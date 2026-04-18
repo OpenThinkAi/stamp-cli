@@ -1,0 +1,46 @@
+{
+  "name": "stamp-cli",
+  "version": "0.1.0-alpha.0",
+  "type": "module",
+  "description": "Local, headless pull-request system for agent-to-agent code review workflows",
+  "bin": {
+    "stamp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup && find dist -name '*.js' -exec sed -i '' 's/from \"sqlite\"/from \"node:sqlite\"/g' {} +",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "homepage": "https://openthink.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenThinkAi/stamp-cli.git"
+  },
+  "keywords": [
+    "cli",
+    "pull-request",
+    "code-review",
+    "ai",
+    "agents",
+    "local-first",
+    "git"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.98",
+    "commander": "^13.1.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsup": "^8.4.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}

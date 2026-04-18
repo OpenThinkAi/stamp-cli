@@ -1,0 +1,119 @@
+process.removeAllListeners("warning");
+process.on("warning", (warn) => {
+  if (
+    warn.name === "ExperimentalWarning" &&
+    /SQLite/i.test(warn.message)
+  ) {
+    return;
+  }
+  console.warn(warn);
+});
+
+import { Command } from "commander";
+import { runInit } from "./commands/init.js";
+import {
+  runKeys,
+  runLog,
+  runMerge,
+  runPush,
+  runReview,
+  runReviewers,
+  runStatus,
+  runVerify,
+} from "./commands/stubs.js";
+
+const program = new Command();
+
+program
+  .name("stamp")
+  .description(
+    "Local, headless pull-request system for agent-to-agent code review.",
+  )
+  .version("0.1.0-alpha.0");
+
+program
+  .command("init")
+  .description("scaffold .stamp/ in the current repo and generate a keypair")
+  .action(() => {
+    try {
+      runInit();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("review")
+  .description("run all configured reviewers against a diff")
+  .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
+  .option("--only <reviewer>", "run a single reviewer by name")
+  .action(() => runReview());
+
+program
+  .command("status")
+  .description("show gate state for a diff; exit 0 if gate is open")
+  .requiredOption("--diff <revspec>", "git revspec to inspect")
+  .action(() => runStatus());
+
+program
+  .command("merge <branch>")
+  .description("merge <branch> into --into <target> if the gate is open")
+  .requiredOption("--into <target>", "target branch to merge into")
+  .action(() => runMerge());
+
+program
+  .command("push <target>")
+  .description("push <target> to origin and report hook verdict")
+  .action(() => runPush());
+
+program
+  .command("verify <sha>")
+  .description("verify an existing merge commit's attestation locally")
+  .action(() => runVerify());
+
+program
+  .command("log")
+  .description("show review history on the current branch (prose)")
+  .option("--limit <n>", "max entries", "50")
+  .action(() => runLog());
+
+const keys = program
+  .command("keys")
+  .description("manage signing keys");
+keys
+  .command("generate")
+  .description("generate a new Ed25519 keypair at ~/.stamp/keys/")
+  .action(() => runKeys("generate"));
+keys
+  .command("list")
+  .description("list local and trusted keys")
+  .action(() => runKeys("list"));
+keys
+  .command("export")
+  .description("print the local public key (for committing to trusted-keys)")
+  .option("--pub", "export public key (default)")
+  .action(() => runKeys("export"));
+keys
+  .command("trust <pub-file>")
+  .description("copy a public key into the repo's .stamp/trusted-keys/")
+  .action(() => runKeys("trust"));
+
+const reviewers = program
+  .command("reviewers")
+  .description("manage reviewer prompts");
+reviewers
+  .command("list")
+  .description("list configured reviewers")
+  .action(() => runReviewers("list"));
+reviewers
+  .command("edit <name>")
+  .description("open a reviewer prompt in $EDITOR")
+  .action(() => runReviewers("edit"));
+
+program.parseAsync(process.argv).catch((err) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`error: ${message}`);
+  process.exit(1);
+});
