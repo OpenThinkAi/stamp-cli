@@ -17,12 +17,13 @@ import {
   keysList,
   keysTrust,
 } from "./commands/keys.js";
+import { runLog } from "./commands/log.js";
 import { runMerge } from "./commands/merge.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
+import { reviewersEdit, reviewersList } from "./commands/reviewers.js";
 import { runStatus } from "./commands/status.js";
 import { runVerify } from "./commands/verify.js";
-import { runLog, runReviewers } from "./commands/stubs.js";
 
 const program = new Command();
 
@@ -122,9 +123,14 @@ program
 
 program
   .command("log")
-  .description("show review history on the current branch (prose)")
+  .description("show review history (prose); optionally filter to a specific diff")
   .option("--limit <n>", "max entries", "50")
-  .action(() => runLog());
+  .option("--diff <revspec>", "filter to reviews of this specific diff")
+  .action((opts: { limit: string; diff?: string }) => {
+    wrap(() =>
+      runLog({ limit: Number(opts.limit) || 50, diff: opts.diff }),
+    );
+  });
 
 const keys = program
   .command("keys")
@@ -162,12 +168,12 @@ const reviewers = program
   .description("manage reviewer prompts");
 reviewers
   .command("list")
-  .description("list configured reviewers")
-  .action(() => runReviewers("list"));
+  .description("list configured reviewers and their prompt file status")
+  .action(() => wrap(() => reviewersList()));
 reviewers
   .command("edit <name>")
-  .description("open a reviewer prompt in $EDITOR")
-  .action(() => runReviewers("edit"));
+  .description("open a reviewer's prompt file in $EDITOR")
+  .action((name: string) => wrap(() => reviewersEdit(name)));
 
 program.parseAsync(process.argv).catch((err) => {
   const message = err instanceof Error ? err.message : String(err);

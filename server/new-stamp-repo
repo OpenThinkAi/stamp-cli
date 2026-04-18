@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# new-stamp-repo — one-line repo provisioning on a running stamp server.
+#
+# Usage (over SSH):
+#   ssh git@<host> new-stamp-repo <name>
+#
+# Creates /srv/git/<name>.git with the stamp-verify hook installed and the
+# operator's public key (from $OPERATOR_PUB_KEY at container startup) as the
+# initial trusted signer.
+#
+set -e
+
+if [ $# -ne 1 ]; then
+  echo "usage: new-stamp-repo <name>" >&2
+  exit 2
+fi
+
+NAME="$1"
+REPO="/srv/git/${NAME}.git"
+HOOK="/etc/stamp/pre-receive"
+OPERATOR_KEY="/etc/stamp/operator.pub"
+
+if [ -e "$REPO" ]; then
+  echo "error: $REPO already exists" >&2
+  exit 1
+fi
+
+if [ ! -f "$OPERATOR_KEY" ]; then
+  echo "error: operator public key not found at $OPERATOR_KEY" >&2
+  echo "set OPERATOR_PUB_KEY when launching the container" >&2
+  exit 1
+fi
+
+exec /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY"

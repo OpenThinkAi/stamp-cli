@@ -26,44 +26,72 @@ export function runInit(): void {
   const configFile = stampConfigFile(repoRoot);
   const reviewersDir = stampReviewersDir(repoRoot);
   const trustedKeysDir = stampTrustedKeysDir(repoRoot);
+  const stateDbPath = stampStateDbPath(repoRoot);
 
-  if (existsSync(configFile)) {
-    console.error(`error: ${configFile} already exists. Repo is already initialized.`);
-    process.exit(1);
-  }
+  const alreadyHasConfig = existsSync(configFile);
 
   ensureDir(configDir);
   ensureDir(reviewersDir);
   ensureDir(trustedKeysDir);
 
-  writeFileSync(configFile, stringifyConfig(DEFAULT_CONFIG));
-  writeFileSync(join(reviewersDir, "example.md"), EXAMPLE_REVIEWER_PROMPT);
+  if (!alreadyHasConfig) {
+    writeFileSync(configFile, stringifyConfig(DEFAULT_CONFIG));
+    writeFileSync(join(reviewersDir, "example.md"), EXAMPLE_REVIEWER_PROMPT);
+  }
 
-  const { keypair, created } = ensureUserKeypair();
+  const { keypair, created: keyCreated } = ensureUserKeypair();
 
   const pubKeyPath = join(
     trustedKeysDir,
     publicKeyFingerprintFilename(keypair.fingerprint),
   );
-  writeFileSync(pubKeyPath, keypair.publicKeyPem);
+  const keyDeposited = !existsSync(pubKeyPath);
+  if (keyDeposited) {
+    writeFileSync(pubKeyPath, keypair.publicKeyPem);
+  }
 
-  const db = openDb(stampStateDbPath(repoRoot));
+  const dbExisted = existsSync(stateDbPath);
+  const db = openDb(stateDbPath);
   db.close();
 
-  console.log("stamp initialized.\n");
-  console.log(`  repo root:   ${repoRoot}`);
-  console.log(`  config:      ${configFile}`);
-  console.log(`  reviewers:   ${reviewersDir}/example.md`);
-  console.log(`  trust store: ${trustedKeysDir}/`);
-  console.log(`  state db:    ${stampStateDbPath(repoRoot)}`);
+  const mode = alreadyHasConfig ? "sync" : "scaffold";
   console.log(
-    `  your key:    ${keypair.fingerprint} ${created ? "(generated)" : "(existing)"}`,
+    mode === "scaffold"
+      ? "stamp initialized (scaffolded fresh repo).\n"
+      : "stamp initialized (synced to existing .stamp/ config).\n",
+  );
+  console.log(`  repo root:   ${repoRoot}`);
+  console.log(
+    `  config:      ${configFile}${alreadyHasConfig ? " (existing)" : " (created)"}`,
+  );
+  console.log(`  trust store: ${trustedKeysDir}/`);
+  console.log(
+    `  state db:    ${stateDbPath}${dbExisted ? " (existing)" : " (created)"}`,
+  );
+  console.log(
+    `  your key:    ${keypair.fingerprint} ${keyCreated ? "(generated)" : "(existing)"}`,
   );
   console.log();
-  console.log("Next steps:");
-  console.log("  1. Edit .stamp/config.yml to define your branch rules and reviewers");
-  console.log("  2. Write reviewer prompts in .stamp/reviewers/*.md");
-  console.log("  3. Commit the .stamp/ directory to your repo");
-  console.log("  4. Share your public key file (in .stamp/trusted-keys/) with other");
-  console.log("     machines that will push to this repo");
+
+  if (mode === "scaffold") {
+    console.log("Next steps:");
+    console.log("  1. Edit .stamp/config.yml to define branch rules and reviewers");
+    console.log("  2. Write reviewer prompts in .stamp/reviewers/*.md");
+    console.log("  3. Commit the .stamp/ directory");
+    console.log(
+      "  4. Share your public key (in .stamp/trusted-keys/) with any other",
+    );
+    console.log("     machines that will push to this repo");
+  } else if (keyDeposited) {
+    console.log(
+      `Your public key was deposited at ${pubKeyPath}.`,
+    );
+    console.log(
+      `Commit + push it so the remote will accept merges signed by this machine.`,
+    );
+  } else {
+    console.log(
+      "Your key is already in .stamp/trusted-keys/. You're ready to review + merge.",
+    );
+  }
 }
