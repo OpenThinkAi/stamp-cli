@@ -11,16 +11,17 @@ process.on("warning", (warn) => {
 
 import { Command } from "commander";
 import { runInit } from "./commands/init.js";
+import {
+  keysExport,
+  keysGenerate,
+  keysList,
+  keysTrust,
+} from "./commands/keys.js";
+import { runMerge } from "./commands/merge.js";
 import { runReview } from "./commands/review.js";
 import { runStatus } from "./commands/status.js";
-import {
-  runKeys,
-  runLog,
-  runMerge,
-  runPush,
-  runReviewers,
-  runVerify,
-} from "./commands/stubs.js";
+import { runVerify } from "./commands/verify.js";
+import { runLog, runPush, runReviewers } from "./commands/stubs.js";
 
 const program = new Command();
 
@@ -81,7 +82,15 @@ program
   .command("merge <branch>")
   .description("merge <branch> into --into <target> if the gate is open")
   .requiredOption("--into <target>", "target branch to merge into")
-  .action(() => runMerge());
+  .action((branch: string, opts: { into: string }) => {
+    try {
+      runMerge({ branch, into: opts.into });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
 
 program
   .command("push <target>")
@@ -91,7 +100,15 @@ program
 program
   .command("verify <sha>")
   .description("verify an existing merge commit's attestation locally")
-  .action(() => runVerify());
+  .action((sha: string) => {
+    try {
+      runVerify(sha);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
 
 program
   .command("log")
@@ -105,20 +122,30 @@ const keys = program
 keys
   .command("generate")
   .description("generate a new Ed25519 keypair at ~/.stamp/keys/")
-  .action(() => runKeys("generate"));
+  .action(() => wrap(() => keysGenerate()));
 keys
   .command("list")
   .description("list local and trusted keys")
-  .action(() => runKeys("list"));
+  .action(() => wrap(() => keysList()));
 keys
   .command("export")
   .description("print the local public key (for committing to trusted-keys)")
   .option("--pub", "export public key (default)")
-  .action(() => runKeys("export"));
+  .action(() => wrap(() => keysExport()));
 keys
   .command("trust <pub-file>")
   .description("copy a public key into the repo's .stamp/trusted-keys/")
-  .action(() => runKeys("trust"));
+  .action((pubFile: string) => wrap(() => keysTrust(pubFile)));
+
+function wrap(fn: () => void): void {
+  try {
+    fn();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`error: ${message}`);
+    process.exit(1);
+  }
+}
 
 const reviewers = program
   .command("reviewers")

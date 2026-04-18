@@ -71,6 +71,31 @@ export interface LatestVerdict {
   verdict: Verdict;
 }
 
+export interface LatestReview {
+  id: number;
+  reviewer: string;
+  verdict: Verdict;
+  issues: string | null;
+}
+
+const LATEST_VERDICTS_SQL = `
+  SELECT id, reviewer, verdict, issues
+  FROM (
+    SELECT
+      id,
+      reviewer,
+      verdict,
+      issues,
+      ROW_NUMBER() OVER (
+        PARTITION BY reviewer
+        ORDER BY created_at DESC, id DESC
+      ) AS rn
+    FROM reviews
+    WHERE base_sha = ? AND head_sha = ?
+  )
+  WHERE rn = 1
+`;
+
 /**
  * For a given (base_sha, head_sha), return the latest verdict per reviewer.
  * Uses ROW_NUMBER() window function with (created_at DESC, id DESC) ordering
@@ -81,22 +106,21 @@ export function latestVerdicts(
   base_sha: string,
   head_sha: string,
 ): LatestVerdict[] {
-  const stmt = db.prepare(`
-    SELECT reviewer, verdict
-    FROM (
-      SELECT
-        reviewer,
-        verdict,
-        ROW_NUMBER() OVER (
-          PARTITION BY reviewer
-          ORDER BY created_at DESC, id DESC
-        ) AS rn
-      FROM reviews
-      WHERE base_sha = ? AND head_sha = ?
-    )
-    WHERE rn = 1
-  `);
+  const stmt = db.prepare(LATEST_VERDICTS_SQL);
   return stmt.all(base_sha, head_sha) as LatestVerdict[];
+}
+
+/**
+ * Same as latestVerdicts but also returns prose (for computing review_sha
+ * during attestation, or for display).
+ */
+export function latestReviews(
+  db: DatabaseSync,
+  base_sha: string,
+  head_sha: string,
+): LatestReview[] {
+  const stmt = db.prepare(LATEST_VERDICTS_SQL);
+  return stmt.all(base_sha, head_sha) as LatestReview[];
 }
 
 export function reviewHistory(
