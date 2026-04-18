@@ -18,10 +18,11 @@ import {
   keysTrust,
 } from "./commands/keys.js";
 import { runMerge } from "./commands/merge.js";
+import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
 import { runStatus } from "./commands/status.js";
 import { runVerify } from "./commands/verify.js";
-import { runLog, runPush, runReviewers } from "./commands/stubs.js";
+import { runLog, runReviewers } from "./commands/stubs.js";
 
 const program = new Command();
 
@@ -94,8 +95,17 @@ program
 
 program
   .command("push <target>")
-  .description("push <target> to origin and report hook verdict")
-  .action(() => runPush());
+  .description("push <target> to origin; surfaces stamp-verify hook stderr on rejection")
+  .option("--remote <name>", "remote to push to", "origin")
+  .action((target: string, opts: { remote: string }) => {
+    try {
+      runPush({ target, remote: opts.remote });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
 
 program
   .command("verify <sha>")
