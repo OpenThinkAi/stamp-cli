@@ -11,12 +11,12 @@ process.on("warning", (warn) => {
 
 import { Command } from "commander";
 import { runInit } from "./commands/init.js";
+import { runReview } from "./commands/review.js";
 import {
   runKeys,
   runLog,
   runMerge,
   runPush,
-  runReview,
   runReviewers,
   runStatus,
   runVerify,
@@ -46,10 +46,18 @@ program
 
 program
   .command("review")
-  .description("run all configured reviewers against a diff")
+  .description("run configured reviewer(s) against a diff")
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")
-  .action(() => runReview());
+  .action(async (opts: { diff: string; only?: string }) => {
+    try {
+      await runReview({ diff: opts.diff, only: opts.only });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
 
 program
   .command("status")

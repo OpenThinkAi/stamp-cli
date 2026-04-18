@@ -76,18 +76,30 @@ export const DEFAULT_CONFIG: StampConfig = {
 
 export const EXAMPLE_REVIEWER_PROMPT = `# Example Reviewer
 
-This is a placeholder reviewer prompt. Replace it with instructions for what this reviewer should look for in a diff.
+This file is the system prompt for an example reviewer. Replace its body with the actual instructions for the reviewer you want (security, standards, product, etc.).
 
 A real reviewer prompt should describe:
 
 1. **Scope** — what this reviewer is responsible for (e.g. security, code quality, UX, API design).
 2. **What to check for** — specific patterns, anti-patterns, and concerns in the reviewer's domain.
-3. **Verdict criteria** — when to return each verdict:
-   - \`approved\`: the change is acceptable for this reviewer's concern
-   - \`changes_requested\`: specific fixable issues exist; list them with file:line refs
-   - \`denied\`: the approach itself is wrong for this domain; the author should rethink rather than tweak
-4. **Output format** — how to format the review (bullet list of issues, summary paragraph, etc.)
-5. **Tone** — direct, terse, actionable. No hedging.
+3. **Verdict criteria** — when to return each verdict (see "Output format" below for how).
+4. **Tone** — direct, terse, actionable. No hedging.
+
+## Output format (required — do not change)
+
+You MUST end your review with a single line of exactly this form, on its own line:
+
+\`\`\`
+VERDICT: approved
+\`\`\`
+
+Use one of:
+
+- \`approved\` — the diff is acceptable for this reviewer's concern
+- \`changes_requested\` — specific fixable issues exist; list them above, with file:line refs where possible
+- \`denied\` — the approach itself is wrong for this domain; the author should rethink rather than tweak
+
+Exactly one \`VERDICT:\` line, at the end of your response. Nothing after it.
 
 ---
 
