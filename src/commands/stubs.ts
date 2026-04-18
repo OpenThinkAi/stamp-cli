@@ -1,6 +1,5 @@
 /**
- * Stubs for Phase 1.A. Real implementations land in later phases:
- *   - review, status           → Phase 1.B / 1.C
+ * Stubs for commands that haven't landed yet:
  *   - merge, verify, keys      → Phase 1.D
  *   - push                     → Phase 1.E
  *   - log, reviewers           → Phase 1.F
@@ -11,8 +10,6 @@ function notImplemented(name: string, phase: string): never {
   process.exit(2);
 }
 
-export const runReview = () => notImplemented("stamp review", "1.B");
-export const runStatus = () => notImplemented("stamp status", "1.C");
 export const runMerge = () => notImplemented("stamp merge", "1.D");
 export const runVerify = () => notImplemented("stamp verify", "1.D");
 export const runPush = () => notImplemented("stamp push", "1.E");

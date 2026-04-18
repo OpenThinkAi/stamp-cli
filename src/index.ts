@@ -12,13 +12,13 @@ process.on("warning", (warn) => {
 import { Command } from "commander";
 import { runInit } from "./commands/init.js";
 import { runReview } from "./commands/review.js";
+import { runStatus } from "./commands/status.js";
 import {
   runKeys,
   runLog,
   runMerge,
   runPush,
   runReviewers,
-  runStatus,
   runVerify,
 } from "./commands/stubs.js";
 
@@ -61,9 +61,21 @@ program
 
 program
   .command("status")
-  .description("show gate state for a diff; exit 0 if gate is open")
+  .description("show gate state for a diff; exit 0 if gate is open, 1 if closed")
   .requiredOption("--diff <revspec>", "git revspec to inspect")
-  .action(() => runStatus());
+  .option(
+    "--into <target>",
+    "target branch whose rule to check (default: inferred from diff base)",
+  )
+  .action((opts: { diff: string; into?: string }) => {
+    try {
+      runStatus({ diff: opts.diff, into: opts.into });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
 
 program
   .command("merge <branch>")

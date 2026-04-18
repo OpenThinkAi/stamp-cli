@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { loadConfig } from "../lib/config.js";
+import { loadConfig, type StampConfig } from "../lib/config.js";
 import { openDb, recordReview } from "../lib/db.js";
-import { resolveDiff } from "../lib/git.js";
-import { invokeReviewer } from "../lib/reviewer.js";
+import { resolveDiff, type ResolvedDiff } from "../lib/git.js";
+import { invokeReviewer, type ReviewerInvocation } from "../lib/reviewer.js";
 import {
   findRepoRoot,
   stampConfigFile,
@@ -26,7 +26,9 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
 
   const resolved = resolveDiff(opts.diff, repoRoot);
   if (!resolved.diff.trim()) {
-    console.log(`No changes between ${resolved.base_sha.slice(0, 8)} and ${resolved.head_sha.slice(0, 8)}.`);
+    console.log(
+      `No changes between ${resolved.base_sha.slice(0, 8)} and ${resolved.head_sha.slice(0, 8)}.`,
+    );
     return;
   }
 
@@ -37,49 +39,63 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     );
   }
 
-  if (reviewerNames.length > 1) {
-    // Parallel fan-out is Phase 1.C. For 1.B, require --only.
-    throw new Error(
-      `multiple reviewers configured; for now pass --only <reviewer> to run one at a time. ` +
-        `(Parallel fan-out lands in Phase 1.C.)`,
-    );
-  }
+  console.log(
+    `running ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} in parallel: ${reviewerNames.join(", ")}`,
+  );
+  console.log(
+    `  diff: ${opts.diff} (${resolved.base_sha.slice(0, 8)} → ${resolved.head_sha.slice(0, 8)})`,
+  );
+  console.log();
 
   const db = openDb(stampStateDbPath(repoRoot));
   try {
-    for (const name of reviewerNames) {
-      const result = await invokeReviewer({
-        reviewer: name,
-        config,
-        repoRoot,
-        diff: resolved.diff,
-        base_sha: resolved.base_sha,
-        head_sha: resolved.head_sha,
-      });
+    const results = await Promise.allSettled(
+      reviewerNames.map((name) =>
+        invokeReviewer({
+          reviewer: name,
+          config,
+          repoRoot,
+          diff: resolved.diff,
+          base_sha: resolved.base_sha,
+          head_sha: resolved.head_sha,
+        }),
+      ),
+    );
 
-      recordReview(db, {
-        reviewer: name,
-        base_sha: resolved.base_sha,
-        head_sha: resolved.head_sha,
-        verdict: result.verdict,
-        issues: result.prose,
-      });
+    let anyFailed = false;
+    for (let i = 0; i < reviewerNames.length; i++) {
+      const name = reviewerNames[i]!;
+      const outcome = results[i]!;
+      if (outcome.status === "fulfilled") {
+        recordReview(db, {
+          reviewer: name,
+          base_sha: resolved.base_sha,
+          head_sha: resolved.head_sha,
+          verdict: outcome.value.verdict,
+          issues: outcome.value.prose,
+        });
+        printReview(outcome.value, resolved.base_sha, resolved.head_sha);
+      } else {
+        anyFailed = true;
+        printError(name, outcome.reason);
+      }
+    }
 
-      printReview(result, resolved.base_sha, resolved.head_sha);
+    if (anyFailed) {
+      process.exitCode = 1;
     }
   } finally {
     db.close();
   }
 }
 
-function chooseReviewers(
-  config: { reviewers: Record<string, unknown> },
-  only?: string,
-): string[] {
+function chooseReviewers(config: StampConfig, only?: string): string[] {
   if (only) {
     if (!(only in config.reviewers)) {
       throw new Error(
-        `reviewer "${only}" is not configured. Available: ${Object.keys(config.reviewers).join(", ") || "(none)"}`,
+        `reviewer "${only}" is not configured. Available: ${
+          Object.keys(config.reviewers).join(", ") || "(none)"
+        }`,
       );
     }
     return [only];
@@ -88,7 +104,7 @@ function chooseReviewers(
 }
 
 function printReview(
-  result: { reviewer: string; prose: string; verdict: string },
+  result: ReviewerInvocation,
   base_sha: string,
   head_sha: string,
 ): void {
@@ -102,4 +118,19 @@ function printReview(
   console.log(bar);
   console.log(`verdict: ${result.verdict}`);
   console.log(bar);
+  console.log();
 }
+
+function printError(reviewer: string, err: unknown): void {
+  const bar = "─".repeat(72);
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(bar);
+  console.error(`reviewer: ${reviewer}   FAILED`);
+  console.error(bar);
+  console.error(message);
+  console.error(bar);
+  console.error();
+}
+
+// Re-export types for callers who want them
+export type { ResolvedDiff };
