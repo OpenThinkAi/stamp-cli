@@ -10,6 +10,10 @@
 #
 set -e
 
+# Platform volume mounts (Railway, Fly, etc.) come up root-owned, overriding
+# any build-time chown. Fix at boot so the git user can write its own repos.
+chown -R git:git /srv/git 2>/dev/null || true
+
 if [ -n "$AUTHORIZED_KEYS" ]; then
   printf '%s\n' "$AUTHORIZED_KEYS" > /home/git/.ssh/authorized_keys
   chmod 600 /home/git/.ssh/authorized_keys
