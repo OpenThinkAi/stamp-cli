@@ -18,7 +18,7 @@
 # Example:
 #   setup-repo.sh /srv/git/myproject.git \
 #                 /path/to/stamp-cli/dist/hooks/pre-receive.cjs \
-#                 /home/matt/.stamp/keys/ed25519.pub
+#                 ~/.stamp/keys/ed25519.pub
 #
 # Arguments:
 #   <repo-dir>         Path where the bare repo will be created
