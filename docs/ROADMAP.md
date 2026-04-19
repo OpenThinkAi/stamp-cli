@@ -17,42 +17,15 @@ Status, upcoming priorities, deferred items. Paired with [`DESIGN.md`](../DESIGN
 
 **Phase 2.A pre-merge test gate — shipped.** `.stamp/config.yml` supports `required_checks` per branch; `stamp merge` runs each check on the post-merge tree before signing; attestation payload records `{name, command, exit_code, output_sha}`; server hook verifies attestation lists every required check with exit 0. This exists because LLM reviewers miss compile/syntax errors a build step catches trivially — dogfooding surfaced that gap on the first real project.
 
-## Near-term priorities (Phase 2.B → D)
+## Phase 2.B–D — shipped
 
-Ordered by the value they unlock for Matt's commitsonmain dogfood and any other real use.
+All three near-term priorities Matt called out are now live and dogfooded on keeb-cooker.
 
-### 2.B — Visibility: enhanced `stamp log`
+**2.B — Enhanced `stamp log`.** Default view shows first-parent merge history with one-line attestation summaries (signer, reviewers ✓/✗, checks ✓/✗); `stamp log <sha>` drills into one commit with decoded attestation, signature status, review prose from DB, and check details; `--reviews` keeps the legacy DB-rows view accessible.
 
-**Goal:** answer "what went in to `main`?" on demand without leaving the terminal.
+**2.C — Reviewer management.** `stamp reviewers add/remove/edit/test/show`. The `test` subcommand is the key iteration tool — invokes a reviewer against a diff without recording to DB. `show` surfaces aggregate verdict stats for calibration.
 
-- `stamp log --commits` — one line per merge with attestation summary: commit, signer fingerprint short, reviewer verdicts ✓/✗, check results ✓/✗
-- `stamp log <sha>` — full detail for one commit: review prose by reviewer, check output tails, attestation trailer decoded, verification result
-- `stamp log --branch <name>` — filter by target branch
-- `stamp log --limit N` — already exists; keep
-
-Prose output, no interactive navigation. Path to a real TUI (`stamp ui`) stays on the board as a later polish item if this isn't sufficient.
-
-### 2.C — Reviewer management
-
-**Goal:** low-friction iteration on reviewer prompts during persona development.
-
-- `stamp reviewers add <name>` — scaffold new reviewer: create `.stamp/reviewers/<name>.md` with template body, register in `config.yml`, open in `$EDITOR`
-- `stamp reviewers remove <name>` — deregister, optionally delete file (with confirmation)
-- `stamp reviewers test <name> --diff <revspec>` — invoke reviewer against a diff **without recording to DB**; pure prompt-tuning loop
-- `stamp reviewers show <name> --history` — recent verdicts this reviewer has issued across commits, for calibration
-
-Unblocks real persona writing (Tracks A/B/C in `~/Ideas/commitsonmain.md`).
-
-### 2.D — Gated mirror to github.com
-
-**Goal:** stamp remote remains source of truth; deploy pipelines and CI (Actions, Vercel, Netlify) work unchanged by mirroring verified commits to a GitHub repo as a bot.
-
-- `.stamp/mirror.yml` (committed) declaring: github remote URL, bot identity, branch mappings
-- Server-side **post-receive hook** that, after pre-receive accepts a push, pushes the same ref to the configured GitHub remote using the bot's credentials
-- Docs: setting up a bot user with SSH deploy key or fine-scoped PAT; GitHub branch protection to restrict direct pushes to bot-only
-- Result: push to stamp remote → hook verifies signature + checks → push mirrors to github.com → Actions fire off builds/deploys normally
-
-No impact on the agent loop. Purely additive.
+**2.D — Gated mirror to github.com.** Post-receive hook mirrors verified commits to a configured GitHub repo using a bot PAT. `.stamp/mirror.yml` committed per-repo declares destination; `GITHUB_BOT_TOKEN` env var on the server holds the PAT; hook reads it from `/etc/stamp/env` (persisted by entrypoint because sshd strips env from sessions). Mirror failures log to stderr but don't block the stamped push. Server README walks through setup including GitHub branch protection.
 
 ## Remaining Phase 2 items (deferred)
 
