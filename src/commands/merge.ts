@@ -138,8 +138,30 @@ export function runMerge(opts: MergeOptions): void {
   // 5. Run required checks on the POST-merge tree. This is the state that
   //    would land on the remote, so it's the correct thing to verify. If a
   //    check fails, roll back the merge commit and abort.
+  //
+  //    Critically: we re-load config from the working tree NOW (post-merge)
+  //    rather than using the pre-merge `rule`. If the feature branch added
+  //    new required_checks, the merge commit's own tree declares them; the
+  //    attestation must cover them or `stamp verify` (which reads the merge
+  //    commit's tree) will correctly reject. Using pre-merge `rule` here
+  //    was the bug reported in issue #1 — the merge succeeded but produced
+  //    an attestation that its own commit's config declared invalid.
+  //
+  //    Gate check (required reviewers) above still uses pre-merge `rule`
+  //    because adding a new *reviewer* is a different bootstrap problem
+  //    (chicken-and-egg: the new reviewer has no prior verdict for this
+  //    diff). That case still needs the documented two-phase workaround.
+  const postMergeConfig = loadConfig(stampConfigFile(repoRoot));
+  const postMergeRule = postMergeConfig.branches[opts.into];
+  if (!postMergeRule) {
+    throw new Error(
+      `.stamp/config.yml in the merged tree has no rule for branch "${opts.into}" — ` +
+        `the feature branch dropped 'branches.${opts.into}' from .stamp/config.yml. ` +
+        `Restore it on the feature branch before merging, or target a different branch with --into.`,
+    );
+  }
   const checkAttestations: CheckAttestation[] = [];
-  const requiredChecks = rule.required_checks ?? [];
+  const requiredChecks = postMergeRule.required_checks ?? [];
   if (requiredChecks.length > 0) {
     console.log(
       `running ${requiredChecks.length} required check${requiredChecks.length === 1 ? "" : "s"} against merged tree: ${requiredChecks.map((c) => c.name).join(", ")}`,

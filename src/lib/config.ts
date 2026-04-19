@@ -44,7 +44,17 @@ export interface StampConfig {
 }
 
 export function loadConfig(path: string): StampConfig {
-  const raw = readFileSync(path, "utf8");
+  return parseConfigFromYaml(readFileSync(path, "utf8"));
+}
+
+/**
+ * Parse a .stamp/config.yml text blob into a validated StampConfig.
+ * Delegated from loadConfig and also used by verify-at-sha paths that
+ * source the YAML via `git show <sha>:.stamp/config.yml`. Single parser
+ * keeps the verifier and the working-tree loader in sync — if one grows
+ * a new field, both paths see it.
+ */
+export function parseConfigFromYaml(raw: string): StampConfig {
   const parsed = parse(raw) as unknown;
   return validateConfig(parsed);
 }

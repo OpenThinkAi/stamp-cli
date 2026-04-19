@@ -1,18 +1,43 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   parseCommitAttestation,
   type AttestationPayload,
 } from "../lib/attestation.js";
-import { loadConfig } from "../lib/config.js";
+import { parseConfigFromYaml, type StampConfig } from "../lib/config.js";
 import { findTrustedKey } from "../lib/keys.js";
-import { findRepoRoot, stampConfigFile } from "../lib/paths.js";
+import { findRepoRoot } from "../lib/paths.js";
 import {
   hashMcpServers,
   hashPromptBytes,
   hashTools,
-  readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
+
+/**
+ * Load .stamp/config.yml from the given commit's tree and parse it via the
+ * same validator loadConfig uses. Single `git show` with status-code
+ * branching: exit 128 means "path not in tree" (legal bootstrap state —
+ * return empty config); any other non-zero is a real git failure and
+ * surfaces as an error.
+ */
+function loadConfigAtSha(sha: string, repoRoot: string): StampConfig {
+  const result = spawnSync(
+    "git",
+    ["show", `${sha}:.stamp/config.yml`],
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (result.status === 128) {
+    // `fatal: path '.stamp/config.yml' does not exist in '<sha>'` — no config
+    // committed at this ref. Legitimate bootstrap state.
+    return { branches: {}, reviewers: {} };
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `git show ${sha}:.stamp/config.yml failed (exit ${result.status}): ${(result.stderr ?? "").trim() || "(no stderr)"}`,
+    );
+  }
+  return parseConfigFromYaml(result.stdout);
+}
 
 export interface VerifyResult {
   valid: boolean;
@@ -26,7 +51,12 @@ export interface VerifyResult {
  */
 export function runVerify(sha: string): void {
   const repoRoot = findRepoRoot();
-  const config = loadConfig(stampConfigFile(repoRoot));
+  // Load config from the merge commit's OWN tree, not the working directory.
+  // A commit must satisfy the rules it itself declares — current-main config
+  // can have drifted since the commit was made, and verifying against drifted
+  // rules produces false positives/negatives. Matches the semantics the
+  // post-fix `stamp merge` uses when choosing which required_checks to run.
+  const config = loadConfigAtSha(sha, repoRoot);
 
   // 1. Read the commit message and parse trailers.
   const commitMessage = git(["show", "-s", "--format=%B", sha], repoRoot);
@@ -147,7 +177,7 @@ export function runVerify(sha: string): void {
   // 7. v2+: verify per-reviewer prompt/tools/mcp hashes against the merge
   //    commit's .stamp/ tree. Legacy (v1) attestations skip this step.
   if ((payload.schema_version ?? 1) >= 2) {
-    verifyReviewerHashes(sha, payload, repoRoot);
+    verifyReviewerHashes(sha, payload, repoRoot, config);
   }
 
   // All checks passed.
@@ -158,15 +188,16 @@ function verifyReviewerHashes(
   sha: string,
   payload: AttestationPayload,
   repoRoot: string,
+  config: StampConfig,
 ): void {
-  const configYaml = tryGitShow(`${sha}:.stamp/config.yml`, repoRoot);
-  if (!configYaml) {
+  const reviewers = config.reviewers;
+  if (Object.keys(reviewers).length === 0) {
     fail(
       sha,
-      `v2 attestation: cannot read .stamp/config.yml from the merge commit's tree. Commit the config and re-run merge.`,
+      `v2 attestation: no reviewers defined in .stamp/config.yml at this commit. ` +
+        `Either the file is missing from the commit's tree, or its 'reviewers:' map is empty.`,
     );
   }
-  const reviewers = readReviewersFromYaml(configYaml);
 
   for (const approval of payload.approvals) {
     const missing: string[] = [];
