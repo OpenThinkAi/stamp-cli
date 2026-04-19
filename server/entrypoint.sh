@@ -25,5 +25,24 @@ if [ -n "$OPERATOR_PUB_KEY" ]; then
   chmod 644 /etc/stamp/operator.pub
 fi
 
+# sshd strips custom environment variables by default, so hooks invoked
+# through SSH sessions don't see things like GITHUB_BOT_TOKEN. Persist
+# them to a file the hooks can read directly. Chown to the git user so
+# only that user (which runs the hooks) can read the secret.
+: > /etc/stamp/env
+chmod 600 /etc/stamp/env
+chown git:git /etc/stamp/env
+
+write_env_var() {
+  local name="$1"
+  local value
+  value="$(eval "printf '%s' \"\$$name\"")"
+  if [ -n "$value" ]; then
+    printf '%s=%s\n' "$name" "$value" >> /etc/stamp/env
+  fi
+}
+
+write_env_var GITHUB_BOT_TOKEN
+
 # -e: log to stderr (goes to container logs); -D: don't daemonize.
 exec /usr/sbin/sshd -D -e

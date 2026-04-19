@@ -20,7 +20,10 @@ export default defineConfig([
     // supported" error in ESM mode.
   },
   {
-    entry: { "hooks/pre-receive": "src/hooks/pre-receive.ts" },
+    entry: {
+      "hooks/pre-receive": "src/hooks/pre-receive.ts",
+      "hooks/post-receive": "src/hooks/post-receive.ts",
+    },
     format: ["cjs"],
     target: "node22",
     clean: false, // don't wipe the ESM build

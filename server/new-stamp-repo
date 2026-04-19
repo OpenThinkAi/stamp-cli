@@ -18,7 +18,9 @@ fi
 
 NAME="$1"
 REPO="/srv/git/${NAME}.git"
-HOOK="/etc/stamp/pre-receive"
+# The setup-repo.sh script auto-discovers post-receive.cjs alongside
+# the pre-receive path, so we pass the .cjs form here to enable it.
+HOOK="/etc/stamp/pre-receive.cjs"
 OPERATOR_KEY="/etc/stamp/operator.pub"
 
 if [ -e "$REPO" ]; then

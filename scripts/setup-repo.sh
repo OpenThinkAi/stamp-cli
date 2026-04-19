@@ -112,10 +112,22 @@ git push --quiet "$REPO_DIR" main
 echo "→ installing stamp-verify hook (now active for all subsequent pushes)"
 install -m 0755 "$HOOK_SCRIPT" "$REPO_DIR/hooks/pre-receive"
 
+# Optional: install post-receive mirror hook if it's alongside the pre-receive
+# script. Path convention: <dir>/pre-receive.cjs + <dir>/post-receive.cjs.
+HOOK_DIR="$(dirname "$HOOK_SCRIPT")"
+POST_HOOK="$HOOK_DIR/post-receive.cjs"
+if [[ -f "$POST_HOOK" ]]; then
+  echo "→ installing stamp-mirror post-receive hook"
+  install -m 0755 "$POST_HOOK" "$REPO_DIR/hooks/post-receive"
+fi
+
 echo "✓ repo ready"
 echo
 echo "  bare repo:        $REPO_DIR"
-echo "  hook installed:   $REPO_DIR/hooks/pre-receive"
+echo "  pre-receive:      $REPO_DIR/hooks/pre-receive"
+if [[ -f "$REPO_DIR/hooks/post-receive" ]]; then
+  echo "  post-receive:     $REPO_DIR/hooks/post-receive (mirror-capable)"
+fi
 echo "  seeded branch:    main"
 echo "  trusted key:      ${FP}.pub"
 echo

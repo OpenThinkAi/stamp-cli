@@ -55,6 +55,9 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      to connect. Start with your own: `cat ~/.ssh/id_ed25519.pub`.
    - `OPERATOR_PUB_KEY` — the stamp-cli public key that will be seeded as
      the initial trusted signer in each new repo: `cat ~/.stamp/keys/ed25519.pub`.
+   - `GITHUB_BOT_TOKEN` — **optional**, only needed if you want to mirror
+     verified commits to a GitHub repo (see "GitHub mirror" below). A
+     fine-scoped GitHub PAT with `contents: write` on the target repo(s).
 6. **Expose port 22** via Railway's TCP proxy:
    - Settings → Networking → Public Networking → TCP Proxy → create one
      pointing at container port 22. Railway gives you a public host +
@@ -100,6 +103,63 @@ stamp merge my-feature --into main  # signed merge commit
 stamp push main                     # hook verifies, main advances
 ```
 
+## GitHub mirror (optional)
+
+After a successful stamped push lands on the server, a **post-receive hook**
+can automatically mirror the ref to a GitHub repo. The stamp server stays
+source-of-truth; GitHub becomes a read-only public mirror that deploy
+pipelines (Actions, Vercel, Netlify, etc.) can integrate with natively.
+
+### Per-repo config
+
+Commit `.stamp/mirror.yml` at the repo root declaring the GitHub destination:
+
+```yaml
+github:
+  repo: mattpardini/keeb-cooker   # GitHub "owner/repo"
+  branches:
+    - main
+```
+
+Only branches listed here are mirrored. Other refs are pushed to your stamp
+server but not to GitHub.
+
+### Server-side credentials
+
+Set `GITHUB_BOT_TOKEN` as a Railway env var with a GitHub PAT (or GitHub App
+installation token) that has `contents: write` on the target repo. The
+post-receive hook reads it from `/etc/stamp/env` (written by the entrypoint,
+chmod 600, git-owned) and constructs:
+
+```
+https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<owner>/<repo>.git
+```
+
+to push the ref.
+
+### GitHub-side protection (recommended)
+
+On the GitHub mirror repo, enable branch protection on `main`:
+
+- Settings → Branches → Add rule: `main`
+- "Restrict who can push to matching branches" → only the bot identity
+  that owns the PAT
+
+This ensures the only way a commit lands on GitHub's `main` is via a
+verified push through your stamp server. Humans with repo access can still
+fork/PR via GitHub's standard flow, but those PRs cannot merge (branch
+protection blocks everyone except the bot).
+
+### Behaviors
+
+- Mirror failures do **not** block the stamped push — the stamp main push
+  already succeeded by the time post-receive runs. Mirror failures are
+  logged to stderr (visible to the client via git's `remote:` prefix).
+- A failed mirror leaves GitHub out-of-sync until the next successful push
+  or a manual retry. Not data-loss, just staleness.
+- First push to a fresh GitHub repo requires the GitHub repo to already
+  exist (create it empty on github.com first).
+
 ## Adding more pushers
 
 Anyone else who wants to push needs:
@@ -115,15 +175,19 @@ The entire state is in the Railway volume at `/srv/git/`. Back it up by
 copying that directory periodically; a freshly-provisioned container
 pointed at the same volume will pick up exactly where it left off.
 
-## Updating the hook
+## Updating the hooks
 
-When stamp-cli releases a new hook version, redeploy the container —
-the builder stage recompiles, and the new hook replaces the old one at
-`/etc/stamp/pre-receive`. Existing bare repos under `/srv/git/` still
-reference the old hook at `hooks/pre-receive`, so you'll need to reinstall:
+When stamp-cli releases new hooks, redeploy the container — the builder
+stage recompiles, and the new hooks land at `/etc/stamp/pre-receive.cjs`
+and `/etc/stamp/post-receive.cjs`. Existing bare repos under `/srv/git/`
+still point at the old copies, so refresh them:
 
 ```sh
-ssh git@stamp 'for r in /srv/git/*.git; do cp /etc/stamp/pre-receive "$r/hooks/"; chmod +x "$r/hooks/pre-receive"; done'
+ssh git@stamp 'for r in /srv/git/*.git; do
+  cp /etc/stamp/pre-receive.cjs  "$r/hooks/pre-receive"
+  cp /etc/stamp/post-receive.cjs "$r/hooks/post-receive"
+  chmod +x "$r/hooks/pre-receive" "$r/hooks/post-receive"
+done'
 ```
 
 A future stamp-cli release will automate this.

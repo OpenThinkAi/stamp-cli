@@ -27,12 +27,14 @@ RUN sed -i \
       -e 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' \
       /etc/ssh/sshd_config
 
-COPY --from=builder /build/dist/hooks/pre-receive.cjs /etc/stamp/pre-receive
+COPY --from=builder /build/dist/hooks/pre-receive.cjs /etc/stamp/pre-receive.cjs
+COPY --from=builder /build/dist/hooks/post-receive.cjs /etc/stamp/post-receive.cjs
 COPY scripts/setup-repo.sh /usr/local/bin/setup-repo.sh
 COPY server/new-stamp-repo /usr/local/bin/new-stamp-repo
 COPY server/entrypoint.sh /entrypoint.sh
 
-RUN chmod +x /etc/stamp/pre-receive \
+RUN chmod +x /etc/stamp/pre-receive.cjs \
+             /etc/stamp/post-receive.cjs \
              /usr/local/bin/setup-repo.sh \
              /usr/local/bin/new-stamp-repo \
              /entrypoint.sh
