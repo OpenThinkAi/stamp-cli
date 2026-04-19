@@ -22,12 +22,16 @@
 
 import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
-import { parseCommitAttestation } from "../lib/attestation.js";
+import {
+  parseCommitAttestation,
+  type AttestationPayload,
+} from "../lib/attestation.js";
 import { fingerprintFromPem } from "../lib/keys.js";
 import {
   hashMcpServers,
   hashPromptBytes,
   hashTools,
+  readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
 
@@ -238,29 +242,14 @@ function verifyCommit(
 
   // v2+: verify per-reviewer prompt/tools/mcp hashes against the commit's
   // own .stamp/ tree. Legacy (v1) attestations skip this step.
-  const schemaVersion =
-    (payload as { schema_version?: number }).schema_version ?? 1;
-  if (schemaVersion >= 2) {
+  if ((payload.schema_version ?? 1) >= 2) {
     verifyReviewerHashesAtCommit(sha, payload, refname);
   }
 }
 
-interface ReviewerDefAtRef {
-  prompt: string;
-  tools?: string[];
-  mcp_servers?: Record<string, unknown>;
-}
-
 function verifyReviewerHashesAtCommit(
   sha: string,
-  payload: {
-    approvals: Array<{
-      reviewer: string;
-      prompt_sha256?: string;
-      tools_sha256?: string;
-      mcp_sha256?: string;
-    }>;
-  },
+  payload: AttestationPayload,
   refname: string,
 ): void {
   let configYaml: string;
@@ -272,10 +261,15 @@ function verifyReviewerHashesAtCommit(
       `commit ${sha.slice(0, 8)}: v2 attestation but .stamp/config.yml unreadable at commit's tree`,
     );
   }
-  const reviewers = readReviewersForHashing(configYaml);
+  const reviewers = readReviewersFromYaml(configYaml);
 
   for (const approval of payload.approvals) {
-    if (!approval.prompt_sha256 || !approval.tools_sha256 || !approval.mcp_sha256) {
+    const expected = {
+      prompt: approval.prompt_sha256,
+      tools: approval.tools_sha256,
+      mcp: approval.mcp_sha256,
+    };
+    if (!expected.prompt || !expected.tools || !expected.mcp) {
       reject(
         refname,
         `commit ${sha.slice(0, 8)}: v2 attestation missing hash fields for reviewer "${approval.reviewer}"`,
@@ -297,49 +291,26 @@ function verifyReviewerHashesAtCommit(
         `commit ${sha.slice(0, 8)}: reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at this commit`,
       );
     }
-    const expectedPrompt = hashPromptBytes(promptBytes);
-    if (expectedPrompt !== approval.prompt_sha256) {
-      reject(
-        refname,
-        `commit ${sha.slice(0, 8)}: reviewer "${approval.reviewer}" prompt hash mismatch`,
-      );
-    }
-    const expectedTools = hashTools(def.tools);
-    if (expectedTools !== approval.tools_sha256) {
-      reject(
-        refname,
-        `commit ${sha.slice(0, 8)}: reviewer "${approval.reviewer}" tools hash mismatch`,
-      );
-    }
-    const expectedMcp = hashMcpServers(def.mcp_servers);
-    if (expectedMcp !== approval.mcp_sha256) {
-      reject(
-        refname,
-        `commit ${sha.slice(0, 8)}: reviewer "${approval.reviewer}" mcp_servers hash mismatch`,
-      );
-    }
+    checkHashOrReject(sha, approval.reviewer, "prompt", hashPromptBytes(promptBytes), expected.prompt!, refname);
+    checkHashOrReject(sha, approval.reviewer, "tools", hashTools(def.tools), expected.tools!, refname);
+    checkHashOrReject(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), expected.mcp!, refname);
   }
 }
 
-function readReviewersForHashing(
-  yamlText: string,
-): Record<string, ReviewerDefAtRef> {
-  const parsed = parseYaml(yamlText) as Record<string, unknown> | null;
-  const rawReviewers = (parsed?.reviewers ?? {}) as Record<string, unknown>;
-  const out: Record<string, ReviewerDefAtRef> = {};
-  for (const [name, def] of Object.entries(rawReviewers)) {
-    if (!def || typeof def !== "object") continue;
-    const d = def as Record<string, unknown>;
-    if (typeof d.prompt !== "string") continue;
-    out[name] = {
-      prompt: d.prompt,
-      ...(Array.isArray(d.tools) ? { tools: d.tools.map(String) } : {}),
-      ...(d.mcp_servers && typeof d.mcp_servers === "object"
-        ? { mcp_servers: d.mcp_servers as Record<string, unknown> }
-        : {}),
-    };
-  }
-  return out;
+function checkHashOrReject(
+  sha: string,
+  reviewer: string,
+  field: string,
+  computed: string,
+  expected: string,
+  refname: string,
+): void {
+  if (computed === expected) return;
+  reject(
+    refname,
+    `commit ${sha.slice(0, 8)}: reviewer "${reviewer}" ${field} hash mismatch ` +
+      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...)`,
+  );
 }
 
 // ---------- git wrappers (hook runs in the bare repo's cwd) ----------

@@ -1,15 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { parseCommitAttestation } from "../lib/attestation.js";
-import { loadConfig, type StampConfig } from "../lib/config.js";
+import {
+  parseCommitAttestation,
+  type AttestationPayload,
+} from "../lib/attestation.js";
+import { loadConfig } from "../lib/config.js";
 import { findTrustedKey } from "../lib/keys.js";
 import { findRepoRoot, stampConfigFile } from "../lib/paths.js";
 import {
   hashMcpServers,
   hashPromptBytes,
   hashTools,
+  readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
-import { parse as parseYaml } from "yaml";
 
 export interface VerifyResult {
   valid: boolean;
@@ -153,81 +156,63 @@ export function runVerify(sha: string): void {
 
 function verifyReviewerHashes(
   sha: string,
-  payload: { approvals: Array<{ reviewer: string; prompt_sha256?: string; tools_sha256?: string; mcp_sha256?: string }> },
+  payload: AttestationPayload,
   repoRoot: string,
 ): void {
   const configYaml = tryGitShow(`${sha}:.stamp/config.yml`, repoRoot);
   if (!configYaml) {
-    fail(sha, `v2 attestation: cannot read .stamp/config.yml from the merge commit's tree`);
+    fail(
+      sha,
+      `v2 attestation: cannot read .stamp/config.yml from the merge commit's tree. Commit the config and re-run merge.`,
+    );
   }
-  const config = parseReviewerConfigForHashing(configYaml);
+  const reviewers = readReviewersFromYaml(configYaml);
 
   for (const approval of payload.approvals) {
-    if (!approval.prompt_sha256 || !approval.tools_sha256 || !approval.mcp_sha256) {
+    const expected = {
+      prompt: approval.prompt_sha256,
+      tools: approval.tools_sha256,
+      mcp: approval.mcp_sha256,
+    };
+    if (!expected.prompt || !expected.tools || !expected.mcp) {
       fail(
         sha,
         `v2 attestation: approval for "${approval.reviewer}" is missing required hash fields (prompt_sha256, tools_sha256, mcp_sha256)`,
       );
     }
-    const reviewerDef = config.reviewers[approval.reviewer];
-    if (!reviewerDef) {
+    const def = reviewers[approval.reviewer];
+    if (!def) {
       fail(
         sha,
         `v2 attestation: reviewer "${approval.reviewer}" is in payload but not defined in config.reviewers at the merge commit`,
       );
     }
-    const promptBytes = tryGitShow(`${sha}:${reviewerDef.prompt}`, repoRoot);
+    const promptBytes = tryGitShow(`${sha}:${def.prompt}`, repoRoot);
     if (promptBytes === null) {
       fail(
         sha,
-        `v2 attestation: reviewer "${approval.reviewer}" prompt file "${reviewerDef.prompt}" missing from the merge commit's tree`,
+        `v2 attestation: reviewer "${approval.reviewer}" prompt file "${def.prompt}" missing from the merge commit's tree`,
       );
     }
-    const expectedPrompt = hashPromptBytes(promptBytes);
-    if (expectedPrompt !== approval.prompt_sha256) {
-      fail(
-        sha,
-        `v2 attestation: reviewer "${approval.reviewer}" prompt hash mismatch ` +
-          `(expected ${approval.prompt_sha256.slice(0, 16)}..., committed tree has ${expectedPrompt.slice(0, 16)}...)`,
-      );
-    }
-    const expectedTools = hashTools(reviewerDef.tools);
-    if (expectedTools !== approval.tools_sha256) {
-      fail(
-        sha,
-        `v2 attestation: reviewer "${approval.reviewer}" tools hash mismatch`,
-      );
-    }
-    const expectedMcp = hashMcpServers(reviewerDef.mcp_servers);
-    if (expectedMcp !== approval.mcp_sha256) {
-      fail(
-        sha,
-        `v2 attestation: reviewer "${approval.reviewer}" mcp_servers hash mismatch`,
-      );
-    }
+    checkHash(sha, approval.reviewer, "prompt", hashPromptBytes(promptBytes), expected.prompt!);
+    checkHash(sha, approval.reviewer, "tools", hashTools(def.tools), expected.tools!);
+    checkHash(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), expected.mcp!);
   }
 }
 
-// Minimal reviewer-section parser — just enough to pull prompt/tools/mcp_servers
-// per reviewer for hash recomputation. Unlike loadConfig, this one tolerates
-// missing branches and other shape issues since we only need the reviewers map.
-function parseReviewerConfigForHashing(yamlText: string): StampConfig {
-  const parsed = parseYaml(yamlText) as Record<string, unknown> | null;
-  const reviewersRaw = (parsed?.reviewers ?? {}) as Record<string, unknown>;
-  const reviewers: StampConfig["reviewers"] = {};
-  for (const [name, def] of Object.entries(reviewersRaw)) {
-    if (!def || typeof def !== "object") continue;
-    const d = def as Record<string, unknown>;
-    if (typeof d.prompt !== "string") continue;
-    reviewers[name] = {
-      prompt: d.prompt,
-      ...(Array.isArray(d.tools) ? { tools: d.tools.map(String) } : {}),
-      ...(d.mcp_servers && typeof d.mcp_servers === "object"
-        ? { mcp_servers: d.mcp_servers as StampConfig["reviewers"][string]["mcp_servers"] }
-        : {}),
-    };
-  }
-  return { branches: {}, reviewers };
+function checkHash(
+  sha: string,
+  reviewer: string,
+  field: string,
+  computed: string,
+  expected: string,
+): void {
+  if (computed === expected) return;
+  fail(
+    sha,
+    `v2 attestation: reviewer "${reviewer}" ${field} hash mismatch ` +
+      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...)`,
+  );
 }
 
 function tryGitShow(treeRef: string, repoRoot: string): string | null {

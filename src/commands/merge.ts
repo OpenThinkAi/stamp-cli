@@ -1,7 +1,5 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
@@ -24,6 +22,7 @@ import {
   hashMcpServers,
   hashPromptBytes,
   hashTools,
+  readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { signBytes } from "../lib/signing.js";
 
@@ -97,29 +96,17 @@ export function runMerge(opts: MergeOptions): void {
       );
     }
 
-    // Build approvals list from required reviewers (not all reviewers — only
-    // those the target branch requires). This keeps the payload minimal and
-    // binds the attestation to the exact rule that authorized the merge.
-    //
-    // Each approval also pins the reviewer's prompt + tool + MCP config
-    // hashes as of merge time. Verifiers recompute these from the committed
-    // .stamp/ tree and reject on mismatch (plan Step 2).
+    // Build the skeletal approvals list from required reviewers (not all
+    // reviewers — only those the target branch requires). Hashes for the
+    // reviewer prompt + tools + mcp config are added post-merge, sourced
+    // from the merge commit's own tree so merge-time and verify-time hashes
+    // agree even on platforms with core.autocrlf or .gitattributes filters.
     approvals = rule.required.map((name) => {
       const rev = byReviewer.get(name)!;
-      const reviewerDef = config.reviewers[name];
-      if (!reviewerDef) {
-        throw new Error(
-          `reviewer "${name}" is required by branch rule "${opts.into}" but not defined in config.reviewers`,
-        );
-      }
-      const promptBytes = readFileSync(join(repoRoot, reviewerDef.prompt));
       return {
         reviewer: rev.reviewer,
         verdict: rev.verdict,
         review_sha: hashPart(rev.issues ?? ""),
-        prompt_sha256: hashPromptBytes(promptBytes),
-        tools_sha256: hashTools(reviewerDef.tools),
-        mcp_sha256: hashMcpServers(reviewerDef.mcp_servers),
       };
     });
   } finally {
@@ -192,7 +179,31 @@ export function runMerge(opts: MergeOptions): void {
     }
   }
 
-  // 6. Build payload, sign, amend the merge commit with trailers.
+  // 6a. Compute per-reviewer prompt/tools/mcp hashes from the merge commit's
+  //     own tree. Reads via `git show HEAD:<path>` so merge-time bytes are
+  //     identical to what verifiers see via the same command — avoids EOL /
+  //     .gitattributes divergence between working directory and committed
+  //     blob. Config is also read from HEAD so we see the merged reviewers
+  //     section, in case the feature branch modified .stamp/config.yml.
+  const committedConfigYaml = git(["show", "HEAD:.stamp/config.yml"], repoRoot);
+  const committedReviewers = readReviewersFromYaml(committedConfigYaml);
+  approvals = approvals.map((a) => {
+    const def = committedReviewers[a.reviewer];
+    if (!def) {
+      throw new Error(
+        `reviewer "${a.reviewer}" is required by branch rule "${opts.into}" but not defined in the merged .stamp/config.yml`,
+      );
+    }
+    const promptBytes = git(["show", `HEAD:${def.prompt}`], repoRoot);
+    return {
+      ...a,
+      prompt_sha256: hashPromptBytes(promptBytes),
+      tools_sha256: hashTools(def.tools),
+      mcp_sha256: hashMcpServers(def.mcp_servers),
+    };
+  });
+
+  // 6b. Build payload, sign, amend the merge commit with trailers.
   const payload: AttestationPayload = {
     schema_version: CURRENT_PAYLOAD_VERSION,
     base_sha: resolved.base_sha,

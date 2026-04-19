@@ -1,5 +1,40 @@
 import { createHash } from "node:crypto";
+import { parse as parseYaml } from "yaml";
 import type { McpServerDef } from "./config.js";
+
+/**
+ * Minimal reviewer-section extractor used by verify paths. Mirrors the
+ * loadConfig shape but tolerates missing branches and other structural
+ * issues — we only need {prompt, tools, mcp_servers} per reviewer for
+ * hash recomputation, so broken-elsewhere configs shouldn't block the
+ * check.
+ */
+export interface ReviewerDefForHashing {
+  prompt: string;
+  tools?: string[];
+  mcp_servers?: Record<string, unknown>;
+}
+
+export function readReviewersFromYaml(
+  yamlText: string,
+): Record<string, ReviewerDefForHashing> {
+  const parsed = parseYaml(yamlText) as Record<string, unknown> | null;
+  const rawReviewers = (parsed?.reviewers ?? {}) as Record<string, unknown>;
+  const out: Record<string, ReviewerDefForHashing> = {};
+  for (const [name, def] of Object.entries(rawReviewers)) {
+    if (!def || typeof def !== "object") continue;
+    const d = def as Record<string, unknown>;
+    if (typeof d.prompt !== "string") continue;
+    out[name] = {
+      prompt: d.prompt,
+      ...(Array.isArray(d.tools) ? { tools: d.tools.map(String) } : {}),
+      ...(d.mcp_servers && typeof d.mcp_servers === "object"
+        ? { mcp_servers: d.mcp_servers as Record<string, unknown> }
+        : {}),
+    };
+  }
+  return out;
+}
 
 /**
  * Hashes for per-reviewer attestation fields (plan Step 2).
@@ -29,6 +64,13 @@ function sha256Hex(input: string | Buffer): string {
   return h.digest("hex");
 }
 
+/**
+ * Hash the raw bytes of a reviewer prompt file. Callers must source the
+ * bytes from the committed git tree (`git show <sha>:<path>`), not the
+ * working directory — Windows + core.autocrlf and .gitattributes eol
+ * filters can make working-tree bytes diverge from committed bytes, and
+ * verifiers always hash the committed form.
+ */
 export function hashPromptBytes(bytes: string | Buffer): string {
   return sha256Hex(bytes);
 }
