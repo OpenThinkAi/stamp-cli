@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { allPassed, runChecks, type CheckResult } from "../lib/checks.js";
 import { loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
 import { resolveDiff } from "../lib/git.js";
@@ -11,11 +12,12 @@ import {
 } from "../lib/paths.js";
 import {
   formatTrailers,
-  type AttestationPayload,
+  serializePayload,
   type Approval,
+  type AttestationPayload,
+  type CheckAttestation,
 } from "../lib/attestation.js";
 import { signBytes } from "../lib/signing.js";
-import { serializePayload } from "../lib/attestation.js";
 
 export interface MergeOptions {
   branch: string;
@@ -102,10 +104,50 @@ export function runMerge(opts: MergeOptions): void {
     db.close();
   }
 
-  // 3. Load signing key.
+  // 3. Run required checks (pre-merge test gate). Non-zero exit blocks merge.
+  //    Results are attested into the payload so the server hook can verify
+  //    the signer actually ran what the config requires.
+  const checkAttestations: CheckAttestation[] = [];
+  const checkTails: CheckResult[] = [];
+  const requiredChecks = rule.required_checks ?? [];
+  if (requiredChecks.length > 0) {
+    console.log(
+      `running ${requiredChecks.length} required check${requiredChecks.length === 1 ? "" : "s"}: ${requiredChecks.map((c) => c.name).join(", ")}`,
+    );
+    const results = runChecks(requiredChecks, repoRoot);
+    for (const r of results) {
+      const mark = r.exit_code === 0 ? "✓" : "✗";
+      console.log(
+        `  ${mark} ${r.name.padEnd(16)} exit=${r.exit_code}  ${r.duration_ms}ms`,
+      );
+      checkTails.push(r);
+      checkAttestations.push({
+        name: r.name,
+        command: r.command,
+        exit_code: r.exit_code,
+        output_sha: r.output_sha,
+      });
+    }
+    if (!allPassed(results)) {
+      const failed = results.filter((r) => r.exit_code !== 0);
+      const bar = "─".repeat(72);
+      for (const f of failed) {
+        console.error(bar);
+        console.error(`FAILED: ${f.name} (${f.command})`);
+        console.error(bar);
+        if (f.tail) console.error(f.tail);
+      }
+      console.error(bar);
+      throw new Error(
+        `pre-merge checks failed: ${failed.map((f) => f.name).join(", ")}. Fix and re-run.`,
+      );
+    }
+  }
+
+  // 4. Load signing key.
   const { keypair } = ensureUserKeypair();
 
-  // 4. Do the git merge --no-ff with a simple title; we'll amend the message
+  // 5. Do the git merge --no-ff with a simple title; we'll amend the message
   //    with trailers next.
   const title = `Merge branch '${opts.branch}' into ${opts.into}`;
   try {
@@ -120,12 +162,13 @@ export function runMerge(opts: MergeOptions): void {
     );
   }
 
-  // 5. Build payload, sign, amend the merge commit with trailers.
+  // 6. Build payload, sign, amend the merge commit with trailers.
   const payload: AttestationPayload = {
     base_sha: resolved.base_sha,
     head_sha: resolved.head_sha,
     target_branch: opts.into,
     approvals,
+    checks: checkAttestations,
     signer_key_id: keypair.fingerprint,
   };
   const payloadBytes = serializePayload(payload);
@@ -137,7 +180,7 @@ export function runMerge(opts: MergeOptions): void {
 
   const mergeSha = git(["rev-parse", "HEAD"], repoRoot).trim();
 
-  // 6. Report.
+  // 7. Report.
   const bar = "─".repeat(72);
   console.log(bar);
   console.log(`merged '${opts.branch}' into '${opts.into}'`);
@@ -148,11 +191,14 @@ export function runMerge(opts: MergeOptions): void {
   );
   console.log(`  signed by:  ${keypair.fingerprint}`);
   console.log(`  approvals:  ${approvals.map((a) => a.reviewer).join(", ")}`);
+  if (checkAttestations.length > 0) {
+    console.log(
+      `  checks:     ${checkAttestations.map((c) => `${c.name}=exit${c.exit_code}`).join(", ")}`,
+    );
+  }
   console.log(bar);
-  console.log(
-    `\nVerify locally:    stamp verify ${mergeSha.slice(0, 12)}`,
-  );
-  console.log(`Push to origin:    stamp push ${opts.into}   (Phase 1.E)`);
+  console.log(`\nVerify locally:    stamp verify ${mergeSha.slice(0, 12)}`);
+  console.log(`Push to origin:    stamp push ${opts.into}`);
 }
 
 function hashPart(s: string): string {

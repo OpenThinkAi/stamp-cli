@@ -28,8 +28,14 @@ import { verifyBytes } from "../lib/signing.js";
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
+interface CheckDef {
+  name: string;
+  run: string;
+}
+
 interface BranchRule {
   required: string[];
+  required_checks?: CheckDef[];
 }
 
 interface StampConfigAtRef {
@@ -192,6 +198,38 @@ function verifyCommit(
       `commit ${sha.slice(0, 8)}: missing required approvals — ${missing.join(", ")}`,
     );
   }
+
+  // Verify attested checks cover every required_check in the committed
+  // config, and that each recorded an exit code of 0.
+  const requiredChecks = rule.required_checks ?? [];
+  const attestedByName = new Map(
+    ((payload as { checks?: { name: string; exit_code: number }[] }).checks ?? [])
+      .map((c) => [c.name, c]),
+  );
+  const missingChecks: string[] = [];
+  const failingChecks: string[] = [];
+  for (const req of requiredChecks) {
+    const attested = attestedByName.get(req.name);
+    if (!attested) {
+      missingChecks.push(req.name);
+      continue;
+    }
+    if (attested.exit_code !== 0) {
+      failingChecks.push(`${req.name} (exit ${attested.exit_code})`);
+    }
+  }
+  if (missingChecks.length > 0) {
+    reject(
+      refname,
+      `commit ${sha.slice(0, 8)}: attestation is missing required check(s) — ${missingChecks.join(", ")}`,
+    );
+  }
+  if (failingChecks.length > 0) {
+    reject(
+      refname,
+      `commit ${sha.slice(0, 8)}: attestation records failing check(s) — ${failingChecks.join(", ")}`,
+    );
+  }
 }
 
 // ---------- git wrappers (hook runs in the bare repo's cwd) ----------
@@ -221,9 +259,24 @@ function readConfigAt(sha: string): StampConfigAtRef | null {
       for (const [name, rule] of Object.entries(obj.branches)) {
         if (!rule || typeof rule !== "object") continue;
         const r = rule as Record<string, unknown>;
-        if (Array.isArray(r.required)) {
-          branches[name] = { required: r.required.map(String) };
+        if (!Array.isArray(r.required)) continue;
+
+        const required_checks: CheckDef[] = [];
+        if (Array.isArray(r.required_checks)) {
+          for (const c of r.required_checks) {
+            if (c && typeof c === "object") {
+              const cc = c as Record<string, unknown>;
+              if (typeof cc.name === "string" && typeof cc.run === "string") {
+                required_checks.push({ name: cc.name, run: cc.run });
+              }
+            }
+          }
         }
+
+        branches[name] = {
+          required: r.required.map(String),
+          ...(required_checks.length > 0 ? { required_checks } : {}),
+        };
       }
     }
     return { branches };

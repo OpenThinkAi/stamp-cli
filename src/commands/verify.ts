@@ -110,6 +110,37 @@ export function runVerify(sha: string): void {
     );
   }
 
+  // 6. Check that attested checks cover every required_check in config,
+  //    and that each recorded an exit code of 0.
+  const requiredChecks = rule.required_checks ?? [];
+  const attestedByName = new Map(
+    (payload.checks ?? []).map((c) => [c.name, c]),
+  );
+  const missingChecks: string[] = [];
+  const failingChecks: string[] = [];
+  for (const req of requiredChecks) {
+    const attested = attestedByName.get(req.name);
+    if (!attested) {
+      missingChecks.push(req.name);
+      continue;
+    }
+    if (attested.exit_code !== 0) {
+      failingChecks.push(`${req.name} (exit ${attested.exit_code})`);
+    }
+  }
+  if (missingChecks.length > 0) {
+    fail(
+      sha,
+      `attestation is missing required check(s): ${missingChecks.join(", ")}`,
+    );
+  }
+  if (failingChecks.length > 0) {
+    fail(
+      sha,
+      `attestation records failing check(s): ${failingChecks.join(", ")}`,
+    );
+  }
+
   // All checks passed.
   printSuccess(sha, payload);
 }
@@ -127,6 +158,7 @@ function printSuccess(
     head_sha: string;
     signer_key_id: string;
     approvals: { reviewer: string; verdict: string }[];
+    checks?: { name: string; exit_code: number }[];
   },
 ): void {
   const bar = "─".repeat(72);
@@ -142,6 +174,13 @@ function printSuccess(
   for (const a of payload.approvals) {
     const mark = a.verdict === "approved" ? "✓" : "✗";
     console.log(`    ${mark} ${a.reviewer}   ${a.verdict}`);
+  }
+  if (payload.checks && payload.checks.length > 0) {
+    console.log(`  checks:`);
+    for (const c of payload.checks) {
+      const mark = c.exit_code === 0 ? "✓" : "✗";
+      console.log(`    ${mark} ${c.name}   exit ${c.exit_code}`);
+    }
   }
   console.log(bar);
 }

@@ -1,8 +1,17 @@
 import { readFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 
+export interface CheckDef {
+  /** Short name used in config and attestation payloads — e.g. "build", "test" */
+  name: string;
+  /** Shell command to run; non-zero exit blocks merge */
+  run: string;
+}
+
 export interface BranchRule {
   required: string[];
+  /** Optional pre-merge check commands; all must pass before merge is signed */
+  required_checks?: CheckDef[];
 }
 
 export interface ReviewerDef {
@@ -39,7 +48,13 @@ function validateConfig(input: unknown): StampConfig {
     if (!Array.isArray(r.required)) {
       throw new Error(`config.branches.${name}.required must be an array`);
     }
-    branches[name] = { required: r.required.map(String) };
+
+    const required_checks = parseChecks(r.required_checks, name);
+
+    branches[name] = {
+      required: r.required.map(String),
+      ...(required_checks ? { required_checks } : {}),
+    };
   }
 
   const reviewers: Record<string, ReviewerDef> = {};
@@ -59,6 +74,36 @@ function validateConfig(input: unknown): StampConfig {
   }
 
   return { branches, reviewers };
+}
+
+function parseChecks(input: unknown, branchName: string): CheckDef[] | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!Array.isArray(input)) {
+    throw new Error(
+      `config.branches.${branchName}.required_checks must be an array`,
+    );
+  }
+  const out: CheckDef[] = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(
+        `config.branches.${branchName}.required_checks entries must be objects`,
+      );
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e.name !== "string" || !e.name) {
+      throw new Error(
+        `config.branches.${branchName}.required_checks[].name must be a non-empty string`,
+      );
+    }
+    if (typeof e.run !== "string" || !e.run) {
+      throw new Error(
+        `config.branches.${branchName}.required_checks[].run must be a non-empty string`,
+      );
+    }
+    out.push({ name: e.name, run: e.run });
+  }
+  return out;
 }
 
 export function stringifyConfig(config: StampConfig): string {

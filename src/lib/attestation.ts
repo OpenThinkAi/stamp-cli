@@ -7,11 +7,21 @@ export interface Approval {
   review_sha: string;
 }
 
+export interface CheckAttestation {
+  name: string;
+  command: string;
+  exit_code: number;
+  output_sha: string;
+}
+
 export interface AttestationPayload {
   base_sha: string;
   head_sha: string;
   target_branch: string;
   approvals: Approval[];
+  /** Pre-merge checks that ran on the signer's machine and passed.
+   * Empty array if the branch has no required_checks configured. */
+  checks: CheckAttestation[];
   /** "sha256:<hex>" fingerprint of the signer's public key */
   signer_key_id: string;
 }
