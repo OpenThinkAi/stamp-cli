@@ -1,0 +1,85 @@
+name: publish
+
+# Fires when commits land on main (including via the stamp server's
+# post-receive mirror). Publishes to npm only when package.json declares
+# a version that isn't already on the registry — every non-bump merge
+# no-ops safely. Requires the NPM_TOKEN secret to be set in repo Settings
+# → Secrets → Actions; token should be an npm Automation token with
+# publish access on stamp-cli.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: read target version
+        id: version
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          # Derive the npm dist-tag from the version string.
+          # - bare X.Y.Z → latest
+          # - X.Y.Z-alpha.N → alpha (and likewise beta, rc, or any other suffix
+          #   label) so prerelease versions do NOT clobber the 'latest' tag
+          if [[ "$VERSION" == *-* ]]; then
+            DIST_TAG="${VERSION#*-}"
+            DIST_TAG="${DIST_TAG%%.*}"
+          else
+            DIST_TAG="latest"
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          echo "target: $NAME@$VERSION (dist-tag: $DIST_TAG)"
+
+      - name: check npm registry
+        id: check
+        run: |
+          if npm view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }} already on npm — skipping."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }} not on npm — will publish."
+          fi
+
+      - name: install
+        if: steps.check.outputs.published == 'false'
+        run: npm ci
+
+      - name: typecheck
+        if: steps.check.outputs.published == 'false'
+        run: npm run typecheck
+
+      # Build is invoked automatically via package.json's prepublishOnly
+      # script before the tarball is assembled, so no explicit build step.
+      - name: publish
+        if: steps.check.outputs.published == 'false'
+        run: npm publish --access public --tag "${{ steps.version.outputs.dist_tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: tag release
+        if: steps.check.outputs.published == 'false'
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          git tag "$TAG"
+          git push origin "$TAG"
