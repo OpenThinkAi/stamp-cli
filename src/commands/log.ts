@@ -1,5 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 import {
   parseCommitAttestation,
   type AttestationPayload,
@@ -18,12 +17,11 @@ import {
   resolveDiff,
   type CommitSummary,
 } from "../lib/git.js";
-import { fingerprintFromPem } from "../lib/keys.js";
+import { findTrustedKey } from "../lib/keys.js";
 import {
   findRepoRoot,
   stampConfigFile,
   stampStateDbPath,
-  stampTrustedKeysDir,
 } from "../lib/paths.js";
 import { verifyBytes } from "../lib/signing.js";
 
@@ -216,23 +214,6 @@ function collectReviewProse(
   }
 }
 
-function findTrustedKey(repoRoot: string, fingerprint: string): string | null {
-  const dir = stampTrustedKeysDir(repoRoot);
-  try {
-    for (const f of readdirSync(dir)) {
-      if (!f.endsWith(".pub")) continue;
-      const pem = readFileSync(join(dir, f), "utf8");
-      try {
-        if (fingerprintFromPem(pem) === fingerprint) return pem;
-      } catch {
-        // skip malformed
-      }
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
 
 // ---------- legacy --reviews view: raw DB rows ----------
 

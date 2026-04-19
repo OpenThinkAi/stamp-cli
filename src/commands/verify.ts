@@ -1,14 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { parseCommitAttestation } from "../lib/attestation.js";
 import { loadConfig } from "../lib/config.js";
-import { fingerprintFromPem } from "../lib/keys.js";
-import {
-  findRepoRoot,
-  stampConfigFile,
-  stampTrustedKeysDir,
-} from "../lib/paths.js";
+import { findTrustedKey } from "../lib/keys.js";
+import { findRepoRoot, stampConfigFile } from "../lib/paths.js";
 import { verifyBytes } from "../lib/signing.js";
 
 export interface VerifyResult {
@@ -183,28 +177,6 @@ function printSuccess(
     }
   }
   console.log(bar);
-}
-
-function findTrustedKey(
-  repoRoot: string,
-  fingerprint: string,
-): string | null {
-  const dir = stampTrustedKeysDir(repoRoot);
-  try {
-    const files = readdirSync(dir);
-    for (const f of files) {
-      if (!f.endsWith(".pub")) continue;
-      const pem = readFileSync(join(dir, f), "utf8");
-      try {
-        if (fingerprintFromPem(pem) === fingerprint) return pem;
-      } catch {
-        // skip malformed keys
-      }
-    }
-  } catch {
-    return null;
-  }
-  return null;
 }
 
 function git(args: string[], cwd: string): string {
