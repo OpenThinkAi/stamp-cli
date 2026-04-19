@@ -1,8 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { parseCommitAttestation } from "../lib/attestation.js";
+import {
+  parseCommitAttestation,
+  type AttestationPayload,
+} from "../lib/attestation.js";
 import { loadConfig } from "../lib/config.js";
 import { findTrustedKey } from "../lib/keys.js";
 import { findRepoRoot, stampConfigFile } from "../lib/paths.js";
+import {
+  hashMcpServers,
+  hashPromptBytes,
+  hashTools,
+  readReviewersFromYaml,
+} from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
 
 export interface VerifyResult {
@@ -135,8 +144,87 @@ export function runVerify(sha: string): void {
     );
   }
 
+  // 7. v2+: verify per-reviewer prompt/tools/mcp hashes against the merge
+  //    commit's .stamp/ tree. Legacy (v1) attestations skip this step.
+  if ((payload.schema_version ?? 1) >= 2) {
+    verifyReviewerHashes(sha, payload, repoRoot);
+  }
+
   // All checks passed.
   printSuccess(sha, payload);
+}
+
+function verifyReviewerHashes(
+  sha: string,
+  payload: AttestationPayload,
+  repoRoot: string,
+): void {
+  const configYaml = tryGitShow(`${sha}:.stamp/config.yml`, repoRoot);
+  if (!configYaml) {
+    fail(
+      sha,
+      `v2 attestation: cannot read .stamp/config.yml from the merge commit's tree. Commit the config and re-run merge.`,
+    );
+  }
+  const reviewers = readReviewersFromYaml(configYaml);
+
+  for (const approval of payload.approvals) {
+    const missing: string[] = [];
+    if (!approval.prompt_sha256) missing.push("prompt_sha256");
+    if (!approval.tools_sha256) missing.push("tools_sha256");
+    if (!approval.mcp_sha256) missing.push("mcp_sha256");
+    if (missing.length > 0) {
+      fail(
+        sha,
+        `v2 attestation: approval for "${approval.reviewer}" is missing ${missing.join(", ")}`,
+      );
+    }
+    const def = reviewers[approval.reviewer];
+    if (!def) {
+      fail(
+        sha,
+        `v2 attestation: reviewer "${approval.reviewer}" is in payload but not defined in config.reviewers at the merge commit`,
+      );
+    }
+    const promptBytes = tryGitShow(`${sha}:${def.prompt}`, repoRoot);
+    if (promptBytes === null) {
+      fail(
+        sha,
+        `v2 attestation: reviewer "${approval.reviewer}" prompt file "${def.prompt}" missing from the merge commit's tree`,
+      );
+    }
+    checkHash(sha, approval.reviewer, "prompt", hashPromptBytes(promptBytes), approval.prompt_sha256!);
+    checkHash(sha, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
+    checkHash(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
+  }
+}
+
+function checkHash(
+  sha: string,
+  reviewer: string,
+  field: string,
+  computed: string,
+  expected: string,
+): void {
+  if (computed === expected) return;
+  fail(
+    sha,
+    `v2 attestation: reviewer "${reviewer}" ${field} hash mismatch ` +
+      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...). ` +
+      `The committed config differs from what the attestation claims; re-run stamp merge or revert the change.`,
+  );
+}
+
+function tryGitShow(treeRef: string, repoRoot: string): string | null {
+  try {
+    return execFileSync("git", ["show", treeRef], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function fail(sha: string, reason: string): never {

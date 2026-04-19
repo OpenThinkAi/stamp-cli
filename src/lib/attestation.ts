@@ -1,10 +1,24 @@
 import type { Verdict } from "./db.js";
 
+/**
+ * Current attestation payload schema version. v1 (absent field) was the
+ * initial shape; v2 adds per-approval prompt/tools/mcp hashes (plan Step 2).
+ * Verifiers treat absent/1 as legacy fail-open on hash checks, 2 as
+ * fail-closed without hashes.
+ */
+export const CURRENT_PAYLOAD_VERSION = 2;
+
 export interface Approval {
   reviewer: string;
   verdict: Verdict;
   /** sha256 of the review's prose, hex — lets verifiers tie attestation to a specific DB row */
   review_sha: string;
+  /** v2+: sha256 of the reviewer's prompt file at merge time */
+  prompt_sha256?: string;
+  /** v2+: sha256 of the canonical-form tool allowlist (sorted JSON array) */
+  tools_sha256?: string;
+  /** v2+: sha256 of the canonical-form mcp_servers config (sorted-key JSON) */
+  mcp_sha256?: string;
 }
 
 export interface CheckAttestation {
@@ -15,6 +29,8 @@ export interface CheckAttestation {
 }
 
 export interface AttestationPayload {
+  /** Schema version. Absent = v1 (pre-Step-2). Present = v2+. */
+  schema_version?: number;
   base_sha: string;
   head_sha: string;
   target_branch: string;

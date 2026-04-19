@@ -184,17 +184,23 @@ Stamp-Payload: <base64 JSON>
 Stamp-Verified: <base64 Ed25519 signature>
 ```
 
-**Payload schema:**
+**Payload schema (v2, current):**
 
 ```json
 {
+  "schema_version": 2,
   "base_sha": "abc123...",
   "head_sha": "def456...",
   "target_branch": "main",
   "approvals": [
-    { "reviewer": "security",  "verdict": "approved", "review_sha": "..." },
-    { "reviewer": "standards", "verdict": "approved", "review_sha": "..." },
-    { "reviewer": "product",   "verdict": "approved", "review_sha": "..." }
+    {
+      "reviewer": "security",
+      "verdict": "approved",
+      "review_sha": "...",
+      "prompt_sha256": "...",
+      "tools_sha256": "...",
+      "mcp_sha256": "..."
+    }
   ],
   "checks": [
     { "name": "build",     "command": "npm run build",  "exit_code": 0, "output_sha": "..." },
@@ -208,6 +214,16 @@ Where `base_sha` and `head_sha` identify the diff: for `stamp merge <branch> --i
 
 The signature covers the base64-decoded payload bytes. `signer_key_id` is a SHA-256 fingerprint of the public key (`sha256:<hex>`), not a human-readable name — names collide and can be forged; fingerprints don't.
 
+Per-approval fields beyond `{ reviewer, verdict, review_sha }` are v2+:
+
+- `prompt_sha256` — sha256 of the reviewer's prompt file contents at merge time
+- `tools_sha256` — sha256 of the canonical-form tool allowlist (JSON, alphabetically-sorted array)
+- `mcp_sha256` — sha256 of the canonical-form MCP server config (JSON, recursively-sorted object keys; arrays preserve order)
+
+These pin the config the reviewer was invoked against. See `docs/plans/verified-reviewer-configs.md` for the motivating threat model and the remaining steps (remote manifests, lock files, tool-invocation traces).
+
+**Backward compat.** `schema_version` absent or `1` is a legacy payload produced before Step 2 shipped. Verifiers treat legacy payloads as passing the hash checks (fail-open) so existing stamp repos don't break mid-upgrade. New payloads (`schema_version: 2+`) without the hash fields are rejected (fail-closed) — the hash evidence is required for v2+ and missing fields indicate either a malformed payload or a forged downgrade.
+
 **Verification (both local `stamp verify` and server-side hook):**
 
 1. Extract `Stamp-Payload` and `Stamp-Verified` trailers from the commit message
@@ -217,8 +233,9 @@ The signature covers the base64-decoded payload bytes. `signer_key_id` is a SHA-
 5. Confirm `target_branch` matches the branch being pushed into
 6. Confirm `approvals` satisfies `.stamp/config.yml`'s `branches.<target>.required`, where config is read from the repo's HEAD of the target branch **as it existed before this push**
 7. Confirm `checks` in the payload covers every entry in `branches.<target>.required_checks` from that same config, with each recording `exit_code: 0`
+8. **(v2+)** For each approval, recompute `prompt_sha256`, `tools_sha256`, and `mcp_sha256` from the merge commit's own `.stamp/` tree (via `git show <sha>:.stamp/...`) and confirm they equal the payload's. Mismatch → reject. This catches an operator who signs an attestation that references configs different from what's actually in the committed repo.
 
-All seven checks must pass. Any failure → push rejected (or `stamp verify` returns non-zero).
+All checks must pass. Any failure → push rejected (or `stamp verify` returns non-zero).
 
 **Trailer size note:** Trailers are single-line. A 3-approval payload serializes to ~400–600 bytes base64 — well within any reasonable line-length limit. If payloads grow beyond a few KB (many approvals, verbose metadata), migrate storage to `git notes` under `refs/notes/stamp/attestations` with the trailer holding only a note reference. Not an MVP concern.
 

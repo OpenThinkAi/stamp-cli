@@ -22,8 +22,17 @@
 
 import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
-import { parseCommitAttestation } from "../lib/attestation.js";
+import {
+  parseCommitAttestation,
+  type AttestationPayload,
+} from "../lib/attestation.js";
 import { fingerprintFromPem } from "../lib/keys.js";
+import {
+  hashMcpServers,
+  hashPromptBytes,
+  hashTools,
+  readReviewersFromYaml,
+} from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
@@ -230,6 +239,79 @@ function verifyCommit(
       `commit ${sha.slice(0, 8)}: attestation records failing check(s) — ${failingChecks.join(", ")}`,
     );
   }
+
+  // v2+: verify per-reviewer prompt/tools/mcp hashes against the commit's
+  // own .stamp/ tree. Legacy (v1) attestations skip this step.
+  if ((payload.schema_version ?? 1) >= 2) {
+    verifyReviewerHashesAtCommit(sha, payload, refname);
+  }
+}
+
+function verifyReviewerHashesAtCommit(
+  sha: string,
+  payload: AttestationPayload,
+  refname: string,
+): void {
+  const prefix = `commit ${sha.slice(0, 8)}: v2 attestation:`;
+  let configYaml: string;
+  try {
+    configYaml = run(["show", `${sha}:.stamp/config.yml`]);
+  } catch {
+    reject(
+      refname,
+      `${prefix} .stamp/config.yml unreadable at commit's tree`,
+    );
+  }
+  const reviewers = readReviewersFromYaml(configYaml);
+
+  for (const approval of payload.approvals) {
+    const missing: string[] = [];
+    if (!approval.prompt_sha256) missing.push("prompt_sha256");
+    if (!approval.tools_sha256) missing.push("tools_sha256");
+    if (!approval.mcp_sha256) missing.push("mcp_sha256");
+    if (missing.length > 0) {
+      reject(
+        refname,
+        `${prefix} approval for "${approval.reviewer}" is missing ${missing.join(", ")}`,
+      );
+    }
+    const def = reviewers[approval.reviewer];
+    if (!def) {
+      reject(
+        refname,
+        `${prefix} reviewer "${approval.reviewer}" not defined in .stamp/config.yml at this commit`,
+      );
+    }
+    let promptBytes: string;
+    try {
+      promptBytes = run(["show", `${sha}:${def.prompt}`]);
+    } catch {
+      reject(
+        refname,
+        `${prefix} reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at this commit`,
+      );
+    }
+    checkHashOrReject(prefix, refname, approval.reviewer, "prompt", hashPromptBytes(promptBytes), approval.prompt_sha256!);
+    checkHashOrReject(prefix, refname, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
+    checkHashOrReject(prefix, refname, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
+  }
+}
+
+function checkHashOrReject(
+  prefix: string,
+  refname: string,
+  reviewer: string,
+  field: string,
+  computed: string,
+  expected: string,
+): void {
+  if (computed === expected) return;
+  reject(
+    refname,
+    `${prefix} reviewer "${reviewer}" ${field} hash mismatch ` +
+      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...). ` +
+      `The committed config differs from what the attestation claims; re-run stamp merge or revert the change.`,
+  );
 }
 
 // ---------- git wrappers (hook runs in the bare repo's cwd) ----------
