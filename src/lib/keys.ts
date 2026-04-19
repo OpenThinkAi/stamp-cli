@@ -4,9 +4,19 @@ import {
   generateKeyPairSync,
   KeyObject,
 } from "node:crypto";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
-import { ensureDir, isFile, userKeysDir } from "./paths.js";
+import {
+  ensureDir,
+  isFile,
+  stampTrustedKeysDir,
+  userKeysDir,
+} from "./paths.js";
 
 export interface Keypair {
   privateKeyPem: string;
@@ -83,4 +93,36 @@ export function publicKeyFingerprintFilename(fingerprint: string): string {
 
 export function publicKeyFromObject(obj: KeyObject): string {
   return obj.export({ type: "spki", format: "pem" }) as string;
+}
+
+/**
+ * Look up a public key PEM in a repo's .stamp/trusted-keys/ directory by
+ * fingerprint. Returns null if no file in the directory matches.
+ */
+export function findTrustedKey(
+  repoRoot: string,
+  fingerprint: string,
+): string | null {
+  const dir = stampTrustedKeysDir(repoRoot);
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const f of files) {
+    if (!f.endsWith(".pub")) continue;
+    let pem: string;
+    try {
+      pem = readFileSync(join(dir, f), "utf8");
+    } catch {
+      continue;
+    }
+    try {
+      if (fingerprintFromPem(pem) === fingerprint) return pem;
+    } catch {
+      // skip malformed keys
+    }
+  }
+  return null;
 }
