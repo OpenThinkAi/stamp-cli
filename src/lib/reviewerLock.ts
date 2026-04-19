@@ -89,11 +89,14 @@ export interface DriftMismatch {
   observed: string;
 }
 
-export interface DriftResult {
-  hasLock: boolean;
-  lock: LockFile | null;
-  mismatches: DriftMismatch[];
-}
+/**
+ * Discriminated union — branch on `hasLock` to get typed access to `lock`
+ * without a non-null assertion. An unpinned reviewer has `hasLock: false`
+ * and no mismatches; a pinned reviewer has `hasLock: true` and a LockFile.
+ */
+export type DriftResult =
+  | { hasLock: false; lock: null; mismatches: [] }
+  | { hasLock: true; lock: LockFile; mismatches: DriftMismatch[] };
 
 /**
  * Compare a reviewer's current prompt + tool + MCP config against its lock
@@ -108,7 +111,7 @@ export function checkReviewerDrift(
 ): DriftResult {
   const lock = readLockFile(repoRoot, reviewerName);
   if (!lock) {
-    return { hasLock: false, lock: null, mismatches: [] };
+    return unpinnedResult();
   }
 
   const promptPath = join(repoRoot, def.prompt);
@@ -149,6 +152,10 @@ export function checkReviewerDrift(
   return { hasLock: true, lock, mismatches };
 }
 
+export function unpinnedResult(): DriftResult {
+  return { hasLock: false, lock: null, mismatches: [] };
+}
+
 /** Format a drift report as a prose block ready for stderr. Matches the
  *  shape documented in docs/plans/verified-reviewer-configs.md Step 3. */
 export function formatDriftReport(
@@ -158,7 +165,7 @@ export function formatDriftReport(
   if (!result.hasLock || result.mismatches.length === 0) {
     return `reviewer "${reviewerName}" is clean against its lock file.`;
   }
-  const lock = result.lock!;
+  const { lock } = result;
   const lines: string[] = [];
   for (const m of result.mismatches) {
     lines.push(`error: reviewer '${reviewerName}' ${m.field} hash mismatch`);

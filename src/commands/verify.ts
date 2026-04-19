@@ -193,7 +193,7 @@ function verifyReviewerHashes(
         `v2 attestation: reviewer "${approval.reviewer}" prompt file "${def.prompt}" missing from the merge commit's tree`,
       );
     }
-    checkHash(sha, approval.reviewer, "prompt", hashPromptBytes(promptBytes), approval.prompt_sha256!);
+    checkHash(sha, approval.reviewer, "prompt", hashPromptBytes(Buffer.from(promptBytes, "utf8")), approval.prompt_sha256!);
     checkHash(sha, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
     checkHash(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
   }

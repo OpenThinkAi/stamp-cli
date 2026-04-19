@@ -199,11 +199,11 @@ export function runMerge(opts: MergeOptions): void {
         `reviewer "${a.reviewer}" is required by branch rule "${opts.into}" but not defined in the merged .stamp/config.yml`,
       );
     }
-    const promptBytes = git(["show", `HEAD:${def.prompt}`], repoRoot);
+    const promptText = git(["show", `HEAD:${def.prompt}`], repoRoot);
     const source = readReviewerSource(a.reviewer, repoRoot);
     return {
       ...a,
-      prompt_sha256: hashPromptBytes(promptBytes),
+      prompt_sha256: hashPromptBytes(Buffer.from(promptText, "utf8")),
       tools_sha256: hashTools(def.tools),
       mcp_sha256: hashMcpServers(def.mcp_servers),
       ...(source ? { reviewer_source: source } : {}),

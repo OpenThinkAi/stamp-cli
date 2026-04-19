@@ -66,7 +66,9 @@ program
 
 program
   .command("review")
-  .description("run configured reviewer(s) against a diff")
+  .description(
+    "run configured reviewer(s) against a diff. Exits 3 on lock-file drift (distinct from exit 1 for reviewer rejections).",
+  )
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")
   .action(async (opts: { diff: string; only?: string }) => {
