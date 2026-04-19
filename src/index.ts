@@ -129,6 +129,22 @@ program
   });
 
 program
+  .command("ui")
+  .description("launch the interactive terminal UI")
+  .action(async () => {
+    try {
+      // Dynamic import keeps ink/react (~35 transitive deps) out of the
+      // hot path for every non-ui command.
+      const { runUi } = await import("./commands/ui.js");
+      runUi();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
+
+program
   .command("log [sha]")
   .description(
     "show first-parent merge history with attestation summaries; <sha> shows full detail for one commit",

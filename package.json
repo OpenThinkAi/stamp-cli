@@ -36,10 +36,13 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",
     "commander": "^13.1.0",
+    "ink": "^7.0.1",
+    "react": "^19.2.5",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
+    "@types/react": "^19.2.14",
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3"
