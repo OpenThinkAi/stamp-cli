@@ -24,6 +24,14 @@ npm install -g stamp-cli
 Node 22.5+ required (we use `node:sqlite` and `node:crypto`'s Ed25519 APIs,
 both of which are built-in but gated on 22.5+).
 
+Published tarballs carry an SLSA build attestation via npm's Trusted
+Publishing, so you can verify chain-of-custody against the GitHub Actions
+run that produced the release:
+
+```sh
+npm audit signatures
+```
+
 ## Quick start (local test)
 
 This runs everything on one machine using a bare git repo on disk as the
