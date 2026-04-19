@@ -116,7 +116,7 @@ Commit `.stamp/mirror.yml` at the repo root declaring the GitHub destination:
 
 ```yaml
 github:
-  repo: mattpardini/keeb-cooker   # GitHub "owner/repo"
+  repo: your-user/your-repo       # GitHub "owner/repo" of the mirror destination
   branches:
     - main
 ```
