@@ -177,9 +177,10 @@ enforcement strength. Pick based on whether your remote can run a
 pre-receive hook — GitHub can't, so the choice matters.
 
 **1. Self-hosted remote — full enforcement (recommended).**
-A server you control runs `git + sshd + stamp-verify`. Every push is
-rejected at the server if it isn't a properly signed stamped merge, so
-author-agents can't bypass the gate even with working credentials.
+A server you control runs `git + sshd` with stamp-cli's pre-receive
+hook installed. Every push is rejected at the server if it isn't a
+properly signed stamped merge, so author-agents can't bypass the gate
+even with working credentials.
 Easiest path: deploy `server/Dockerfile` to Railway, Fly, or any
 container host — see [`server/README.md`](./server/README.md) for the
 Railway walkthrough. Minimalist alternative: any Linux host with `git +

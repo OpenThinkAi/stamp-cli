@@ -39,7 +39,7 @@ The repo is public and `stamp-cli@0.2.0` is on npm. Pre-public audit shipped all
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `.github/workflows/ci.yml` landed.
 - `AGENTS.md` + `CLAUDE.md` added so first-contact agents (Cursor, Claude Code, etc.) explain stamp-cli with the right framing.
 
-**Breaking change in this phase:** `stamp init` now scaffolds three starter reviewers by default (`security`, `standards`, `product`) with `required: [security, standards, product]`. `stamp init --minimal` preserves the prior single-`example` behavior as an explicit opt-in. This is what motivated the `0.1.x → 0.2.0` bump under pre-1.0 semver.
+**Breaking change in this phase:** `stamp init` now scaffolds three starter reviewers by default (`security`, `standards`, `product`) with `required: [security, standards, product]`. `stamp init --minimal` preserves the prior single-`example` behavior as an explicit opt-in. This is what motivated the `0.1.x → 0.2.0` bump under pre-1.0 semver. Upgraders with onboarding scripts or agent loops that assumed the old layout (`edit .stamp/reviewers/example.md`) should pass `--minimal` or update tooling to the new persona filenames.
 
 **Deferred from 2.E (post-public, nice-to-have):**
 
