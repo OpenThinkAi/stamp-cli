@@ -19,7 +19,7 @@ Status, upcoming priorities, deferred items. Paired with [`DESIGN.md`](../DESIGN
 
 ## Phase 2.B–D — shipped
 
-All three near-term priorities Matt called out are now live and dogfooded on keeb-cooker.
+Three near-term priorities, all live and dogfooded against a real project using stamp-cli as the merge gate.
 
 **2.B — Enhanced `stamp log`.** Default view shows first-parent merge history with one-line attestation summaries (signer, reviewers ✓/✗, checks ✓/✗); `stamp log <sha>` drills into one commit with decoded attestation, signature status, review prose from DB, and check details; `--reviews` keeps the raw DB-rows view accessible. **Breaking changes:**
 - Old `stamp log --diff <revspec>` (DB-row filter) is now `stamp log --reviews --diff <revspec>`. Any agent loop that parsed the old default output needs updating.
@@ -28,6 +28,31 @@ All three near-term priorities Matt called out are now live and dogfooded on kee
 **2.C — Reviewer management.** `stamp reviewers add/remove/edit/test/show`. The `test` subcommand is the key iteration tool — invokes a reviewer against a diff without recording to DB. `show` surfaces aggregate verdict stats for calibration.
 
 **2.D — Gated mirror to github.com.** Post-receive hook mirrors verified commits to a configured GitHub repo using a bot PAT. `.stamp/mirror.yml` committed per-repo declares destination; `GITHUB_BOT_TOKEN` env var on the server holds the PAT; hook reads it from `/etc/stamp/env` (persisted by entrypoint because sshd strips env from sessions). Mirror failures log to stderr but don't block the stamped push. Server README walks through setup including GitHub branch protection.
+
+## Phase 2.E — pre-public release hardening (in progress)
+
+stamp-cli has been developed in a private repo with the author as the only user. Before the repo flips to public and the package ships to npm proper, an audit found items that need to land first. Tracked and fixed through the normal stamp gate, each as a separate PR.
+
+**Blockers (must land before the repo goes public):**
+
+- Scrub personal references from tracked docs. OSS readers shouldn't care about any particular operator's infra — the roadmap, server README, and personas guide all get depersonalized.
+- Disclose the proprietary `@anthropic-ai/claude-agent-sdk` dependency in the README. License is "SEE LICENSE IN README.md" (Anthropic's terms). Users running `npm install` are bound by those terms and deserve to know.
+- Decide the install path: publish `stamp-cli@0.1.0` to npm, or rewrite the README's install section to "build from source" until publishing is ready. Current `npm install -g stamp-cli` lands on a v0.0.0 name-squat stub that does nothing.
+
+**Strongly recommended:**
+
+- Document the `required_checks` shell-execution tradeoff in DESIGN.md's security model. `stamp merge` runs config-sourced commands via `shell: true`; the mitigation is the reviewer gate on changes to `.stamp/config.yml`, and operators should know that explicitly.
+- `CONTRIBUTING.md` — dev setup, build, test, PR process.
+- `CODE_OF_CONDUCT.md` — Contributor Covenant template.
+- CI workflow (`.github/workflows/ci.yml`) — at minimum `npm ci && npm run build && npm run typecheck` on push and pull requests.
+
+**Nice-to-have (can ship after going public):**
+
+- Cap the attestation trailer size before `JSON.parse` in `lib/attestation.ts` (theoretical prototype-pollution / DoS via oversized JSON; realistic risk low).
+- `THIRD-PARTY-NOTICES.md` for Apache-2.0 transitive deps.
+- Genericize `docs/personas.md`'s concrete example project reference.
+
+When everything in this phase ships and the first `npm publish` goes out, Phase 2.E is done and the project is out of pre-release.
 
 ## Remaining Phase 2 items (deferred)
 
@@ -70,4 +95,4 @@ Items where the "right" answer should be informed by continued dogfooding before
 - [`README.md`](../README.md) — user-facing installation + quick-start
 - [`server/README.md`](../server/README.md) — server deployment (Railway walkthrough, Dockerfile explanation)
 
-Matt's personal deployment plan (commitsonmain specifics, reviewer persona Tracks A/B/C) lives at `~/Ideas/commitsonmain.md` outside the repo — deployment specifics aren't part of the OSS product.
+Deployment-specific plans (a particular operator's Railway setup, reviewer persona development for a specific project) live outside this repo — specifics of any given install aren't part of the OSS product.
