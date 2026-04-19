@@ -23,6 +23,7 @@ fi
 if [ -n "$OPERATOR_PUB_KEY" ]; then
   printf '%s\n' "$OPERATOR_PUB_KEY" > /etc/stamp/operator.pub
   chmod 644 /etc/stamp/operator.pub
+  chown git:git /etc/stamp/operator.pub
 fi
 
 # sshd strips custom environment variables by default, so hooks invoked
