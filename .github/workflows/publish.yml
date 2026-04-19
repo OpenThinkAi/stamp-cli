@@ -3,9 +3,13 @@ name: publish
 # Fires when commits land on main (including via the stamp server's
 # post-receive mirror). Publishes to npm only when package.json declares
 # a version that isn't already on the registry — every non-bump merge
-# no-ops safely. Requires the NPM_TOKEN secret to be set in repo Settings
-# → Secrets → Actions; token should be an npm Automation token with
-# publish access on stamp-cli.
+# no-ops safely.
+#
+# Auth: Trusted Publishing via OIDC. No NPM_TOKEN secret; the npm package
+# must have a Trusted Publisher configured on the npm side pointing at
+# this repo + workflow filename (npm package → Settings → Trusted
+# Publishers). --provenance attaches an SLSA build attestation to the
+# published tarball, verifiable via 'npm audit signatures'.
 
 on:
   push:
@@ -18,6 +22,7 @@ jobs:
 
     permissions:
       contents: write
+      id-token: write
 
     steps:
       - name: checkout
@@ -71,11 +76,11 @@ jobs:
 
       # Build is invoked automatically via package.json's prepublishOnly
       # script before the tarball is assembled, so no explicit build step.
+      # --provenance requires id-token: write and a Trusted Publisher on
+      # the npm side; attaches an SLSA build attestation to the tarball.
       - name: publish
         if: steps.check.outputs.published == 'false'
-        run: npm publish --access public --tag "${{ steps.version.outputs.dist_tag }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance --tag "${{ steps.version.outputs.dist_tag }}"
 
       - name: tag release
         if: steps.check.outputs.published == 'false'
