@@ -98,8 +98,14 @@ See [`docs/personas.md`](./docs/personas.md) for prompt-writing guidance.
 ## Release process
 
 - Version in `package.json` is the source of truth.
-- When a release is cut, the maintainer bumps the version, updates `CHANGELOG.md` (once it exists), tags the commit, and runs `npm publish`.
+- Publishing is automated: `.github/workflows/publish.yml` fires on every push to `main` (including the stamp server's post-receive mirror) and publishes to npm **only if** `package.json` declares a version that isn't already on the registry. So the maintainer flow is:
+  1. Bump `package.json` version in a branch.
+  2. `stamp review → stamp merge → stamp push main` as usual.
+  3. The mirror carries the commit to GitHub; the publish workflow picks up the new version and runs `npm publish` + creates a `v<version>` git tag.
+- Every non-bump merge safely no-ops the publish step.
 - Alpha/beta/rc versions (e.g., `0.2.0-alpha.0`) publish under the `alpha` dist-tag.
+
+The workflow requires an `NPM_TOKEN` secret (npm Automation token, publish scope on `stamp-cli`) in repo Settings → Secrets and variables → Actions.
 
 Current state: we are pre-1.0. Breaking changes are allowed between minor versions.
 
