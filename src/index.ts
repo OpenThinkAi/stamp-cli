@@ -122,15 +122,41 @@ program
   });
 
 program
-  .command("log")
-  .description("show review history (prose); optionally filter to a specific diff")
-  .option("--limit <n>", "max entries", "50")
-  .option("--diff <revspec>", "filter to reviews of this specific diff")
-  .action((opts: { limit: string; diff?: string }) => {
-    wrap(() =>
-      runLog({ limit: Number(opts.limit) || 50, diff: opts.diff }),
-    );
-  });
+  .command("log [sha]")
+  .description(
+    "show first-parent merge history with attestation summaries; <sha> shows full detail for one commit",
+  )
+  .option("--limit <n>", "max entries in list view", "20")
+  .option("--branch <name>", "branch/ref to list; defaults to current branch")
+  .option(
+    "--reviews",
+    "legacy view — raw review DB rows instead of commit history",
+  )
+  .option(
+    "--diff <revspec>",
+    "with --reviews, filter rows to this exact diff",
+  )
+  .action(
+    (
+      sha: string | undefined,
+      opts: {
+        limit: string;
+        branch?: string;
+        reviews?: boolean;
+        diff?: string;
+      },
+    ) => {
+      wrap(() =>
+        runLog({
+          sha,
+          limit: Number(opts.limit) || 20,
+          branch: opts.branch,
+          reviews: opts.reviews ?? false,
+          diff: opts.diff,
+        }),
+      );
+    },
+  );
 
 const keys = program
   .command("keys")

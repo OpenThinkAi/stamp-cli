@@ -11,6 +11,75 @@ export interface ResolvedDiff {
   diff: string;
 }
 
+export interface CommitSummary {
+  sha: string;
+  title: string;
+  author: string;
+  date: string;
+  /** Full commit message body */
+  body: string;
+  /** Parent SHAs (typically 1 for normal commits, 2 for merges) */
+  parents: string[];
+}
+
+export function currentBranch(cwd: string): string {
+  return git(["rev-parse", "--abbrev-ref", "HEAD"], cwd).trim();
+}
+
+/**
+ * First-parent commit history on a branch — follows only the branch's linear
+ * history, skipping commits that came in via merged feature branches. This
+ * matches what the pre-receive hook verifies on push.
+ */
+export function firstParentCommits(
+  branch: string,
+  limit: number,
+  cwd: string,
+): CommitSummary[] {
+  const sep = "----stamp-record-end----";
+  const fmt = `%H%n%P%n%an <%ae>%n%ai%n%s%n%n%b${sep}`;
+  const out = git(
+    ["log", "--first-parent", `-${limit}`, `--format=${fmt}`, branch],
+    cwd,
+  );
+  const records = out.split(sep).map((r) => r.trim()).filter(Boolean);
+  const commits: CommitSummary[] = [];
+  for (const rec of records) {
+    const lines = rec.split("\n");
+    if (lines.length < 5) continue;
+    const [sha, parents, author, date, title, ...rest] = lines as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      ...string[],
+    ];
+    const body = rest.join("\n").replace(/^\n+/, "").trimEnd();
+    commits.push({
+      sha,
+      parents: parents.split(/\s+/).filter(Boolean),
+      author,
+      date,
+      title,
+      body,
+    });
+  }
+  return commits;
+}
+
+export function commitMessage(sha: string, cwd: string): string {
+  return git(["show", "-s", "--format=%B", sha], cwd);
+}
+
+export function commitSummary(sha: string, cwd: string): CommitSummary {
+  const commits = firstParentCommits(sha, 1, cwd);
+  if (commits.length === 0) {
+    throw new Error(`commit ${sha} not found`);
+  }
+  return commits[0]!;
+}
+
 /**
  * Parse and resolve a git revspec of the form "<base>..<head>".
  * - base_sha is merge-base(<base>, <head>), the point at which <head> diverged
