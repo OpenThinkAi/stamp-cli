@@ -21,7 +21,9 @@ Status, upcoming priorities, deferred items. Paired with [`DESIGN.md`](../DESIGN
 
 All three near-term priorities Matt called out are now live and dogfooded on keeb-cooker.
 
-**2.B — Enhanced `stamp log`.** Default view shows first-parent merge history with one-line attestation summaries (signer, reviewers ✓/✗, checks ✓/✗); `stamp log <sha>` drills into one commit with decoded attestation, signature status, review prose from DB, and check details; `--reviews` keeps the legacy DB-rows view accessible.
+**2.B — Enhanced `stamp log`.** Default view shows first-parent merge history with one-line attestation summaries (signer, reviewers ✓/✗, checks ✓/✗); `stamp log <sha>` drills into one commit with decoded attestation, signature status, review prose from DB, and check details; `--reviews` keeps the raw DB-rows view accessible. **Breaking changes:**
+- Old `stamp log --diff <revspec>` (DB-row filter) is now `stamp log --reviews --diff <revspec>`. Any agent loop that parsed the old default output needs updating.
+- `stamp keys export --pub` is now just `stamp keys export` (the flag is accepted as a no-op for backward compat). Old scripts still work.
 
 **2.C — Reviewer management.** `stamp reviewers add/remove/edit/test/show`. The `test` subcommand is the key iteration tool — invokes a reviewer against a diff without recording to DB. `show` surfaces aggregate verdict stats for calibration.
 

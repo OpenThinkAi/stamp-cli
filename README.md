@@ -13,6 +13,8 @@ PR dashboard, no human comment threads in core. Just a CLI + a git hook.
 
 Part of the [OpenThink](https://openthink.dev) suite.
 
+**Docs:** [DESIGN](./DESIGN.md) (spec) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
+
 ## Install
 
 ```sh
@@ -78,16 +80,42 @@ See [`DESIGN.md`](./DESIGN.md) for the full spec and [`docs/ROADMAP.md`](./docs/
 
 ## Commands
 
+**Core review cycle:**
+
 ```
-stamp init                                 # scaffold .stamp/ and keypair
-stamp review --diff <revspec>              # run reviewers; optional --only <name>
-stamp status --diff <revspec>              # gate check; exit 0/1
-stamp merge <branch> --into <target>       # signed merge commit
+stamp init                                 # scaffold .stamp/ + keypair; idempotent
+stamp review --diff <revspec>              # run all configured reviewers in parallel
+stamp review --diff <revspec> --only <name> # run a single reviewer
+stamp status --diff <revspec>              # gate check; exit 0 if open, 1 if closed
+stamp merge <branch> --into <target>       # run required_checks → sign merge commit
 stamp push <target>                        # plain git push; hook stderr forwarded
 stamp verify <sha>                         # verify a merge commit's attestation locally
-stamp log [--diff <revspec>] [--limit N]   # prose review history
-stamp reviewers list                       # inspect configured reviewers
-stamp reviewers edit <name>                # open a reviewer prompt in $EDITOR
+```
+
+**Browsing history:**
+
+```
+stamp log                                  # first-parent commit list w/ attestation summary
+stamp log <sha>                            # drill-down: decoded attestation + review prose
+stamp log --branch <name>                  # filter by branch
+stamp log --reviews                        # raw DB-row view of every review invocation
+stamp ui                                   # interactive TUI: list → detail → review prose
+```
+
+**Managing reviewers (persona development):**
+
+```
+stamp reviewers list                              # configured reviewers + prompt file status
+stamp reviewers add <name> [--no-edit]            # scaffold + register; --no-edit skips $EDITOR
+stamp reviewers edit <name>                       # open existing reviewer's prompt
+stamp reviewers test <name> --diff <revspec>      # invoke reviewer w/o recording to DB
+stamp reviewers show <name> [--limit <n>]         # verdict history + stats for calibration
+stamp reviewers remove <name> [--delete-file]     # de-register; optional rm of .md
+```
+
+**Key management:**
+
+```
 stamp keys generate                        # create ~/.stamp/keys/ed25519{,.pub}
 stamp keys list                            # local + trusted keys in this repo
 stamp keys export                          # print your public key
@@ -101,7 +129,12 @@ stamp keys trust <pub-file>                # deposit a key into .stamp/trusted-k
 ```yaml
 branches:
   main:
-    required: [security, standards, product]   # every merge to main requires these
+    required: [security, standards, product]   # reviewers that must approve
+    required_checks:                           # mechanical checks run pre-merge
+      - name: build
+        run: npm run build
+      - name: typecheck
+        run: npx tsc --noEmit
   develop:
     required: [security]
 
@@ -112,8 +145,17 @@ reviewers:
 ```
 
 Reviewer names are arbitrary — pick whatever matches your team's review
-dimensions. The prompt file is the reviewer's full system prompt; there
-are no conventions beyond ending with a `VERDICT:` line.
+dimensions. The prompt file is the reviewer's full system prompt; the only
+contract is that it must end with a `VERDICT:` line. See
+[`docs/personas.md`](./docs/personas.md) for how to write good reviewer prompts.
+
+`required_checks` run on the **post-merge tree** before the commit is signed.
+Any non-zero exit blocks the merge and rolls it back. Results are attested
+into the commit's signed payload; the server hook verifies that attestation
+matches the committed config.
+
+Optional: `.stamp/mirror.yml` enables GitHub mirroring via the post-receive
+hook. See [`server/README.md`](./server/README.md).
 
 ## Running your own remote
 
@@ -128,7 +170,17 @@ walkthrough.
 Create a bare repo, drop `dist/hooks/pre-receive.cjs` into `hooks/pre-receive`
 (chmod +x), and you're done. The hook is self-contained.
 
-## How agents use it
+## For agent authors
+
+stamp-cli is designed for agents as the primary user. What that means in
+practice:
+
+- **Output is prose**, not JSON. LLMs read prose natively. No `--json` flag.
+- **Control flow is exit codes.** Agent loops branch on them.
+- **State is files.** `.stamp/config.yml`, `.git/stamp/state.db`, git commit
+  trailers. Easy to inspect, hard to lose.
+- **Operations are idempotent.** `stamp init` is safe to re-run. `stamp
+  review` accumulates history; re-invoking doesn't corrupt anything.
 
 The canonical unattended loop:
 
@@ -145,8 +197,32 @@ while :; do
 done
 ```
 
-Output is prose — LLMs read it natively. Control flow is exit codes —
-loops branch on `stamp status` / `stamp push` success.
+**Exit-code cheat sheet:**
+
+| Command | 0 | non-zero (check stderr to disambiguate) |
+|---|---|---|
+| `stamp review` | reviewers ran and recorded | invocation failed (reviewer crash, DB error) — verdict may or may not be approved; always follow with `stamp status` to check the gate |
+| `stamp status` | gate open (all required reviewers approved) | gate closed — at least one required reviewer missing or non-approved |
+| `stamp merge` | merge signed, on main | stderr says which case: `gate CLOSED:` (need reviews), `pre-merge checks failed:` (merge rolled back, need fix), or a git-merge conflict message (working tree needs resolution) |
+| `stamp push` | remote accepted | stderr has `remote: stamp-verify: rejecting ...` for hook rejections, or a standard git error for network/auth issues |
+| `stamp verify` | attestation valid | stderr names the specific verification step that failed (signature invalid, untrusted signer, SHA mismatch, missing check, etc.) |
+
+Distinct exit codes per failure mode are on the roadmap — for now, agents should regex on the stderr markers above to disambiguate.
+
+**Tuning reviewer prompts.** Use `stamp reviewers test <name> --diff <revspec>`
+when iterating on a prompt — it invokes the reviewer against a diff **without
+recording to the DB**, so you can tweak the prompt, retest, and not pollute
+history. Pattern:
+
+```sh
+$EDITOR .stamp/reviewers/my-reviewer.md
+stamp reviewers test my-reviewer --diff main..test-violations
+# read output, adjust prompt, repeat
+```
+
+See [`docs/personas.md`](./docs/personas.md) for reviewer-prompt guidance and
+[`docs/troubleshooting.md`](./docs/troubleshooting.md) for common failures
+with concrete fixes.
 
 ## Security model
 
