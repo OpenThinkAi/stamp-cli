@@ -66,6 +66,22 @@ jobs:
             echo "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }} not on npm — will publish."
           fi
 
+      - name: debug OIDC claims (TEMPORARY — removed in immediate follow-up)
+        if: steps.check.outputs.published == 'false'
+        run: |
+          node -e "
+            fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=npm:registry.npmjs.org', {
+              headers: { Authorization: 'Bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }
+            })
+              .then(r => r.json())
+              .then(({ value }) => {
+                const [, payload] = value.split('.');
+                const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+                console.log('OIDC claims (audience=npm:registry.npmjs.org):');
+                console.log(JSON.stringify(claims, null, 2));
+              });
+          "
+
       - name: install
         if: steps.check.outputs.published == 'false'
         run: npm ci
