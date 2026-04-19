@@ -48,7 +48,7 @@ export async function invokeReviewer(params: {
 
   const userPrompt = buildUserPrompt(params);
 
-  const allowedTools = def.tools && def.tools.length > 0 ? def.tools : undefined;
+  const allowedTools = def.tools ?? [];
   const mcpServers = resolveMcpServers(def, params.reviewer);
 
   const q = query({
@@ -56,7 +56,7 @@ export async function invokeReviewer(params: {
     options: {
       cwd: params.repoRoot,
       systemPrompt,
-      ...(allowedTools ? { allowedTools } : { allowedTools: [] }),
+      allowedTools,
       ...(mcpServers ? { mcpServers } : {}),
       persistSession: false,
     },
@@ -123,24 +123,28 @@ function buildServer(
 }
 
 // Expands $VAR and ${VAR} references in an MCP env value against process.env.
-// Unset vars fail fast with a message naming the missing var and where it was
-// declared, so an agent loop doesn't get a confusing mid-stream MCP failure.
+// Matches POSIX-style identifiers: [A-Za-z_][A-Za-z0-9_]*. Unset vars fail
+// fast with a message naming the missing var and where it was declared, so
+// an agent loop doesn't get a confusing mid-stream MCP failure.
 function expandEnvRefs(
   value: string,
   ctx: { reviewer: string; server: string; field: string },
 ): string {
-  return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)/g, (_, a, b) => {
-    const name = a ?? b;
-    const resolved = process.env[name];
-    if (resolved === undefined) {
-      throw new Error(
-        `reviewer "${ctx.reviewer}" declared mcp_servers.${ctx.server}.${ctx.field} ` +
-          `referencing $${name}, but ${name} is not set in the environment. ` +
-          `Export it before running 'stamp review'.`,
-      );
-    }
-    return resolved;
-  });
+  return value.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (_, a, b) => {
+      const name = a ?? b;
+      const resolved = process.env[name];
+      if (resolved === undefined) {
+        throw new Error(
+          `reviewer "${ctx.reviewer}" declared mcp_servers.${ctx.server}.${ctx.field} ` +
+            `referencing $${name}, but ${name} is not set in the environment. ` +
+            `Export it before running 'stamp review'.`,
+        );
+      }
+      return resolved;
+    },
+  );
 }
 
 function buildUserPrompt(params: {
