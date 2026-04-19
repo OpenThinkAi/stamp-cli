@@ -46,6 +46,10 @@ stamp-cli has been developed in a private repo with the author as the only user.
 - `CODE_OF_CONDUCT.md` — Contributor Covenant template.
 - CI workflow (`.github/workflows/ci.yml`) — at minimum `npm ci && npm run build && npm run typecheck` on push and pull requests.
 
+**Default-behavior change during 2.E:**
+
+- `stamp init` now scaffolds three starter reviewers by default (`security`, `standards`, `product`) with `required: [security, standards, product]`, where previously it scaffolded a single `example` reviewer with `required: [example]`. `stamp init --minimal` preserves the old behavior as an explicit opt-in. Any onboarding script or agent loop that assumed the old post-init layout (e.g. "edit `.stamp/reviewers/example.md`") will land in a different world; update to either pass `--minimal` or target the three-persona filenames.
+
 **Nice-to-have (can ship after going public):**
 
 - Cap the attestation trailer size before `JSON.parse` in `lib/attestation.ts` (theoretical prototype-pollution / DoS via oversized JSON; realistic risk low).

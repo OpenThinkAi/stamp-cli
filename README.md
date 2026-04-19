@@ -33,7 +33,14 @@ This runs everything on one machine using a bare git repo on disk as the
 # Install + initialize a fresh project
 mkdir myproject && cd myproject
 git init -b main
-stamp init                     # scaffolds .stamp/ + generates ~/.stamp/keys/
+stamp init                     # scaffolds .stamp/ with three starter reviewers
+                               #   (security, standards, product) + keypair in
+                               #   ~/.stamp/keys/. Use --minimal to scaffold a
+                               #   single placeholder reviewer instead.
+
+# Commit the scaffolded .stamp/ directory so the reviewers + trusted key are
+# part of the repo's history before you start working.
+git add .stamp && git commit -m "stamp: scaffold starter reviewers"
 
 # Provision a bare "remote" with the verify hook
 cd ..
@@ -49,12 +56,16 @@ git remote add origin /tmp/myproject.git
 # Work:
 git checkout -b feature
 # ...make changes, commit...
-stamp review --diff main..feature    # reviewers run in parallel, verdicts land in DB
+stamp review --diff main..feature    # three reviewers run in parallel
 stamp status --diff main..feature    # gate status; exit 0 if open, 1 if closed
 git checkout main
 stamp merge feature --into main      # signed merge commit
 stamp push main                      # hook verifies; main advances on remote
 ```
+
+The scaffolded reviewer prompts are generic starting points. Before relying
+on them for real code review, edit them to match your project's stack,
+conventions, and domain — see [`docs/personas.md`](./docs/personas.md).
 
 Any push that isn't a properly signed stamped merge will be rejected by the
 hook with a clear reason.
@@ -62,8 +73,10 @@ hook with a clear reason.
 ## Concepts
 
 - **Reviewer** — a persona defined by a prompt file at
-  `.stamp/reviewers/<name>.md`. Each deployment supplies its own; stamp-cli
-  ships no opinionated reviewers. Prompts must end with a `VERDICT:
+  `.stamp/reviewers/<name>.md`. `stamp init` scaffolds three starter
+  reviewers (`security`, `standards`, `product`) calibrated for generic
+  TS/JS projects — edit them to fit your codebase. Use `--minimal` for
+  a single placeholder instead. Prompts must end with a `VERDICT:
   approved|changes_requested|denied` line.
 - **Verdict** — a reviewer's judgment on a specific diff. Recorded per
   reviewer per `(base_sha, head_sha)` in `.git/stamp/state.db`.

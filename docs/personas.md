@@ -1,6 +1,10 @@
 # Writing reviewer personas
 
-stamp-cli ships no opinionated reviewers — the contract for a reviewer is tiny (prompt file + a final `VERDICT:` line), and each deployment supplies its own. This doc covers how to write ones that are actually useful.
+`stamp init` scaffolds three starter reviewers — `security`, `standards`, `product` — with generic prompts calibrated for TypeScript/JavaScript projects. They work out of the box for first use, but they are **starting points, not finished opinions**: edit them to fit your codebase's stack, conventions, and domain.
+
+The contract for a reviewer is tiny (prompt file + a final `VERDICT:` line). This doc covers both how to customize the shipped defaults and how to write new ones from scratch.
+
+**If you prefer a zero-opinion scaffold**, run `stamp init --minimal` — it produces a single placeholder reviewer for you to replace, and a config requiring just that one.
 
 ## The contract
 
@@ -83,6 +87,80 @@ A one-paragraph tone guide. What we use:
 > Direct, terse, opinionated. Cite specific lines. Don't hedge. It is fine to tell the author their abstraction is unjustified — that's the value this reviewer adds. Approvals can be one sentence.
 
 Without a tone directive, reviewers tend toward hedging prose that's hard to scan and harder to act on.
+
+## Customizing the shipped defaults
+
+`stamp init` produces three reviewer files you're expected to customize:
+
+- `.stamp/reviewers/security.md` — secrets, dependency risk, dangerous primitives, input validation, subprocess invocation, outbound network, secret leakage, trust model changes
+- `.stamp/reviewers/standards.md` — build-first philosophy, language idiom hygiene, type safety, naming, dead code, boundary-only error handling
+- `.stamp/reviewers/product.md` — interface consistency, breaking changes, error messages, accessibility, edge cases, microcopy — **this one is the most project-specific and needs the heaviest editing**
+
+All three follow the 5-piece structural pattern below. Customize the *content* (scope items, concrete examples, tone) while keeping the *structure* (non-scope handoff, verdict criteria, output format) intact.
+
+### Editing a shipped reviewer in place
+
+```sh
+stamp reviewers edit security
+# ...edits to .stamp/reviewers/security.md in $EDITOR...
+stamp reviewers test security --diff main..HEAD  # try the new version
+# iterate until calibrated
+```
+
+No need to remove and re-add — the reviewer's config entry stays the same, only the prompt file changes.
+
+### Adding a new reviewer beyond the three
+
+Say you want an `accessibility` reviewer for a web project, or an `api-design` reviewer for a library:
+
+```sh
+stamp reviewers add accessibility       # scaffolds + opens in $EDITOR
+# ...write the prompt following the skeleton at the bottom of this doc...
+```
+
+Then to make it gate merges, edit `.stamp/config.yml`:
+
+```yaml
+branches:
+  main:
+    required:
+      - security
+      - standards
+      - product
+      - accessibility   # add here
+```
+
+Reviewers live in `.stamp/reviewers/` but only appear in the gate if they're listed under `branches.<target>.required`.
+
+### Removing a shipped reviewer that doesn't apply
+
+Some projects don't need all three. A throwaway prototype probably doesn't need a `security` reviewer running on every merge; a backend service with no UI may want `product` scope covered differently.
+
+```sh
+# First edit .stamp/config.yml to remove the reviewer from any `required` lists.
+# Then:
+stamp reviewers remove security --delete-file
+```
+
+`stamp reviewers remove` refuses to run if the reviewer is still in a `required` list — it prevents you from orphaning a branch rule. Remove from config first, then from reviewers.
+
+### Changing required reviewers per branch
+
+`.stamp/config.yml` supports per-branch `required` lists. Example: main needs all three, develop needs only security:
+
+```yaml
+branches:
+  main:
+    required:
+      - security
+      - standards
+      - product
+  develop:
+    required:
+      - security
+```
+
+The gate runs against the rule for the branch you're merging into (`stamp merge <branch> --into <target>` reads `branches.<target>.required`). A reviewer can exist in `reviewers:` without being required by any branch — it still runs on `stamp review` but doesn't gate merges.
 
 ## Calibration workflow
 
