@@ -21,7 +21,14 @@ import { runLog } from "./commands/log.js";
 import { runMerge } from "./commands/merge.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
-import { reviewersEdit, reviewersList } from "./commands/reviewers.js";
+import {
+  reviewersAdd,
+  reviewersEdit,
+  reviewersList,
+  reviewersRemove,
+  reviewersShow,
+  reviewersTest,
+} from "./commands/reviewers.js";
 import { runStatus } from "./commands/status.js";
 import { runVerify } from "./commands/verify.js";
 
@@ -197,9 +204,45 @@ reviewers
   .description("list configured reviewers and their prompt file status")
   .action(() => wrap(() => reviewersList()));
 reviewers
+  .command("add <name>")
+  .description("scaffold a new reviewer: create prompt file, register in config, open in editor")
+  .option("--no-edit", "skip opening $EDITOR after scaffolding")
+  .action((name: string, opts: { edit: boolean }) =>
+    wrap(() => reviewersAdd(name, { noEdit: !opts.edit })),
+  );
+reviewers
+  .command("remove <name>")
+  .description("remove a reviewer from config (fails if in use by a branch rule)")
+  .option("--delete-file", "also delete the reviewer's prompt file")
+  .action((name: string, opts: { deleteFile?: boolean }) =>
+    wrap(() => reviewersRemove(name, { deleteFile: opts.deleteFile })),
+  );
+reviewers
   .command("edit <name>")
   .description("open a reviewer's prompt file in $EDITOR")
   .action((name: string) => wrap(() => reviewersEdit(name)));
+reviewers
+  .command("test <name>")
+  .description("invoke a reviewer against a diff WITHOUT recording to DB (prompt tuning)")
+  .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
+  .action(async (name: string, opts: { diff: string }) => {
+    try {
+      await reviewersTest(name, opts.diff);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
+reviewers
+  .command("show <name>")
+  .description("show a reviewer's verdict history and aggregate stats")
+  .option("--limit <n>", "max recent verdicts to list", "10")
+  .action((name: string, opts: { limit: string }) =>
+    wrap(() =>
+      reviewersShow(name, { limit: Number(opts.limit) || 10 }),
+    ),
+  );
 
 program.parseAsync(process.argv).catch((err) => {
   const message = err instanceof Error ? err.message : String(err);

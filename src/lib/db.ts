@@ -136,3 +136,62 @@ export function reviewHistory(
   `);
   return stmt.all(limit) as ReviewRow[];
 }
+
+export interface ReviewerStats {
+  reviewer: string;
+  total: number;
+  approved: number;
+  changes_requested: number;
+  denied: number;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
+export function reviewerStats(
+  db: DatabaseSync,
+  reviewer: string,
+): ReviewerStats {
+  const stmt = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN verdict = 'approved'          THEN 1 ELSE 0 END) AS approved,
+      SUM(CASE WHEN verdict = 'changes_requested' THEN 1 ELSE 0 END) AS changes_requested,
+      SUM(CASE WHEN verdict = 'denied'            THEN 1 ELSE 0 END) AS denied,
+      MIN(created_at) AS first_seen,
+      MAX(created_at) AS last_seen
+    FROM reviews
+    WHERE reviewer = ?
+  `);
+  const row = stmt.get(reviewer) as {
+    total: number;
+    approved: number | null;
+    changes_requested: number | null;
+    denied: number | null;
+    first_seen: string | null;
+    last_seen: string | null;
+  };
+  return {
+    reviewer,
+    total: row.total ?? 0,
+    approved: row.approved ?? 0,
+    changes_requested: row.changes_requested ?? 0,
+    denied: row.denied ?? 0,
+    first_seen: row.first_seen,
+    last_seen: row.last_seen,
+  };
+}
+
+export function recentReviewsByReviewer(
+  db: DatabaseSync,
+  reviewer: string,
+  limit: number,
+): ReviewRow[] {
+  const stmt = db.prepare(`
+    SELECT id, reviewer, base_sha, head_sha, verdict, issues, created_at
+    FROM reviews
+    WHERE reviewer = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `);
+  return stmt.all(reviewer, limit) as ReviewRow[];
+}
