@@ -133,39 +133,83 @@ function mirrorBranch(
   }
 }
 
-function readMirrorConfig(sha: string): MirrorConfig | null {
-  // Try repo-root .stamp/mirror.yml at the pushed ref.
-  try {
-    const raw = run(["show", `${sha}:.stamp/mirror.yml`]);
-    const parsed = parseYaml(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") return null;
-    const obj = parsed as Record<string, unknown>;
+// Canonical schema shape used in warning messages. Mirrors the example in
+// DESIGN.md and server/README.md so the operator sees consistent text at
+// every touchpoint.
+const SCHEMA_HINT =
+  "expected schema: github: { repo: owner/name, branches: [main] }";
 
-    const out: MirrorConfig = {};
-    if (obj.github && typeof obj.github === "object") {
-      const gh = obj.github as Record<string, unknown>;
-      if (typeof gh.repo === "string" && Array.isArray(gh.branches)) {
-        if (!GITHUB_REPO_RE.test(gh.repo)) {
-          // Refuse to interpolate an unexpected-shape repo into a URL. Git's
-          // parser would keep github.com as the host (first @ wins), so this
-          // isn't host-hijack territory — it's defense in depth against a
-          // malformed mirror.yml slipping through reviewer + breaking the
-          // push in surprising ways.
-          warn(
-            `mirror: invalid github.repo '${gh.repo}' in .stamp/mirror.yml (expected owner/repo) — skipping`,
-          );
-          return null;
-        }
-        out.github = {
-          repo: gh.repo,
-          branches: gh.branches.map(String),
-        };
-      }
-    }
-    return out;
+function readMirrorConfig(sha: string): MirrorConfig | null {
+  // Absence of the file is normal — repos without mirror configured just
+  // don't have .stamp/mirror.yml. Silent no-op in that case.
+  let raw: string;
+  try {
+    raw = run(["show", `${sha}:.stamp/mirror.yml`]);
   } catch {
     return null;
   }
+
+  // File exists. From here on, misconfigurations warn explicitly rather
+  // than silently disabling the mirror — that silent-no-op pattern was the
+  // bug reported in issue #2.
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (err) {
+    warn(
+      `mirror: .stamp/mirror.yml failed to parse as YAML (${err instanceof Error ? err.message : String(err)}) — skipping mirror.`,
+    );
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    warn(
+      `mirror: .stamp/mirror.yml is empty or not a map — skipping mirror. ${SCHEMA_HINT}.`,
+    );
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.github === undefined) {
+    const topKeys = Object.keys(obj).join(", ") || "(none)";
+    warn(
+      `mirror: .stamp/mirror.yml has no top-level 'github' key (found: ${topKeys}) — skipping mirror. ${SCHEMA_HINT}.`,
+    );
+    return null;
+  }
+  if (!obj.github || typeof obj.github !== "object" || Array.isArray(obj.github)) {
+    warn(
+      `mirror: .stamp/mirror.yml's 'github' value must be a map, not ${Array.isArray(obj.github) ? "an array" : typeof obj.github} — skipping mirror. ${SCHEMA_HINT}.`,
+    );
+    return null;
+  }
+  const gh = obj.github as Record<string, unknown>;
+  if (typeof gh.repo !== "string") {
+    warn(
+      `mirror: .stamp/mirror.yml missing 'github.repo' (expected string of form owner/name) — skipping mirror. ${SCHEMA_HINT}.`,
+    );
+    return null;
+  }
+  if (!GITHUB_REPO_RE.test(gh.repo)) {
+    // Refuse to interpolate an unexpected-shape repo into a URL. Git's parser
+    // keeps github.com as the host (first @ wins) so this isn't host-hijack
+    // territory — it's defense in depth against a malformed mirror.yml
+    // slipping through review and producing surprising push behavior.
+    warn(
+      `mirror: invalid github.repo '${gh.repo}' in .stamp/mirror.yml (expected owner/repo) — skipping mirror.`,
+    );
+    return null;
+  }
+  if (!Array.isArray(gh.branches)) {
+    warn(
+      `mirror: .stamp/mirror.yml missing or non-array 'github.branches' (expected list of branch names) — skipping mirror. ${SCHEMA_HINT}.`,
+    );
+    return null;
+  }
+  return {
+    github: {
+      repo: gh.repo,
+      branches: gh.branches.map(String),
+    },
+  };
 }
 
 function run(args: string[]): string {
