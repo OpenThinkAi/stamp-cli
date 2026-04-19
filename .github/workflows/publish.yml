@@ -35,9 +35,20 @@ jobs:
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
+          # Derive the npm dist-tag from the version string.
+          # - bare X.Y.Z → latest
+          # - X.Y.Z-alpha.N → alpha (and likewise beta, rc, or any other suffix
+          #   label) so prerelease versions do NOT clobber the 'latest' tag
+          if [[ "$VERSION" == *-* ]]; then
+            DIST_TAG="${VERSION#*-}"
+            DIST_TAG="${DIST_TAG%%.*}"
+          else
+            DIST_TAG="latest"
+          fi
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "target: $NAME@$VERSION"
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          echo "target: $NAME@$VERSION (dist-tag: $DIST_TAG)"
 
       - name: check npm registry
         id: check
@@ -58,9 +69,11 @@ jobs:
         if: steps.check.outputs.published == 'false'
         run: npm run typecheck
 
+      # Build is invoked automatically via package.json's prepublishOnly
+      # script before the tarball is assembled, so no explicit build step.
       - name: publish
         if: steps.check.outputs.published == 'false'
-        run: npm publish --access public
+        run: npm publish --access public --tag "${{ steps.version.outputs.dist_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
