@@ -28,18 +28,21 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
-      # Intentionally NO registry-url here. When setup-node is given a
-      # registry-url without an NPM_TOKEN env, it writes ~/.npmrc with
-      # _authToken=${NODE_AUTH_TOKEN} and exports NODE_AUTH_TOKEN as the
-      # literal placeholder 'XXXXX-XXXXX-XXXXX-XXXXX'. npm publish then
-      # tries to authenticate the PUT with that garbage token (404), and
-      # never falls through to OIDC / Trusted Publishing. Omit registry-url
-      # entirely so .npmrc stays empty and npm auto-detects OIDC.
       - name: setup node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
+          registry-url: "https://registry.npmjs.org"
+
+      # Node 22 bundles npm 10.x, which supports OIDC only for provenance
+      # signing (sigstore) — not for authenticating the registry PUT. npm
+      # Trusted Publishing on the PUT path requires npm 11.5.1+. Upgrade
+      # before publish so 'npm publish --provenance' actually exchanges
+      # the OIDC token with the npm registry instead of falling back to
+      # the NODE_AUTH_TOKEN placeholder setup-node writes into .npmrc.
+      - name: upgrade to npm with Trusted Publishing support
+        run: npm install -g npm@latest
 
       - name: read target version
         id: version
