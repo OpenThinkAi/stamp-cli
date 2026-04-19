@@ -37,10 +37,17 @@ export function runMerge(opts: MergeOptions): void {
     );
   }
 
-  const dirty = git(["status", "--porcelain"], repoRoot).trim();
+  // Check for modified/staged tracked files only — untracked build artifacts
+  // (dist/, .vite/, node_modules/ on a freshly checked-out target branch)
+  // shouldn't block the merge.
+  const dirty = git(
+    ["status", "--porcelain", "--untracked-files=no"],
+    repoRoot,
+  ).trim();
   if (dirty) {
     throw new Error(
-      `working tree is not clean. Commit or stash changes before running \`stamp merge\`.`,
+      `working tree has uncommitted changes to tracked files. ` +
+        `Commit or stash before running \`stamp merge\`.`,
     );
   }
 
