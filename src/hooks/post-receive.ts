@@ -133,11 +133,11 @@ function mirrorBranch(
   }
 }
 
-// Canonical schema shape used in warning messages. Mirrors the example in
-// DESIGN.md and server/README.md so the operator sees consistent text at
-// every touchpoint.
+// Canonical schema shape used in warning messages. Matches the YAML
+// example in DESIGN.md and server/README.md so the operator sees
+// consistent text at every touchpoint.
 const SCHEMA_HINT =
-  "expected schema: github: { repo: owner/name, branches: [main] }";
+  "expected schema: github: { repo: owner/repo, branches: [main] }";
 
 function readMirrorConfig(sha: string): MirrorConfig | null {
   // Absence of the file is normal — repos without mirror configured just
@@ -175,7 +175,13 @@ function readMirrorConfig(sha: string): MirrorConfig | null {
     );
     return null;
   }
-  if (!obj.github || typeof obj.github !== "object" || Array.isArray(obj.github)) {
+  if (obj.github === null) {
+    warn(
+      `mirror: .stamp/mirror.yml's 'github' key is null (likely 'github:' with no value) — skipping mirror. ${SCHEMA_HINT}.`,
+    );
+    return null;
+  }
+  if (typeof obj.github !== "object" || Array.isArray(obj.github)) {
     warn(
       `mirror: .stamp/mirror.yml's 'github' value must be a map, not ${Array.isArray(obj.github) ? "an array" : typeof obj.github} — skipping mirror. ${SCHEMA_HINT}.`,
     );
@@ -184,7 +190,7 @@ function readMirrorConfig(sha: string): MirrorConfig | null {
   const gh = obj.github as Record<string, unknown>;
   if (typeof gh.repo !== "string") {
     warn(
-      `mirror: .stamp/mirror.yml missing 'github.repo' (expected string of form owner/name) — skipping mirror. ${SCHEMA_HINT}.`,
+      `mirror: .stamp/mirror.yml missing 'github.repo' (expected string of form owner/repo) — skipping mirror. ${SCHEMA_HINT}.`,
     );
     return null;
   }
@@ -194,7 +200,7 @@ function readMirrorConfig(sha: string): MirrorConfig | null {
     // territory — it's defense in depth against a malformed mirror.yml
     // slipping through review and producing surprising push behavior.
     warn(
-      `mirror: invalid github.repo '${gh.repo}' in .stamp/mirror.yml (expected owner/repo) — skipping mirror.`,
+      `mirror: invalid github.repo '${gh.repo}' in .stamp/mirror.yml — skipping mirror. ${SCHEMA_HINT}.`,
     );
     return null;
   }
