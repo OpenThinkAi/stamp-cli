@@ -30,7 +30,9 @@ import {
   reviewersTest,
 } from "./commands/reviewers.js";
 import { runStatus } from "./commands/status.js";
+import { runUpdate } from "./commands/update.js";
 import { runVerify } from "./commands/verify.js";
+import { readPackageVersion } from "./lib/version.js";
 
 const program = new Command();
 
@@ -39,7 +41,7 @@ program
   .description(
     "Local, headless pull-request system for agent-to-agent code review.",
   )
-  .version("0.1.0-alpha.0");
+  .version(readPackageVersion());
 
 program
   .command("init")
@@ -133,6 +135,13 @@ program
       process.exit(1);
     }
   });
+
+program
+  .command("update")
+  .description(
+    "upgrade stamp-cli to the latest npm release (runs 'npm install -g stamp-cli@latest')",
+  )
+  .action(() => wrap(() => runUpdate()));
 
 program
   .command("ui")

@@ -135,6 +135,12 @@ stamp keys export                          # print your public key
 stamp keys trust <pub-file>                # deposit a key into .stamp/trusted-keys/
 ```
 
+**Maintenance:**
+
+```
+stamp update                               # upgrade stamp-cli to the latest npm release
+```
+
 ## Configuration
 
 `.stamp/config.yml`:
