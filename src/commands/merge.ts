@@ -155,7 +155,9 @@ export function runMerge(opts: MergeOptions): void {
   const postMergeRule = postMergeConfig.branches[opts.into];
   if (!postMergeRule) {
     throw new Error(
-      `.stamp/config.yml in the merged tree has no rule for branch "${opts.into}"`,
+      `.stamp/config.yml in the merged tree has no rule for branch "${opts.into}" — ` +
+        `the feature branch dropped 'branches.${opts.into}' from .stamp/config.yml. ` +
+        `Restore it on the feature branch before merging, or target a different branch with --into.`,
     );
   }
   const checkAttestations: CheckAttestation[] = [];

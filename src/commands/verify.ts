@@ -1,64 +1,44 @@
-import { execFileSync } from "node:child_process";
-import { parse as parseYaml } from "yaml";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   parseCommitAttestation,
   type AttestationPayload,
 } from "../lib/attestation.js";
-import type { BranchRule, StampConfig, CheckDef } from "../lib/config.js";
+import { parseConfigFromYaml, type StampConfig } from "../lib/config.js";
 import { findTrustedKey } from "../lib/keys.js";
 import { findRepoRoot } from "../lib/paths.js";
 import {
   hashMcpServers,
   hashPromptBytes,
   hashTools,
-  readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
 
 /**
- * Load just enough of .stamp/config.yml from the given commit's tree to
- * verify an attestation — branches (required + required_checks) and
- * reviewers (for hash recomputation). Tolerates missing config cleanly
- * for the "no rule for this branch" pass-through at the caller.
+ * Load .stamp/config.yml from the given commit's tree and parse it via the
+ * same validator loadConfig uses. A commit with no .stamp/config.yml in its
+ * tree legitimately has no rules — treat that as empty config. But a git
+ * failure for any other reason (corrupt repo, missing object) surfaces as
+ * an error rather than being papered over as "no rules."
  */
 function loadConfigAtSha(sha: string, repoRoot: string): StampConfig {
-  let raw: string;
-  try {
-    raw = execFileSync("git", ["show", `${sha}:.stamp/config.yml`], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-    });
-  } catch {
+  // Check whether the path exists in the tree first. git cat-file -e exits 0
+  // if the object exists, non-zero if not — lets us distinguish "absent"
+  // (legal bootstrap state, return empty config) from "git plumbing failed"
+  // (surface the error).
+  const existsCheck = spawnSync(
+    "git",
+    ["cat-file", "-e", `${sha}:.stamp/config.yml`],
+    { cwd: repoRoot, stdio: "ignore" },
+  );
+  if (existsCheck.status !== 0) {
     return { branches: {}, reviewers: {} };
   }
-  const parsed = (parseYaml(raw) ?? {}) as Record<string, unknown>;
-  const branches: Record<string, BranchRule> = {};
-  const rawBranches = parsed.branches;
-  if (rawBranches && typeof rawBranches === "object") {
-    for (const [name, rule] of Object.entries(rawBranches)) {
-      if (!rule || typeof rule !== "object") continue;
-      const r = rule as Record<string, unknown>;
-      if (!Array.isArray(r.required)) continue;
-      const required_checks: CheckDef[] = [];
-      if (Array.isArray(r.required_checks)) {
-        for (const c of r.required_checks) {
-          if (c && typeof c === "object") {
-            const cc = c as Record<string, unknown>;
-            if (typeof cc.name === "string" && typeof cc.run === "string") {
-              required_checks.push({ name: cc.name, run: cc.run });
-            }
-          }
-        }
-      }
-      branches[name] = {
-        required: r.required.map(String),
-        ...(required_checks.length > 0 ? { required_checks } : {}),
-      };
-    }
-  }
-  const reviewers = readReviewersFromYaml(raw);
-  return { branches, reviewers: reviewers as StampConfig["reviewers"] };
+  const raw = execFileSync("git", ["show", `${sha}:.stamp/config.yml`], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return parseConfigFromYaml(raw);
 }
 
 export interface VerifyResult {
@@ -199,7 +179,7 @@ export function runVerify(sha: string): void {
   // 7. v2+: verify per-reviewer prompt/tools/mcp hashes against the merge
   //    commit's .stamp/ tree. Legacy (v1) attestations skip this step.
   if ((payload.schema_version ?? 1) >= 2) {
-    verifyReviewerHashes(sha, payload, repoRoot);
+    verifyReviewerHashes(sha, payload, repoRoot, config);
   }
 
   // All checks passed.
@@ -210,15 +190,15 @@ function verifyReviewerHashes(
   sha: string,
   payload: AttestationPayload,
   repoRoot: string,
+  config: StampConfig,
 ): void {
-  const configYaml = tryGitShow(`${sha}:.stamp/config.yml`, repoRoot);
-  if (!configYaml) {
+  const reviewers = config.reviewers;
+  if (Object.keys(reviewers).length === 0) {
     fail(
       sha,
       `v2 attestation: cannot read .stamp/config.yml from the merge commit's tree. Commit the config and re-run merge.`,
     );
   }
-  const reviewers = readReviewersFromYaml(configYaml);
 
   for (const approval of payload.approvals) {
     const missing: string[] = [];
