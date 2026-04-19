@@ -13,6 +13,7 @@ import {
   formatDriftReport,
   LOCK_DRIFT_EXIT,
 } from "../lib/reviewerLock.js";
+import { serializeToolCalls } from "../lib/toolCalls.js";
 
 export interface ReviewOptions {
   diff: string;
@@ -100,6 +101,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           head_sha: resolved.head_sha,
           verdict: outcome.value.verdict,
           issues: outcome.value.prose,
+          tool_calls: serializeToolCalls(outcome.value.tool_calls),
         });
         printReview(outcome.value, resolved.base_sha, resolved.head_sha);
       } else {

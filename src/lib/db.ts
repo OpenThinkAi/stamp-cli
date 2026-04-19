@@ -11,6 +11,9 @@ export interface ReviewRow {
   head_sha: string;
   verdict: Verdict;
   issues: string | null;
+  /** JSON-encoded ToolCall[] (see lib/toolCalls.ts), or null for reviews
+   *  recorded before Step 4 shipped or where no tools were invoked. */
+  tool_calls: string | null;
   created_at: string;
 }
 
@@ -20,6 +23,8 @@ export interface RecordReviewInput {
   head_sha: string;
   verdict: Verdict;
   issues?: string | null;
+  /** JSON-encoded ToolCall[] or null. See lib/toolCalls.ts. */
+  tool_calls?: string | null;
 }
 
 export function openDb(path: string): DatabaseSync {
@@ -40,12 +45,21 @@ function initSchema(db: DatabaseSync): void {
       head_sha    TEXT    NOT NULL,
       verdict     TEXT    NOT NULL CHECK (verdict IN ('approved','changes_requested','denied')),
       issues      TEXT,
+      tool_calls  TEXT,
       created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE INDEX IF NOT EXISTS idx_reviews_shas
       ON reviews(base_sha, head_sha, reviewer);
   `);
+
+  // Migration for DBs created before Step 4 shipped — tool_calls column
+  // wasn't in the original schema. PRAGMA table_info lists columns; if
+  // tool_calls is absent, add it. Idempotent: repeat opens no-op.
+  const cols = db.prepare("PRAGMA table_info(reviews)").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "tool_calls")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN tool_calls TEXT");
+  }
 }
 
 export function recordReview(
@@ -53,8 +67,8 @@ export function recordReview(
   input: RecordReviewInput,
 ): number {
   const stmt = db.prepare(
-    `INSERT INTO reviews (reviewer, base_sha, head_sha, verdict, issues)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO reviews (reviewer, base_sha, head_sha, verdict, issues, tool_calls)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
     input.reviewer,
@@ -62,6 +76,7 @@ export function recordReview(
     input.head_sha,
     input.verdict,
     input.issues ?? null,
+    input.tool_calls ?? null,
   );
   return Number(result.lastInsertRowid);
 }
@@ -76,16 +91,18 @@ export interface LatestReview {
   reviewer: string;
   verdict: Verdict;
   issues: string | null;
+  tool_calls: string | null;
 }
 
 const LATEST_VERDICTS_SQL = `
-  SELECT id, reviewer, verdict, issues
+  SELECT id, reviewer, verdict, issues, tool_calls
   FROM (
     SELECT
       id,
       reviewer,
       verdict,
       issues,
+      tool_calls,
       ROW_NUMBER() OVER (
         PARTITION BY reviewer
         ORDER BY created_at DESC, id DESC
