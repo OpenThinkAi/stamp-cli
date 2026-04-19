@@ -2,7 +2,11 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_CONFIG,
+  DEFAULT_PRODUCT_PROMPT,
+  DEFAULT_SECURITY_PROMPT,
+  DEFAULT_STANDARDS_PROMPT,
   EXAMPLE_REVIEWER_PROMPT,
+  MINIMAL_CONFIG,
   stringifyConfig,
 } from "../lib/config.js";
 import { openDb } from "../lib/db.js";
@@ -20,7 +24,16 @@ import {
   stampTrustedKeysDir,
 } from "../lib/paths.js";
 
-export function runInit(): void {
+export interface InitOptions {
+  /**
+   * When true, scaffold a single placeholder `example` reviewer and require
+   * only it. When false (default), scaffold three starter reviewers
+   * (security / standards / product) and require all three.
+   */
+  minimal?: boolean;
+}
+
+export function runInit(opts: InitOptions = {}): void {
   const repoRoot = findRepoRoot();
   const configDir = stampConfigDir(repoRoot);
   const configFile = stampConfigFile(repoRoot);
@@ -35,8 +48,24 @@ export function runInit(): void {
   ensureDir(trustedKeysDir);
 
   if (!alreadyHasConfig) {
-    writeFileSync(configFile, stringifyConfig(DEFAULT_CONFIG));
-    writeFileSync(join(reviewersDir, "example.md"), EXAMPLE_REVIEWER_PROMPT);
+    if (opts.minimal) {
+      writeFileSync(configFile, stringifyConfig(MINIMAL_CONFIG));
+      writeFileSync(join(reviewersDir, "example.md"), EXAMPLE_REVIEWER_PROMPT);
+    } else {
+      writeFileSync(configFile, stringifyConfig(DEFAULT_CONFIG));
+      writeFileSync(
+        join(reviewersDir, "security.md"),
+        DEFAULT_SECURITY_PROMPT,
+      );
+      writeFileSync(
+        join(reviewersDir, "standards.md"),
+        DEFAULT_STANDARDS_PROMPT,
+      );
+      writeFileSync(
+        join(reviewersDir, "product.md"),
+        DEFAULT_PRODUCT_PROMPT,
+      );
+    }
   }
 
   const { keypair, created: keyCreated } = ensureUserKeypair();
@@ -57,7 +86,7 @@ export function runInit(): void {
   const mode = alreadyHasConfig ? "sync" : "scaffold";
   console.log(
     mode === "scaffold"
-      ? "stamp initialized (scaffolded fresh repo).\n"
+      ? `stamp initialized (scaffolded fresh repo${opts.minimal ? " — minimal mode, single placeholder reviewer" : " with three starter reviewers"}).\n`
       : "stamp initialized (synced to existing .stamp/ config).\n",
   );
   console.log(`  repo root:   ${repoRoot}`);
@@ -75,13 +104,29 @@ export function runInit(): void {
 
   if (mode === "scaffold") {
     console.log("Next steps:");
-    console.log("  1. Edit .stamp/config.yml to define branch rules and reviewers");
-    console.log("  2. Write reviewer prompts in .stamp/reviewers/*.md");
-    console.log("  3. Commit the .stamp/ directory");
+    if (opts.minimal) {
+      console.log(
+        "  1. Replace .stamp/reviewers/example.md with your own reviewer prompt.",
+      );
+      console.log("  2. Or add more reviewers: `stamp reviewers add <name>`.");
+    } else {
+      console.log(
+        "  1. Read the scaffolded prompts in .stamp/reviewers/ — they're",
+      );
+      console.log(
+        "     starting points calibrated for generic TS/JS projects; customize",
+      );
+      console.log("     for your codebase. See docs/personas.md for guidance.");
+      console.log(
+        "  2. Optionally add `required_checks` to .stamp/config.yml (e.g.",
+      );
+      console.log(`     \`npm run build\`, \`npm run typecheck\`).`);
+    }
+    console.log("  3. Commit the .stamp/ directory.");
     console.log(
       "  4. Share your public key (in .stamp/trusted-keys/) with any other",
     );
-    console.log("     machines that will push to this repo");
+    console.log("     machines that will push to this repo.");
   } else if (keyDeposited) {
     console.log(
       `Your public key was deposited at ${pubKeyPath}.`,

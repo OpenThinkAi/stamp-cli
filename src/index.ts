@@ -43,10 +43,16 @@ program
 
 program
   .command("init")
-  .description("scaffold .stamp/ in the current repo and generate a keypair")
-  .action(() => {
+  .description(
+    "scaffold .stamp/ (three-persona starter: security/standards/product) and generate a keypair",
+  )
+  .option(
+    "--minimal",
+    "scaffold a single placeholder reviewer instead of the three-persona starter",
+  )
+  .action((opts: { minimal?: boolean }) => {
     try {
-      runInit();
+      runInit({ minimal: opts.minimal });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`error: ${message}`);

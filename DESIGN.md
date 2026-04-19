@@ -33,7 +33,7 @@ Users may also install the hook into any git forge that supports pre-receive hoo
 
 ## Core concepts
 
-**Reviewer** — a persona defined by a prompt file under `.stamp/reviewers/<name>.md`. stamp-cli ships no opinionated reviewers; it provides a contract. Each deployment supplies its own reviewers (security, standards, product, API-design, style — whatever the team chooses). `stamp init` scaffolds one example stub that demonstrates the format.
+**Reviewer** — a persona defined by a prompt file under `.stamp/reviewers/<name>.md`. The *mechanism* (gate evaluation, attestation, signature) is opinion-free — each deployment supplies its own reviewer set. `stamp init` scaffolds three starter prompts (`security`, `standards`, `product`) calibrated for generic TypeScript/JavaScript projects, expected to be customized. `stamp init --minimal` scaffolds a single placeholder reviewer instead, for users who want to start from zero. Reviewers are named arbitrarily — the three defaults are a sweet-spot starting point, not a fixed set.
 
 **Verdict** — a reviewer's judgment on a specific diff. One of:
 - `approved` — contributes to gate
