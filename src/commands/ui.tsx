@@ -1,35 +1,44 @@
-import { Box, render, Text, useApp, useInput } from "ink";
-import { useState } from "react";
+import { Box, render, Text, useApp, useInput, useStdout } from "ink";
+import { existsSync } from "node:fs";
+import { useMemo, useState } from "react";
 import {
   parseCommitAttestation,
   type AttestationPayload,
   type ParsedAttestation,
 } from "../lib/attestation.js";
+import { latestReviews, openDb, type LatestReview } from "../lib/db.js";
 import {
   commitMessage,
   currentBranch,
   firstParentCommits,
 } from "../lib/git.js";
 import { findTrustedKey } from "../lib/keys.js";
-import { findRepoRoot } from "../lib/paths.js";
+import { findRepoRoot, stampStateDbPath } from "../lib/paths.js";
 import { verifyBytes } from "../lib/signing.js";
 
 /**
- * Phase 2.B/TUI step 3 — commit list + detail view.
+ * Phase 2.B/TUI step 4 — list + detail + review prose viewer.
  *
- * List: first-parent commits with a one-line attestation summary.
- *   ↑/↓ or j/k — navigate
- *   enter      — open detail view for the selected commit
- *   q/esc      — quit (Ctrl-C via ink default)
+ * List:
+ *   ↑/↓ or j/k   navigate
+ *   ⏎            open detail for selected commit
+ *   q/esc        quit
  *
- * Detail: full attestation inspection for one commit.
- *   target, base→head, signer, signature validity, approvals, checks.
- *   esc        — back to list
- *   q          — quit
+ * Detail:
+ *   r            open review prose viewer (if any reviews in local DB)
+ *   esc          back to list
+ *   q            quit
+ *
+ * Reviews:
+ *   n            next reviewer (cycles)
+ *   p            previous reviewer
+ *   ↑/↓ or j/k   scroll prose
+ *   esc          back to detail
+ *   q            quit
+ *
+ * Ctrl-C via ink's default in all modes.
  *
  * Exit codes: 0 on clean quit, 1 if no TTY is available.
- *
- * Next step wires `r` in the detail view to a review-prose viewer.
  */
 
 const COMMITS_LIMIT = 30;
@@ -83,14 +92,12 @@ function CommitRow({ row, selected }: { row: Row; selected: boolean }) {
   );
 }
 
-// ---------- detail view ----------
+// ---------- detail ----------
 
 interface DetailData {
   sha: string;
   title: string;
-  /** null if the commit has no attestation trailer */
   parsed: ParsedAttestation | null;
-  /** null if no trailer, "valid", "invalid", or "untrusted" (no matching key). */
   sigStatus: "valid" | "invalid" | "untrusted" | null;
 }
 
@@ -114,7 +121,20 @@ function loadDetail(repoRoot: string, sha: string): DetailData {
   return { sha, title, parsed, sigStatus: ok ? "valid" : "invalid" };
 }
 
-function Detail({ data }: { data: DetailData }) {
+function SigBadge({ status }: { status: DetailData["sigStatus"] }) {
+  if (status === null) return <Text color="red">n/a</Text>;
+  if (status === "valid") return <Text color="green">✓ valid</Text>;
+  if (status === "invalid") return <Text color="red">✗ INVALID</Text>;
+  return <Text color="red">✗ untrusted key (not in .stamp/trusted-keys/)</Text>;
+}
+
+function Detail({
+  data,
+  hasReviewProse,
+}: {
+  data: DetailData;
+  hasReviewProse: boolean;
+}) {
   const { sha, title, parsed, sigStatus } = data;
 
   return (
@@ -183,20 +203,113 @@ function Detail({ data }: { data: DetailData }) {
       )}
 
       <Box marginTop={2}>
-        <Text dimColor>esc back   q quit   (r: reviews — next phase)</Text>
+        <Text dimColor>
+          esc back   q quit
+          {hasReviewProse ? "   r reviews" : "   (no review prose in local DB)"}
+        </Text>
       </Box>
     </Box>
   );
 }
 
-function SigBadge({ status }: { status: DetailData["sigStatus"] }) {
-  if (status === null) return <Text color="red">n/a</Text>;
-  if (status === "valid") return <Text color="green">✓ valid</Text>;
-  if (status === "invalid") return <Text color="red">✗ INVALID</Text>;
-  return <Text color="red">✗ untrusted key (not in .stamp/trusted-keys/)</Text>;
+// ---------- review prose viewer ----------
+
+function loadReviewProse(
+  repoRoot: string,
+  payload: AttestationPayload,
+): LatestReview[] {
+  const dbPath = stampStateDbPath(repoRoot);
+  if (!existsSync(dbPath)) return [];
+  const db = openDb(dbPath);
+  try {
+    const rows = latestReviews(db, payload.base_sha, payload.head_sha);
+    // Preserve attestation's reviewer order for consistent n/p cycling.
+    const byName = new Map(rows.map((r) => [r.reviewer, r]));
+    const ordered: LatestReview[] = [];
+    for (const a of payload.approvals) {
+      const row = byName.get(a.reviewer);
+      if (row) ordered.push(row);
+    }
+    return ordered;
+  } finally {
+    db.close();
+  }
+}
+
+function ReviewProse({
+  sha,
+  reviews,
+  index,
+  scrollOffset,
+  viewportHeight,
+}: {
+  sha: string;
+  reviews: LatestReview[];
+  index: number;
+  scrollOffset: number;
+  viewportHeight: number;
+}) {
+  const current = reviews[index]!;
+  const hasProse = (current.issues ?? "").trim().length > 0;
+  const lines = useMemo(() => (current.issues ?? "").split("\n"), [current]);
+  const visible = lines.slice(scrollOffset, scrollOffset + viewportHeight);
+  const hasMoreBelow = scrollOffset + viewportHeight < lines.length;
+  const hasMoreAbove = scrollOffset > 0;
+
+  return (
+    <Box flexDirection="column" padding={1}>
+      <Box marginBottom={1}>
+        <Text color="yellow" bold>
+          review: {current.reviewer}
+        </Text>
+        <Text dimColor> — commit {sha.slice(0, 10)}</Text>
+      </Box>
+      <Text>
+        <Text color={current.verdict === "approved" ? "green" : "red"}>
+          verdict:
+        </Text>{" "}
+        {current.verdict}
+      </Text>
+
+      <Box marginTop={1} height={1}>
+        {hasMoreAbove ? <Text dimColor>↑ more above</Text> : null}
+      </Box>
+
+      <Box flexDirection="column">
+        {!hasProse ? (
+          <Text dimColor>(no prose recorded)</Text>
+        ) : (
+          visible.map((line, i) => (
+            <Text key={`${scrollOffset}-${i}`}>{line || " "}</Text>
+          ))
+        )}
+      </Box>
+
+      <Box marginTop={1} height={1}>
+        {hasMoreBelow ? <Text dimColor>↓ more below</Text> : null}
+      </Box>
+
+      <Box marginTop={1}>
+        <Text dimColor>
+          ({index + 1}/{reviews.length}) n next   p prev   ↑↓/jk scroll   esc back   q quit
+        </Text>
+      </Box>
+    </Box>
+  );
 }
 
 // ---------- app ----------
+
+type Mode =
+  | { kind: "list" }
+  | { kind: "detail"; sha: string }
+  | {
+      kind: "reviews";
+      sha: string;
+      reviews: LatestReview[];
+      index: number;
+      scroll: number;
+    };
 
 function App({
   repoRoot,
@@ -208,21 +321,88 @@ function App({
   rows: Row[];
 }) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const [selected, setSelected] = useState(0);
-  const [detailSha, setDetailSha] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>({ kind: "list" });
+
+  // Leave room for the header/footer chrome — ~12 rows of non-prose per screen
+  // (title, verdict line, scroll indicators above & below, key-hint line,
+  // padding).
+  const proseViewportHeight = Math.max(5, (stdout?.rows ?? 30) - 12);
+
+  // Detail data + the matching review-prose rows are both keyed on the
+  // commit SHA. Memoize them together so SQLite is opened once per commit
+  // (re-runs only when the user opens detail for a different commit).
+  const contextSha =
+    mode.kind === "detail" || mode.kind === "reviews" ? mode.sha : null;
+  const commitContext = useMemo(() => {
+    if (contextSha === null) return null;
+    const data = loadDetail(repoRoot, contextSha);
+    const reviews = data.parsed
+      ? loadReviewProse(repoRoot, data.parsed.payload)
+      : [];
+    return { data, reviews };
+  }, [contextSha, repoRoot]);
 
   useInput((input, key) => {
     if (input === "q") {
       exit();
       return;
     }
-    if (detailSha !== null) {
+
+    if (mode.kind === "reviews") {
       if (key.escape) {
-        setDetailSha(null);
+        setMode({ kind: "detail", sha: mode.sha });
+        return;
+      }
+      if (input === "n") {
+        setMode({
+          ...mode,
+          index: (mode.index + 1) % mode.reviews.length,
+          scroll: 0,
+        });
+        return;
+      }
+      if (input === "p") {
+        setMode({
+          ...mode,
+          index: (mode.index - 1 + mode.reviews.length) % mode.reviews.length,
+          scroll: 0,
+        });
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        const current = mode.reviews[mode.index]!;
+        const lineCount = (current.issues ?? "").split("\n").length;
+        const maxScroll = Math.max(0, lineCount - proseViewportHeight);
+        setMode({ ...mode, scroll: Math.min(maxScroll, mode.scroll + 1) });
+        return;
+      }
+      if (key.upArrow || input === "k") {
+        setMode({ ...mode, scroll: Math.max(0, mode.scroll - 1) });
         return;
       }
       return;
     }
+
+    if (mode.kind === "detail") {
+      if (key.escape) {
+        setMode({ kind: "list" });
+        return;
+      }
+      if (input === "r" && commitContext && commitContext.reviews.length > 0) {
+        setMode({
+          kind: "reviews",
+          sha: mode.sha,
+          reviews: commitContext.reviews,
+          index: 0,
+          scroll: 0,
+        });
+        return;
+      }
+      return;
+    }
+
     // list mode
     if (key.escape) {
       exit();
@@ -237,14 +417,30 @@ function App({
       return;
     }
     if (key.return && rows[selected]) {
-      setDetailSha(rows[selected]!.sha);
+      setMode({ kind: "detail", sha: rows[selected]!.sha });
       return;
     }
   });
 
-  if (detailSha !== null) {
-    const data = loadDetail(repoRoot, detailSha);
-    return <Detail data={data} />;
+  if (mode.kind === "reviews") {
+    return (
+      <ReviewProse
+        sha={mode.sha}
+        reviews={mode.reviews}
+        index={mode.index}
+        scrollOffset={mode.scroll}
+        viewportHeight={proseViewportHeight}
+      />
+    );
+  }
+
+  if (mode.kind === "detail" && commitContext) {
+    return (
+      <Detail
+        data={commitContext.data}
+        hasReviewProse={commitContext.reviews.length > 0}
+      />
+    );
   }
 
   if (rows.length === 0) {
