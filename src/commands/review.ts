@@ -8,6 +8,11 @@ import {
   stampConfigFile,
   stampStateDbPath,
 } from "../lib/paths.js";
+import {
+  checkReviewerDrift,
+  formatDriftReport,
+  LOCK_DRIFT_EXIT,
+} from "../lib/reviewerLock.js";
 
 export interface ReviewOptions {
   diff: string;
@@ -37,6 +42,28 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     throw new Error(
       `no reviewers to run (config has ${Object.keys(config.reviewers).length} configured)`,
     );
+  }
+
+  // Pre-flight: for any reviewer with a lock file, confirm the committed
+  // prompt + tool + mcp config still matches what was fetched. Drift means
+  // silent tampering somewhere between `stamp reviewers fetch` and now;
+  // refuse to run a review we can't faithfully attribute to a known config.
+  // Exit code LOCK_DRIFT_EXIT is distinct from the general exit 1 so agent
+  // loops can route "re-fetch / reconcile" vs "reviewer rejected the diff".
+  const driftReports: string[] = [];
+  for (const name of reviewerNames) {
+    const def = config.reviewers[name]!;
+    const drift = checkReviewerDrift(repoRoot, name, def);
+    if (drift.hasLock && drift.mismatches.length > 0) {
+      driftReports.push(formatDriftReport(name, drift));
+    }
+  }
+  if (driftReports.length > 0) {
+    for (const report of driftReports) {
+      console.error(report);
+      console.error();
+    }
+    process.exit(LOCK_DRIFT_EXIT);
   }
 
   console.log(

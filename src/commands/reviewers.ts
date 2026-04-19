@@ -6,11 +6,13 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   EXAMPLE_REVIEWER_PROMPT,
   loadConfig,
   stringifyConfig,
+  type McpServerDef,
 } from "../lib/config.js";
 import {
   openDb,
@@ -26,6 +28,36 @@ import {
   stampReviewersDir,
   stampStateDbPath,
 } from "../lib/paths.js";
+import {
+  hashMcpServers,
+  hashPromptBytes,
+  hashTools,
+} from "../lib/reviewerHash.js";
+import {
+  checkReviewerDrift,
+  formatDriftReport,
+  LOCK_DRIFT_EXIT,
+  LOCK_FILE_VERSION,
+  lockFilePath,
+  writeLockFile,
+  type DriftResult,
+  type LockFile,
+} from "../lib/reviewerLock.js";
+
+// Names are interpolated into filesystem paths and URL segments. Keep the
+// allowed alphabet tight so there's no path-traversal ('../../evil') or
+// URL-injection surface. Matches the pattern reviewersAdd has historically
+// enforced (alphanumerics + underscore + hyphen), with an added length cap.
+const VALID_REVIEWER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+function requireValidReviewerName(name: string): void {
+  if (!VALID_REVIEWER_NAME.test(name)) {
+    throw new Error(
+      `invalid reviewer name '${name}'. Names must match ${VALID_REVIEWER_NAME.source} ` +
+        `— letters, digits, underscores, hyphens; max 64 chars; no leading hyphen.`,
+    );
+  }
+}
 
 export function reviewersList(): void {
   const repoRoot = findRepoRoot();
@@ -80,15 +112,11 @@ export function reviewersEdit(name: string): void {
 }
 
 export function reviewersAdd(name: string, opts: { noEdit?: boolean } = {}): void {
+  requireValidReviewerName(name);
   const repoRoot = findRepoRoot();
   const configPath = stampConfigFile(repoRoot);
   const config = loadConfig(configPath);
 
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-    throw new Error(
-      `reviewer name "${name}" must be alphanumeric (letters, digits, - and _)`,
-    );
-  }
   if (config.reviewers[name]) {
     throw new Error(
       `reviewer "${name}" already exists. Use \`stamp reviewers edit ${name}\` to change its prompt.`,
@@ -284,6 +312,322 @@ export function reviewersShow(name: string, opts: { limit: number }): void {
 function pct(n: number, total: number): number {
   if (total === 0) return 0;
   return Math.round((n / total) * 100);
+}
+
+// --------------------------------------------------------------------------
+// fetch + verify (plan Step 3 — remote canonical personas + lock files)
+// --------------------------------------------------------------------------
+
+export interface ReviewersFetchOptions {
+  /** Value of the --from flag: <source>@<ref>. Source is <owner>/<repo> or
+   *  a full GitHub URL; ref is any git ref (tag, branch, commit). */
+  from: string;
+}
+
+export async function reviewersFetch(
+  reviewerName: string,
+  opts: ReviewersFetchOptions,
+): Promise<void> {
+  requireValidReviewerName(reviewerName);
+  const repoRoot = findRepoRoot();
+  const { source, ref } = parseSourceSpec(opts.from);
+
+  const reviewersDir = stampReviewersDir(repoRoot);
+  if (!existsSync(reviewersDir)) {
+    throw new Error(
+      `${reviewersDir} does not exist — run \`stamp init\` first.`,
+    );
+  }
+
+  console.log(`fetching reviewer '${reviewerName}' from ${source}@${ref}...`);
+
+  const promptUrl = buildRawUrl(source, ref, `personas/${reviewerName}/prompt.md`);
+  const configUrl = buildRawUrl(source, ref, `personas/${reviewerName}/config.yaml`);
+
+  const promptText = await fetchRequired(promptUrl, "prompt.md");
+  const configYaml = await fetchOptional(configUrl, "config.yaml");
+
+  // Parse optional tool/MCP config. Keep unknown-shape at the network
+  // boundary; validate shape before it reaches the hash.
+  let tools: string[] | undefined;
+  let mcpServers: Record<string, McpServerDef> | undefined;
+  if (configYaml !== null) {
+    const parsed = (parseYaml(configYaml) ?? {}) as Record<string, unknown>;
+    if (Array.isArray(parsed.tools)) {
+      tools = parsed.tools.map(String);
+    }
+    if (parsed.mcp_servers !== undefined) {
+      mcpServers = validateMcpServersFromSource(parsed.mcp_servers, source, ref);
+    }
+  }
+
+  // Write prompt to .stamp/reviewers/<name>.md
+  const promptPath = join(reviewersDir, `${reviewerName}.md`);
+  const promptBytes = Buffer.from(promptText, "utf8");
+  writeFileSync(promptPath, promptBytes);
+
+  // Compute hashes from the bytes we just wrote (identical to what verifiers
+  // will hash later).
+  const lock: LockFile = {
+    version: LOCK_FILE_VERSION,
+    source,
+    ref,
+    reviewer: reviewerName,
+    prompt_sha256: hashPromptBytes(promptBytes),
+    tools_sha256: hashTools(tools),
+    mcp_sha256: hashMcpServers(mcpServers),
+    fetched_at: new Date().toISOString(),
+  };
+  writeLockFile(repoRoot, reviewerName, lock);
+
+  // Report.
+  const bar = "─".repeat(72);
+  console.log(bar);
+  console.log(`fetched reviewer '${reviewerName}'`);
+  console.log(bar);
+  console.log(`  source:     ${source}@${ref}`);
+  console.log(`  prompt:     ${relative(repoRoot, promptPath)}`);
+  console.log(`  lock file:  ${relative(repoRoot, lockFilePath(repoRoot, reviewerName))}`);
+  console.log(`  prompt sha: sha256:${lock.prompt_sha256.slice(0, 16)}...`);
+  console.log(`  tools sha:  sha256:${lock.tools_sha256.slice(0, 16)}...`);
+  console.log(`  mcp sha:    sha256:${lock.mcp_sha256.slice(0, 16)}...`);
+  console.log(bar);
+
+  // Tell the user how to wire the reviewer into their config (we deliberately
+  // don't auto-modify .stamp/config.yml — the config is the user's declared
+  // intent and we don't want fetches to silently rewrite it).
+  console.log();
+  console.log(`Next: ensure .stamp/config.yml has this reviewer entry:`);
+  console.log();
+  const yamlBlock = buildConfigYamlHint(reviewerName, tools, mcpServers);
+  for (const line of yamlBlock.split("\n")) console.log(`    ${line}`);
+  console.log();
+  console.log(
+    `If the tools/mcp_servers in config.yml differ from the lock, \`stamp review\` will refuse to run with exit ${LOCK_DRIFT_EXIT}.`,
+  );
+}
+
+export interface ReviewersVerifyOptions {
+  /** Optional reviewer name to restrict the check to. */
+  only?: string;
+}
+
+export function reviewersVerify(opts: ReviewersVerifyOptions): void {
+  if (opts.only) requireValidReviewerName(opts.only);
+  const repoRoot = findRepoRoot();
+  const config = loadConfig(stampConfigFile(repoRoot));
+
+  const names = opts.only
+    ? [opts.only]
+    : Object.keys(config.reviewers);
+
+  if (names.length === 0) {
+    console.log("No reviewers configured.");
+    return;
+  }
+
+  console.log(
+    `verifying ${names.length} reviewer${names.length === 1 ? "" : "s"} against lock files...`,
+  );
+  console.log();
+
+  // Compute drift once per reviewer, reuse for the summary and the drift-
+  // report pass. Hashing a prompt file + tools/mcp config is cheap, but
+  // doing the file I/O twice is sloppy and drifts behavior if the user
+  // edits the prompt between the two passes.
+  const results = new Map<string, DriftResult>();
+  let anyDrift = false;
+  let anyLocked = false;
+
+  for (const name of names) {
+    const def = config.reviewers[name];
+    if (!def) {
+      console.error(
+        `error: reviewer '${name}' is not in .stamp/config.yml. ` +
+          `Add it with \`stamp reviewers add ${name}\` or remove its lock file.`,
+      );
+      process.exit(1);
+    }
+    const result = checkReviewerDrift(repoRoot, name, def);
+    results.set(name, result);
+    if (!result.hasLock) {
+      console.log(`  ${name.padEnd(16)} (no lock file — unpinned)`);
+      continue;
+    }
+    anyLocked = true;
+    if (result.mismatches.length === 0) {
+      console.log(
+        `  ✓ ${name.padEnd(16)} clean (${result.lock.source}@${result.lock.ref})`,
+      );
+    } else {
+      anyDrift = true;
+      console.log(
+        `  ✗ ${name.padEnd(16)} DRIFT (${result.mismatches.map((m) => m.field).join(", ")})`,
+      );
+    }
+  }
+
+  if (!anyLocked) {
+    console.log(
+      "\nNo lock files present. Run `stamp reviewers fetch <name> --from <source>@<ref>` to pin a reviewer.",
+    );
+    return;
+  }
+
+  if (anyDrift) {
+    console.error();
+    for (const [name, result] of results) {
+      if (result.hasLock && result.mismatches.length > 0) {
+        console.error(formatDriftReport(name, result));
+        console.error();
+      }
+    }
+    process.exit(LOCK_DRIFT_EXIT);
+  }
+}
+
+// --------------------------------------------------------------------------
+// fetch/verify internals
+// --------------------------------------------------------------------------
+
+function parseSourceSpec(from: string): { source: string; ref: string } {
+  const at = from.lastIndexOf("@");
+  if (at < 1 || at === from.length - 1) {
+    throw new Error(
+      `--from must be '<source>@<ref>' (e.g. 'acme/stamp-personas@v3.2'); got '${from}'`,
+    );
+  }
+  return { source: from.slice(0, at), ref: from.slice(at + 1) };
+}
+
+function buildRawUrl(source: string, ref: string, path: string): string {
+  // Refs can legally contain slashes (e.g. 'release/v3.2', 'feature/foo') —
+  // don't encodeURIComponent them, since git raw endpoints expect literal
+  // slashes in the path segment. Tag and sha refs are slash-free anyway, so
+  // skipping encoding is safe for all documented inputs.
+  //
+  // Shorthand <owner>/<repo> → GitHub raw.
+  if (/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(source)) {
+    return `https://raw.githubusercontent.com/${source}/${ref}/${path}`;
+  }
+  // Full URL: https only. http:// is rejected because the first fetch is the
+  // trust-anchor step — an MITM at that moment pins the attacker's prompt
+  // into the lock file and every subsequent fetch of the same (source, ref)
+  // would validate against the poisoned hash.
+  if (/^https:\/\//.test(source)) {
+    return `${source.replace(/\/$/, "")}/${ref}/${path}`;
+  }
+  if (/^http:\/\//.test(source)) {
+    throw new Error(
+      `--from source '${source}' uses http://. Plain HTTP is rejected because the initial fetch is MITM-able and pins into the lock file. Use https://.`,
+    );
+  }
+  throw new Error(
+    `unsupported --from source '${source}'. Use '<owner>/<repo>' (GitHub) or a full 'https://' URL.`,
+  );
+}
+
+async function fetchRequired(url: string, label: string): Promise<string> {
+  const res = await doFetch(url, label);
+  if (res.status === 404) {
+    throw new Error(
+      `${label} not found at ${url} (HTTP 404). Check the source/ref/reviewer name.`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      `failed to fetch ${label} from ${url}: HTTP ${res.status} ${res.statusText}`,
+    );
+  }
+  return await res.text();
+}
+
+async function fetchOptional(
+  url: string,
+  label: string,
+): Promise<string | null> {
+  const res = await doFetch(url, label);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(
+      `failed to fetch ${label} from ${url}: HTTP ${res.status} ${res.statusText}`,
+    );
+  }
+  return await res.text();
+}
+
+async function doFetch(url: string, label: string): Promise<Response> {
+  try {
+    return await fetch(url);
+  } catch (err) {
+    throw new Error(
+      `failed to fetch ${label} from ${url}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+function validateMcpServersFromSource(
+  raw: unknown,
+  source: string,
+  ref: string,
+): Record<string, McpServerDef> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      `config.yaml from ${source}@${ref}: 'mcp_servers' must be a map of server name → config`,
+    );
+  }
+  const out: Record<string, McpServerDef> = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(
+        `config.yaml from ${source}@${ref}: mcp_servers.${name} must be an object`,
+      );
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e.command !== "string" || !e.command) {
+      throw new Error(
+        `config.yaml from ${source}@${ref}: mcp_servers.${name}.command must be a non-empty string`,
+      );
+    }
+    const def: McpServerDef = { command: e.command };
+    if (e.args !== undefined) {
+      if (!Array.isArray(e.args)) {
+        throw new Error(
+          `config.yaml from ${source}@${ref}: mcp_servers.${name}.args must be an array of strings`,
+        );
+      }
+      def.args = e.args.map(String);
+    }
+    if (e.env !== undefined) {
+      if (!e.env || typeof e.env !== "object" || Array.isArray(e.env)) {
+        throw new Error(
+          `config.yaml from ${source}@${ref}: mcp_servers.${name}.env must be a map of string → string`,
+        );
+      }
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(e.env)) {
+        env[k] = String(v);
+      }
+      def.env = env;
+    }
+    out[name] = def;
+  }
+  return out;
+}
+
+function buildConfigYamlHint(
+  reviewerName: string,
+  tools: string[] | undefined,
+  mcpServers: Record<string, McpServerDef> | undefined,
+): string {
+  const reviewerBlock: Record<string, unknown> = {
+    prompt: `.stamp/reviewers/${reviewerName}.md`,
+  };
+  if (tools && tools.length > 0) reviewerBlock.tools = tools;
+  if (mcpServers && Object.keys(mcpServers).length > 0) {
+    reviewerBlock.mcp_servers = mcpServers;
+  }
+  return stringifyYaml({ reviewers: { [reviewerName]: reviewerBlock } }).trimEnd();
 }
 
 function launchEditor(path: string): void {

@@ -185,6 +185,11 @@ export function runMerge(opts: MergeOptions): void {
   //     .gitattributes divergence between working directory and committed
   //     blob. Config is also read from HEAD so we see the merged reviewers
   //     section, in case the feature branch modified .stamp/config.yml.
+  //
+  //     If a reviewer has a committed lock file, carry its (source, ref)
+  //     into the attestation as reviewer_source — lets auditors ask "was
+  //     this reviewer fetched from an approved manifest?" without trusting
+  //     the operator's local state.
   const committedConfigYaml = git(["show", "HEAD:.stamp/config.yml"], repoRoot);
   const committedReviewers = readReviewersFromYaml(committedConfigYaml);
   approvals = approvals.map((a) => {
@@ -194,12 +199,14 @@ export function runMerge(opts: MergeOptions): void {
         `reviewer "${a.reviewer}" is required by branch rule "${opts.into}" but not defined in the merged .stamp/config.yml`,
       );
     }
-    const promptBytes = git(["show", `HEAD:${def.prompt}`], repoRoot);
+    const promptText = git(["show", `HEAD:${def.prompt}`], repoRoot);
+    const source = readReviewerSource(a.reviewer, repoRoot);
     return {
       ...a,
-      prompt_sha256: hashPromptBytes(promptBytes),
+      prompt_sha256: hashPromptBytes(Buffer.from(promptText, "utf8")),
       tools_sha256: hashTools(def.tools),
       mcp_sha256: hashMcpServers(def.mcp_servers),
+      ...(source ? { reviewer_source: source } : {}),
     };
   });
 
@@ -245,6 +252,30 @@ export function runMerge(opts: MergeOptions): void {
 
 function hashPart(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+function readReviewerSource(
+  reviewerName: string,
+  repoRoot: string,
+): { source: string; ref: string } | null {
+  // Read the committed lock file (not the on-disk copy) so the attestation
+  // reflects what's in the merge commit's tree. Absence is not an error —
+  // unpinned reviewers just produce no reviewer_source field.
+  let raw: string;
+  try {
+    raw = git(["show", `HEAD:.stamp/reviewers/${reviewerName}.lock.json`], repoRoot);
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as { source?: string; ref?: string };
+    if (typeof parsed.source === "string" && typeof parsed.ref === "string") {
+      return { source: parsed.source, ref: parsed.ref };
+    }
+  } catch {
+    // malformed lock → treat as absent rather than blow up the merge
+  }
+  return null;
 }
 
 function git(args: string[], cwd: string): string {

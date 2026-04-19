@@ -70,8 +70,13 @@ function sha256Hex(input: string | Buffer): string {
  * working directory — Windows + core.autocrlf and .gitattributes eol
  * filters can make working-tree bytes diverge from committed bytes, and
  * verifiers always hash the committed form.
+ *
+ * Takes `Buffer` (not `string | Buffer`) so the input type is unambiguous
+ * at call sites. String callers should convert with Buffer.from(s, "utf8")
+ * at the point they read the bytes — UTF-8 is the documented assumption
+ * for reviewer prompts.
  */
-export function hashPromptBytes(bytes: string | Buffer): string {
+export function hashPromptBytes(bytes: Buffer): string {
   return sha256Hex(bytes);
 }
 

@@ -291,7 +291,7 @@ function verifyReviewerHashesAtCommit(
         `${prefix} reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at this commit`,
       );
     }
-    checkHashOrReject(prefix, refname, approval.reviewer, "prompt", hashPromptBytes(promptBytes), approval.prompt_sha256!);
+    checkHashOrReject(prefix, refname, approval.reviewer, "prompt", hashPromptBytes(Buffer.from(promptBytes, "utf8")), approval.prompt_sha256!);
     checkHashOrReject(prefix, refname, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
     checkHashOrReject(prefix, refname, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
   }

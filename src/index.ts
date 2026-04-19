@@ -24,10 +24,12 @@ import { runReview } from "./commands/review.js";
 import {
   reviewersAdd,
   reviewersEdit,
+  reviewersFetch,
   reviewersList,
   reviewersRemove,
   reviewersShow,
   reviewersTest,
+  reviewersVerify,
 } from "./commands/reviewers.js";
 import { runStatus } from "./commands/status.js";
 import { runUpdate } from "./commands/update.js";
@@ -64,7 +66,9 @@ program
 
 program
   .command("review")
-  .description("run configured reviewer(s) against a diff")
+  .description(
+    "run configured reviewer(s) against a diff. Exits 3 on lock-file drift (distinct from exit 1 for reviewer rejections).",
+  )
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")
   .action(async (opts: { diff: string; only?: string }) => {
@@ -273,6 +277,32 @@ reviewers
     wrap(() =>
       reviewersShow(name, { limit: Number(opts.limit) || 10 }),
     ),
+  );
+reviewers
+  .command("fetch <name>")
+  .description(
+    "install a reviewer from a remote canonical source (writes prompt + lock file)",
+  )
+  .requiredOption(
+    "--from <source@ref>",
+    "source repo and ref — '<owner>/<repo>@<tag>' (GitHub) or full 'https://' URL + ref",
+  )
+  .action(async (name: string, opts: { from: string }) => {
+    try {
+      await reviewersFetch(name, { from: opts.from });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`error: ${message}`);
+      process.exit(1);
+    }
+  });
+reviewers
+  .command("verify [name]")
+  .description(
+    "check reviewer prompt/tool/mcp config against lock files; exit 3 on drift",
+  )
+  .action((name: string | undefined) =>
+    wrap(() => reviewersVerify({ only: name })),
   );
 
 program.parseAsync(process.argv).catch((err) => {

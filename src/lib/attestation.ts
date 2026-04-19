@@ -19,6 +19,13 @@ export interface Approval {
   tools_sha256?: string;
   /** v2+: sha256 of the canonical-form mcp_servers config (sorted-key JSON) */
   mcp_sha256?: string;
+  /** v2+: canonical source the reviewer was fetched from (if a lock file
+   *  existed at merge time). Enables downstream audit: "was this reviewer
+   *  fetched from an approved manifest at an approved version?" */
+  reviewer_source?: {
+    source: string;
+    ref: string;
+  };
 }
 
 export interface CheckAttestation {
