@@ -1,6 +1,6 @@
 {
   "name": "stamp-cli",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0",
   "type": "module",
   "description": "Local, headless pull-request system for agent-to-agent code review workflows",
   "bin": {
