@@ -170,18 +170,40 @@ matches the committed config.
 Optional: `.stamp/mirror.yml` enables GitHub mirroring via the post-receive
 hook. See [`server/README.md`](./server/README.md).
 
-## Running your own remote
+## Deployment shapes
 
-The quick-start above uses a bare repo on disk. For real use, you want
-a server other machines can push to.
+Three ways to run stamp-cli in a real setting, trading setup cost for
+enforcement strength. Pick based on whether your remote can run a
+pre-receive hook — GitHub can't, so the choice matters.
 
-**Easiest path:** deploy `server/Dockerfile` to Railway (or any container
-host). See [`server/README.md`](./server/README.md) for the full Railway
-walkthrough.
+**1. Self-hosted remote — full enforcement (recommended).**
+A server you control runs `git + sshd + stamp-verify`. Every push is
+rejected at the server if it isn't a properly signed stamped merge, so
+author-agents can't bypass the gate even with working credentials.
+Easiest path: deploy `server/Dockerfile` to Railway, Fly, or any
+container host — see [`server/README.md`](./server/README.md) for the
+Railway walkthrough. Minimalist alternative: any Linux host with `git +
+sshd + Node 22.5+` — create a bare repo, drop
+`dist/hooks/pre-receive.cjs` into `hooks/pre-receive` (chmod +x), done.
+The hook is self-contained.
 
-**Minimalist path:** any Linux host with `git` + `sshd` + Node 22.5+ works.
-Create a bare repo, drop `dist/hooks/pre-receive.cjs` into `hooks/pre-receive`
-(chmod +x), and you're done. The hook is self-contained.
+**2. Self-hosted remote + GitHub mirror — full enforcement + GitHub ecosystem.**
+Run the stamp server as source-of-truth; commit `.stamp/mirror.yml` to
+mirror verified commits to a GitHub repo via the post-receive hook.
+Deploy pipelines (Actions, Vercel, Netlify) integrate with the GitHub
+copy. GitHub branch protection restricts pushes on the mirror to the
+bot identity, so the only way anything lands on GitHub's `main` is via
+a verified push through your stamp server. Humans can still fork/PR on
+GitHub, but those PRs can't merge. See
+[`server/README.md`](./server/README.md)'s GitHub mirror section.
+
+**3. Local-only — weakest enforcement, lowest setup.**
+Skip the server entirely. stamp-cli still produces signed merge commits
+locally, and `stamp verify <sha>` validates them anywhere — but anyone
+with push access to your remote (e.g. GitHub `main` without branch
+protection, or with protection that doesn't require the hook) can
+bypass the gate. You get the attestation audit trail without running
+infrastructure. Suitable for solo use or small trusted teams.
 
 ## For agent authors
 
