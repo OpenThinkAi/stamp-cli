@@ -74,7 +74,7 @@ hook with a clear reason.
   and trusted keys from the target branch's tree at push time, re-runs
   every check the client ran.
 
-See [`DESIGN.md`](./DESIGN.md) for the full spec.
+See [`DESIGN.md`](./DESIGN.md) for the full spec and [`docs/ROADMAP.md`](./docs/ROADMAP.md) for current status + upcoming work.
 
 ## Commands
 
