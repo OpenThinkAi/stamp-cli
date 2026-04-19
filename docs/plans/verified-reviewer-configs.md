@@ -139,9 +139,12 @@ Weak guarantee, real audit value. Lands if there's demand after Steps 1–3.
 ## Open questions
 
 - **Manifest format and discovery.** Git repo? npm package? Plain HTTP JSON? The answer likely depends on what teams already have for prompt distribution.
-- **Lock file conflict resolution.** When the manifest updates a persona, what does `stamp review` do? Fail closed (reject run) vs. warn-and-continue vs. auto-update.
+- **Lock file conflict resolution.** When the manifest updates a reviewer, what does `stamp review` do? Fail closed (reject run) vs. warn-and-continue vs. auto-update.
 - **Env var resolution in MCP configs.** `$LINEAR_API_KEY` must resolve at invocation time, not leak into attestation hashes. Canonical-form hashing excludes resolved env values.
 - **Built-in tool versioning.** Claude's `Read`, `Grep`, etc. are defined by the SDK version. A new SDK release could silently change tool semantics. Do we pin SDK version in the attestation too?
+- **`stamp reviewers fetch` arg order.** Plan currently commits to `fetch <source>@<version> <reviewer>`. Every other verb in the `reviewers` family takes reviewer name as the primary identifier; consider `fetch <reviewer> --from <source>@<version>` or `fetch <reviewer>@<version> --from <source>` instead, so noun-verb-identifier ordering is consistent. Settle before the verb ships.
+- **`add` vs `fetch` disambiguation.** Existing `reviewers add` creates a local unpinned reviewer; new `reviewers fetch` downloads and pins from a remote manifest. Help-text must make the choice obvious at `--help` without reading both long descriptions.
+- **Exit-code audit.** Plan reserves exit 3 for config drift. Verify at implementation time that no other command/path is already using 3 for a different failure mode before committing.
 
 ## Referenced docs
 
