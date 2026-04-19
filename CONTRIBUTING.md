@@ -105,7 +105,7 @@ See [`docs/personas.md`](./docs/personas.md) for prompt-writing guidance.
 - Every non-bump merge safely no-ops the publish step.
 - Alpha/beta/rc versions (e.g., `0.2.0-alpha.0`) publish under the `alpha` dist-tag.
 
-The workflow requires an `NPM_TOKEN` secret (npm Automation token, publish scope on `stamp-cli`) in repo Settings → Secrets and variables → Actions.
+Auth uses npm's [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) via OIDC — no long-lived `NPM_TOKEN` secret. The trust relationship is configured once on the npm side (package → Settings → Trusted Publishers → GitHub Actions) pointing at `OpenThinkAi/stamp-cli` and the `publish.yml` workflow. The workflow grants itself `id-token: write`, and `npm publish` exchanges a short-lived OIDC token at publish time. `--provenance` attaches an SLSA build attestation to the published tarball; anyone can verify with `npm audit signatures`.
 
 Current state: we are pre-1.0. Breaking changes are allowed between minor versions.
 
