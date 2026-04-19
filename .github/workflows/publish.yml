@@ -66,23 +66,20 @@ jobs:
             echo "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }} not on npm — will publish."
           fi
 
-      - name: debug OIDC claims (temporary — remove after validating publish)
+      - name: debug OIDC claims (TEMPORARY — removed in immediate follow-up)
         if: steps.check.outputs.published == 'false'
         run: |
-          RAW=$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org")
-          TOKEN=$(echo "$RAW" | node -e "
-            const d = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-            console.log(d.value);
-          ")
-          PAYLOAD=$(echo "$TOKEN" | cut -d'.' -f2)
-          # base64url → base64 with padding
-          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
-          PADDED=$(printf '%s%*s' "$PAYLOAD" "$PAD" '' | tr ' ' '=' | tr '_-' '/+')
-          echo "claims (audience=npm:registry.npmjs.org):"
-          echo "$PADDED" | base64 -d | node -e "
-            const d = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-            console.log(JSON.stringify(d, null, 2));
+          node -e "
+            fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=npm:registry.npmjs.org', {
+              headers: { Authorization: 'Bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }
+            })
+              .then(r => r.json())
+              .then(({ value }) => {
+                const [, payload] = value.split('.');
+                const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+                console.log('OIDC claims (audience=npm:registry.npmjs.org):');
+                console.log(JSON.stringify(claims, null, 2));
+              });
           "
 
       - name: install
