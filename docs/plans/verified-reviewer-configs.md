@@ -1,6 +1,6 @@
 # Plan — verified reviewer configs
 
-Status: proposed · Owner: maintainer · Target: Phase 3
+Status: shipped (Steps 1–4) · Owner: maintainer · Target: Phase 3
 
 ## Motivation
 
@@ -112,20 +112,22 @@ The attestation's per-reviewer entry grows `reviewer_source` pointing at the man
 
 Optional: sign the manifest itself with an org key. Verifier checks the signature before trusting the hash list.
 
-### Step 4 — Tool-invocation trace in attestation (optional)
+### Step 4 — Tool-invocation trace in attestation — shipped
 
-The Claude Agent SDK surfaces tool-call events during `query()`. Record a minimal trace per review:
+The Claude Agent SDK surfaces `tool_use` content blocks in assistant messages during `query()`. During `stamp review`, each reviewer's agent stream is scanned for those blocks and a trace is persisted in the DB alongside the verdict:
 
 ```json
 [
-  { "tool": "linear.get_issue", "input_sha256": "..." },
-  { "tool": "Read", "input_sha256": "..." }
+  { "tool": "Read", "input_sha256": "..." },
+  { "tool": "mcp__linear__get_issue", "input_sha256": "..." }
 ]
 ```
 
-Embed in the attestation. Doesn't cryptographically prove the tools ran with the right inputs — the operator could forge the trace — but it creates an audit trail that catches lazy tampering and gives downstream verifiers something concrete to reason about ("for diffs mentioning LIN-123, we expect a `linear.get_issue` call").
+At merge time the trace is lifted from the DB and embedded in the approval's `tool_calls` field (see attestation schema in `DESIGN.md`). Inputs are hashed rather than stored verbatim so file contents, LLM-derived prompts, and other potentially sensitive argument data don't flow into the signed commit trailer.
 
-Weak guarantee, real audit value. Lands if there's demand after Steps 1–3.
+Deliberately not cryptographic evidence — the operator runs the SDK locally and could forge the trace. The value is audit: a verifier with expectations about tool usage ("for diffs mentioning LIN-123, I expect a `mcp__linear__get_issue` call with input hashing to X") can verify that expectation. Catches lazy tampering, not determined forgery — as documented in the "Honest scope" section above.
+
+Backward compat: `tool_calls` is an additive optional field on the v2 payload. No schema bump required. Reviews recorded before Step 4 shipped have `tool_calls: null` in the DB; merges against those rows produce attestations without the field.
 
 ## Threat model impact per step
 

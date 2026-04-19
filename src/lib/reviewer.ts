@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { McpServerDef, ReviewerDef, StampConfig } from "./config.js";
 import type { Verdict } from "./db.js";
+import { hashToolInput, type ToolCall } from "./toolCalls.js";
 
 type McpServerResolved = {
   type: "stdio";
@@ -17,6 +18,9 @@ export interface ReviewerInvocation {
   reviewer: string;
   prose: string; // the model's full response text
   verdict: Verdict;
+  /** Tool calls the reviewer's agent made during the review. Audit metadata
+   *  only — see lib/toolCalls.ts for threat model. */
+  tool_calls: ToolCall[];
 }
 
 export async function invokeReviewer(params: {
@@ -64,8 +68,33 @@ export async function invokeReviewer(params: {
 
   let finalText: string | null = null;
   let errorMessage: string | null = null;
+  const toolCalls: ToolCall[] = [];
 
   for await (const msg of q) {
+    // Capture tool-use blocks from assistant messages for the audit trace.
+    // SDKAssistantMessage.message.content is an array of content blocks; the
+    // tool_use ones carry { type: 'tool_use', name, input }.
+    if (msg.type === "assistant") {
+      const content = (msg.message as { content?: unknown }).content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (
+            block &&
+            typeof block === "object" &&
+            (block as { type?: unknown }).type === "tool_use"
+          ) {
+            const b = block as { name?: unknown; input?: unknown };
+            if (typeof b.name === "string") {
+              toolCalls.push({
+                tool: b.name,
+                input_sha256: hashToolInput(b.input),
+              });
+            }
+          }
+        }
+      }
+      continue;
+    }
     if (msg.type === "result") {
       if (msg.subtype === "success") {
         finalText = msg.result;
@@ -86,7 +115,7 @@ export async function invokeReviewer(params: {
   const verdict = parseVerdict(finalText, params.reviewer);
   const prose = stripVerdictLine(finalText);
 
-  return { reviewer: params.reviewer, prose, verdict };
+  return { reviewer: params.reviewer, prose, verdict, tool_calls: toolCalls };
 }
 
 function resolveMcpServers(

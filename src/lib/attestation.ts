@@ -1,4 +1,5 @@
 import type { Verdict } from "./db.js";
+import type { ToolCall } from "./toolCalls.js";
 
 /**
  * Current attestation payload schema version. v1 (absent field) was the
@@ -26,6 +27,13 @@ export interface Approval {
     source: string;
     ref: string;
   };
+  /** v2+: audit trace of tool calls the reviewer's agent made during review.
+   *  Each entry is `{ tool, input_sha256 }`. Not cryptographically verified —
+   *  the operator can forge the list — but catches lazy tampering and gives
+   *  auditors a concrete signal ("did product call linear.get_issue at all?").
+   *  Omitted or empty for reviewers that ran with no tools or where the SDK
+   *  version didn't surface tool-use blocks. */
+  tool_calls?: ToolCall[];
 }
 
 export interface CheckAttestation {

@@ -99,7 +99,7 @@ export function hashMcpServers(
 // preserve order — in MCP configs, CLI arg order is semantically meaningful
 // (e.g. `--debug` in a different position may or may not matter, and we
 // don't want to silently equate reorderings).
-function canonicalize(value: unknown): unknown {
+export function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(canonicalize);
   }

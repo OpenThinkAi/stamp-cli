@@ -61,7 +61,7 @@ These were in the original plan but are lower priority given current dogfood pai
 
 Further out; broader architectural changes.
 
-- **Verified reviewer configs** — extend attestations to embed hashes of the prompt + tool/MCP config each reviewer actually ran with, so organizations can publish canonical personas and detect operator-side tampering. Local-first is preserved: reviewers still run on the operator's machine with zero-friction cycles; the remote is only a source of canonical definitions. Four-step plan (tool plumbing → hash pinning → remote manifests + lock files → tool-invocation traces) in [`docs/plans/verified-reviewer-configs.md`](./plans/verified-reviewer-configs.md).
+- **Verified reviewer configs — shipped.** All four steps of the plan landed: (1) per-reviewer `tools:` and `mcp_servers:` in `.stamp/config.yml`; (2) prompt/tools/mcp hashes in the attestation payload (v2), verified against the merge commit's committed tree; (3) `stamp reviewers fetch <name> --from <source>@<ref>` + `stamp reviewers verify` + lock files + exit code 3 for drift, with `reviewer_source` embedded in the attestation; (4) audit-only tool-invocation trace `{ tool, input_sha256 }[]` captured from the SDK stream and embedded per approval. Full design in [`docs/plans/verified-reviewer-configs.md`](./plans/verified-reviewer-configs.md).
 - **GitHub adapter** — staging-branch + Action pattern for teams that only have github.com and can't run their own remote. Workaround path, not the canonical story.
 - **Multi-key / team key rotation UX** — clean "add collaborator," "rotate compromised key" flows.
 - **Sigstore / gitsign integration** — replace long-lived Ed25519 keys with short-lived OIDC-backed certs from a transparency log.

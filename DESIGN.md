@@ -200,7 +200,11 @@ Stamp-Verified: <base64 Ed25519 signature>
       "prompt_sha256": "...",
       "tools_sha256": "...",
       "mcp_sha256": "...",
-      "reviewer_source": { "source": "acme/stamp-personas", "ref": "v3.2" }
+      "reviewer_source": { "source": "acme/stamp-personas", "ref": "v3.2" },
+      "tool_calls": [
+        { "tool": "Read", "input_sha256": "..." },
+        { "tool": "mcp__linear__get_issue", "input_sha256": "..." }
+      ]
     }
   ],
   "checks": [
@@ -221,6 +225,7 @@ Per-approval fields beyond `{ reviewer, verdict, review_sha }` are v2+:
 - `tools_sha256` — sha256 of the canonical-form tool allowlist (JSON, alphabetically-sorted array)
 - `mcp_sha256` — sha256 of the canonical-form MCP server config (JSON, recursively-sorted object keys; arrays preserve order)
 - `reviewer_source` (optional) — `{ source, ref }` from the reviewer's committed lock file (`.stamp/reviewers/<name>.lock.json`), present only when the reviewer was installed via `stamp reviewers fetch`. Lets auditors cross-reference which canonical manifest + ref produced the bundle.
+- `tool_calls` (optional) — audit trace of tool invocations the reviewer's Claude agent made during the review. Each entry is `{ tool, input_sha256 }` where `tool` is the SDK's name (`Read`, `Grep`, `mcp__<server>__<tool>`) and `input_sha256` hashes the canonical JSON of the input. **Not cryptographic evidence that the tools ran** — the operator runs the SDK locally and could forge the trace. This is audit metadata: an auditor who expects "a diff mentioning LIN-123 should produce a `mcp__linear__get_issue` call with input hashing to X" can verify that expectation. Catches lazy tampering, not determined forgery.
 
 These pin the config the reviewer was invoked against. See `docs/plans/verified-reviewer-configs.md` for the motivating threat model and the remaining steps (server-side manifest allowlists, tool-invocation traces).
 
