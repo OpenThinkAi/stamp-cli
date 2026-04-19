@@ -16,6 +16,26 @@ export interface BranchRule {
 
 export interface ReviewerDef {
   prompt: string;
+  /**
+   * Claude Agent SDK built-in tools the reviewer may call during review
+   * (e.g. ["Read", "Grep", "WebFetch"]). Absent or empty → reviewer runs
+   * with zero tools (the safe default, matches pre-tools stamp behavior).
+   * Mapped to the SDK's `allowedTools` option at invocation time.
+   */
+  tools?: string[];
+  /**
+   * MCP servers to expose to the reviewer agent. Keys are server names used
+   * in the reviewer prompt (e.g. "linear"); values are stdio server configs.
+   * Env values may reference shell env vars via $VAR or ${VAR} — resolved at
+   * invocation time; unset vars cause `stamp review` to fail fast.
+   */
+  mcp_servers?: Record<string, McpServerDef>;
+}
+
+export interface McpServerDef {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
 }
 
 export interface StampConfig {
@@ -70,7 +90,13 @@ function validateConfig(input: unknown): StampConfig {
     if (typeof d.prompt !== "string") {
       throw new Error(`config.reviewers.${name}.prompt must be a string`);
     }
-    reviewers[name] = { prompt: d.prompt };
+    const tools = parseTools(d.tools, name);
+    const mcp_servers = parseMcpServers(d.mcp_servers, name);
+    reviewers[name] = {
+      prompt: d.prompt,
+      ...(tools ? { tools } : {}),
+      ...(mcp_servers ? { mcp_servers } : {}),
+    };
   }
 
   return { branches, reviewers };
@@ -102,6 +128,91 @@ function parseChecks(input: unknown, branchName: string): CheckDef[] | undefined
       );
     }
     out.push({ name: e.name, run: e.run });
+  }
+  return out;
+}
+
+function parseTools(input: unknown, reviewerName: string): string[] | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!Array.isArray(input)) {
+    throw new Error(
+      `config.reviewers.${reviewerName}.tools must be an array of tool names`,
+    );
+  }
+  const out: string[] = [];
+  for (const entry of input) {
+    if (typeof entry !== "string" || !entry) {
+      throw new Error(
+        `config.reviewers.${reviewerName}.tools entries must be non-empty strings`,
+      );
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+function parseMcpServers(
+  input: unknown,
+  reviewerName: string,
+): Record<string, McpServerDef> | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error(
+      `config.reviewers.${reviewerName}.mcp_servers must be a map of server name → config`,
+    );
+  }
+  const out: Record<string, McpServerDef> = {};
+  for (const [serverName, raw] of Object.entries(input)) {
+    if (!raw || typeof raw !== "object") {
+      throw new Error(
+        `config.reviewers.${reviewerName}.mcp_servers.${serverName} must be an object`,
+      );
+    }
+    const r = raw as Record<string, unknown>;
+    if (typeof r.command !== "string" || !r.command) {
+      throw new Error(
+        `config.reviewers.${reviewerName}.mcp_servers.${serverName}.command must be a non-empty string`,
+      );
+    }
+    const args = r.args === undefined ? undefined : parseStringArray(
+      r.args,
+      `config.reviewers.${reviewerName}.mcp_servers.${serverName}.args`,
+    );
+    const env = r.env === undefined ? undefined : parseStringMap(
+      r.env,
+      `config.reviewers.${reviewerName}.mcp_servers.${serverName}.env`,
+    );
+    out[serverName] = {
+      command: r.command,
+      ...(args ? { args } : {}),
+      ...(env ? { env } : {}),
+    };
+  }
+  return out;
+}
+
+function parseStringArray(input: unknown, path: string): string[] {
+  if (!Array.isArray(input)) {
+    throw new Error(`${path} must be an array of strings`);
+  }
+  return input.map((v, i) => {
+    if (typeof v !== "string") {
+      throw new Error(`${path}[${i}] must be a string`);
+    }
+    return v;
+  });
+}
+
+function parseStringMap(input: unknown, path: string): Record<string, string> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error(`${path} must be a map of string → string`);
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (typeof v !== "string") {
+      throw new Error(`${path}.${k} must be a string`);
+    }
+    out[k] = v;
   }
   return out;
 }

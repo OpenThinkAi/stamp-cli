@@ -1,8 +1,15 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { StampConfig } from "./config.js";
+import type { McpServerDef, ReviewerDef, StampConfig } from "./config.js";
 import type { Verdict } from "./db.js";
+
+type McpServerResolved = {
+  type: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+};
 
 const VERDICT_REGEX = /^VERDICT:\s*(approved|changes_requested|denied)\s*$/im;
 
@@ -41,12 +48,16 @@ export async function invokeReviewer(params: {
 
   const userPrompt = buildUserPrompt(params);
 
+  const allowedTools = def.tools ?? [];
+  const mcpServers = resolveMcpServers(def, params.reviewer);
+
   const q = query({
     prompt: userPrompt,
     options: {
       cwd: params.repoRoot,
       systemPrompt,
-      tools: [],
+      allowedTools,
+      ...(mcpServers ? { mcpServers } : {}),
       persistSession: false,
     },
   });
@@ -76,6 +87,64 @@ export async function invokeReviewer(params: {
   const prose = stripVerdictLine(finalText);
 
   return { reviewer: params.reviewer, prose, verdict };
+}
+
+function resolveMcpServers(
+  def: ReviewerDef,
+  reviewerName: string,
+): Record<string, McpServerResolved> | undefined {
+  if (!def.mcp_servers) return undefined;
+  const out: Record<string, McpServerResolved> = {};
+  for (const [serverName, cfg] of Object.entries(def.mcp_servers)) {
+    out[serverName] = buildServer(cfg, reviewerName, serverName);
+  }
+  return out;
+}
+
+function buildServer(
+  cfg: McpServerDef,
+  reviewerName: string,
+  serverName: string,
+): McpServerResolved {
+  const resolved: McpServerResolved = { type: "stdio", command: cfg.command };
+  if (cfg.args) resolved.args = cfg.args;
+  if (cfg.env) {
+    const env: Record<string, string> = {};
+    for (const [key, rawValue] of Object.entries(cfg.env)) {
+      env[key] = expandEnvRefs(rawValue, {
+        reviewer: reviewerName,
+        server: serverName,
+        field: `env.${key}`,
+      });
+    }
+    resolved.env = env;
+  }
+  return resolved;
+}
+
+// Expands $VAR and ${VAR} references in an MCP env value against process.env.
+// Matches POSIX-style identifiers: [A-Za-z_][A-Za-z0-9_]*. Unset vars fail
+// fast with a message naming the missing var and where it was declared, so
+// an agent loop doesn't get a confusing mid-stream MCP failure.
+function expandEnvRefs(
+  value: string,
+  ctx: { reviewer: string; server: string; field: string },
+): string {
+  return value.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (_, a, b) => {
+      const name = a ?? b;
+      const resolved = process.env[name];
+      if (resolved === undefined) {
+        throw new Error(
+          `reviewer "${ctx.reviewer}" declared mcp_servers.${ctx.server}.${ctx.field} ` +
+            `referencing $${name}, but ${name} is not set in the environment. ` +
+            `Export it before running 'stamp review'.`,
+        );
+      }
+      return resolved;
+    },
+  );
 }
 
 function buildUserPrompt(params: {

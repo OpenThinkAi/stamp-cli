@@ -153,6 +153,23 @@ The mitigation is the review gate itself. Changes to `.stamp/config.yml` are dif
 2. Include language in the `security` reviewer prompt instructing the reviewer to flag new or modified `required_checks` entries and scrutinize what the command does.
 3. Not use stamp as the sole boundary against adversarial-insider threats. The signing key + reviewer gate protect against an agent that doesn't hold the key. They do not protect against a keyholder who merges malicious config on purpose — non-repudiation makes that forgery attributable, not preventable.
 
+**Reviewer tool access — a second, opt-in shell-adjacent tradeoff:**
+
+By default, reviewers run with **no tools** — they see only the diff and their prompt. Reviewer definitions in `.stamp/config.yml` may opt in per-reviewer to:
+
+- A subset of the Claude Agent SDK's built-in tools (`Read`, `Grep`, `WebFetch`, …) via a `tools:` allowlist
+- Stdio-transport MCP servers via `mcp_servers:` (e.g. a Linear MCP so the product reviewer can cross-check ticket references)
+
+Granting tools expands what a malicious reviewer prompt can do beyond voting approval. A prompt with `Read` can slurp files from the repo tree (which is already committed public-by-default content, but includes the diff context too). `WebFetch` can exfiltrate diff contents to an attacker-controlled URL. An MCP server runs as a subprocess on the operator's machine with whatever permissions the MCP binary asks for.
+
+The mitigation model is the same as `required_checks`: the reviewer gate on `.stamp/config.yml` changes. Additions of `tools:` entries or `mcp_servers:` blocks should be scrutinized by the security reviewer, and new MCP commands should be treated with the same skepticism as a new `required_checks.run` string. Conservative guidance:
+
+1. `Read` and `Grep` are reasonably safe for in-repo context (they respect cwd). Avoid `Bash` and `Write` — nothing a reviewer should need.
+2. `WebFetch` should be enabled only when a reviewer genuinely needs it and the prompt constrains *where* it's allowed to fetch from. Consider an MCP server with narrowly scoped tools instead.
+3. Do not share MCP API keys across reviewers if a single-reviewer compromise shouldn't imply access to everything.
+
+Verification of *which* tools a reviewer actually ran with is planned (see `docs/plans/verified-reviewer-configs.md`). Today's model trusts the committed config: the attestation proves "the keyholder signed this verdict" but not "this reviewer ran with these specific tools."
+
 **What signing does NOT claim:**
 
 - The signature proves "a keyholder approved this specific diff with these specific reviewer verdicts and these specific check results." It does not prove the check actually ran, that the reviewer actually read the diff, or that the approvals reflect objective correctness. It proves a keyholder took responsibility.
