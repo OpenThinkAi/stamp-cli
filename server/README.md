@@ -177,10 +177,16 @@ pointed at the same volume will pick up exactly where it left off.
 
 ## Updating the hooks
 
-When stamp-cli releases new hooks, redeploy the container — the builder
-stage recompiles, and the new hooks land at `/etc/stamp/pre-receive.cjs`
-and `/etc/stamp/post-receive.cjs`. Existing bare repos under `/srv/git/`
-still point at the old copies, so refresh them:
+When stamp-cli releases new hook code, redeploy the container — the builder
+stage recompiles and the fresh hook bundle lands at `/etc/stamp/pre-receive.cjs`
+and `/etc/stamp/post-receive.cjs`. On container restart, `entrypoint.sh`
+automatically walks `/srv/git/*.git/hooks/` and overwrites each repo's
+`pre-receive` + `post-receive` with the fresh bundle from `/etc/stamp/`. No
+manual step required — Railway's auto-deploy on push triggers the restart,
+and the refresh loop runs before sshd starts accepting connections.
+
+**Break-glass manual refresh** (useful if you need to push a hook update
+without restarting the container, or you're debugging):
 
 ```sh
 ssh git@stamp 'for r in /srv/git/*.git; do
@@ -189,5 +195,3 @@ ssh git@stamp 'for r in /srv/git/*.git; do
   chmod +x "$r/hooks/pre-receive" "$r/hooks/post-receive"
 done'
 ```
-
-A future stamp-cli release will automate this.

@@ -45,5 +45,25 @@ write_env_var() {
 
 write_env_var GITHUB_BOT_TOKEN
 
+# Refresh stamp hooks in every existing bare repo before accepting connections.
+#
+# When setup-repo.sh provisioned each repo, it COPIED /etc/stamp/*.cjs into
+# that repo's hooks/ directory. Git runs the per-repo copy at push time, not
+# /etc/stamp/ directly — so a container rebuild with new hook code doesn't
+# reach existing repos on its own. Walk /srv/git/ on every boot and overwrite
+# each repo's hooks with the fresh bundle from /etc/stamp/. Idempotent;
+# no-ops if the volume is empty (first boot, no repos yet).
+for repo in /srv/git/*.git; do
+  [ -d "$repo" ] || continue
+  for hook in pre-receive post-receive; do
+    src="/etc/stamp/${hook}.cjs"
+    if [ -f "$src" ]; then
+      cp "$src" "$repo/hooks/$hook"
+      chmod +x "$repo/hooks/$hook"
+      chown git:git "$repo/hooks/$hook"
+    fi
+  done
+done
+
 # -e: log to stderr (goes to container logs); -D: don't daemonize.
 exec /usr/sbin/sshd -D -e
