@@ -37,7 +37,7 @@ stamp-cli has been developed in a private repo with the author as the only user.
 
 - Scrub personal references from tracked docs. OSS readers shouldn't care about any particular operator's infra — the roadmap, server README, and personas guide all get depersonalized.
 - Disclose the proprietary `@anthropic-ai/claude-agent-sdk` dependency in the README. License is "SEE LICENSE IN README.md" (Anthropic's terms). Users running `npm install` are bound by those terms and deserve to know.
-- Decide the install path: publish `stamp-cli@0.1.0` to npm, or rewrite the README's install section to "build from source" until publishing is ready. Current `npm install -g stamp-cli` lands on a v0.0.0 name-squat stub that does nothing.
+- ~~Decide the install path~~ — resolved: `stamp-cli@0.1.0` is the first real npm release, replacing the v0.0.0 name-squat stub. `npm install -g stamp-cli` now installs a working CLI.
 
 **Strongly recommended:**
 
