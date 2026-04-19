@@ -13,7 +13,10 @@ export default defineConfig([
     clean: true,
     sourcemap: true,
     shims: false,
-    splitting: false,
+    // Splitting ON so dynamic imports (e.g. the `stamp ui` command's lazy
+    // import of ink/react via await import()) produce separate chunks. Keeps
+    // the hot-path bundle small for non-ui commands.
+    splitting: true,
     banner: { js: "#!/usr/bin/env node" },
     // CLI keeps yaml/commander as runtime deps (npm install provides them).
     // Bundling yaml here triggers tsup's "Dynamic require of 'process' is not
