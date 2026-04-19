@@ -29,34 +29,23 @@ Three near-term priorities, all live and dogfooded against a real project using 
 
 **2.D — Gated mirror to github.com.** Post-receive hook mirrors verified commits to a configured GitHub repo using a bot PAT. `.stamp/mirror.yml` committed per-repo declares destination; `GITHUB_BOT_TOKEN` env var on the server holds the PAT; hook reads it from `/etc/stamp/env` (persisted by entrypoint because sshd strips env from sessions). Mirror failures log to stderr but don't block the stamped push. Server README walks through setup including GitHub branch protection.
 
-## Phase 2.E — pre-public release hardening (in progress)
+## Phase 2.E — pre-public release hardening — shipped
 
-stamp-cli has been developed in a private repo with the author as the only user. Before the repo flips to public and the package ships to npm proper, an audit found items that need to land first. Tracked and fixed through the normal stamp gate, each as a separate PR.
+The repo is public and `stamp-cli@0.2.0` is on npm. Pre-public audit shipped all blockers and strongly-recommended items through the normal stamp gate as separate PRs:
 
-**Blockers (must land before the repo goes public):**
+- Personal references scrubbed from tracked docs.
+- Proprietary `@anthropic-ai/claude-agent-sdk` dependency disclosed in README; license is "SEE LICENSE IN README.md" (Anthropic's terms).
+- `required_checks` shell-execution tradeoff documented in DESIGN.md's security model (mitigation: reviewer gate on `.stamp/config.yml` changes).
+- `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `.github/workflows/ci.yml` landed.
+- `AGENTS.md` + `CLAUDE.md` added so first-contact agents (Cursor, Claude Code, etc.) explain stamp-cli with the right framing.
 
-- Scrub personal references from tracked docs. OSS readers shouldn't care about any particular operator's infra — the roadmap, server README, and personas guide all get depersonalized.
-- Disclose the proprietary `@anthropic-ai/claude-agent-sdk` dependency in the README. License is "SEE LICENSE IN README.md" (Anthropic's terms). Users running `npm install` are bound by those terms and deserve to know.
-- ~~Decide the install path~~ — resolved: `stamp-cli@0.1.0` is the first real npm release, replacing the v0.0.0 name-squat stub. `npm install -g stamp-cli` now installs a working CLI.
+**Breaking change in this phase:** `stamp init` now scaffolds three starter reviewers by default (`security`, `standards`, `product`) with `required: [security, standards, product]`. `stamp init --minimal` preserves the prior single-`example` behavior as an explicit opt-in. This is what motivated the `0.1.x → 0.2.0` bump under pre-1.0 semver. Upgraders with onboarding scripts or agent loops that assumed the old layout (`edit .stamp/reviewers/example.md`) should pass `--minimal` or update tooling to the new persona filenames.
 
-**Strongly recommended:**
-
-- Document the `required_checks` shell-execution tradeoff in DESIGN.md's security model. `stamp merge` runs config-sourced commands via `shell: true`; the mitigation is the reviewer gate on changes to `.stamp/config.yml`, and operators should know that explicitly.
-- `CONTRIBUTING.md` — dev setup, build, test, PR process.
-- `CODE_OF_CONDUCT.md` — Contributor Covenant template.
-- CI workflow (`.github/workflows/ci.yml`) — at minimum `npm ci && npm run build && npm run typecheck` on push and pull requests.
-
-**Default-behavior change during 2.E:**
-
-- `stamp init` now scaffolds three starter reviewers by default (`security`, `standards`, `product`) with `required: [security, standards, product]`, where previously it scaffolded a single `example` reviewer with `required: [example]`. `stamp init --minimal` preserves the old behavior as an explicit opt-in. Any onboarding script or agent loop that assumed the old post-init layout (e.g. "edit `.stamp/reviewers/example.md`") will land in a different world; update to either pass `--minimal` or target the three-persona filenames.
-
-**Nice-to-have (can ship after going public):**
+**Deferred from 2.E (post-public, nice-to-have):**
 
 - Cap the attestation trailer size before `JSON.parse` in `lib/attestation.ts` (theoretical prototype-pollution / DoS via oversized JSON; realistic risk low).
 - `THIRD-PARTY-NOTICES.md` for Apache-2.0 transitive deps.
 - Genericize `docs/personas.md`'s concrete example project reference.
-
-When everything in this phase ships and the first `npm publish` goes out, Phase 2.E is done and the project is out of pre-release.
 
 ## Remaining Phase 2 items (deferred)
 
