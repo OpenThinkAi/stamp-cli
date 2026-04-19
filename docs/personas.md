@@ -187,6 +187,47 @@ stamp reviewers test my-reviewer --diff main..test-violations
 
 `stamp reviewers test` is built for exactly this loop — it runs the reviewer without recording to the DB, so you can iterate without polluting history.
 
+## Giving a reviewer tools
+
+By default, reviewers see only the diff and their prompt. No file reads, no web calls, nothing. That's the safe baseline, but it rules out some genuinely useful patterns:
+
+- The standards reviewer cross-checking the diff against a committed `STANDARDS.md`
+- The product reviewer fetching the referenced Linear ticket to verify acceptance criteria
+- The security reviewer looking up a CVE by ID when a dependency bump is proposed
+
+Reviewer definitions in `.stamp/config.yml` can opt each reviewer in to specific tools:
+
+```yaml
+reviewers:
+  standards:
+    prompt: .stamp/reviewers/standards.md
+    tools: [Read, Grep]          # Claude built-in tools
+
+  product:
+    prompt: .stamp/reviewers/product.md
+    tools: [WebFetch]            # allow the reviewer to make HTTP calls
+    mcp_servers:
+      linear:
+        command: npx
+        args: ["-y", "@tacticlabs/linear-mcp-server"]
+        env:
+          LINEAR_API_KEY: $LINEAR_API_KEY   # resolved from caller's env at invocation
+```
+
+`tools:` names Claude Agent SDK built-ins (`Read`, `Grep`, `WebFetch`, etc.). `mcp_servers:` declares stdio-transport MCP servers as a map of `name → { command, args?, env? }`. Env values may reference `$VAR` or `${VAR}` — resolved from `process.env` at invocation; an unset reference fails the `stamp review` run with a clear error naming the missing var.
+
+Tell the reviewer in its prompt what the tools are for. For example, in `standards.md`:
+
+> Before reviewing the diff, read `docs/STANDARDS.md`. Evaluate the diff against those conventions; cite specific standards sections in any `changes_requested`.
+
+And in `product.md`:
+
+> If the commit message or diff mentions a ticket ID matching `[A-Z]+-[0-9]+`, use the `linear` MCP to fetch that ticket and evaluate whether the diff satisfies its acceptance criteria. If the ticket is missing or the scope doesn't match, flag it.
+
+Security tradeoffs worth naming: granting tools expands what a malicious reviewer prompt can do. See DESIGN.md's security model for the full discussion — the short version is `Read`/`Grep` are reasonably safe for in-repo context, `WebFetch` can exfiltrate diff contents if the prompt is hostile, and MCP servers run as subprocesses with whatever permissions their binaries ask for. Treat `tools:` and `mcp_servers:` additions in `.stamp/config.yml` as security-sensitive diffs; calibrate your security reviewer's prompt to flag them explicitly.
+
+Verified-config enforcement (cryptographic proof that a reviewer ran with the tool config the org expected) is planned — see [`plans/verified-reviewer-configs.md`](./plans/verified-reviewer-configs.md). Today's model trusts the committed config.
+
 Effective tests:
 - **One clean diff** the reviewer should approve
 - **Three deliberate violations** that the reviewer should catch (one per major concern on your scope list)
