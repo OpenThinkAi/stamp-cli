@@ -95,7 +95,12 @@ Uses `node:sqlite` (Node 22.5+ built-in) — same pattern as `open-think`. Zero 
 ```yaml
 branches:
   main:
-    required: [security, standards, product]
+    required: [security, standards, product]   # reviewer approval gate
+    required_checks:                            # mechanical pre-merge gate
+      - name: build
+        run: npm run build
+      - name: typecheck
+        run: npx tsc --noEmit
   develop:
     required: [security]
 
@@ -105,7 +110,26 @@ reviewers:
   product:   { prompt: .stamp/reviewers/product.md }
 ```
 
-Names are user-chosen. The above is an example, not a fixed set.
+Names are user-chosen. The above is an example, not a fixed set. `required_checks` is optional; if omitted, only the reviewer gate applies.
+
+**`required_checks` semantics (Phase 2.A):**
+
+- Each check is `{ name, run }` — `run` is a shell command.
+- `stamp merge` runs every check **on the post-merge tree** (after `git merge --no-ff` has been applied, before the commit is signed). Running on the post-merge state is correct because that's the state that would actually land on the target branch.
+- Non-zero exit blocks the merge. stamp-cli rolls back via `git reset --hard HEAD~1` so the working tree ends up exactly as it was before `stamp merge` was invoked.
+- Results of each check — `{ name, command, exit_code, output_sha }` where `output_sha = sha256(stdout + stderr)` — are written into the signed attestation payload under the `checks` field.
+- Server-side hook verifies the attestation's `checks` array contains every required check from the committed config with `exit_code: 0`. The server does not re-run the checks; it trusts the signer's attestation (this is the intentional "attested local check execution" tradeoff — see README security model).
+
+**Optional: `.stamp/mirror.yml` for GitHub mirroring (Phase 2.D):**
+
+```yaml
+github:
+  repo: owner/repo
+  branches:
+    - main
+```
+
+Read by the server-side post-receive hook after a push is accepted. For each configured branch, the hook pushes to `https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<repo>.git`. `GITHUB_BOT_TOKEN` comes from `/etc/stamp/env` on the server (populated by the entrypoint from a Railway env var; sshd strips custom env vars from sessions, so a file is the reliable transport). Mirror failures log to stderr but don't block the stamped push.
 
 ## Signing & attestation
 
@@ -128,6 +152,10 @@ Stamp-Verified: <base64 Ed25519 signature>
     { "reviewer": "standards", "verdict": "approved", "review_sha": "..." },
     { "reviewer": "product",   "verdict": "approved", "review_sha": "..." }
   ],
+  "checks": [
+    { "name": "build",     "command": "npm run build",  "exit_code": 0, "output_sha": "..." },
+    { "name": "typecheck", "command": "npx tsc --noEmit", "exit_code": 0, "output_sha": "..." }
+  ],
   "signer_key_id": "sha256:a1b2c3..."
 }
 ```
@@ -144,8 +172,9 @@ The signature covers the base64-decoded payload bytes. `signer_key_id` is a SHA-
 4. Confirm `base_sha` and `head_sha` in the payload match the commit's actual parent and tree lineage
 5. Confirm `target_branch` matches the branch being pushed into
 6. Confirm `approvals` satisfies `.stamp/config.yml`'s `branches.<target>.required`, where config is read from the repo's HEAD of the target branch **as it existed before this push**
+7. Confirm `checks` in the payload covers every entry in `branches.<target>.required_checks` from that same config, with each recording `exit_code: 0`
 
-All six checks must pass. Any failure → push rejected (or `stamp verify` returns non-zero).
+All seven checks must pass. Any failure → push rejected (or `stamp verify` returns non-zero).
 
 **Trailer size note:** Trailers are single-line. A 3-approval payload serializes to ~400–600 bytes base64 — well within any reasonable line-length limit. If payloads grow beyond a few KB (many approvals, verbose metadata), migrate storage to `git notes` under `refs/notes/stamp/attestations` with the trailer holding only a note reference. Not an MVP concern.
 
@@ -168,20 +197,36 @@ Because this commit is written directly to the bare repo's object store via loca
 ## CLI surface
 
 ```
-stamp init                                  # scaffold .stamp/, create keypair, print pub key to add to trusted-keys
+# Core review cycle
+stamp init                                  # scaffold .stamp/ + keypair; idempotent
 stamp review --diff <revspec>               # run all configured reviewers in parallel
-stamp review --diff <revspec> --only <rev>  # run a single reviewer
-stamp status --diff <revspec>               # gate state for this diff; exit 0 if open, non-zero if closed
-stamp merge <branch> --into <target>        # git merge --no-ff if gate open; sign commit; exit 0 on merge, non-zero if blocked
-stamp push <target>                         # git push to the remote; surfaces hook stderr on rejection
-stamp verify <sha>                          # verify an existing merge commit's attestation locally
+stamp review --diff <revspec> --only <name> # run a single reviewer
+stamp status --diff <revspec>               # gate state; exit 0 if open, 1 if closed
+stamp merge <branch> --into <target>        # run required_checks → sign → merge
+stamp push <target>                         # git push; surfaces hook stderr on reject
+stamp verify <sha>                          # verify an existing merge commit's attestation
+
+# Browsing history
+stamp log                                   # first-parent commits w/ attestation summary
+stamp log <sha>                             # drill into one commit (decoded payload + prose)
+stamp log --branch <name>                   # filter by branch
+stamp log --reviews [--diff <revspec>]      # raw DB-row view of every review invocation
+stamp ui                                    # interactive TUI (list → detail → prose)
+
+# Reviewer management
+stamp reviewers list                        # configured reviewers + file status
+stamp reviewers add <name> [--no-edit]      # scaffold + register; --no-edit skips $EDITOR
+stamp reviewers edit <name>                 # open existing prompt in $EDITOR
+stamp reviewers test <name> --diff <revspec> # invoke w/o recording to DB (prompt tuning)
+stamp reviewers show <name> [--limit <n>]   # verdict history + aggregate stats
+stamp reviewers remove <name> [--delete-file]  # de-register; --delete-file also removes the .md
+
+# Keys
 stamp keys generate                         # generate Ed25519 keypair
-stamp keys list                             # show local and trusted keys
-stamp keys export --pub                     # print public key for committing to .stamp/trusted-keys/
-stamp keys trust <pub-file>                 # copy a public key into the repo's trusted-keys
-stamp reviewers list                        # list configured reviewers
-stamp reviewers edit <name>                 # open prompt file in $EDITOR
-stamp log                                   # prose-formatted review history (debug)
+stamp keys list                             # show local + trusted keys
+stamp keys export                           # print public key PEM
+                                            # (--pub still accepted as no-op; deprecated)
+stamp keys trust <pub-file>                 # deposit a pub key into .stamp/trusted-keys/
 ```
 
 **Output format: prose.** Not JSON. The consumer is another Claude agent; LLMs read prose natively and JSON adds parse overhead without helping the reader. Control flow happens via exit codes.

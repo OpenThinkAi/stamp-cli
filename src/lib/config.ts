@@ -119,20 +119,26 @@ export const DEFAULT_CONFIG: StampConfig = {
   },
 };
 
-export const EXAMPLE_REVIEWER_PROMPT = `# Example Reviewer
+export const EXAMPLE_REVIEWER_PROMPT = `# example reviewer
 
-This file is the system prompt for an example reviewer. Replace its body with the actual instructions for the reviewer you want (security, standards, product, etc.).
+This is a placeholder reviewer. Replace its body with actual instructions for the
+reviewer you want. For guidance on writing effective reviewer prompts — structure,
+calibration, verdict thresholds — see stamp-cli's
+\`docs/personas.md\` (https://github.com/OpenThinkAi/stamp-cli/blob/main/docs/personas.md).
 
-A real reviewer prompt should describe:
+Three canonical personas to start from:
 
-1. **Scope** — what this reviewer is responsible for (e.g. security, code quality, UX, API design).
-2. **What to check for** — specific patterns, anti-patterns, and concerns in the reviewer's domain.
-3. **Verdict criteria** — when to return each verdict (see "Output format" below for how).
-4. **Tone** — direct, terse, actionable. No hedging.
+- **security** — secrets, injection, dependency risk, exfiltration surfaces
+- **standards** — code quality, idiom, over-engineering pushback, test discipline
+- **product** — user-facing impact, UX, breaking changes, interface consistency
+
+Each should declare its scope, what it does NOT check (handing off to the other
+reviewers), verdict criteria, and a tone directive. Parallel execution means
+having three focused reviewers is not meaningfully slower than one generic reviewer.
 
 ## Output format (required — do not change)
 
-You MUST end your review with a single line of exactly this form, on its own line:
+Every reviewer MUST end its response with exactly one final line of this form:
 
 \`\`\`
 VERDICT: approved
@@ -140,21 +146,19 @@ VERDICT: approved
 
 Use one of:
 
-- \`approved\` — the diff is acceptable for this reviewer's concern
-- \`changes_requested\` — specific fixable issues exist; list them above, with file:line refs where possible
-- \`denied\` — the approach itself is wrong for this domain; the author should rethink rather than tweak
+- \`approved\` — nothing worth blocking on in this reviewer's concern
+- \`changes_requested\` — specific fixable issues; list them with file:line refs
+- \`denied\` — the approach itself is wrong; the author should rethink, not tweak
 
 Exactly one \`VERDICT:\` line, at the end of your response. Nothing after it.
 
 ---
 
-## Example reviewer body
+## Placeholder body (replace this)
 
-You are an example reviewer. Your job is to read the provided diff and return a verdict.
+You are a placeholder reviewer. Read the provided diff. Return \`approved\` if it
+looks fine, \`changes_requested\` with a list if you see fixable problems, or
+\`denied\` only if the entire approach seems wrong.
 
-- Return \`approved\` if the diff looks fine.
-- Return \`changes_requested\` with a bulleted list of issues if you see fixable problems.
-- Return \`denied\` only if the entire approach seems wrong.
-
-This is a placeholder. Customize this file for your actual review needs.
+This prompt is deliberately generic. Customize it before shipping.
 `;
