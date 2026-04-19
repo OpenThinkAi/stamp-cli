@@ -15,30 +15,28 @@ import { verifyBytes } from "../lib/signing.js";
 
 /**
  * Load .stamp/config.yml from the given commit's tree and parse it via the
- * same validator loadConfig uses. A commit with no .stamp/config.yml in its
- * tree legitimately has no rules — treat that as empty config. But a git
- * failure for any other reason (corrupt repo, missing object) surfaces as
- * an error rather than being papered over as "no rules."
+ * same validator loadConfig uses. Single `git show` with status-code
+ * branching: exit 128 means "path not in tree" (legal bootstrap state —
+ * return empty config); any other non-zero is a real git failure and
+ * surfaces as an error.
  */
 function loadConfigAtSha(sha: string, repoRoot: string): StampConfig {
-  // Check whether the path exists in the tree first. git cat-file -e exits 0
-  // if the object exists, non-zero if not — lets us distinguish "absent"
-  // (legal bootstrap state, return empty config) from "git plumbing failed"
-  // (surface the error).
-  const existsCheck = spawnSync(
+  const result = spawnSync(
     "git",
-    ["cat-file", "-e", `${sha}:.stamp/config.yml`],
-    { cwd: repoRoot, stdio: "ignore" },
+    ["show", `${sha}:.stamp/config.yml`],
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
   );
-  if (existsCheck.status !== 0) {
+  if (result.status === 128) {
+    // `fatal: path '.stamp/config.yml' does not exist in '<sha>'` — no config
+    // committed at this ref. Legitimate bootstrap state.
     return { branches: {}, reviewers: {} };
   }
-  const raw = execFileSync("git", ["show", `${sha}:.stamp/config.yml`], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  return parseConfigFromYaml(raw);
+  if (result.status !== 0) {
+    throw new Error(
+      `git show ${sha}:.stamp/config.yml failed (exit ${result.status}): ${(result.stderr ?? "").trim() || "(no stderr)"}`,
+    );
+  }
+  return parseConfigFromYaml(result.stdout);
 }
 
 export interface VerifyResult {
@@ -196,7 +194,8 @@ function verifyReviewerHashes(
   if (Object.keys(reviewers).length === 0) {
     fail(
       sha,
-      `v2 attestation: cannot read .stamp/config.yml from the merge commit's tree. Commit the config and re-run merge.`,
+      `v2 attestation: no reviewers defined in .stamp/config.yml at this commit. ` +
+        `Either the file is missing from the commit's tree, or its 'reviewers:' map is empty.`,
     );
   }
 
