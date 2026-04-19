@@ -47,10 +47,20 @@ function loadServerEnvFile(path = "/etc/stamp/env"): void {
     if (!m) continue;
     const key = m[1]!;
     if (process.env[key] === undefined) {
-      process.env[key] = m[2];
+      process.env[key] = (m[2] ?? "").trim();
     }
   }
 }
+
+// Strips `x-access-token:<token>@` credentials out of any string before it's
+// forwarded to the pushing client. Git's push errors (e.g. "fatal: unable to
+// access 'https://...'") can echo the URL back, and the URL embeds the bot
+// token. Call this on every stderr/message that leaves the server.
+function scrubTokenUrls(s: string): string {
+  return s.replace(/x-access-token:[^@\s]*@/g, "x-access-token:***@");
+}
+
+const GITHUB_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function main(): void {
   loadServerEnvFile();
@@ -111,7 +121,7 @@ function mirrorBranch(
       `mirror: pushed ${branch} (${newSha.slice(0, 8)}) → github.com/${githubRepo}`,
     );
   } else {
-    const errOut = (result.stderr ?? "").trim();
+    const errOut = scrubTokenUrls((result.stderr ?? "").trim());
     warn(
       `mirror: push to github.com/${githubRepo} failed (exit ${result.status})`,
     );
@@ -135,6 +145,17 @@ function readMirrorConfig(sha: string): MirrorConfig | null {
     if (obj.github && typeof obj.github === "object") {
       const gh = obj.github as Record<string, unknown>;
       if (typeof gh.repo === "string" && Array.isArray(gh.branches)) {
+        if (!GITHUB_REPO_RE.test(gh.repo)) {
+          // Refuse to interpolate an unexpected-shape repo into a URL. Git's
+          // parser would keep github.com as the host (first @ wins), so this
+          // isn't host-hijack territory — it's defense in depth against a
+          // malformed mirror.yml slipping through reviewer + breaking the
+          // push in surprising ways.
+          warn(
+            `mirror: invalid github.repo '${gh.repo}' in .stamp/mirror.yml (expected owner/repo) — skipping`,
+          );
+          return null;
+        }
         out.github = {
           repo: gh.repo,
           branches: gh.branches.map(String),
