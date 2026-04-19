@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
@@ -11,12 +13,18 @@ import {
   stampStateDbPath,
 } from "../lib/paths.js";
 import {
+  CURRENT_PAYLOAD_VERSION,
   formatTrailers,
   serializePayload,
   type Approval,
   type AttestationPayload,
   type CheckAttestation,
 } from "../lib/attestation.js";
+import {
+  hashMcpServers,
+  hashPromptBytes,
+  hashTools,
+} from "../lib/reviewerHash.js";
 import { signBytes } from "../lib/signing.js";
 
 export interface MergeOptions {
@@ -92,12 +100,26 @@ export function runMerge(opts: MergeOptions): void {
     // Build approvals list from required reviewers (not all reviewers — only
     // those the target branch requires). This keeps the payload minimal and
     // binds the attestation to the exact rule that authorized the merge.
+    //
+    // Each approval also pins the reviewer's prompt + tool + MCP config
+    // hashes as of merge time. Verifiers recompute these from the committed
+    // .stamp/ tree and reject on mismatch (plan Step 2).
     approvals = rule.required.map((name) => {
       const rev = byReviewer.get(name)!;
+      const reviewerDef = config.reviewers[name];
+      if (!reviewerDef) {
+        throw new Error(
+          `reviewer "${name}" is required by branch rule "${opts.into}" but not defined in config.reviewers`,
+        );
+      }
+      const promptBytes = readFileSync(join(repoRoot, reviewerDef.prompt));
       return {
         reviewer: rev.reviewer,
         verdict: rev.verdict,
         review_sha: hashPart(rev.issues ?? ""),
+        prompt_sha256: hashPromptBytes(promptBytes),
+        tools_sha256: hashTools(reviewerDef.tools),
+        mcp_sha256: hashMcpServers(reviewerDef.mcp_servers),
       };
     });
   } finally {
@@ -172,6 +194,7 @@ export function runMerge(opts: MergeOptions): void {
 
   // 6. Build payload, sign, amend the merge commit with trailers.
   const payload: AttestationPayload = {
+    schema_version: CURRENT_PAYLOAD_VERSION,
     base_sha: resolved.base_sha,
     head_sha: resolved.head_sha,
     target_branch: opts.into,
