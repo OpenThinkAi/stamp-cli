@@ -169,15 +169,14 @@ function verifyReviewerHashes(
   const reviewers = readReviewersFromYaml(configYaml);
 
   for (const approval of payload.approvals) {
-    const expected = {
-      prompt: approval.prompt_sha256,
-      tools: approval.tools_sha256,
-      mcp: approval.mcp_sha256,
-    };
-    if (!expected.prompt || !expected.tools || !expected.mcp) {
+    const missing: string[] = [];
+    if (!approval.prompt_sha256) missing.push("prompt_sha256");
+    if (!approval.tools_sha256) missing.push("tools_sha256");
+    if (!approval.mcp_sha256) missing.push("mcp_sha256");
+    if (missing.length > 0) {
       fail(
         sha,
-        `v2 attestation: approval for "${approval.reviewer}" is missing required hash fields (prompt_sha256, tools_sha256, mcp_sha256)`,
+        `v2 attestation: approval for "${approval.reviewer}" is missing ${missing.join(", ")}`,
       );
     }
     const def = reviewers[approval.reviewer];
@@ -194,9 +193,9 @@ function verifyReviewerHashes(
         `v2 attestation: reviewer "${approval.reviewer}" prompt file "${def.prompt}" missing from the merge commit's tree`,
       );
     }
-    checkHash(sha, approval.reviewer, "prompt", hashPromptBytes(promptBytes), expected.prompt!);
-    checkHash(sha, approval.reviewer, "tools", hashTools(def.tools), expected.tools!);
-    checkHash(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), expected.mcp!);
+    checkHash(sha, approval.reviewer, "prompt", hashPromptBytes(promptBytes), approval.prompt_sha256!);
+    checkHash(sha, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
+    checkHash(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
   }
 }
 
@@ -211,7 +210,8 @@ function checkHash(
   fail(
     sha,
     `v2 attestation: reviewer "${reviewer}" ${field} hash mismatch ` +
-      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...)`,
+      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...). ` +
+      `The committed config differs from what the attestation claims; re-run stamp merge or revert the change.`,
   );
 }
 

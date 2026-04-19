@@ -252,34 +252,34 @@ function verifyReviewerHashesAtCommit(
   payload: AttestationPayload,
   refname: string,
 ): void {
+  const prefix = `commit ${sha.slice(0, 8)}: v2 attestation:`;
   let configYaml: string;
   try {
     configYaml = run(["show", `${sha}:.stamp/config.yml`]);
   } catch {
     reject(
       refname,
-      `commit ${sha.slice(0, 8)}: v2 attestation but .stamp/config.yml unreadable at commit's tree`,
+      `${prefix} .stamp/config.yml unreadable at commit's tree`,
     );
   }
   const reviewers = readReviewersFromYaml(configYaml);
 
   for (const approval of payload.approvals) {
-    const expected = {
-      prompt: approval.prompt_sha256,
-      tools: approval.tools_sha256,
-      mcp: approval.mcp_sha256,
-    };
-    if (!expected.prompt || !expected.tools || !expected.mcp) {
+    const missing: string[] = [];
+    if (!approval.prompt_sha256) missing.push("prompt_sha256");
+    if (!approval.tools_sha256) missing.push("tools_sha256");
+    if (!approval.mcp_sha256) missing.push("mcp_sha256");
+    if (missing.length > 0) {
       reject(
         refname,
-        `commit ${sha.slice(0, 8)}: v2 attestation missing hash fields for reviewer "${approval.reviewer}"`,
+        `${prefix} approval for "${approval.reviewer}" is missing ${missing.join(", ")}`,
       );
     }
     const def = reviewers[approval.reviewer];
     if (!def) {
       reject(
         refname,
-        `commit ${sha.slice(0, 8)}: reviewer "${approval.reviewer}" not defined in .stamp/config.yml at this commit`,
+        `${prefix} reviewer "${approval.reviewer}" not defined in .stamp/config.yml at this commit`,
       );
     }
     let promptBytes: string;
@@ -288,28 +288,29 @@ function verifyReviewerHashesAtCommit(
     } catch {
       reject(
         refname,
-        `commit ${sha.slice(0, 8)}: reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at this commit`,
+        `${prefix} reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at this commit`,
       );
     }
-    checkHashOrReject(sha, approval.reviewer, "prompt", hashPromptBytes(promptBytes), expected.prompt!, refname);
-    checkHashOrReject(sha, approval.reviewer, "tools", hashTools(def.tools), expected.tools!, refname);
-    checkHashOrReject(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), expected.mcp!, refname);
+    checkHashOrReject(prefix, refname, approval.reviewer, "prompt", hashPromptBytes(promptBytes), approval.prompt_sha256!);
+    checkHashOrReject(prefix, refname, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
+    checkHashOrReject(prefix, refname, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
   }
 }
 
 function checkHashOrReject(
-  sha: string,
+  prefix: string,
+  refname: string,
   reviewer: string,
   field: string,
   computed: string,
   expected: string,
-  refname: string,
 ): void {
   if (computed === expected) return;
   reject(
     refname,
-    `commit ${sha.slice(0, 8)}: reviewer "${reviewer}" ${field} hash mismatch ` +
-      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...)`,
+    `${prefix} reviewer "${reviewer}" ${field} hash mismatch ` +
+      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...). ` +
+      `The committed config differs from what the attestation claims; re-run stamp merge or revert the change.`,
   );
 }
 
