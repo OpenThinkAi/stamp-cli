@@ -1,0 +1,36 @@
+name: ci
+
+# Runs on every push to main and every pull request opened against main.
+# Build + typecheck are the same two checks the stamp merge gate enforces
+# locally; running them in CI gives outside contributors (who don't have
+# the stamp signing key) a clear green/red signal on their PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: install
+        run: npm ci
+
+      - name: build
+        run: npm run build
+
+      - name: typecheck
+        run: npm run typecheck
