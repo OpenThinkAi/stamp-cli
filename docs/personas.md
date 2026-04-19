@@ -228,6 +228,76 @@ Security tradeoffs worth naming: granting tools expands what a malicious reviewe
 
 Verified-config enforcement (cryptographic proof that a reviewer ran with the tool config the org expected) is planned — see [`plans/verified-reviewer-configs.md`](./plans/verified-reviewer-configs.md). Today's model trusts the committed config.
 
+## Pinning a reviewer to a canonical source
+
+For teams that want consistent reviewer policy across repositories, publish your personas in a central git repo and `stamp reviewers fetch` them into each project. The command writes a lock file alongside the prompt; `stamp review` refuses to run if the committed config has drifted from the lock.
+
+**Source repo layout** (the canonical side):
+
+```
+personas/
+  standards/
+    prompt.md           # required — the reviewer's system prompt
+    config.yaml         # optional — tools + mcp_servers for this reviewer
+  security/
+    prompt.md
+  product/
+    prompt.md
+    config.yaml
+```
+
+`config.yaml` (when present) mirrors the per-reviewer shape from `.stamp/config.yml`:
+
+```yaml
+tools: [Read, Grep, WebFetch]
+mcp_servers:
+  linear:
+    command: npx
+    args: ["-y", "@tacticlabs/linear-mcp-server"]
+    env:
+      LINEAR_API_KEY: $LINEAR_API_KEY
+```
+
+Tag the source repo with versions (e.g. `v3.2`). Consumers pin to specific tags.
+
+**Consuming side** — in the repo that wants to use a canonical reviewer:
+
+```sh
+# install + pin 'standards' from acme/stamp-personas at tag v3.2
+stamp reviewers fetch standards --from acme/stamp-personas@v3.2
+```
+
+This writes:
+
+- `.stamp/reviewers/standards.md` — the prompt bytes from the source
+- `.stamp/reviewers/standards.lock.json` — pinned hashes of the fetched prompt + tools + mcp_servers
+
+The command prints the YAML snippet you should paste into `.stamp/config.yml`'s `reviewers:` section. We deliberately don't auto-modify your config — your config is your declared intent, and we don't want a fetch to silently rewrite it.
+
+**Enforcement.** Every subsequent `stamp review` hashes the committed prompt + declared tools/mcp against the lock file. If anything drifts, the review refuses to run:
+
+```
+error: reviewer 'standards' prompt hash mismatch
+  expected: sha256:abc1234567890123...  (from .stamp/reviewers/standards.lock.json, source=acme/stamp-personas@v3.2)
+  observed: sha256:def4567890123456...  (current config)
+  fix: re-run 'stamp reviewers fetch standards --from acme/stamp-personas@v3.2' or update the lock file deliberately
+```
+
+Exit code **3** is reserved for lock-file drift — distinct from exit 1 ("review rejected") and exit 2 (commander usage errors). Agent loops can branch on it to decide whether to re-fetch and retry or halt and flag.
+
+**Pre-flight check without invoking reviewers.** `stamp reviewers verify` runs the same drift check without calling the Claude API — useful for CI gates or pre-commit hooks. `stamp reviewers verify <name>` scopes to a single reviewer.
+
+**Updating a pinned reviewer.** Re-run `stamp reviewers fetch <name> --from <source>@<new-ref>`. There's no separate `update` verb; `fetch` is idempotent and versioned.
+
+**Removing the pin.** Delete `.stamp/reviewers/<name>.lock.json`. `stamp review` will then treat the reviewer as unpinned (current behavior for reviewers with no lock file).
+
+**Source formats supported today:**
+
+- `<owner>/<repo>` — GitHub shorthand; resolves to `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/personas/<reviewer>/...`
+- Full `https://` URLs — appended as `<base>/<ref>/personas/<reviewer>/...`
+
+Private repos, git+ssh URLs, and non-git sources are not yet supported. For private GitHub orgs, host the canonical personas in a public repo and rely on the attestation's signed hashes for audit.
+
 Effective tests:
 - **One clean diff** the reviewer should approve
 - **Three deliberate violations** that the reviewer should catch (one per major concern on your scope list)

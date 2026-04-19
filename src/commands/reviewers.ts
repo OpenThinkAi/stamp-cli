@@ -7,10 +7,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
   EXAMPLE_REVIEWER_PROMPT,
   loadConfig,
   stringifyConfig,
+  type McpServerDef,
 } from "../lib/config.js";
 import {
   openDb,
@@ -26,6 +28,19 @@ import {
   stampReviewersDir,
   stampStateDbPath,
 } from "../lib/paths.js";
+import {
+  hashMcpServers,
+  hashPromptBytes,
+  hashTools,
+} from "../lib/reviewerHash.js";
+import {
+  checkReviewerDrift,
+  formatDriftReport,
+  LOCK_DRIFT_EXIT,
+  LOCK_FILE_VERSION,
+  writeLockFile,
+  type LockFile,
+} from "../lib/reviewerLock.js";
 
 export function reviewersList(): void {
   const repoRoot = findRepoRoot();
@@ -284,6 +299,271 @@ export function reviewersShow(name: string, opts: { limit: number }): void {
 function pct(n: number, total: number): number {
   if (total === 0) return 0;
   return Math.round((n / total) * 100);
+}
+
+// --------------------------------------------------------------------------
+// fetch + verify (plan Step 3 — remote canonical personas + lock files)
+// --------------------------------------------------------------------------
+
+export interface ReviewersFetchOptions {
+  /** Value of the --from flag: <source>@<ref>. Source is <owner>/<repo> or
+   *  a full GitHub URL; ref is any git ref (tag, branch, commit). */
+  from: string;
+}
+
+export async function reviewersFetch(
+  reviewerName: string,
+  opts: ReviewersFetchOptions,
+): Promise<void> {
+  const repoRoot = findRepoRoot();
+  const { source, ref } = parseSourceSpec(opts.from);
+
+  const reviewersDir = stampReviewersDir(repoRoot);
+  if (!existsSync(reviewersDir)) {
+    throw new Error(
+      `${reviewersDir} does not exist — run \`stamp init\` first.`,
+    );
+  }
+
+  console.log(`fetching reviewer '${reviewerName}' from ${source}@${ref}...`);
+
+  const promptUrl = buildRawUrl(source, ref, `personas/${reviewerName}/prompt.md`);
+  const configUrl = buildRawUrl(source, ref, `personas/${reviewerName}/config.yaml`);
+
+  const promptBytes = await fetchText(promptUrl, {
+    required: true,
+    label: "prompt.md",
+  });
+  if (promptBytes === null) {
+    // fetchText throws when required: true fails — this is defense in depth.
+    throw new Error(`prompt fetch returned null unexpectedly`);
+  }
+
+  const configYaml = await fetchText(configUrl, {
+    required: false,
+    label: "config.yaml",
+  });
+
+  // Parse optional tool/MCP config.
+  let tools: string[] | undefined;
+  let mcpServers: Record<string, McpServerDef> | undefined;
+  if (configYaml !== null) {
+    const parsed = (parseYaml(configYaml) ?? {}) as Record<string, unknown>;
+    if (Array.isArray(parsed.tools)) {
+      tools = parsed.tools.map(String);
+    }
+    if (parsed.mcp_servers && typeof parsed.mcp_servers === "object") {
+      mcpServers = parsed.mcp_servers as Record<string, McpServerDef>;
+    }
+  }
+
+  // Write prompt to .stamp/reviewers/<name>.md
+  const promptPath = join(reviewersDir, `${reviewerName}.md`);
+  writeFileSync(promptPath, promptBytes, "utf8");
+
+  // Compute hashes from the bytes we just wrote (identical to what verifiers
+  // will hash later).
+  const lock: LockFile = {
+    version: LOCK_FILE_VERSION,
+    source,
+    ref,
+    reviewer: reviewerName,
+    prompt_sha256: hashPromptBytes(promptBytes),
+    tools_sha256: hashTools(tools),
+    mcp_sha256: hashMcpServers(mcpServers),
+    fetched_at: new Date().toISOString(),
+  };
+  writeLockFile(repoRoot, reviewerName, lock);
+
+  // Report.
+  const bar = "─".repeat(72);
+  console.log(bar);
+  console.log(`fetched reviewer '${reviewerName}'`);
+  console.log(bar);
+  console.log(`  source:     ${source}@${ref}`);
+  console.log(`  prompt:     ${stampRelative(promptPath, repoRoot)}`);
+  console.log(`  lock file:  ${stampRelative(lockFilePathStr(repoRoot, reviewerName), repoRoot)}`);
+  console.log(`  prompt sha: sha256:${lock.prompt_sha256.slice(0, 16)}...`);
+  console.log(`  tools sha:  sha256:${lock.tools_sha256.slice(0, 16)}...`);
+  console.log(`  mcp sha:    sha256:${lock.mcp_sha256.slice(0, 16)}...`);
+  console.log(bar);
+
+  // Tell the user how to wire the reviewer into their config (we deliberately
+  // don't auto-modify .stamp/config.yml — the config is the user's declared
+  // intent and we don't want fetches to silently rewrite it).
+  console.log();
+  console.log(`Next: ensure .stamp/config.yml has this reviewer entry:`);
+  console.log();
+  const yamlBlock = buildConfigYamlHint(reviewerName, tools, mcpServers);
+  for (const line of yamlBlock.split("\n")) console.log(`    ${line}`);
+  console.log();
+  console.log(
+    `If the tools/mcp_servers in config.yml differ from the lock, \`stamp review\` will refuse to run with exit ${LOCK_DRIFT_EXIT}.`,
+  );
+}
+
+export interface ReviewersVerifyOptions {
+  /** Optional reviewer name to restrict the check to. */
+  only?: string;
+}
+
+export function reviewersVerify(opts: ReviewersVerifyOptions): void {
+  const repoRoot = findRepoRoot();
+  const config = loadConfig(stampConfigFile(repoRoot));
+
+  const names = opts.only
+    ? [opts.only]
+    : Object.keys(config.reviewers);
+
+  if (names.length === 0) {
+    console.log("No reviewers configured.");
+    return;
+  }
+
+  let anyDrift = false;
+  let anyLocked = false;
+
+  for (const name of names) {
+    const def = config.reviewers[name];
+    if (!def) {
+      console.error(`error: reviewer '${name}' is not in .stamp/config.yml`);
+      process.exit(1);
+    }
+    const result = checkReviewerDrift(repoRoot, name, def);
+    if (!result.hasLock) {
+      console.log(`  ${name.padEnd(16)} (no lock file — unpinned)`);
+      continue;
+    }
+    anyLocked = true;
+    if (result.mismatches.length === 0) {
+      console.log(
+        `  ✓ ${name.padEnd(16)} clean (${result.lock!.source}@${result.lock!.ref})`,
+      );
+    } else {
+      anyDrift = true;
+      console.log(
+        `  ✗ ${name.padEnd(16)} DRIFT (${result.mismatches.map((m) => m.field).join(", ")})`,
+      );
+    }
+  }
+
+  if (!anyLocked) {
+    console.log(
+      "\nNo lock files present. Run `stamp reviewers fetch <name> --from <source>@<ref>` to pin a reviewer.",
+    );
+    return;
+  }
+
+  if (anyDrift) {
+    console.error();
+    for (const name of names) {
+      const def = config.reviewers[name]!;
+      const result = checkReviewerDrift(repoRoot, name, def);
+      if (result.hasLock && result.mismatches.length > 0) {
+        console.error(formatDriftReport(name, result));
+        console.error();
+      }
+    }
+    process.exit(LOCK_DRIFT_EXIT);
+  }
+}
+
+// --------------------------------------------------------------------------
+// fetch/verify internals
+// --------------------------------------------------------------------------
+
+function parseSourceSpec(from: string): { source: string; ref: string } {
+  const at = from.lastIndexOf("@");
+  if (at < 1 || at === from.length - 1) {
+    throw new Error(
+      `--from must be '<source>@<ref>' (e.g. 'acme/stamp-personas@v3.2'); got '${from}'`,
+    );
+  }
+  return { source: from.slice(0, at), ref: from.slice(at + 1) };
+}
+
+function buildRawUrl(source: string, ref: string, path: string): string {
+  // Shorthand <owner>/<repo> → GitHub raw.
+  if (/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(source)) {
+    return `https://raw.githubusercontent.com/${source}/${encodeURIComponent(ref)}/${path}`;
+  }
+  // Full URL: append ref + path. Requires the base to point at a git raw
+  // server convention. Users of non-GitHub hosters should pass a URL like
+  // 'https://raw.githubusercontent.com/ORG/REPO' (without trailing slash,
+  // without ref) and we'll construct <url>/<ref>/<path>.
+  if (/^https?:\/\//.test(source)) {
+    return `${source.replace(/\/$/, "")}/${encodeURIComponent(ref)}/${path}`;
+  }
+  throw new Error(
+    `unsupported --from source '${source}'. Use '<owner>/<repo>' (GitHub) or a full 'https://' URL.`,
+  );
+}
+
+async function fetchText(
+  url: string,
+  opts: { required: boolean; label: string },
+): Promise<string | null> {
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (err) {
+    throw new Error(
+      `failed to fetch ${opts.label} from ${url}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (res.status === 404) {
+    if (opts.required) {
+      throw new Error(
+        `${opts.label} not found at ${url} (HTTP 404). Check the source/ref/reviewer name.`,
+      );
+    }
+    return null;
+  }
+  if (!res.ok) {
+    throw new Error(
+      `failed to fetch ${opts.label} from ${url}: HTTP ${res.status} ${res.statusText}`,
+    );
+  }
+  return await res.text();
+}
+
+function lockFilePathStr(repoRoot: string, reviewerName: string): string {
+  return join(repoRoot, ".stamp", "reviewers", `${reviewerName}.lock.json`);
+}
+
+function stampRelative(abs: string, repoRoot: string): string {
+  return abs.startsWith(repoRoot + "/") ? abs.slice(repoRoot.length + 1) : abs;
+}
+
+function buildConfigYamlHint(
+  reviewerName: string,
+  tools: string[] | undefined,
+  mcpServers: Record<string, McpServerDef> | undefined,
+): string {
+  const lines: string[] = [];
+  lines.push(`reviewers:`);
+  lines.push(`  ${reviewerName}:`);
+  lines.push(`    prompt: .stamp/reviewers/${reviewerName}.md`);
+  if (tools && tools.length > 0) {
+    lines.push(`    tools: [${tools.join(", ")}]`);
+  }
+  if (mcpServers && Object.keys(mcpServers).length > 0) {
+    lines.push(`    mcp_servers:`);
+    for (const [name, def] of Object.entries(mcpServers)) {
+      lines.push(`      ${name}:`);
+      lines.push(`        command: ${def.command}`);
+      if (def.args && def.args.length > 0) {
+        lines.push(`        args: [${def.args.map((a) => JSON.stringify(a)).join(", ")}]`);
+      }
+      if (def.env && Object.keys(def.env).length > 0) {
+        lines.push(`        env:`);
+        for (const [k, v] of Object.entries(def.env)) {
+          lines.push(`          ${k}: ${v}`);
+        }
+      }
+    }
+  }
+  return lines.join("\n");
 }
 
 function launchEditor(path: string): void {

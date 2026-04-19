@@ -199,7 +199,8 @@ Stamp-Verified: <base64 Ed25519 signature>
       "review_sha": "...",
       "prompt_sha256": "...",
       "tools_sha256": "...",
-      "mcp_sha256": "..."
+      "mcp_sha256": "...",
+      "reviewer_source": { "source": "acme/stamp-personas", "ref": "v3.2" }
     }
   ],
   "checks": [
@@ -219,8 +220,9 @@ Per-approval fields beyond `{ reviewer, verdict, review_sha }` are v2+:
 - `prompt_sha256` — sha256 of the reviewer's prompt file contents at merge time
 - `tools_sha256` — sha256 of the canonical-form tool allowlist (JSON, alphabetically-sorted array)
 - `mcp_sha256` — sha256 of the canonical-form MCP server config (JSON, recursively-sorted object keys; arrays preserve order)
+- `reviewer_source` (optional) — `{ source, ref }` from the reviewer's committed lock file (`.stamp/reviewers/<name>.lock.json`), present only when the reviewer was installed via `stamp reviewers fetch`. Lets auditors cross-reference which canonical manifest + ref produced the bundle.
 
-These pin the config the reviewer was invoked against. See `docs/plans/verified-reviewer-configs.md` for the motivating threat model and the remaining steps (remote manifests, lock files, tool-invocation traces).
+These pin the config the reviewer was invoked against. See `docs/plans/verified-reviewer-configs.md` for the motivating threat model and the remaining steps (server-side manifest allowlists, tool-invocation traces).
 
 **Backward compat.** `schema_version` absent or `1` is a legacy payload produced before Step 2 shipped. Verifiers treat legacy payloads as passing the hash checks (fail-open) so existing stamp repos don't break mid-upgrade. New payloads (`schema_version: 2+`) without the hash fields are rejected (fail-closed) — the hash evidence is required for v2+ and missing fields indicate either a malformed payload or a forged downgrade.
 
