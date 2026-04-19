@@ -167,6 +167,16 @@ Any non-zero exit blocks the merge and rolls it back. Results are attested
 into the commit's signed payload; the server hook verifies that attestation
 matches the committed config.
 
+> **Security note.** `required_checks[].run` values execute as shell commands
+> on the merger's machine via `spawnSync(cmd, { shell: true })`. Anyone who
+> can land a PR that touches `.stamp/config.yml` can introduce arbitrary
+> code that will run on the next person to call `stamp merge`. The mitigation
+> is the reviewer gate itself: `.stamp/config.yml` changes go through the
+> same reviewers as any other code change, and your security reviewer prompt
+> should treat `required_checks` edits as high-scrutiny. Unlike GitHub
+> Actions, these commands are **not** sandboxed. See
+> [`DESIGN.md`](./DESIGN.md#security-model) for the full threat model.
+
 Optional: `.stamp/mirror.yml` enables GitHub mirroring via the post-receive
 hook. See [`server/README.md`](./server/README.md).
 
