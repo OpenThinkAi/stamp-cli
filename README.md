@@ -132,7 +132,7 @@ stamp reviewers edit <name>                       # open existing reviewer's pro
 stamp reviewers test <name> --diff <revspec>      # invoke reviewer w/o recording to DB
 stamp reviewers show <name> [--limit <n>]         # verdict history + stats for calibration
 stamp reviewers remove <name> [--delete-file]     # de-register; optional rm of .md
-stamp reviewers fetch <name> --from <src>@<ref>   # install + pin from canonical source
+stamp reviewers fetch <name> --from <source@ref>  # install + pin from canonical source
 stamp reviewers verify [<name>]                   # check prompt/tool/mcp against lock; exit 3 on drift
 ```
 

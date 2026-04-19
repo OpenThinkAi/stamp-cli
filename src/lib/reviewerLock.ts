@@ -38,6 +38,11 @@ export function lockFilePath(repoRoot: string, reviewerName: string): string {
   return join(repoRoot, ".stamp", "reviewers", `${reviewerName}.lock.json`);
 }
 
+// Throws on malformed lock files so the pre-flight check fails loudly rather
+// than silently pretending the reviewer is unpinned. merge.ts reads lock
+// files with its own silent-catch path (see readReviewerSource) because a
+// corrupt lock at merge time should degrade gracefully (drop reviewer_source)
+// rather than blow up the merge — different tolerance, deliberate.
 export function readLockFile(
   repoRoot: string,
   reviewerName: string,
@@ -109,7 +114,9 @@ export function checkReviewerDrift(
   const promptPath = join(repoRoot, def.prompt);
   if (!existsSync(promptPath)) {
     throw new Error(
-      `reviewer "${reviewerName}" has a lock file but its prompt "${def.prompt}" does not exist on disk`,
+      `reviewer "${reviewerName}" has a lock file but its prompt "${def.prompt}" does not exist on disk. ` +
+        `Re-run 'stamp reviewers fetch ${reviewerName} --from ${lock.source}@${lock.ref}' to restore it, ` +
+        `or delete the lock file to un-pin the reviewer.`,
     );
   }
   const promptBytes = readFileSync(promptPath);

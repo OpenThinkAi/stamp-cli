@@ -6,8 +6,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { join, relative, resolve } from "node:path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   EXAMPLE_REVIEWER_PROMPT,
   loadConfig,
@@ -420,16 +420,25 @@ export function reviewersVerify(opts: ReviewersVerifyOptions): void {
     return;
   }
 
+  // Compute drift once per reviewer, reuse for the summary and the drift-
+  // report pass. Hashing a prompt file + tools/mcp config is cheap, but
+  // doing the file I/O twice is sloppy and drifts behavior if the user
+  // edits the prompt between the two passes.
+  const results = new Map<string, ReturnType<typeof checkReviewerDrift>>();
   let anyDrift = false;
   let anyLocked = false;
 
   for (const name of names) {
     const def = config.reviewers[name];
     if (!def) {
-      console.error(`error: reviewer '${name}' is not in .stamp/config.yml`);
+      console.error(
+        `error: reviewer '${name}' is not in .stamp/config.yml. ` +
+          `Add it with \`stamp reviewers add ${name}\` or remove its lock file.`,
+      );
       process.exit(1);
     }
     const result = checkReviewerDrift(repoRoot, name, def);
+    results.set(name, result);
     if (!result.hasLock) {
       console.log(`  ${name.padEnd(16)} (no lock file — unpinned)`);
       continue;
@@ -456,9 +465,7 @@ export function reviewersVerify(opts: ReviewersVerifyOptions): void {
 
   if (anyDrift) {
     console.error();
-    for (const name of names) {
-      const def = config.reviewers[name]!;
-      const result = checkReviewerDrift(repoRoot, name, def);
+    for (const [name, result] of results) {
       if (result.hasLock && result.mismatches.length > 0) {
         console.error(formatDriftReport(name, result));
         console.error();
@@ -483,16 +490,20 @@ function parseSourceSpec(from: string): { source: string; ref: string } {
 }
 
 function buildRawUrl(source: string, ref: string, path: string): string {
+  // Refs can legally contain slashes (e.g. 'release/v3.2', 'feature/foo') —
+  // don't encodeURIComponent them, since git raw endpoints expect literal
+  // slashes in the path segment. Tag and sha refs are slash-free anyway, so
+  // skipping encoding is safe for all documented inputs.
+  //
   // Shorthand <owner>/<repo> → GitHub raw.
   if (/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(source)) {
-    return `https://raw.githubusercontent.com/${source}/${encodeURIComponent(ref)}/${path}`;
+    return `https://raw.githubusercontent.com/${source}/${ref}/${path}`;
   }
-  // Full URL: append ref + path. Requires the base to point at a git raw
-  // server convention. Users of non-GitHub hosters should pass a URL like
-  // 'https://raw.githubusercontent.com/ORG/REPO' (without trailing slash,
-  // without ref) and we'll construct <url>/<ref>/<path>.
+  // Full URL: append ref + path. Users of non-GitHub hosters should pass a
+  // URL like 'https://raw.githubusercontent.com/ORG/REPO' (without trailing
+  // slash, without ref) and we'll construct <url>/<ref>/<path>.
   if (/^https?:\/\//.test(source)) {
-    return `${source.replace(/\/$/, "")}/${encodeURIComponent(ref)}/${path}`;
+    return `${source.replace(/\/$/, "")}/${ref}/${path}`;
   }
   throw new Error(
     `unsupported --from source '${source}'. Use '<owner>/<repo>' (GitHub) or a full 'https://' URL.`,
@@ -532,7 +543,7 @@ function lockFilePathStr(repoRoot: string, reviewerName: string): string {
 }
 
 function stampRelative(abs: string, repoRoot: string): string {
-  return abs.startsWith(repoRoot + "/") ? abs.slice(repoRoot.length + 1) : abs;
+  return relative(repoRoot, abs);
 }
 
 function buildConfigYamlHint(
@@ -540,30 +551,14 @@ function buildConfigYamlHint(
   tools: string[] | undefined,
   mcpServers: Record<string, McpServerDef> | undefined,
 ): string {
-  const lines: string[] = [];
-  lines.push(`reviewers:`);
-  lines.push(`  ${reviewerName}:`);
-  lines.push(`    prompt: .stamp/reviewers/${reviewerName}.md`);
-  if (tools && tools.length > 0) {
-    lines.push(`    tools: [${tools.join(", ")}]`);
-  }
+  const reviewerBlock: Record<string, unknown> = {
+    prompt: `.stamp/reviewers/${reviewerName}.md`,
+  };
+  if (tools && tools.length > 0) reviewerBlock.tools = tools;
   if (mcpServers && Object.keys(mcpServers).length > 0) {
-    lines.push(`    mcp_servers:`);
-    for (const [name, def] of Object.entries(mcpServers)) {
-      lines.push(`      ${name}:`);
-      lines.push(`        command: ${def.command}`);
-      if (def.args && def.args.length > 0) {
-        lines.push(`        args: [${def.args.map((a) => JSON.stringify(a)).join(", ")}]`);
-      }
-      if (def.env && Object.keys(def.env).length > 0) {
-        lines.push(`        env:`);
-        for (const [k, v] of Object.entries(def.env)) {
-          lines.push(`          ${k}: ${v}`);
-        }
-      }
-    }
+    reviewerBlock.mcp_servers = mcpServers;
   }
-  return lines.join("\n");
+  return stringifyYaml({ reviewers: { [reviewerName]: reviewerBlock } }).trimEnd();
 }
 
 function launchEditor(path: string): void {
