@@ -37,7 +37,7 @@ This split is the honest, defensible guarantee a local-first tool can make. Orga
 
 ### Step 1 — Reviewer tools + MCP plumbing
 
-Wire `.stamp/config.yml` to the Claude Agent SDK's `query()` options. Reviewers can now declare an `allowedTools` list (built-in Claude tools: `Read`, `Grep`, `WebFetch`, etc.) and optional `mcp_servers` per reviewer. No verification yet — this just enables richer reviews.
+Wire `.stamp/config.yml` to the Claude Agent SDK's `query()` options. Reviewers can now declare a `tools` list (built-in Claude tools: `Read`, `Grep`, `WebFetch`, etc., mapped internally to the SDK's `allowedTools`) and optional `mcp_servers` per reviewer. No verification yet — this just enables richer reviews.
 
 Schema sketch:
 
@@ -59,6 +59,8 @@ reviewers:
 
 Security model update: DESIGN.md names the new threat expansion — a malicious reviewer prompt with tool access could exfiltrate diff contents, read local files in the repo tree, or make external network calls. Conservative defaults (Read/Grep only, no Bash/Write); MCP servers explicit opt-in.
 
+**Invocation-time error handling:** when `mcp_servers[*].env` references an env var (e.g. `LINEAR_API_KEY`) that isn't set at the caller's shell, `stamp review` fails fast with exit 1 and a stderr line naming the missing var and which reviewer declared it — rather than silently passing `undefined` into the MCP config and producing a confusing mid-stream tool failure. Open Q4 covers the hashing side; this covers the runtime error.
+
 ### Step 2 — Prompt + tool config hashing in attestation
 
 Each approval entry in the signed payload grows three fields:
@@ -75,11 +77,13 @@ Server hook's verification step grows: recompute the hashes against the committe
 
 At this step, verifiers have a hash to compare against *something* — but without a canonical manifest, it's self-referential. Step 3 makes the hash meaningful.
 
+**Backward compat:** attestations produced before this feature shipped don't carry the hash fields. The attestation payload already has a `version` integer; this step bumps it. The server hook and `stamp verify` treat attestations at the old payload version as valid without hash checks (fail-open on legacy), and attestations at the new version as invalid without hash checks (fail-closed). That keeps existing stamp repos from breaking mid-upgrade while forcing new attestations to include the stronger evidence.
+
 ### Step 3 — Remote canonical personas + lock files
 
 Organizations publish canonical reviewer definitions to a source (git repo, npm package, or HTTP endpoint). A manifest lists acceptable `(persona, version, prompt_sha256, tools_sha256, mcp_sha256)` tuples.
 
-New subcommand: `stamp personas fetch <source>@<version> <reviewer>`. Downloads the prompt and config into `.stamp/reviewers/`, writes a lock file `.stamp/reviewers/<name>.lock.json` recording:
+New subcommand: `stamp reviewers fetch <source>@<version> <reviewer>`. Downloads the prompt and config into `.stamp/reviewers/`, writes a lock file `.stamp/reviewers/<name>.lock.json` recording:
 
 ```json
 {
@@ -93,9 +97,18 @@ New subcommand: `stamp personas fetch <source>@<version> <reviewer>`. Downloads 
 }
 ```
 
-At review time, `stamp review` hashes the current prompt + config and compares against the lock file. Mismatch → refuse to run. (Catches local tampering between fetch and review.)
+At review time, `stamp review` hashes the current prompt + config and compares against the lock file. Mismatch → exit 3 (new dedicated code for config drift, distinct from exit 1 "review genuinely rejected" so agent loops can branch on the difference). Error message shape:
 
-The attestation's per-reviewer entry grows `persona_source` pointing at the manifest. Downstream verifiers (server hook, third-party auditors) can independently query the manifest source, confirm the `(source, version, hashes)` tuple is listed as acceptable, and reject attestations referencing unknown or obsolete versions.
+```
+error: reviewer 'standards' prompt hash mismatch
+  expected: sha256:abc123...  (from .stamp/reviewers/standards.lock.json)
+  observed: sha256:def456...  (current .stamp/reviewers/standards.md)
+  fix: re-run 'stamp reviewers fetch <source>@<version> standards' or update the lock file deliberately
+```
+
+Planned verbs in the `stamp reviewers` family at completion of Step 3: existing `list / add / edit / remove / test / show` + new `fetch` (pull + pin from remote manifest) + new `verify` (run the hash check without invoking the reviewer, useful for CI pre-flight). No separate `update` verb — `fetch` with a newer version string is the update path.
+
+The attestation's per-reviewer entry grows `reviewer_source` pointing at the manifest. Downstream verifiers (server hook, third-party auditors) can independently query the manifest source, confirm the `(source, version, hashes)` tuple is listed as acceptable, and reject attestations referencing unknown or obsolete versions.
 
 Optional: sign the manifest itself with an org key. Verifier checks the signature before trusting the hash list.
 
