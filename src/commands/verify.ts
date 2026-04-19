@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { parse as parseYaml } from "yaml";
 import {
   parseCommitAttestation,
   type AttestationPayload,
 } from "../lib/attestation.js";
-import { loadConfig } from "../lib/config.js";
+import type { BranchRule, StampConfig, CheckDef } from "../lib/config.js";
 import { findTrustedKey } from "../lib/keys.js";
-import { findRepoRoot, stampConfigFile } from "../lib/paths.js";
+import { findRepoRoot } from "../lib/paths.js";
 import {
   hashMcpServers,
   hashPromptBytes,
@@ -13,6 +14,52 @@ import {
   readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
+
+/**
+ * Load just enough of .stamp/config.yml from the given commit's tree to
+ * verify an attestation — branches (required + required_checks) and
+ * reviewers (for hash recomputation). Tolerates missing config cleanly
+ * for the "no rule for this branch" pass-through at the caller.
+ */
+function loadConfigAtSha(sha: string, repoRoot: string): StampConfig {
+  let raw: string;
+  try {
+    raw = execFileSync("git", ["show", `${sha}:.stamp/config.yml`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch {
+    return { branches: {}, reviewers: {} };
+  }
+  const parsed = (parseYaml(raw) ?? {}) as Record<string, unknown>;
+  const branches: Record<string, BranchRule> = {};
+  const rawBranches = parsed.branches;
+  if (rawBranches && typeof rawBranches === "object") {
+    for (const [name, rule] of Object.entries(rawBranches)) {
+      if (!rule || typeof rule !== "object") continue;
+      const r = rule as Record<string, unknown>;
+      if (!Array.isArray(r.required)) continue;
+      const required_checks: CheckDef[] = [];
+      if (Array.isArray(r.required_checks)) {
+        for (const c of r.required_checks) {
+          if (c && typeof c === "object") {
+            const cc = c as Record<string, unknown>;
+            if (typeof cc.name === "string" && typeof cc.run === "string") {
+              required_checks.push({ name: cc.name, run: cc.run });
+            }
+          }
+        }
+      }
+      branches[name] = {
+        required: r.required.map(String),
+        ...(required_checks.length > 0 ? { required_checks } : {}),
+      };
+    }
+  }
+  const reviewers = readReviewersFromYaml(raw);
+  return { branches, reviewers: reviewers as StampConfig["reviewers"] };
+}
 
 export interface VerifyResult {
   valid: boolean;
@@ -26,7 +73,12 @@ export interface VerifyResult {
  */
 export function runVerify(sha: string): void {
   const repoRoot = findRepoRoot();
-  const config = loadConfig(stampConfigFile(repoRoot));
+  // Load config from the merge commit's OWN tree, not the working directory.
+  // A commit must satisfy the rules it itself declares — current-main config
+  // can have drifted since the commit was made, and verifying against drifted
+  // rules produces false positives/negatives. Matches the semantics the
+  // post-fix `stamp merge` uses when choosing which required_checks to run.
+  const config = loadConfigAtSha(sha, repoRoot);
 
   // 1. Read the commit message and parse trailers.
   const commitMessage = git(["show", "-s", "--format=%B", sha], repoRoot);
