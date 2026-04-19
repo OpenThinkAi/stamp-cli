@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { allPassed, runChecks, type CheckResult } from "../lib/checks.js";
+import { allPassed, runChecks } from "../lib/checks.js";
 import { loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
 import { resolveDiff } from "../lib/git.js";
@@ -104,15 +104,33 @@ export function runMerge(opts: MergeOptions): void {
     db.close();
   }
 
-  // 3. Run required checks (pre-merge test gate). Non-zero exit blocks merge.
-  //    Results are attested into the payload so the server hook can verify
-  //    the signer actually ran what the config requires.
+  // 3. Load signing key (do this before git merge so we can fail fast if
+  //    there's a key problem — no rollback needed).
+  const { keypair } = ensureUserKeypair();
+
+  // 4. Do the git merge --no-ff with a simple title; we'll amend the message
+  //    with trailers once checks pass.
+  const title = `Merge branch '${opts.branch}' into ${opts.into}`;
+  try {
+    git(
+      ["merge", "--no-ff", "--no-edit", "-m", title, opts.branch],
+      repoRoot,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `git merge failed. Working tree may be in a conflict state — run \`git merge --abort\` to reset. (${msg})`,
+    );
+  }
+
+  // 5. Run required checks on the POST-merge tree. This is the state that
+  //    would land on the remote, so it's the correct thing to verify. If a
+  //    check fails, roll back the merge commit and abort.
   const checkAttestations: CheckAttestation[] = [];
-  const checkTails: CheckResult[] = [];
   const requiredChecks = rule.required_checks ?? [];
   if (requiredChecks.length > 0) {
     console.log(
-      `running ${requiredChecks.length} required check${requiredChecks.length === 1 ? "" : "s"}: ${requiredChecks.map((c) => c.name).join(", ")}`,
+      `running ${requiredChecks.length} required check${requiredChecks.length === 1 ? "" : "s"} against merged tree: ${requiredChecks.map((c) => c.name).join(", ")}`,
     );
     const results = runChecks(requiredChecks, repoRoot);
     for (const r of results) {
@@ -120,7 +138,6 @@ export function runMerge(opts: MergeOptions): void {
       console.log(
         `  ${mark} ${r.name.padEnd(16)} exit=${r.exit_code}  ${r.duration_ms}ms`,
       );
-      checkTails.push(r);
       checkAttestations.push({
         name: r.name,
         command: r.command,
@@ -138,28 +155,19 @@ export function runMerge(opts: MergeOptions): void {
         if (f.tail) console.error(f.tail);
       }
       console.error(bar);
+
+      // Roll back the merge commit so the repo ends up exactly as it was
+      // before `stamp merge` was called.
+      try {
+        git(["reset", "--hard", "HEAD~1"], repoRoot);
+      } catch {
+        // Best-effort; caller can recover manually if this somehow fails.
+      }
+
       throw new Error(
-        `pre-merge checks failed: ${failed.map((f) => f.name).join(", ")}. Fix and re-run.`,
+        `pre-merge checks failed: ${failed.map((f) => f.name).join(", ")}. Merge rolled back. Fix and re-run.`,
       );
     }
-  }
-
-  // 4. Load signing key.
-  const { keypair } = ensureUserKeypair();
-
-  // 5. Do the git merge --no-ff with a simple title; we'll amend the message
-  //    with trailers next.
-  const title = `Merge branch '${opts.branch}' into ${opts.into}`;
-  try {
-    git(
-      ["merge", "--no-ff", "--no-edit", "-m", title, opts.branch],
-      repoRoot,
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `git merge failed. Working tree may be in a conflict state — run \`git merge --abort\` to reset. (${msg})`,
-    );
   }
 
   // 6. Build payload, sign, amend the merge commit with trailers.
