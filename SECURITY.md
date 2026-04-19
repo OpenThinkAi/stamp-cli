@@ -1,0 +1,70 @@
+# Security policy
+
+## Supported versions
+
+stamp-cli is pre-1.0. Only the latest published `0.x` version on npm receives
+security fixes. Users are expected to upgrade promptly; semver caveats noted
+in [`docs/ROADMAP.md`](./docs/ROADMAP.md) apply.
+
+## Reporting a vulnerability
+
+**Do not open a public GitHub issue for security reports.**
+
+Use GitHub's private vulnerability reporting for this repository:
+<https://github.com/OpenThinkAi/stamp-cli/security/advisories/new>
+
+That routes the report directly to the maintainers without any public trace.
+Include:
+
+- A description of the issue and which component is affected (CLI, hook
+  bundle, server image, etc.).
+- A proof-of-concept or step-by-step reproduction if you have one.
+- Your assessment of impact (what a malicious author-agent or pusher could
+  achieve).
+- Any suggested fix or mitigation.
+
+### What to expect
+
+- Acknowledgment within **3 business days** of the report landing.
+- A triage response within **7 business days** including severity assessment
+  and likely fix timeline.
+- Coordinated disclosure: once a fix is published, we'll credit you in the
+  release notes unless you prefer to remain anonymous.
+
+### Scope
+
+**In scope:**
+
+- The stamp-cli CLI (signing, verification, attestation parsing, config
+  loading, reviewer invocation).
+- The hook bundle (`dist/hooks/pre-receive.cjs`, `dist/hooks/post-receive.cjs`).
+- The reference server image (`server/Dockerfile`, `server/entrypoint.sh`,
+  `server/setup-repo.sh`).
+- Any documented trust boundary — pre-receive hook enforcement, attestation
+  verification, key-trust rules.
+
+**Out of scope:**
+
+- Vulnerabilities in Anthropic's Claude models or the
+  `@anthropic-ai/claude-agent-sdk` package itself — report those directly
+  to Anthropic.
+- Weaknesses that require an operator to voluntarily install a malicious
+  reviewer prompt or commit secrets to a public repo.
+- Issues in third-party deploy platforms (Railway, Fly, etc.) or a user's
+  own git server.
+- Reviewer prompts producing poor judgments — prompt quality is operator
+  responsibility.
+
+## Known trade-offs
+
+Some behaviors are intentional trade-offs, not vulnerabilities:
+
+- **`required_checks[].run` executes as shell commands on the merger's
+  machine.** Mitigation: the reviewer gate on `.stamp/config.yml` changes.
+  See [`DESIGN.md`](./DESIGN.md#security-model).
+- **Local-only deployment mode provides no server-side enforcement.** By
+  design; see the Deployment shapes section of
+  [`README.md`](./README.md).
+- **The signing key holder can produce valid signed merges for arbitrary
+  content.** Non-repudiation, not authorization — inherent to local-first
+  signing. Documented in the README security-model section.
