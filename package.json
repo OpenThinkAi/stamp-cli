@@ -12,6 +12,7 @@
   "scripts": {
     "build": "tsup && node -e \"require('fs').readdirSync('dist',{recursive:true,withFileTypes:true}).filter(e=>e.isFile()&&/\\.(js|cjs)$/.test(e.name)).forEach(e=>{const p=require('path').join(e.parentPath||e.path,e.name);const c=require('fs').readFileSync(p,'utf8').replace(/from \\\"sqlite\\\"/g,'from \\\"node:sqlite\\\"');require('fs').writeFileSync(p,c)})\"",
     "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
   "homepage": "https://openthink.dev",

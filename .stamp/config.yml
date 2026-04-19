@@ -1,0 +1,18 @@
+branches:
+  main:
+    required:
+      - security
+      - standards
+      - product
+    required_checks:
+      - name: build
+        run: npm run build
+      - name: typecheck
+        run: npm run typecheck
+reviewers:
+  security:
+    prompt: .stamp/reviewers/security.md
+  standards:
+    prompt: .stamp/reviewers/standards.md
+  product:
+    prompt: .stamp/reviewers/product.md

@@ -107,7 +107,7 @@ export function latestVerdicts(
   head_sha: string,
 ): LatestVerdict[] {
   const stmt = db.prepare(LATEST_VERDICTS_SQL);
-  return stmt.all(base_sha, head_sha) as LatestVerdict[];
+  return stmt.all(base_sha, head_sha) as unknown as LatestVerdict[];
 }
 
 /**
@@ -120,7 +120,7 @@ export function latestReviews(
   head_sha: string,
 ): LatestReview[] {
   const stmt = db.prepare(LATEST_VERDICTS_SQL);
-  return stmt.all(base_sha, head_sha) as LatestReview[];
+  return stmt.all(base_sha, head_sha) as unknown as LatestReview[];
 }
 
 export function reviewHistory(
@@ -134,7 +134,7 @@ export function reviewHistory(
     ORDER BY created_at DESC, id DESC
     LIMIT ?
   `);
-  return stmt.all(limit) as ReviewRow[];
+  return stmt.all(limit) as unknown as ReviewRow[];
 }
 
 export interface ReviewerStats {
@@ -193,5 +193,5 @@ export function recentReviewsByReviewer(
     ORDER BY created_at DESC, id DESC
     LIMIT ?
   `);
-  return stmt.all(reviewer, limit) as ReviewRow[];
+  return stmt.all(reviewer, limit) as unknown as ReviewRow[];
 }
