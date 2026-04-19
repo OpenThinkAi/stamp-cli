@@ -35,14 +35,6 @@ jobs:
           cache: "npm"
           registry-url: "https://registry.npmjs.org"
 
-      # Node 22 bundles npm 10.x, which supports OIDC only for provenance
-      # signing (sigstore) — not for authenticating the registry PUT. npm
-      # Trusted Publishing on the PUT path requires npm 11.5.1+. Upgrade
-      # before publish so 'npm publish --provenance' actually exchanges
-      # the OIDC token with the npm registry instead of falling back to
-      # the NODE_AUTH_TOKEN placeholder setup-node writes into .npmrc.
-      - name: upgrade to npm with Trusted Publishing support
-        run: npm install -g npm@latest
 
       - name: read target version
         id: version
@@ -87,9 +79,17 @@ jobs:
       # script before the tarball is assembled, so no explicit build step.
       # --provenance requires id-token: write and a Trusted Publisher on
       # the npm side; attaches an SLSA build attestation to the tarball.
+      #
+      # npx npm@latest (not bare 'npm publish'): Node 22 bundles npm 10.x,
+      # which supports OIDC only for provenance signing but NOT for
+      # authenticating the registry PUT — that requires npm 11.5.1+.
+      # Self-upgrading via 'npm install -g npm@latest' breaks on hosted
+      # runners (MODULE_NOT_FOUND on promise-retry as the running npm
+      # replaces its own modules mid-flight). npx fetches a clean npm@latest
+      # per-run without touching the globally-installed npm.
       - name: publish
         if: steps.check.outputs.published == 'false'
-        run: npm publish --access public --provenance --tag "${{ steps.version.outputs.dist_tag }}"
+        run: npx -y npm@latest publish --access public --provenance --tag "${{ steps.version.outputs.dist_tag }}"
 
       - name: tag release
         if: steps.check.outputs.published == 'false'
