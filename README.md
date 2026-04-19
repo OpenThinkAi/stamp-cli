@@ -239,8 +239,20 @@ specific key's owner, provable from git history alone. For the
 agent-can't-bypass threat model this is exactly right.
 
 See [`DESIGN.md`](./DESIGN.md) for the full bootstrap, key-management, and
-verification-rule details.
+verification-rule details, including the security model around user-configured
+pre-merge checks.
 
 ## License
 
-MIT.
+stamp-cli itself is MIT-licensed.
+
+**Third-party dependency notice.** stamp-cli invokes reviewers via
+[`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
+which is distributed under Anthropic's proprietary license ("SEE LICENSE IN
+README.md" on the package). Running `stamp review` — or installing stamp-cli
+via npm at all — binds you to Anthropic's terms of service for API usage and
+their SDK's license. Review those before integrating stamp-cli into
+distributed products.
+
+All other runtime dependencies are permissively licensed (MIT, ISC, BSD,
+Apache-2.0).

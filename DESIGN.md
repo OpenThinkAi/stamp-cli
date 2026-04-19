@@ -131,6 +131,33 @@ github:
 
 Read by the server-side post-receive hook after a push is accepted. For each configured branch, the hook pushes to `https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<repo>.git`. `GITHUB_BOT_TOKEN` comes from `/etc/stamp/env` on the server (populated by the entrypoint from a Railway env var; sshd strips custom env vars from sessions, so a file is the reliable transport). Mirror failures log to stderr but don't block the stamped push.
 
+## Security model
+
+stamp-cli's threat model centers on agent-driven workflows: the primary defender position is "an unattended AI agent cannot land code on `main` that wasn't reviewed, checked, and signed by a key the agent does not possess." A secondary position is non-repudiation — every merge is cryptographically attributed to a specific key's holder.
+
+**What is enforced:**
+
+- Author-agents cannot produce a valid signed merge without the private key (kept in `~/.stamp/keys/`, file mode 0600, never transmitted)
+- The server-side pre-receive hook performs all seven verification steps from the "Signing & attestation" section before accepting a push — signature validity, SHA binding, approvals satisfy the branch rule, checks are attested with exit 0
+- All subprocess calls in the CLI and hooks use argument-array form (`execFileSync(git, [args...])`); no `shell: true` is used except in one specific, documented case below
+
+**What is NOT enforced — the `required_checks` shell-execution tradeoff:**
+
+Each entry in `branches.<target>.required_checks` is a `{ name, run }` pair where `run` is a shell command (`npm run build`, `pytest`, etc.). To support real developer commands, `stamp merge` invokes each check with `spawnSync(check.run, { shell: true, cwd: repoRoot, ... })`.
+
+This means: **anyone with write access to `.stamp/config.yml` can add a check whose `run` string is arbitrary shell code that will execute on every operator's machine during `stamp merge`**, with the cwd set to the repo root.
+
+The mitigation is the review gate itself. Changes to `.stamp/config.yml` are diffs like any other — they go through `stamp review` against the configured personas before they can land on `main`. A well-calibrated `security` or `standards` reviewer should flag a `required_checks` addition that introduces a new command category, especially one that reads from paths outside the repo or writes anywhere persistent. Operators relying on stamp should therefore:
+
+1. Treat `.stamp/config.yml` as security-sensitive. A merge that adds a new check deserves a closer look from reviewers than a merge that only touches application code.
+2. Include language in the `security` reviewer prompt instructing the reviewer to flag new or modified `required_checks` entries and scrutinize what the command does.
+3. Not use stamp as the sole boundary against adversarial-insider threats. The signing key + reviewer gate protect against an agent that doesn't hold the key. They do not protect against a keyholder who merges malicious config on purpose — non-repudiation makes that forgery attributable, not preventable.
+
+**What signing does NOT claim:**
+
+- The signature proves "a keyholder approved this specific diff with these specific reviewer verdicts and these specific check results." It does not prove the check actually ran, that the reviewer actually read the diff, or that the approvals reflect objective correctness. It proves a keyholder took responsibility.
+- A stamp-protected repo with a single keyholder using a single machine has the same failure modes as a GPG-signed git repo with one signer. The layered defenses in stamp-cli (reviewer gate, check gate, attestation binding to exact SHA pairs) compound to make agent-driven bypass structurally impossible, but do not make human-operator bypass cryptographically impossible.
+
 ## Signing & attestation
 
 `stamp merge` produces a merge commit whose message includes two trailers:
