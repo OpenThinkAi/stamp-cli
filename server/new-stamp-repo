@@ -3,20 +3,26 @@
 # new-stamp-repo — one-line repo provisioning on a running stamp server.
 #
 # Usage (over SSH):
-#   ssh git@<host> new-stamp-repo <name>
+#   ssh git@<host> new-stamp-repo <name> [<seed-stamp-dir>]
 #
 # Creates /srv/git/<name>.git with the stamp-verify hook installed and the
 # operator's public key (from $OPERATOR_PUB_KEY at container startup) as the
 # initial trusted signer.
 #
+# Optional <seed-stamp-dir> is a path on the SERVER (typically uploaded via
+# scp into /tmp first) containing a project-specific .stamp/ seed —
+# config.yml + reviewers/. When omitted, a placeholder example reviewer is
+# seeded.
+#
 set -e
 
-if [ $# -ne 1 ]; then
-  echo "usage: new-stamp-repo <name>" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+  echo "usage: new-stamp-repo <name> [<seed-stamp-dir>]" >&2
   exit 2
 fi
 
 NAME="$1"
+SEED_DIR="${2:-}"
 REPO="/srv/git/${NAME}.git"
 # The setup-repo.sh script auto-discovers post-receive.cjs alongside
 # the pre-receive path, so we pass the .cjs form here to enable it.
@@ -34,4 +40,8 @@ if [ ! -f "$OPERATOR_KEY" ]; then
   exit 1
 fi
 
-exec /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY"
+if [ -n "$SEED_DIR" ]; then
+  exec /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" "$SEED_DIR"
+else
+  exec /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY"
+fi
