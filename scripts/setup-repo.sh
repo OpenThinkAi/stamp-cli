@@ -6,36 +6,52 @@
 # It:
 #   1. Creates a bare repo
 #   2. Installs the stamp-verify pre-receive hook
-#   3. Seeds an initial commit with .stamp/config.yml + trusted key + example reviewer
+#   3. Seeds an initial commit with .stamp/config.yml + trusted key + reviewer(s)
 #
 # Because the seed commit is written by local git operations (not a push),
 # it bypasses the hook — which is exactly what DESIGN.md "Bootstrap" requires.
 # After this, every subsequent push is verified normally.
 #
 # Usage:
-#   setup-repo.sh <repo-dir> <hook-script> <trusted-pub-key>
+#   setup-repo.sh <repo-dir> <hook-script> <trusted-pub-key> [<seed-stamp-dir>]
 #
-# Example:
+# Example (default placeholder seed):
 #   setup-repo.sh /srv/git/myproject.git \
 #                 /path/to/stamp-cli/dist/hooks/pre-receive.cjs \
 #                 ~/.stamp/keys/ed25519.pub
+#
+# Example (project-specific seed — operator brings the real reviewers):
+#   setup-repo.sh /srv/git/myproject.git \
+#                 /path/to/stamp-cli/dist/hooks/pre-receive.cjs \
+#                 ~/.stamp/keys/ed25519.pub \
+#                 /tmp/myproject-stamp-seed
 #
 # Arguments:
 #   <repo-dir>         Path where the bare repo will be created
 #   <hook-script>      Path to the stamp-verify hook (dist/hooks/pre-receive.js)
 #   <trusted-pub-key>  Path to an Ed25519 public key PEM file — the first
 #                      trusted signer for this repo
+#   <seed-stamp-dir>   Optional. Path to a directory whose contents will be
+#                      copied into the seed commit's `.stamp/` directory. Must
+#                      contain at minimum `config.yml` and `reviewers/` (with
+#                      at least one prompt file matching what config.yml
+#                      requires). When omitted, a placeholder example reviewer
+#                      is seeded — fine for trying stamp out, but you'll need
+#                      to swap it for project-specific reviewers later, which
+#                      is a fiddly process (see DESIGN.md). Bringing your own
+#                      seed avoids that swap.
 #
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <repo-dir> <hook-script> <trusted-pub-key>" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "usage: $0 <repo-dir> <hook-script> <trusted-pub-key> [<seed-stamp-dir>]" >&2
   exit 2
 fi
 
 REPO_DIR="$1"
 HOOK_SCRIPT="$2"
 PUB_KEY="$3"
+SEED_DIR="${4:-}"
 
 if [[ -e "$REPO_DIR" ]]; then
   echo "error: $REPO_DIR already exists" >&2
@@ -48,6 +64,20 @@ fi
 if [[ ! -f "$PUB_KEY" ]]; then
   echo "error: public key not found at $PUB_KEY" >&2
   exit 1
+fi
+if [[ -n "$SEED_DIR" ]]; then
+  if [[ ! -d "$SEED_DIR" ]]; then
+    echo "error: seed dir not found at $SEED_DIR" >&2
+    exit 1
+  fi
+  if [[ ! -f "$SEED_DIR/config.yml" ]]; then
+    echo "error: seed dir missing config.yml at $SEED_DIR/config.yml" >&2
+    exit 1
+  fi
+  if [[ ! -d "$SEED_DIR/reviewers" ]]; then
+    echo "error: seed dir missing reviewers/ at $SEED_DIR/reviewers" >&2
+    exit 1
+  fi
 fi
 
 # Compute the SHA-256 fingerprint of the public key so we can name the trust file
@@ -81,7 +111,15 @@ git config user.name "stamp-setup"
 
 mkdir -p .stamp/reviewers .stamp/trusted-keys
 
-cat > .stamp/config.yml <<'EOF'
+if [[ -n "$SEED_DIR" ]]; then
+  echo "→ using project-specific seed from $SEED_DIR"
+  cp "$SEED_DIR/config.yml" .stamp/config.yml
+  cp -R "$SEED_DIR/reviewers/." .stamp/reviewers/
+  if [[ -f "$SEED_DIR/mirror.yml" ]]; then
+    cp "$SEED_DIR/mirror.yml" .stamp/mirror.yml
+  fi
+else
+  cat > .stamp/config.yml <<'EOF'
 branches:
   main:
     required:
@@ -91,7 +129,7 @@ reviewers:
     prompt: .stamp/reviewers/example.md
 EOF
 
-cat > .stamp/reviewers/example.md <<'EOF'
+  cat > .stamp/reviewers/example.md <<'EOF'
 # Example Reviewer
 
 Placeholder reviewer prompt. Replace with the real reviewer instructions
@@ -101,6 +139,7 @@ for your project. Must end with a line of the form:
 
 Options: approved | changes_requested | denied
 EOF
+fi
 
 cp "$PUB_KEY" ".stamp/trusted-keys/${FP}.pub"
 
