@@ -72,6 +72,30 @@ export function commitMessage(sha: string, cwd: string): string {
   return git(["show", "-s", "--format=%B", sha], cwd);
 }
 
+/**
+ * Read a file's contents from a specific git tree (commit / tag / branch /
+ * tree-ish). Wraps `git show <ref>:<path>`. Throws via runGit's stderr-
+ * capturing path if the file doesn't exist at that ref.
+ *
+ * Used by `stamp review` and `stamp merge` to source reviewer config +
+ * prompts from the merge-base tree (rather than the working tree), which is
+ * the security boundary that prevents a feature branch from reviewing
+ * itself with a reviewer prompt it just modified.
+ */
+export function showAtRef(ref: string, path: string, cwd: string): string {
+  return runGit(["show", `${ref}:${path}`], cwd);
+}
+
+/**
+ * List the file paths that differ between two refs (the diff's affected
+ * file set). Used by stamp merge's defense-in-depth check that refuses to
+ * sign when a required reviewer's own prompt was modified in this diff.
+ */
+export function changedFiles(baseRef: string, headRef: string, cwd: string): string[] {
+  const out = runGit(["diff", "--name-only", `${baseRef}...${headRef}`], cwd);
+  return out.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
 export function commitSummary(sha: string, cwd: string): CommitSummary {
   const commits = firstParentCommits(sha, 1, cwd);
   if (commits.length === 0) {

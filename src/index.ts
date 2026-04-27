@@ -154,7 +154,7 @@ program
 program
   .command("review")
   .description(
-    "run configured reviewer(s) against a diff. Exits 3 on lock-file drift (distinct from exit 1 for reviewer rejections).",
+    "run configured reviewer(s) against a diff. Reviewer config + prompts are sourced from the merge-base tree (security: prevents feature-branch self-review). For lock-file drift checks, use `stamp reviewers verify` (which exits 3 on drift).",
   )
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")
