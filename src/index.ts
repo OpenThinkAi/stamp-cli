@@ -60,6 +60,10 @@ program
     "skip creating or updating AGENTS.md at the repo root",
   )
   .option(
+    "--no-claude-md",
+    "skip creating or updating CLAUDE.md at the repo root (CLAUDE.md is auto-loaded by Claude Code)",
+  )
+  .option(
     "--mode <mode>",
     "deployment mode: 'server-gated' (origin is a stamp server, gate is enforced) or 'local-only' (no server, advisory). Auto-detected from the configured remote if omitted.",
   )
@@ -72,6 +76,7 @@ program
     (opts: {
       minimal?: boolean;
       agentsMd: boolean;
+      claudeMd: boolean;
       mode?: string;
       remote: string;
     }) => {
@@ -89,6 +94,7 @@ program
         runInit({
           minimal: opts.minimal,
           agentsMd: opts.agentsMd,
+          claudeMd: opts.claudeMd,
           mode,
           remote: opts.remote,
         });
@@ -121,6 +127,10 @@ program
     "--no-agents-md",
     "skip creating or updating AGENTS.md at the repo root",
   )
+  .option(
+    "--no-claude-md",
+    "skip creating or updating CLAUDE.md at the repo root (CLAUDE.md is auto-loaded by Claude Code)",
+  )
   .action(
     async (opts: {
       reviewers?: string;
@@ -130,6 +140,7 @@ program
       dryRun?: boolean;
       force?: boolean;
       agentsMd: boolean;
+      claudeMd: boolean;
     }) => {
       try {
         await runBootstrap({
@@ -142,6 +153,7 @@ program
           dryRun: opts.dryRun,
           force: opts.force,
           agentsMd: opts.agentsMd,
+          claudeMd: opts.claudeMd,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

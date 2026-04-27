@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ensureAgentsMd, type AgentsMdMode } from "../lib/agentsMd.js";
+import { ensureAgentsMd, ensureClaudeMd, type AgentsMdMode } from "../lib/agentsMd.js";
 import { classifyRemote, describeShape } from "../lib/remote.js";
 import {
   DEFAULT_CONFIG,
@@ -40,6 +40,14 @@ export interface InitOptions {
    * projects that maintain their own AGENTS.md discipline.
    */
   agentsMd?: boolean;
+  /**
+   * When false, skip creating or updating CLAUDE.md at the repo root.
+   * Default true. CLAUDE.md is auto-loaded by Claude Code into the model's
+   * context; AGENTS.md generally is not, so the CLAUDE.md write exists to
+   * make sure a Claude-Code agent that never explicitly opens AGENTS.md
+   * still sees the "use stamp flow, don't push directly" rule.
+   */
+  claudeMd?: boolean;
   /**
    * Deployment shape this repo is being initialized for.
    *
@@ -139,6 +147,8 @@ export function runInit(opts: InitOptions = {}): void {
     opts.agentsMd === false
       ? "skipped"
       : ensureAgentsMd(repoRoot, effectiveMode);
+  const claudeMdAction =
+    opts.claudeMd === false ? "skipped" : ensureClaudeMd(repoRoot);
 
   const scaffoldOrSync = alreadyHasConfig ? "sync" : "scaffold";
   console.log(
@@ -164,6 +174,11 @@ export function runInit(opts: InitOptions = {}): void {
   if (agentsMdAction !== "unchanged" && agentsMdAction !== "skipped") {
     console.log(
       `  AGENTS.md:   ${agentsMdAction} at repo root (${effectiveMode} guidance)`,
+    );
+  }
+  if (claudeMdAction !== "unchanged" && claudeMdAction !== "skipped") {
+    console.log(
+      `  CLAUDE.md:   ${claudeMdAction} at repo root (auto-loaded by Claude Code)`,
     );
   }
   console.log();
@@ -224,6 +239,30 @@ export function runInit(opts: InitOptions = {}): void {
     console.log(
       "Your key is already in .stamp/trusted-keys/. You're ready to review + merge.",
     );
+  }
+
+  // Loud agent-imperative footer. Prints regardless of mode — both
+  // server-gated (where it's redundant but harmless) and local-only (where
+  // the agent IS the enforcement and easily skips the rule by accident).
+  // The most common failure mode is an agent running `stamp init` and then
+  // immediately doing `git commit && git push origin main` because nothing
+  // told it not to.
+  if (agentsMdAction !== "skipped" || claudeMdAction !== "skipped") {
+    console.log();
+    const bar = "─".repeat(72);
+    console.log(bar);
+    console.log("note: AI agents — read AGENTS.md at the repo root before any git command.");
+    console.log();
+    console.log("This repo is stamp-protected. Direct `git commit` to main and direct");
+    console.log("`git push origin main` are violations of the process, even when the");
+    console.log("remote accepts them. The required flow is:");
+    console.log();
+    console.log("  git checkout -b feature; <edit/commit on feature>;");
+    console.log("  stamp review --diff main..feature; stamp merge feature --into main;");
+    console.log("  git push origin main  (or `stamp push main` if origin is a stamp server).");
+    console.log();
+    console.log("Full reference: AGENTS.md (and CLAUDE.md) at the repo root.");
+    console.log(bar);
   }
 }
 
