@@ -35,4 +35,9 @@ read it before any git command. It covers the mode (server-gated vs.
 local-only), what NOT to do, where things live, and how to recover when stamp
 blocks you.
 
+**One exception:** the very first commit that ADDS `.stamp/` + `AGENTS.md` +
+`CLAUDE.md` to a fresh repo is allowed to land directly on the current branch
+(there's nothing to review against). Recent `stamp init` runs do this commit
+automatically. Every subsequent change goes through the stamp flow.
+
 <!-- stamp:claude:end -->

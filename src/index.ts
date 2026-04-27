@@ -64,6 +64,14 @@ program
     "skip creating or updating CLAUDE.md at the repo root (CLAUDE.md is auto-loaded by Claude Code)",
   )
   .option(
+    "--no-bootstrap-commit",
+    "skip the auto bootstrap commit (which adds .stamp/ + AGENTS.md + CLAUDE.md to a fresh repo and pushes)",
+  )
+  .option(
+    "--no-gh-protect",
+    "skip auto-applying the GitHub Ruleset to lock the mirror repo (forge-direct github.com origins only; requires `gh`)",
+  )
+  .option(
     "--mode <mode>",
     "deployment mode: 'server-gated' (origin is a stamp server, gate is enforced) or 'local-only' (no server, advisory). Auto-detected from the configured remote if omitted.",
   )
@@ -77,6 +85,8 @@ program
       minimal?: boolean;
       agentsMd: boolean;
       claudeMd: boolean;
+      bootstrapCommit: boolean;
+      ghProtect: boolean;
       mode?: string;
       remote: string;
     }) => {
@@ -95,6 +105,8 @@ program
           minimal: opts.minimal,
           agentsMd: opts.agentsMd,
           claudeMd: opts.claudeMd,
+          bootstrapCommit: opts.bootstrapCommit,
+          ghProtect: opts.ghProtect,
           mode,
           remote: opts.remote,
         });

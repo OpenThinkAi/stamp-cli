@@ -185,6 +185,18 @@ commit invalidates prior approvals.
   so it doesn't matter." The mode describes who enforces the gate
   (server vs. agent discipline), not whether the gate exists. **The gate exists.**
 
+### The one exception: the bootstrap commit
+
+When `stamp init` runs on a repo that doesn't have stamp installed yet, the
+commit that ADDS `.stamp/` + `AGENTS.md` + `CLAUDE.md` is a chicken-and-egg
+case — there is no prior trusted state to review against, so `stamp review`
+has no meaningful base. That single commit is allowed to land directly on the
+current branch. Recent versions of stamp-cli handle this commit automatically
+inside `stamp init`; if you're working with an older version, make exactly
+that one commit + push by hand and then go through the stamp flow for
+everything afterward. **This exception is for the literal first stamp commit
+only**, not for any subsequent change to `.stamp/` or any other code.
+
 ### How enforcement works here (and why you have to be the enforcer)
 
 This repo's origin is a public forge (GitHub / GitLab / etc.) directly, not a
