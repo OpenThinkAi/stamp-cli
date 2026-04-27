@@ -25,6 +25,32 @@ export const STAMP_END = "<!-- stamp:end -->";
 export type AgentsMdMode = "server-gated" | "local-only";
 
 /**
+ * Mode-agnostic guidance about when to stop iterating on stamp review. Same
+ * dynamic (LLM cost, amend churn, SHA-bound verdict refresh) applies to both
+ * server-gated and local-only repos, so the text is shared rather than
+ * duplicated. Concatenated into both section bodies below.
+ */
+const REVIEW_LOOP_HEURISTIC = `### Knowing when to stop the review loop (diminishing returns)
+
+Each \`stamp review\` run is non-trivial — reviewer LLM calls, your context, and amend
+churn to fix what they flag. After 2–3 rounds the value tapers. A useful pattern:
+
+- **Round 1** catches structure (real bugs, missing rollback, wrong source of truth).
+- **Round 2** catches consistency (code dup, conflicting defaults, broken back-compat).
+- **Round 3** typically surfaces only stylistic polish (comma placement, comment
+  wording, JSDoc rot — things no end user will ever notice).
+
+**Heuristic:** if every reviewer's request includes phrases like "minor", "nit",
+"not blocking", or "cosmetic", apply the fixes and re-run review **only because
+verdicts are SHA-bound and need refreshing** — then merge. Don't iterate further looking
+for more issues. By round 4 you're paying full LLM cost for marginal value, and reviewers
+will sometimes invent new categories of nit just to fill the response.
+
+Exception: if any reviewer returns \`denied\` (not \`changes_requested\`), the change has a
+structural problem regardless of round number — keep iterating until the denial is
+addressed or the design is reconsidered.`;
+
+/**
  * Server-gated section body. Speaks to a future agent dropped into a repo
  * whose origin is a stamp server with the pre-receive hook installed. Names
  * the gate model, the canonical loop, and the concrete things NOT to do.
@@ -98,6 +124,8 @@ Common cases:
 - \`remote: stamp-verify: rejecting refs/heads/main\` — server hook caught a bypass attempt
 - \`required by rule but not defined\` — chicken-and-egg on a reviewer config change; see the
   troubleshooting entry, or use \`stamp bootstrap\` for the placeholder→real swap case
+
+${REVIEW_LOOP_HEURISTIC}
 `;
 
 /**
@@ -171,6 +199,8 @@ server. See [docs/quickstart-server.md](./docs/quickstart-server.md).
 - \`.stamp/reviewers/*.md\` — reviewer prompt files
 - \`.stamp/trusted-keys/*.pub\` — Ed25519 public keys (would be enforced by a server hook if one existed)
 - \`~/.stamp/keys/ed25519{,.pub}\` — your local signing keypair
+
+${REVIEW_LOOP_HEURISTIC}
 `;
 
 
