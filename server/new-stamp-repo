@@ -40,8 +40,32 @@ if [ ! -f "$OPERATOR_KEY" ]; then
   exit 1
 fi
 
+# Suppress setup-repo.sh's own next-steps — it would print a `git clone <local
+# path>` line that's wrong over SSH. We print a server-aware footer below.
+export STAMP_SETUP_QUIET_NEXT_STEPS=1
+
 if [ -n "$SEED_DIR" ]; then
-  exec /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" "$SEED_DIR"
+  /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" "$SEED_DIR"
 else
-  exec /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY"
+  /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY"
+fi
+
+# SSH client-aware next steps. We don't know the exact host the operator used
+# to SSH in (could be Railway TCP proxy, custom CNAME, localhost, etc.), so
+# show <stamp-host> as a placeholder the user can substitute.
+echo
+echo "Next steps (substitute <stamp-host> with the SSH host you connected to):"
+echo "  1. Clone:        git clone ssh://git@<stamp-host>${REPO}"
+echo "  2. cd into the clone"
+if [ -z "$SEED_DIR" ]; then
+  echo "  3. Run:          stamp bootstrap"
+  echo
+  echo "     Installs real reviewers (security/standards/product) and replaces"
+  echo "     the placeholder in one command. \`stamp bootstrap --help\` for"
+  echo "     options. To skip this step on future repos, scp your .stamp/"
+  echo "     seed dir to /tmp/seed on the server and re-run with:"
+  echo "       ssh git@<stamp-host> new-stamp-repo <name> /tmp/seed"
+else
+  echo "  3. Customize .stamp/reviewers/ as needed, then start the normal"
+  echo "     stamp review/merge cycle."
 fi

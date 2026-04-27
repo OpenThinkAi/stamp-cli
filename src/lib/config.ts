@@ -263,48 +263,46 @@ export const MINIMAL_CONFIG: StampConfig = {
   },
 };
 
-export const EXAMPLE_REVIEWER_PROMPT = `# example reviewer
+export const EXAMPLE_REVIEWER_PROMPT = `# example reviewer (bootstrap only — auto-approves everything)
 
-This is a placeholder reviewer. Replace its body with actual instructions for the
-reviewer you want. For guidance on writing effective reviewer prompts — structure,
-calibration, verdict thresholds — see stamp-cli's
-\`docs/personas.md\` (https://github.com/OpenThinkAi/stamp-cli/blob/main/docs/personas.md).
+> **WARNING — DO NOT use this reviewer for real code review.** It is a
+> deterministic auto-approver intended only to land your *real* reviewers
+> via the \`stamp bootstrap\` flow (or the manual placeholder→real swap
+> documented in \`docs/troubleshooting.md\`). Once your real reviewers are
+> in place, remove this one (or leave it defined-but-unrequired forever).
+>
+> If you reached this prompt via \`stamp init --minimal\`, **replace the
+> entire body below** with your actual reviewer instructions before
+> running any meaningful review.
 
-Three canonical personas to start from:
+## Instructions to the reviewer agent
 
-- **security** — secrets, injection, dependency risk, exfiltration surfaces
-- **standards** — code quality, idiom, over-engineering pushback, test discipline
-- **product** — user-facing impact, UX, breaking changes, interface consistency
-
-Each should declare its scope, what it does NOT check (handing off to the other
-reviewers), verdict criteria, and a tone directive. Parallel execution means
-having three focused reviewers is not meaningfully slower than one generic reviewer.
-
-## Output format (required — do not change)
-
-Every reviewer MUST end its response with exactly one final line of this form:
+You are a bootstrap-only placeholder reviewer. **Do not analyze the diff.**
+Do not read files. Do not comment on the code. Output exactly the following
+two-line response, verbatim, and nothing else:
 
 \`\`\`
+Bootstrap placeholder reviewer — approving unconditionally so real reviewers can be installed. Replace this reviewer before relying on it for actual code review.
 VERDICT: approved
 \`\`\`
 
-Use one of:
+That is the entire response. No preamble, no analysis, no caveats beyond
+the line above. The \`VERDICT: approved\` line MUST be the final line.
 
-- \`approved\` — nothing worth blocking on in this reviewer's concern
-- \`changes_requested\` — specific fixable issues; list them with file:line refs
-- \`denied\` — the approach itself is wrong; the author should rethink, not tweak
+## Why this exists
 
-Exactly one \`VERDICT:\` line, at the end of your response. Nothing after it.
+Every stamp-protected repo needs at least one reviewer that can approve
+the very first merge — the merge that installs the *real* reviewers.
+That's a chicken-and-egg problem: real reviewers can't approve their own
+introduction. This placeholder solves it by being trivially approvable,
+and is meant to be retired (or kept defined-but-unrequired) immediately
+after.
 
----
-
-## Placeholder body (replace this)
-
-You are a placeholder reviewer. Read the provided diff. Return \`approved\` if it
-looks fine, \`changes_requested\` with a list if you see fixable problems, or
-\`denied\` only if the entire approach seems wrong.
-
-This prompt is deliberately generic. Customize it before shipping.
+For guidance on writing real reviewer prompts — structure, calibration,
+verdict thresholds — see
+https://github.com/OpenThinkAi/stamp-cli/blob/main/docs/personas.md.
+\`stamp init\` (without \`--minimal\`) scaffolds three calibrated starter
+personas (security / standards / product) you can customize.
 `;
 
 export const DEFAULT_SECURITY_PROMPT = `# security reviewer

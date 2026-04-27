@@ -130,14 +130,35 @@ reviewers:
 EOF
 
   cat > .stamp/reviewers/example.md <<'EOF'
-# Example Reviewer
+# example reviewer (bootstrap only — auto-approves everything)
 
-Placeholder reviewer prompt. Replace with the real reviewer instructions
-for your project. Must end with a line of the form:
+> **WARNING — DO NOT use this reviewer for real code review.** It is a
+> deterministic auto-approver intended only to land your *real* reviewers
+> via the `stamp bootstrap` flow on first clone. Once your real reviewers
+> are in place, remove this one (or leave it defined-but-unrequired
+> forever).
 
-    VERDICT: approved
+## Instructions to the reviewer agent
 
-Options: approved | changes_requested | denied
+You are a bootstrap-only placeholder reviewer. **Do not analyze the diff.**
+Do not read files. Do not comment on the code. Output exactly the following
+two-line response, verbatim, and nothing else:
+
+```
+Bootstrap placeholder reviewer — approving unconditionally so real reviewers can be installed. Replace this reviewer before relying on it for actual code review.
+VERDICT: approved
+```
+
+That is the entire response. No preamble, no analysis, no caveats beyond
+the line above. The `VERDICT: approved` line MUST be the final line.
+
+## Why this exists
+
+Every stamp-protected repo needs at least one reviewer that can approve
+the very first merge — the merge that installs the *real* reviewers.
+This placeholder solves that bootstrap problem and is meant to be retired
+(or kept defined-but-unrequired) immediately after. Run `stamp bootstrap`
+on first clone to land real reviewers automatically.
 EOF
 fi
 
@@ -160,7 +181,15 @@ if [[ -f "$POST_HOOK" ]]; then
   install -m 0755 "$POST_HOOK" "$REPO_DIR/hooks/post-receive"
 fi
 
+USED_PLACEHOLDER_SEED=0
+if [[ -z "$SEED_DIR" ]]; then
+  USED_PLACEHOLDER_SEED=1
+fi
+
 echo "✓ repo ready"
+# When STAMP_SETUP_QUIET_NEXT_STEPS=1, callers (e.g. server/new-stamp-repo)
+# suppress the next-steps section because they want to print their own
+# server-aware version with an ssh://... clone URL.
 echo
 echo "  bare repo:        $REPO_DIR"
 echo "  pre-receive:      $REPO_DIR/hooks/pre-receive"
@@ -169,6 +198,28 @@ if [[ -f "$REPO_DIR/hooks/post-receive" ]]; then
 fi
 echo "  seeded branch:    main"
 echo "  trusted key:      ${FP}.pub"
-echo
-echo "Clone the repo and start pushing:"
-echo "  git clone $REPO_DIR"
+if [[ $USED_PLACEHOLDER_SEED -eq 1 ]]; then
+  echo "  reviewer seed:    placeholder \`example\` (auto-approves)"
+else
+  echo "  reviewer seed:    $SEED_DIR"
+fi
+if [[ "${STAMP_SETUP_QUIET_NEXT_STEPS:-0}" != "1" ]]; then
+  echo
+  echo "Next steps:"
+  echo "  1. Clone:        git clone $REPO_DIR"
+  echo "  2. cd into the clone"
+  if [[ $USED_PLACEHOLDER_SEED -eq 1 ]]; then
+    echo "  3. Run:          stamp bootstrap"
+    echo
+    echo "     This installs real reviewers (security/standards/product) in one"
+    echo "     command and replaces the placeholder. Run \`stamp bootstrap --help\`"
+    echo "     for options including \`--from <dir>\` to use your own reviewer set."
+    echo
+    echo "     To skip the bootstrap dance entirely on future repos, re-run this"
+    echo "     script with a seed-dir arg (4th positional) containing your real"
+    echo "     .stamp/ config + reviewers/."
+  else
+    echo "  3. Customize .stamp/reviewers/ to fit your project, then start the"
+    echo "     normal stamp review/merge cycle."
+  fi
+fi

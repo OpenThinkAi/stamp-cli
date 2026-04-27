@@ -1,9 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
-import { resolveDiff } from "../lib/git.js";
+import { resolveDiff, runGit } from "../lib/git.js";
 import { ensureUserKeypair } from "../lib/keys.js";
 import {
   findRepoRoot,
@@ -135,124 +134,137 @@ export function runMerge(opts: MergeOptions): void {
     );
   }
 
-  // 5. Run required checks on the POST-merge tree. This is the state that
-  //    would land on the remote, so it's the correct thing to verify. If a
-  //    check fails, roll back the merge commit and abort.
+  // From here on the working tree contains the merge commit. Any failure —
+  // checks, post-merge config validation, missing reviewer definitions,
+  // signing — must roll back HEAD~1 so the user is left exactly where they
+  // started. Without this wrapper, partial failures left a stale non-stamp
+  // merge commit on the target branch.
   //
-  //    Critically: we re-load config from the working tree NOW (post-merge)
-  //    rather than using the pre-merge `rule`. If the feature branch added
-  //    new required_checks, the merge commit's own tree declares them; the
-  //    attestation must cover them or `stamp verify` (which reads the merge
-  //    commit's tree) will correctly reject. Using pre-merge `rule` here
-  //    was the bug reported in issue #1 — the merge succeeded but produced
-  //    an attestation that its own commit's config declared invalid.
-  //
-  //    Gate check (required reviewers) above still uses pre-merge `rule`
-  //    because adding a new *reviewer* is a different bootstrap problem
-  //    (chicken-and-egg: the new reviewer has no prior verdict for this
-  //    diff). That case still needs the documented two-phase workaround.
-  const postMergeConfig = loadConfig(stampConfigFile(repoRoot));
-  const postMergeRule = postMergeConfig.branches[opts.into];
-  if (!postMergeRule) {
-    throw new Error(
-      `.stamp/config.yml in the merged tree has no rule for branch "${opts.into}" — ` +
-        `the feature branch dropped 'branches.${opts.into}' from .stamp/config.yml. ` +
-        `Restore it on the feature branch before merging, or target a different branch with --into.`,
-    );
-  }
+  // mergeSha + checkAttestations are hoisted so the success-summary code
+  // after the try-block can read them once the post-merge phase succeeds.
+  let mergeSha: string;
   const checkAttestations: CheckAttestation[] = [];
-  const requiredChecks = postMergeRule.required_checks ?? [];
-  if (requiredChecks.length > 0) {
-    console.log(
-      `running ${requiredChecks.length} required check${requiredChecks.length === 1 ? "" : "s"} against merged tree: ${requiredChecks.map((c) => c.name).join(", ")}`,
-    );
-    const results = runChecks(requiredChecks, repoRoot);
-    for (const r of results) {
-      const mark = r.exit_code === 0 ? "✓" : "✗";
+
+  try {
+    // 5. Re-load config from the working tree NOW (post-merge) rather than
+    //    using the pre-merge `rule`. If the feature branch added new
+    //    required_checks, the merge commit's own tree declares them; the
+    //    attestation must cover them or `stamp verify` (which reads the
+    //    merge commit's tree) will correctly reject.
+    //
+    //    Gate check (required reviewers) above still uses pre-merge `rule`
+    //    because adding a new *reviewer* is a different bootstrap problem
+    //    (chicken-and-egg: the new reviewer has no prior verdict for this
+    //    diff). That case still needs the documented two-phase workaround
+    //    (or `stamp bootstrap` for the placeholder→real swap).
+    const postMergeConfig = loadConfig(stampConfigFile(repoRoot));
+    const postMergeRule = postMergeConfig.branches[opts.into];
+    if (!postMergeRule) {
+      throw new Error(
+        `.stamp/config.yml in the merged tree has no rule for branch "${opts.into}" — ` +
+          `the feature branch dropped 'branches.${opts.into}' from .stamp/config.yml. ` +
+          `Restore it on the feature branch before merging, or target a different branch with --into.`,
+      );
+    }
+    const requiredChecks = postMergeRule.required_checks ?? [];
+    if (requiredChecks.length > 0) {
       console.log(
-        `  ${mark} ${r.name.padEnd(16)} exit=${r.exit_code}  ${r.duration_ms}ms`,
+        `running ${requiredChecks.length} required check${requiredChecks.length === 1 ? "" : "s"} against merged tree: ${requiredChecks.map((c) => c.name).join(", ")}`,
       );
-      checkAttestations.push({
-        name: r.name,
-        command: r.command,
-        exit_code: r.exit_code,
-        output_sha: r.output_sha,
-      });
-    }
-    if (!allPassed(results)) {
-      const failed = results.filter((r) => r.exit_code !== 0);
-      const bar = "─".repeat(72);
-      for (const f of failed) {
-        console.error(bar);
-        console.error(`FAILED: ${f.name} (${f.command})`);
-        console.error(bar);
-        if (f.tail) console.error(f.tail);
+      const results = runChecks(requiredChecks, repoRoot);
+      for (const r of results) {
+        const mark = r.exit_code === 0 ? "✓" : "✗";
+        console.log(
+          `  ${mark} ${r.name.padEnd(16)} exit=${r.exit_code}  ${r.duration_ms}ms`,
+        );
+        checkAttestations.push({
+          name: r.name,
+          command: r.command,
+          exit_code: r.exit_code,
+          output_sha: r.output_sha,
+        });
       }
-      console.error(bar);
-
-      // Roll back the merge commit so the repo ends up exactly as it was
-      // before `stamp merge` was called.
-      try {
-        git(["reset", "--hard", "HEAD~1"], repoRoot);
-      } catch {
-        // Best-effort; caller can recover manually if this somehow fails.
+      if (!allPassed(results)) {
+        const failed = results.filter((r) => r.exit_code !== 0);
+        const bar = "─".repeat(72);
+        for (const f of failed) {
+          console.error(bar);
+          console.error(`FAILED: ${f.name} (${f.command})`);
+          console.error(bar);
+          if (f.tail) console.error(f.tail);
+        }
+        console.error(bar);
+        throw new Error(
+          `pre-merge checks failed: ${failed.map((f) => f.name).join(", ")}. Merge rolled back. Fix and re-run.`,
+        );
       }
-
-      throw new Error(
-        `pre-merge checks failed: ${failed.map((f) => f.name).join(", ")}. Merge rolled back. Fix and re-run.`,
-      );
     }
-  }
 
-  // 6a. Compute per-reviewer prompt/tools/mcp hashes from the merge commit's
-  //     own tree. Reads via `git show HEAD:<path>` so merge-time bytes are
-  //     identical to what verifiers see via the same command — avoids EOL /
-  //     .gitattributes divergence between working directory and committed
-  //     blob. Config is also read from HEAD so we see the merged reviewers
-  //     section, in case the feature branch modified .stamp/config.yml.
-  //
-  //     If a reviewer has a committed lock file, carry its (source, ref)
-  //     into the attestation as reviewer_source — lets auditors ask "was
-  //     this reviewer fetched from an approved manifest?" without trusting
-  //     the operator's local state.
-  const committedConfigYaml = git(["show", "HEAD:.stamp/config.yml"], repoRoot);
-  const committedReviewers = readReviewersFromYaml(committedConfigYaml);
-  approvals = approvals.map((a) => {
-    const def = committedReviewers[a.reviewer];
-    if (!def) {
-      throw new Error(
-        `reviewer "${a.reviewer}" is required by branch rule "${opts.into}" but not defined in the merged .stamp/config.yml`,
-      );
-    }
-    const promptText = git(["show", `HEAD:${def.prompt}`], repoRoot);
-    const source = readReviewerSource(a.reviewer, repoRoot);
-    return {
-      ...a,
-      prompt_sha256: hashPromptBytes(Buffer.from(promptText, "utf8")),
-      tools_sha256: hashTools(def.tools),
-      mcp_sha256: hashMcpServers(def.mcp_servers),
-      ...(source ? { reviewer_source: source } : {}),
+    // 6a. Compute per-reviewer prompt/tools/mcp hashes from the merge commit's
+    //     own tree. Reads via `git show HEAD:<path>` so merge-time bytes are
+    //     identical to what verifiers see via the same command — avoids EOL /
+    //     .gitattributes divergence between working directory and committed
+    //     blob. Config is also read from HEAD so we see the merged reviewers
+    //     section, in case the feature branch modified .stamp/config.yml.
+    //
+    //     If a reviewer has a committed lock file, carry its (source, ref)
+    //     into the attestation as reviewer_source — lets auditors ask "was
+    //     this reviewer fetched from an approved manifest?" without trusting
+    //     the operator's local state.
+    const committedConfigYaml = git(["show", "HEAD:.stamp/config.yml"], repoRoot);
+    const committedReviewers = readReviewersFromYaml(committedConfigYaml);
+    approvals = approvals.map((a) => {
+      const def = committedReviewers[a.reviewer];
+      if (!def) {
+        throw new Error(
+          `reviewer "${a.reviewer}" is required by branch rule "${opts.into}" ` +
+            `but not defined in the merged .stamp/config.yml. ` +
+            `If you removed it from \`reviewers:\` while it was still in \`required:\`, ` +
+            `keep it defined-but-unrequired (or use \`stamp bootstrap\` for the placeholder→real swap). ` +
+            `Merge rolled back.`,
+        );
+      }
+      const promptText = git(["show", `HEAD:${def.prompt}`], repoRoot);
+      const source = readReviewerSource(a.reviewer, repoRoot);
+      return {
+        ...a,
+        prompt_sha256: hashPromptBytes(Buffer.from(promptText, "utf8")),
+        tools_sha256: hashTools(def.tools),
+        mcp_sha256: hashMcpServers(def.mcp_servers),
+        ...(source ? { reviewer_source: source } : {}),
+      };
+    });
+
+    // 6b. Build payload, sign, amend the merge commit with trailers.
+    const payload: AttestationPayload = {
+      schema_version: CURRENT_PAYLOAD_VERSION,
+      base_sha: resolved.base_sha,
+      head_sha: resolved.head_sha,
+      target_branch: opts.into,
+      approvals,
+      checks: checkAttestations,
+      signer_key_id: keypair.fingerprint,
     };
-  });
+    const payloadBytes = serializePayload(payload);
+    const signature = signBytes(keypair.privateKeyPem, payloadBytes);
+    const trailers = formatTrailers(payload, signature);
+    const fullMessage = `${title}\n\n${trailers}\n`;
 
-  // 6b. Build payload, sign, amend the merge commit with trailers.
-  const payload: AttestationPayload = {
-    schema_version: CURRENT_PAYLOAD_VERSION,
-    base_sha: resolved.base_sha,
-    head_sha: resolved.head_sha,
-    target_branch: opts.into,
-    approvals,
-    checks: checkAttestations,
-    signer_key_id: keypair.fingerprint,
-  };
-  const payloadBytes = serializePayload(payload);
-  const signature = signBytes(keypair.privateKeyPem, payloadBytes);
-  const trailers = formatTrailers(payload, signature);
-  const fullMessage = `${title}\n\n${trailers}\n`;
+    git(["commit", "--amend", "-m", fullMessage, "--no-edit"], repoRoot);
 
-  git(["commit", "--amend", "-m", fullMessage, "--no-edit"], repoRoot);
-
-  const mergeSha = git(["rev-parse", "HEAD"], repoRoot).trim();
+    mergeSha = git(["rev-parse", "HEAD"], repoRoot).trim();
+  } catch (err) {
+    // Roll back the merge commit so the repo ends up exactly as it was
+    // before `stamp merge` was called. Best-effort — if reset itself fails
+    // (extremely unlikely on a freshly-made HEAD~1), the original error
+    // still propagates; user can recover manually with `git reset --hard`.
+    try {
+      git(["reset", "--hard", "HEAD~1"], repoRoot);
+    } catch {
+      // best-effort; original throw below still surfaces the real cause
+    }
+    throw err;
+  }
 
   // 7. Report.
   const bar = "─".repeat(72);
@@ -303,16 +315,8 @@ function readReviewerSource(
   return null;
 }
 
-function git(args: string[], cwd: string): string {
-  try {
-    return execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-    });
-  } catch (err) {
-    throw new Error(
-      `git ${args.join(" ")} failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-}
+// Local alias so the existing call sites stay terse. The actual implementation
+// (with stderr capture, etc.) lives in lib/git.ts as runGit() — shared with
+// commands/bootstrap.ts. Some readReviewerSource probes here are *expected* to
+// fail on missing paths; runGit's stderr capture stops those from leaking.
+const git = runGit;

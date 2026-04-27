@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ensureAgentsMd } from "../lib/agentsMd.js";
 import {
   DEFAULT_CONFIG,
   DEFAULT_PRODUCT_PROMPT,
@@ -31,6 +32,13 @@ export interface InitOptions {
    * (security / standards / product) and require all three.
    */
   minimal?: boolean;
+  /**
+   * When false, skip creating or updating AGENTS.md at the repo root.
+   * Default true (writes/refreshes the marker-delimited stamp section so a
+   * future agent dropped into the repo sees the gate model). Opt-out for
+   * projects that maintain their own AGENTS.md discipline.
+   */
+  agentsMd?: boolean;
 }
 
 export function runInit(opts: InitOptions = {}): void {
@@ -83,6 +91,15 @@ export function runInit(opts: InitOptions = {}): void {
   const db = openDb(stateDbPath);
   db.close();
 
+  // Ensure AGENTS.md carries the stamp guidance section unless the operator
+  // opted out with --no-agents-md. Default-on because cloned repos hit
+  // `stamp init` to set up their local keypair + state DB; that's also when
+  // an agent first lands here, so it's the right moment to make the gate
+  // visible. Marker-delimited write is non-destructive; user content outside
+  // the markers is preserved.
+  const agentsMdAction =
+    opts.agentsMd === false ? "skipped" : ensureAgentsMd(repoRoot);
+
   const mode = alreadyHasConfig ? "sync" : "scaffold";
   console.log(
     mode === "scaffold"
@@ -100,6 +117,9 @@ export function runInit(opts: InitOptions = {}): void {
   console.log(
     `  your key:    ${keypair.fingerprint} ${keyCreated ? "(generated)" : "(existing)"}`,
   );
+  if (agentsMdAction !== "unchanged" && agentsMdAction !== "skipped") {
+    console.log(`  AGENTS.md:   ${agentsMdAction} at repo root (with stamp-protected-repo guidance)`);
+  }
   console.log();
 
   if (mode === "scaffold") {

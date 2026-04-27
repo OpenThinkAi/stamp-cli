@@ -13,7 +13,7 @@ PR dashboard, no human comment threads in core. Just a CLI + a git hook.
 
 Part of the [OpenThink](https://openthink.dev) suite.
 
-**Docs:** [DESIGN](./DESIGN.md) (spec) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
+**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
 
 ## Install
 
@@ -32,10 +32,25 @@ run that produced the release:
 npm audit signatures
 ```
 
-## Quick start (local test)
+## Quick start
 
-This runs everything on one machine using a bare git repo on disk as the
-"remote". Good for learning the shape before deploying.
+**On a deployed stamp server (recommended).** If you've deployed the stamp
+server (see [`docs/quickstart-server.md`](./docs/quickstart-server.md) for the
+full Railway walkthrough), the from-zero flow is three commands:
+
+```sh
+ssh stamp new-stamp-repo myproject              # provision bare repo + hook
+git clone ssh://stamp/srv/git/myproject.git
+cd myproject && stamp bootstrap                  # install real reviewers + push
+```
+
+`stamp bootstrap` detects the freshly-provisioned placeholder state, scaffolds
+the three starter reviewers (security, standards, product), and lands them on
+`main` via a single signed merge that the server hook accepts. From there it's
+the normal review/merge cycle.
+
+**Local-only (no server).** Run everything on one machine using a bare git
+repo on disk as the "remote". Good for learning the shape before deploying.
 
 ```sh
 # Install + initialize a fresh project
@@ -104,7 +119,13 @@ See [`DESIGN.md`](./DESIGN.md) for the full spec and [`docs/ROADMAP.md`](./docs/
 **Core review cycle:**
 
 ```
-stamp init                                 # scaffold .stamp/ + keypair; idempotent
+stamp init                                 # scaffold .stamp/ + keypair; idempotent. Also ensures
+                                           #   AGENTS.md at repo root carries the stamp-protected-repo
+                                           #   guidance section (between <!-- stamp:begin --> markers
+                                           #   so user content is never overwritten).
+stamp bootstrap                            # one-shot: replace placeholder example reviewer
+                                           #   with real reviewers on a fresh server-provisioned
+                                           #   repo. See `stamp bootstrap --help`.
 stamp review --diff <revspec>              # run all configured reviewers in parallel
 stamp review --diff <revspec> --only <name> # run a single reviewer
 stamp status --diff <revspec>              # gate check; exit 0 if open, 1 if closed

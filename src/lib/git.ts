@@ -105,15 +105,33 @@ export function resolveDiff(revspec: string, cwd: string): ResolvedDiff {
   return { revspec, base_sha, head_sha, diff };
 }
 
-function git(args: string[], cwd: string): string {
+/**
+ * Shared git-shell helper used by every command that needs to run git
+ * subprocesses. Captures stderr (rather than inheriting it) so failures
+ * surface via the thrown message — no raw `fatal: ...` lines bleed onto
+ * the user's terminal alongside otherwise-successful output. Returns
+ * stdout as utf-8.
+ *
+ * Use this in command modules (commands/*.ts) instead of a local copy.
+ */
+export function runGit(args: string[], cwd: string): string {
   try {
     return execFileSync("git", args, {
       cwd,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024, // 64MB; big diffs happen
+      stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`git ${args.join(" ")} failed: ${message}`);
+    const stderr = (err as { stderr?: Buffer | string } | null)?.stderr;
+    const stderrText =
+      typeof stderr === "string" ? stderr : stderr?.toString("utf8") ?? "";
+    const base = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `git ${args.join(" ")} failed: ${stderrText.trim() || base}`,
+    );
   }
 }
+
+// Local alias so existing callers in this file keep their short name.
+const git = runGit;
