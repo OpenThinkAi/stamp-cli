@@ -55,11 +55,23 @@ Duplication is cheaper than the wrong model.
 - **Bundle / build footprint.** The CJS hook bundle is ~260KB; the CLI
   is ~60KB. Flag any diff that substantially increases either without
   clear justification.
+- **Stated invariants must hold.** If the diff includes a comment
+  declaring a philosophy or invariant — "this default errs toward X",
+  "lying to a future agent is worse than Y", "we always source from
+  base_sha because Z" — verify the code actually follows it across
+  *all* branches and cases, not just the one being changed. The most
+  common failure: a multi-case switch/if-else where one branch follows
+  the stated rule and a sibling branch doesn't. Cite the asymmetry by
+  file:line and name the invariant being violated.
 
 ## What you do NOT check
 
 - Security (key handling, subprocess injection, secrets) → **security** reviewer.
-- CLI UX (flag names, command shape, output format) → **product** reviewer.
+- CLI UX (flag names, command shape, **output format and prose
+  conventions** — prefix tokens like `error:`/`warning:`/`note:`,
+  status marks `✓`/`✗`/`⟳`, summary-block column alignment) → **product**
+  reviewer. If you notice a formatting inconsistency, leave it for
+  product to call out — overlapping coverage wastes review cycles.
 
 ## Verdict criteria
 

@@ -38,12 +38,20 @@ error messages so both audiences stay productive.
    - `--limit <n>` for truncation
    Flag anything that uses a different name for the same concept (e.g.
    `--range` for what should be `--diff`).
-3. **Output format.**
-   - Prose goes to stdout.
-   - Errors go to stderr with `error: ` prefix.
+3. **Output format and CLI prose conventions — this is your beat.** Standards and security do not police output formatting. You do. Specifically:
+   - Prose goes to stdout. Errors go to stderr with `error: ` prefix
+     (lowercase). Advisories use `warning: ` (lowercase) and `note: `
+     (lowercase) to match the existing prefix style.
    - Structural markers are lines of `─` (U+2500).
-   - Verdict/status marks are `✓` / `✗` / `⟳`.
-   - Stick to this. Don't introduce new formatting conventions.
+   - Verdict/status marks are `✓` / `✗` / `⟳`. No other glyphs in
+     status positions — flag any new prefix character (e.g. `→`,
+     `*`, `→`, `[!]`) that's not in this set.
+   - Summary blocks use `key:` labels with `padEnd(N)` to align the
+     value column. Within one block, every label uses the same padding
+     width. Across two blocks for the same command (plan vs. summary),
+     widths should match.
+   - Don't introduce a new convention without surfacing it as a
+     deliberate choice. Conflicts with this set are blocking.
 4. **Exit codes.** Each command has an implicit contract — 0 for
    success, 1 for the primary failure mode, 2 for "command not
    implemented" or invalid usage. Any new command must document its
