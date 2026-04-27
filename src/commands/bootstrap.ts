@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { ensureAgentsMd } from "../lib/agentsMd.js";
+import { ensureAgentsMd, ensureClaudeMd } from "../lib/agentsMd.js";
 import {
   DEFAULT_PRODUCT_PROMPT,
   DEFAULT_SECURITY_PROMPT,
@@ -47,6 +47,13 @@ export interface BootstrapOptions {
    * Default true.
    */
   agentsMd?: boolean;
+  /**
+   * When false, skip creating or updating CLAUDE.md at the repo root.
+   * Default true. CLAUDE.md is auto-loaded by Claude Code into the model
+   * context, so this is the file most likely to actually surface the
+   * "use stamp flow" rule to a Claude-Code agent.
+   */
+  claudeMd?: boolean;
 }
 
 const STARTER_PROMPTS: Record<string, string> = {
@@ -156,10 +163,15 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
     writeBootstrapFiles(repoRoot, plan);
     const agentsMdAction =
       opts.agentsMd === false ? "skipped" : ensureAgentsMd(repoRoot);
+    const claudeMdAction =
+      opts.claudeMd === false ? "skipped" : ensureClaudeMd(repoRoot);
 
     runGit(["add", ".stamp"], repoRoot);
     if (agentsMdAction !== "skipped") {
       runGit(["add", "AGENTS.md"], repoRoot);
+    }
+    if (claudeMdAction !== "skipped") {
+      runGit(["add", "CLAUDE.md"], repoRoot);
     }
     const agentsMdLine = {
       created: "Creates AGENTS.md with stamp-protected-repo guidance for future agents.",
@@ -168,11 +180,18 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
       unchanged: "AGENTS.md already up to date.",
       skipped: "AGENTS.md write skipped (--no-agents-md).",
     }[agentsMdAction];
+    const claudeMdLine = {
+      created: "Creates CLAUDE.md so Claude Code auto-loads the stamp rules.",
+      replaced: "Refreshes the stamp-managed section of CLAUDE.md.",
+      appended: "Appends a stamp section to the existing CLAUDE.md.",
+      unchanged: "CLAUDE.md already up to date.",
+      skipped: "CLAUDE.md write skipped (--no-claude-md).",
+    }[claudeMdAction];
     const commitMsg =
       `stamp: bootstrap real reviewers (${plan.newReviewers.join(", ")})\n\n` +
       `Installs ${plan.newReviewers.join(", ")} as required reviewers on ${plan.targetBranch}.\n` +
       `Keeps the example placeholder defined-but-unrequired (so it can be re-bootstrapped).\n` +
-      `${agentsMdLine}`;
+      `${agentsMdLine}\n${claudeMdLine}`;
     runGit(["commit", "-m", commitMsg], repoRoot);
 
     // 7. Run the placeholder reviewer to record an approval. With --only,
@@ -401,6 +420,13 @@ function printPlan(plan: BootstrapPlan, opts: BootstrapOptions): void {
       opts.agentsMd === false
         ? "skip (--no-agents-md)"
         : "create or update with stamp-protected-repo guidance"
+    }`,
+  );
+  console.log(
+    `  CLAUDE.md:        ${
+      opts.claudeMd === false
+        ? "skip (--no-claude-md)"
+        : "create or update (auto-loaded by Claude Code)"
     }`,
   );
   console.log(`  push after merge: ${opts.noPush ? "no" : `yes (to ${opts.remote ?? "origin"})`}`);
