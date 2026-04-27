@@ -86,6 +86,37 @@ export function showAtRef(ref: string, path: string, cwd: string): string {
   return runGit(["show", `${ref}:${path}`], cwd);
 }
 
+/**
+ * True when `<path>` is already tracked by git on the current branch. Used
+ * by `stamp init` to detect "is this the first time we're adding stamp
+ * config" — the bootstrap moment where the scaffolding files can be
+ * committed directly to main.
+ *
+ * `--error-unmatch` exits non-zero if the path isn't tracked, so we just
+ * branch on whether the call throws.
+ */
+export function isPathTracked(path: string, cwd: string): boolean {
+  try {
+    runGit(["ls-files", "--error-unmatch", path], cwd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the repository has at least one commit on HEAD. False on a
+ * freshly `git init`'d repo where no commits have been made yet.
+ */
+export function repoHasAnyCommit(cwd: string): boolean {
+  try {
+    runGit(["rev-parse", "--verify", "HEAD"], cwd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function commitSummary(sha: string, cwd: string): CommitSummary {
   const commits = firstParentCommits(sha, 1, cwd);
   if (commits.length === 0) {

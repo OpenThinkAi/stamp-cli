@@ -1,6 +1,13 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureAgentsMd, ensureClaudeMd, type AgentsMdMode } from "../lib/agentsMd.js";
+import { isPathTracked, runGit } from "../lib/git.js";
+import {
+  applyStampRuleset,
+  checkGhAvailable,
+  lookupAuthenticatedUserId,
+  parseGithubOriginUrl,
+} from "../lib/ghRuleset.js";
 import { classifyRemote, describeShape } from "../lib/remote.js";
 import {
   DEFAULT_CONFIG,
@@ -48,6 +55,20 @@ export interface InitOptions {
    * still sees the "use stamp flow, don't push directly" rule.
    */
   claudeMd?: boolean;
+  /**
+   * When false, skip the auto bootstrap commit (the one that adds .stamp/ +
+   * AGENTS.md + CLAUDE.md to a fresh repo). Default true. The bootstrap
+   * commit is the chicken-and-egg moment — there's nothing on main to
+   * review against — so stamp init handles it directly. Opt out if you
+   * want to commit the scaffold yourself (e.g. squash with other changes).
+   */
+  bootstrapCommit?: boolean;
+  /**
+   * When false, skip auto-applying the GitHub Ruleset to a forge-direct
+   * github.com origin. Default true. Requires `gh` installed and
+   * authenticated. Skipped silently for non-github / non-forge origins.
+   */
+  ghProtect?: boolean;
   /**
    * Deployment shape this repo is being initialized for.
    *
@@ -183,6 +204,32 @@ export function runInit(opts: InitOptions = {}): void {
   }
   console.log();
 
+  // Bootstrap commit: if .stamp/config.yml isn't tracked yet, this is the
+  // first time stamp is being added to this repo. The chicken-and-egg
+  // problem is that there's nothing on main to review against — `stamp
+  // review` would have no base. So just commit the scaffolding files
+  // directly and push. Every commit AFTER this one goes through the stamp
+  // flow normally. Skipping this step (--no-bootstrap-commit) is the
+  // escape hatch for users who want to squash with other changes.
+  if (opts.bootstrapCommit !== false) {
+    printBootstrapCommitResult(runBootstrapCommit(repoRoot, scaffoldOrSync));
+  }
+
+  // GitHub Ruleset: if origin is github.com directly AND `gh` is available,
+  // apply the stamp-mirror-only ruleset that locks main to the bypass actor
+  // (the gh-authenticated user). This is the GitHub-side guardrail that
+  // makes "you can git push origin main bypassing stamp" actually false at
+  // the remote, even in local-only mode.
+  const ghProtectOpt = opts.ghProtect !== false;
+  if (
+    ghProtectOpt &&
+    remoteClass.shape === "forge-direct" &&
+    remoteClass.forge === "github.com" &&
+    remoteClass.url
+  ) {
+    applyGitHubRulesetWithReporting(remoteClass.url);
+  }
+
   // Print any deployment-shape warnings AFTER the summary. They're advisory
   // when no --mode flag was passed (back-compat), so don't drown the success
   // message in red text.
@@ -263,6 +310,183 @@ export function runInit(opts: InitOptions = {}): void {
     console.log();
     console.log("Full reference: AGENTS.md (and CLAUDE.md) at the repo root.");
     console.log(bar);
+  }
+}
+
+/**
+ * If `.stamp/config.yml` isn't tracked yet (first-time stamp setup on this
+ * repo), commit the scaffolding files directly to the current branch and
+ * push. This is the bootstrap exception — there's no prior state to review
+ * against, so the chicken-and-egg can't be resolved by going through the
+ * stamp flow. Every commit AFTER this one follows the normal cycle.
+ *
+ * For sync-mode runs (re-running stamp init on an existing stamp repo),
+ * skips because `.stamp/config.yml` is already tracked.
+ */
+type BootstrapResult =
+  | { kind: "did-commit" }
+  | { kind: "did-commit-and-push" }
+  | { kind: "skipped-already-tracked" }
+  | { kind: "skipped-no-changes" }
+  | { kind: "push-failed"; error: string };
+
+function runBootstrapCommit(
+  repoRoot: string,
+  scaffoldOrSync: "scaffold" | "sync",
+): BootstrapResult {
+  // Already-tracked check: `.stamp/config.yml` is the canary. Tracked → not
+  // a bootstrap moment, even if we just rewrote AGENTS.md/CLAUDE.md.
+  if (scaffoldOrSync === "sync" || isPathTracked(".stamp/config.yml", repoRoot)) {
+    return { kind: "skipped-already-tracked" };
+  }
+
+  // Stage the bootstrap files. AGENTS.md and CLAUDE.md may not exist if
+  // --no-agents-md / --no-claude-md was passed; `git add` of a missing
+  // pathspec exits non-zero, so add files conditionally.
+  const toAdd = [".stamp"];
+  if (existsSync(join(repoRoot, "AGENTS.md"))) toAdd.push("AGENTS.md");
+  if (existsSync(join(repoRoot, "CLAUDE.md"))) toAdd.push("CLAUDE.md");
+  runGit(["add", ...toAdd], repoRoot);
+
+  // Are there actually any changes to commit? `git diff --cached --quiet`
+  // exits 0 when there are no staged changes, 1 when there are. We use a
+  // try/catch on the throw because runGit treats non-zero exits as throws,
+  // which is the wrong polarity for this query.
+  let hasStagedChanges = false;
+  try {
+    runGit(["diff", "--cached", "--quiet"], repoRoot);
+  } catch {
+    hasStagedChanges = true;
+  }
+  if (!hasStagedChanges) return { kind: "skipped-no-changes" };
+
+  runGit(
+    [
+      "commit",
+      "-m",
+      "stamp: bootstrap config (one-time exception — every later commit goes through stamp review/merge)",
+    ],
+    repoRoot,
+  );
+
+  // Push if origin is configured. Don't fail the whole init if push fails;
+  // the user can push manually. Surface the actual git error on failure
+  // so the user/agent can act on it (auth issue, network, etc.).
+  try {
+    runGit(["remote", "get-url", "origin"], repoRoot);
+  } catch {
+    return { kind: "did-commit" }; // committed locally but no remote to push to
+  }
+
+  try {
+    // Need to know the current branch to push it. HEAD is the safe choice
+    // here — works for "main", "master", or whatever branch the user is on.
+    const branch = runGit(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot).trim();
+    runGit(["push", "origin", branch], repoRoot);
+    return { kind: "did-commit-and-push" };
+  } catch (err) {
+    return {
+      kind: "push-failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function printBootstrapCommitResult(result: BootstrapResult): void {
+  switch (result.kind) {
+    case "did-commit-and-push":
+      console.log(
+        "Bootstrap commit: created and pushed to origin. Every commit from now on goes through stamp review/merge.",
+      );
+      break;
+    case "did-commit":
+      console.log(
+        "Bootstrap commit: created locally (no `origin` remote configured). Push when you've added one.",
+      );
+      break;
+    case "push-failed":
+      console.log(
+        "warning: bootstrap commit created locally but `git push origin` failed.",
+      );
+      console.log(`         underlying error: ${result.error}`);
+      console.log(
+        "         Resolve auth/network/branch-protection and run `git push origin` manually.",
+      );
+      break;
+    case "skipped-no-changes":
+      // Quiet: nothing to commit means the scaffolding was already current.
+      break;
+    case "skipped-already-tracked":
+      // Quiet: re-running stamp init on an existing stamp repo. Any updates
+      // to AGENTS.md/CLAUDE.md are unstaged for the user to review/commit
+      // through the normal stamp flow.
+      break;
+  }
+}
+
+/**
+ * Apply the stamp-mirror-only GitHub Ruleset to the origin repo. Skips
+ * silently if `gh` isn't available (printing a clear note that points the
+ * operator at the manual setup doc as a fallback).
+ */
+function applyGitHubRulesetWithReporting(remoteUrl: string): void {
+  const parsed = parseGithubOriginUrl(remoteUrl);
+  if (!parsed) {
+    // classifyRemote thought this was github.com but the URL doesn't parse
+    // — odd but recoverable. Skip silently.
+    return;
+  }
+
+  const ghCheck = checkGhAvailable();
+  if (!ghCheck.available) {
+    console.log(
+      `note: GitHub Ruleset auto-apply skipped — ${ghCheck.reason}.`,
+    );
+    console.log(
+      `      For manual setup, see docs/github-ruleset-setup.md.`,
+    );
+    console.log();
+    return;
+  }
+
+  const user = lookupAuthenticatedUserId();
+  if (!user) {
+    console.log(
+      `note: GitHub Ruleset auto-apply skipped — couldn't look up the gh-authenticated user.`,
+    );
+    console.log(
+      `      Try \`gh auth status\` to confirm authentication, then re-run \`stamp init\`.`,
+    );
+    console.log();
+    return;
+  }
+
+  const result = applyStampRuleset(parsed.owner, parsed.repo, user.id);
+  switch (result.status) {
+    case "created":
+      console.log(
+        `GitHub Ruleset: created stamp-mirror-only on ${parsed.owner}/${parsed.repo} (bypass actor: ${user.login}, id ${user.id}).`,
+      );
+      console.log(
+        `                Direct \`git push origin main\` from any other identity will now be rejected by GitHub.`,
+      );
+      console.log();
+      break;
+    case "exists":
+      console.log(
+        `GitHub Ruleset: stamp-mirror-only already present on ${parsed.owner}/${parsed.repo} (id ${result.rulesetId}). Not modified.`,
+      );
+      console.log();
+      break;
+    case "failed":
+      console.log(
+        `warning: GitHub Ruleset auto-apply failed: ${result.error}`,
+      );
+      console.log(
+        `         For manual setup, see docs/github-ruleset-setup.md.`,
+      );
+      console.log();
+      break;
   }
 }
 

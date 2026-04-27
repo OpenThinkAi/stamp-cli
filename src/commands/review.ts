@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { parseConfigFromYaml, type StampConfig } from "../lib/config.js";
 import { openDb, recordReview } from "../lib/db.js";
 import {
+  repoHasAnyCommit,
   resolveDiff,
   showAtRef,
   type ResolvedDiff,
@@ -28,7 +29,32 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     );
   }
 
-  const resolved = resolveDiff(opts.diff, repoRoot);
+  // Empty-base safety net: if the diff revspec doesn't resolve AND the
+  // repo has no commits at all, treat it as the bootstrap moment rather
+  // than a failure. Recent `stamp init` runs handle the bootstrap commit
+  // automatically; this branch exists for the case where a user/agent
+  // runs `stamp review` before any commit has happened.
+  //
+  // Critically: gate on `repoHasAnyCommit() === false`, NOT on regex-
+  // matching the git error string. A typo like `--diff main..hed`
+  // produces "fatal: ... unknown revision ..." and we must NOT swallow
+  // that as "the bootstrap moment" — the user needs to see the real
+  // typo error to fix it.
+  let resolved;
+  try {
+    resolved = resolveDiff(opts.diff, repoRoot);
+  } catch (err) {
+    if (!repoHasAnyCommit(repoRoot)) {
+      console.log(
+        `note: no commits in this repo yet — looks like the bootstrap moment.\n` +
+          `      Run \`stamp init\` to scaffold .stamp/ + AGENTS.md + CLAUDE.md and create the\n` +
+          `      bootstrap commit automatically. \`stamp review\` has no base tree to read\n` +
+          `      reviewer prompts from until the first commit lands.`,
+      );
+      return;
+    }
+    throw err;
+  }
   if (!resolved.diff.trim()) {
     console.log(
       `No changes between ${resolved.base_sha.slice(0, 8)} and ${resolved.head_sha.slice(0, 8)}.`,

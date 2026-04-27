@@ -100,6 +100,15 @@ new commit invalidates prior approvals.
 - **Do not** delete \`.stamp/trusted-keys/*.pub\` files unless you genuinely intend to revoke
   a signer; doing so locks that signer out of all future merges.
 
+### The one exception: the bootstrap commit
+
+The single commit that ADDS \`.stamp/\` + \`AGENTS.md\` + \`CLAUDE.md\` to a fresh
+repo for the first time is the chicken-and-egg moment — \`stamp review\` has
+no base tree to read prompts from. That one commit can land directly on
+\`main\`. Recent \`stamp init\` runs do this commit automatically; older
+versions need it done by hand. Every subsequent change to \`.stamp/\` (or
+anything else) goes through the normal stamp flow.
+
 ### Where things live
 
 - \`.stamp/config.yml\` — branch rules (which reviewers are required, optional \`required_checks\`)
@@ -185,6 +194,18 @@ commit invalidates prior approvals.
 - **Do not** rationalize bypassing the gate because "this is local-only mode
   so it doesn't matter." The mode describes who enforces the gate
   (server vs. agent discipline), not whether the gate exists. **The gate exists.**
+
+### The one exception: the bootstrap commit
+
+When \`stamp init\` runs on a repo that doesn't have stamp installed yet, the
+commit that ADDS \`.stamp/\` + \`AGENTS.md\` + \`CLAUDE.md\` is a chicken-and-egg
+case — there is no prior trusted state to review against, so \`stamp review\`
+has no meaningful base. That single commit is allowed to land directly on the
+current branch. Recent versions of stamp-cli handle this commit automatically
+inside \`stamp init\`; if you're working with an older version, make exactly
+that one commit + push by hand and then go through the stamp flow for
+everything afterward. **This exception is for the literal first stamp commit
+only**, not for any subsequent change to \`.stamp/\` or any other code.
 
 ### How enforcement works here (and why you have to be the enforcer)
 
@@ -335,7 +356,12 @@ git push origin main                    # OR \`stamp push main\` if origin is a 
 **The full reference is at [\`AGENTS.md\`](./AGENTS.md) at the repo root** —
 read it before any git command. It covers the mode (server-gated vs.
 local-only), what NOT to do, where things live, and how to recover when stamp
-blocks you.`;
+blocks you.
+
+**One exception:** the very first commit that ADDS \`.stamp/\` + \`AGENTS.md\` +
+\`CLAUDE.md\` to a fresh repo is allowed to land directly on the current branch
+(there's nothing to review against). Recent \`stamp init\` runs do this commit
+automatically. Every subsequent change goes through the stamp flow.`;
 
 /**
  * Insert or replace the stamp-managed CLAUDE.md section. Same three-case
