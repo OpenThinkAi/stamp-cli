@@ -34,9 +34,22 @@ npm audit signatures
 
 ## Quick start
 
-**On a deployed stamp server (recommended).** If you've deployed the stamp
-server (see [`docs/quickstart-server.md`](./docs/quickstart-server.md) for the
-full Railway walkthrough), the from-zero flow is three commands:
+**Pick your deployment shape first** — it determines which command you run and
+what guarantees you actually get:
+
+| Shape | Origin is… | Enforcement | Command to run |
+|---|---|---|---|
+| **Server-gated** (recommended) | A stamp server you deployed | The server's pre-receive hook rejects any push without a valid stamped merge | `stamp bootstrap` on a clone of a server-provisioned repo |
+| **Local-only** (advisory) | GitHub / GitLab / etc. directly | None — direct `git push origin main` succeeds; the stamp config is documentation + a discipline aid | `stamp init --mode local-only` |
+
+These are not interchangeable. Server-gated is the only shape where the gate
+is actually enforced; local-only signs your merges with a verifiable
+attestation but the remote does not reject anything. Pick deliberately.
+
+### Server-gated path
+
+If you've deployed the stamp server (see [`docs/quickstart-server.md`](./docs/quickstart-server.md)
+for the full Railway walkthrough), the from-zero flow is three commands:
 
 ```sh
 ssh stamp new-stamp-repo myproject              # provision bare repo + hook
@@ -49,8 +62,29 @@ the three starter reviewers (security, standards, product), and lands them on
 `main` via a single signed merge that the server hook accepts. From there it's
 the normal review/merge cycle.
 
-**Local-only (no server).** Run everything on one machine using a bare git
-repo on disk as the "remote". Good for learning the shape before deploying.
+### Local-only path
+
+When origin is a public forge directly (GitHub etc.), `stamp init` defaults to
+local-only and prints a prominent warning that the gate is unenforced. Pass
+`--mode local-only` to acknowledge explicitly and silence the warning:
+
+```sh
+cd myproject
+stamp init --mode local-only             # scaffolds .stamp/ + AGENTS.md (advisory mode)
+git add .stamp AGENTS.md && git commit -m "stamp: advisory config"
+git push origin main
+```
+
+You can still run `stamp review` / `stamp merge` / `stamp verify` against this
+repo — the merge commits carry signed attestations and `stamp verify <sha>`
+validates them on any clone. What you don't get: server-side rejection of
+unstamped pushes. Anyone with repo write access can `git push origin main`
+of any commit, stamped or not.
+
+### Local-test (no server, on-disk bare repo)
+
+Run everything on one machine using a bare git repo on disk as the "remote".
+Useful for learning the shape before deploying a real server.
 
 ```sh
 # Install + initialize a fresh project
@@ -119,10 +153,11 @@ See [`DESIGN.md`](./DESIGN.md) for the full spec and [`docs/ROADMAP.md`](./docs/
 **Core review cycle:**
 
 ```
-stamp init                                 # scaffold .stamp/ + keypair; idempotent. Also ensures
-                                           #   AGENTS.md at repo root carries the stamp-protected-repo
-                                           #   guidance section (between <!-- stamp:begin --> markers
-                                           #   so user content is never overwritten).
+stamp init [--mode <shape>]                # scaffold .stamp/ + keypair; idempotent. Also ensures
+                                           #   AGENTS.md at repo root with deployment-shape-aware
+                                           #   guidance. --mode is server-gated|local-only;
+                                           #   auto-detected from origin if omitted (forge-direct
+                                           #   origins default to local-only with a loud warning).
 stamp bootstrap                            # one-shot: replace placeholder example reviewer
                                            #   with real reviewers on a fresh server-provisioned
                                            #   repo. See `stamp bootstrap --help`.
