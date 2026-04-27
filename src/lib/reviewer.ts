@@ -1,6 +1,4 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { McpServerDef, ReviewerDef, StampConfig } from "./config.js";
 import type { Verdict } from "./db.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
@@ -30,23 +28,19 @@ export async function invokeReviewer(params: {
   diff: string;
   base_sha: string;
   head_sha: string;
+  /**
+   * Reviewer prompt text. The caller is responsible for sourcing this from
+   * the right place — `runReview` reads it from the base_sha tree (security:
+   * prevents feature-branch self-review). `stamp reviewers test` reads from
+   * the working tree (intended: prompt-iteration use case). This function
+   * does not read from disk; it just runs whatever prompt it's given.
+   */
+  systemPrompt: string;
 }): Promise<ReviewerInvocation> {
   const def = params.config.reviewers[params.reviewer];
   if (!def) {
     throw new Error(
       `reviewer "${params.reviewer}" is not defined in .stamp/config.yml`,
-    );
-  }
-
-  const promptPath = join(params.repoRoot, def.prompt);
-  let systemPrompt: string;
-  try {
-    systemPrompt = readFileSync(promptPath, "utf8");
-  } catch (err) {
-    throw new Error(
-      `failed to read reviewer prompt at ${def.prompt}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
     );
   }
 
@@ -59,7 +53,7 @@ export async function invokeReviewer(params: {
     prompt: userPrompt,
     options: {
       cwd: params.repoRoot,
-      systemPrompt,
+      systemPrompt: params.systemPrompt,
       allowedTools,
       ...(mcpServers ? { mcpServers } : {}),
       persistSession: false,

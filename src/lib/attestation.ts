@@ -2,12 +2,24 @@ import type { Verdict } from "./db.js";
 import type { ToolCall } from "./toolCalls.js";
 
 /**
- * Current attestation payload schema version. v1 (absent field) was the
- * initial shape; v2 adds per-approval prompt/tools/mcp hashes (plan Step 2).
- * Verifiers treat absent/1 as legacy fail-open on hash checks, 2 as
- * fail-closed without hashes.
+ * Current attestation payload schema version.
+ *
+ *   v1 (absent field) — initial shape; no hash binding to reviewer config.
+ *   v2 — per-approval prompt/tools/mcp hashes, sourced from the merge
+ *        commit's own tree. SECURITY ISSUE: a feature branch could modify
+ *        a reviewer's prompt and the resulting attestation hash matched
+ *        the modified prompt, so the server hook accepted a self-reviewing
+ *        merge.
+ *   v3 — same hash fields, but sourced from the merge-base tree (the
+ *        common ancestor of the two merge parents). This is the version
+ *        of the reviewer that existed BEFORE the diff, so a feature
+ *        branch cannot self-review by modifying its own reviewer prompt.
+ *
+ * Verifiers reject v2 and below — they're known-broken under the self-
+ * review attack. Only v3+ is accepted.
  */
-export const CURRENT_PAYLOAD_VERSION = 2;
+export const CURRENT_PAYLOAD_VERSION = 3;
+export const MIN_ACCEPTED_PAYLOAD_VERSION = 3;
 
 export interface Approval {
   reviewer: string;

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
-import { resolveDiff, runGit } from "../lib/git.js";
+import { changedFiles, resolveDiff, runGit, showAtRef } from "../lib/git.js";
 import { ensureUserKeypair } from "../lib/keys.js";
 import {
   findRepoRoot,
@@ -33,6 +33,14 @@ export interface MergeOptions {
 
 export function runMerge(opts: MergeOptions): void {
   const repoRoot = findRepoRoot();
+  // Branch-rule lookup uses the WORKING TREE config (the operator's local
+  // .stamp/config.yml at merge time, which is on the target branch since
+  // the pre-flight below requires that). This is correct: the branch rule
+  // determines "which reviewers must have approved this diff" and the
+  // operator's local view of the rules is what governs their merge action.
+  // Reviewer prompts and attestation hashes are SEPARATELY sourced from
+  // the merge-base tree (see step 6a) — that's the security boundary.
+  // Don't conflate the two reads.
   const config = loadConfig(stampConfigFile(repoRoot));
 
   // 1. Pre-flight: must be on target branch, working tree must be clean.
@@ -200,31 +208,63 @@ export function runMerge(opts: MergeOptions): void {
       }
     }
 
-    // 6a. Compute per-reviewer prompt/tools/mcp hashes from the merge commit's
-    //     own tree. Reads via `git show HEAD:<path>` so merge-time bytes are
-    //     identical to what verifiers see via the same command — avoids EOL /
-    //     .gitattributes divergence between working directory and committed
-    //     blob. Config is also read from HEAD so we see the merged reviewers
-    //     section, in case the feature branch modified .stamp/config.yml.
+    // 6a. Compute per-reviewer prompt/tools/mcp hashes from the *merge-base*
+    //     tree (NOT the merge commit's own tree). v3 attestation security
+    //     boundary: the reviewer that approved is the one that existed at
+    //     base_sha — the version BEFORE the diff. Hashing the post-merge
+    //     tree (v2) was broken because a feature branch could modify a
+    //     reviewer prompt and the resulting hash would match the modified
+    //     prompt, allowing a self-reviewing merge to verify cleanly.
     //
-    //     If a reviewer has a committed lock file, carry its (source, ref)
-    //     into the attestation as reviewer_source — lets auditors ask "was
-    //     this reviewer fetched from an approved manifest?" without trusting
-    //     the operator's local state.
-    const committedConfigYaml = git(["show", "HEAD:.stamp/config.yml"], repoRoot);
-    const committedReviewers = readReviewersFromYaml(committedConfigYaml);
+    //     Defense-in-depth: also refuse the merge if the diff modifies
+    //     ANY required reviewer's own prompt file. The base-tree-read fix
+    //     handles the "use the right prompt" half; this guard prevents
+    //     the operator from landing reviewer-prompt edits in the same
+    //     PR that's gated by those reviewers.
+    //
+    //     reviewer_source comes from the on-disk lock file (which at this
+    //     point IS the merge-commit tree, since we just made the merge).
+    //     It's audit metadata, not part of the trust boundary — if a diff
+    //     swaps the lock file, the prompt_sha256 hash mismatch (computed
+    //     from the *base* tree below) is what would catch it.
+    const baseConfigYaml = showAtRef(resolved.base_sha, ".stamp/config.yml", repoRoot);
+    const baseReviewers = readReviewersFromYaml(baseConfigYaml);
+
+    // Defense-in-depth check: refuse if any required reviewer's prompt
+    // file is in the diff. Even though the v3 hash binding makes this
+    // formally safe, allowing a contributor to land "modify security
+    // reviewer's prompt" + "potentially-malicious code" in one PR is
+    // bad practice — split into two so the prompt change can be reviewed
+    // by the *current* reviewers before the new reviewer takes over.
+    const diffFiles = changedFiles(resolved.base_sha, resolved.head_sha, repoRoot);
+    const reviewerPromptModifications = approvals
+      .map((a) => {
+        const def = baseReviewers[a.reviewer];
+        if (!def) return null;
+        return diffFiles.includes(def.prompt) ? a.reviewer : null;
+      })
+      .filter((x): x is string => x !== null);
+    if (reviewerPromptModifications.length > 0) {
+      throw new Error(
+        `refusing to merge: this diff modifies the prompt file for required reviewer(s) ` +
+          `${reviewerPromptModifications.join(", ")}, AND those reviewers' approvals are in the attestation. ` +
+          `Split this into two PRs: (1) modify the reviewer prompt(s), reviewed by the current reviewers; ` +
+          `(2) make the changes that depend on the new reviewer behavior. ` +
+          `Merge rolled back.`,
+      );
+    }
+
     approvals = approvals.map((a) => {
-      const def = committedReviewers[a.reviewer];
+      const def = baseReviewers[a.reviewer];
       if (!def) {
         throw new Error(
-          `reviewer "${a.reviewer}" is required by branch rule "${opts.into}" ` +
-            `but not defined in the merged .stamp/config.yml. ` +
-            `If you removed it from \`reviewers:\` while it was still in \`required:\`, ` +
-            `keep it defined-but-unrequired (or use \`stamp bootstrap\` for the placeholder→real swap). ` +
+          `reviewer "${a.reviewer}" approved the diff but is not defined in .stamp/config.yml at base ${resolved.base_sha.slice(0, 8)}. ` +
+            `This shouldn't happen — runReview reads from the same base. ` +
+            `File a bug at https://github.com/OpenThinkAi/stamp-cli/issues. ` +
             `Merge rolled back.`,
         );
       }
-      const promptText = git(["show", `HEAD:${def.prompt}`], repoRoot);
+      const promptText = showAtRef(resolved.base_sha, def.prompt, repoRoot);
       const source = readReviewerSource(a.reviewer, repoRoot);
       return {
         ...a,

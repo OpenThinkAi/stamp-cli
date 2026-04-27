@@ -23,6 +23,7 @@
 import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import {
+  MIN_ACCEPTED_PAYLOAD_VERSION,
   parseCommitAttestation,
   type AttestationPayload,
 } from "../lib/attestation.js";
@@ -240,26 +241,55 @@ function verifyCommit(
     );
   }
 
-  // v2+: verify per-reviewer prompt/tools/mcp hashes against the commit's
-  // own .stamp/ tree. Legacy (v1) attestations skip this step.
-  if ((payload.schema_version ?? 1) >= 2) {
-    verifyReviewerHashesAtCommit(sha, payload, refname);
+  // v3+: verify per-reviewer prompt/tools/mcp hashes against the
+  // merge-base tree (the common ancestor of the two parents). Reading from
+  // the commit's own tree (v2) was broken — a feature branch could modify
+  // a reviewer prompt and the resulting attestation would self-verify.
+  // v3 sources hashes from the version of the reviewer that existed at
+  // merge-base, which is invariant under the diff.
+  //
+  // v2 and below are rejected outright. They're cryptographically valid
+  // but bound to the wrong tree (the post-merge tree, which the diff
+  // could have modified). No upgrade path other than re-merging with a
+  // current stamp-cli build that produces v3.
+  const version = payload.schema_version ?? 1;
+  if (version < MIN_ACCEPTED_PAYLOAD_VERSION) {
+    reject(
+      refname,
+      `commit ${sha.slice(0, 8)}: attestation schema_version ${version} is no longer accepted ` +
+        `(minimum supported is ${MIN_ACCEPTED_PAYLOAD_VERSION} — earlier versions are known-broken under ` +
+        `the feature-branch self-review attack). Re-create the merge with a current stamp-cli build ` +
+        `which produces v${MIN_ACCEPTED_PAYLOAD_VERSION} attestations bound to the merge-base tree.`,
+    );
   }
+  // The merge-base check earlier in verifyCommit already cross-checked
+  // payload.base_sha against the actual merge-base of the two parents and
+  // rejected on mismatch. So we can pass payload.base_sha directly here
+  // instead of recomputing the merge-base; it's provably the same value.
+  verifyReviewerHashesAtMergeBase(sha, payload.base_sha, payload, refname);
 }
 
-function verifyReviewerHashesAtCommit(
+function verifyReviewerHashesAtMergeBase(
   sha: string,
+  baseSha: string,
   payload: AttestationPayload,
   refname: string,
 ): void {
-  const prefix = `commit ${sha.slice(0, 8)}: v2 attestation:`;
+  const prefix = `commit ${sha.slice(0, 8)}: v3 attestation:`;
+
+  // baseSha is the merge-base, already cross-checked against payload.base_sha
+  // by the caller (verifyRef). The reviewer config + prompts at this tree
+  // are the version that existed BEFORE the diff — invariant under
+  // whatever the feature branch added — so a feature branch can't modify
+  // a reviewer prompt and have the modified version verify here.
+
   let configYaml: string;
   try {
-    configYaml = run(["show", `${sha}:.stamp/config.yml`]);
+    configYaml = run(["show", `${baseSha}:.stamp/config.yml`]);
   } catch {
     reject(
       refname,
-      `${prefix} .stamp/config.yml unreadable at commit's tree`,
+      `${prefix} .stamp/config.yml unreadable at merge-base ${baseSha.slice(0, 8)}`,
     );
   }
   const reviewers = readReviewersFromYaml(configYaml);
@@ -279,16 +309,16 @@ function verifyReviewerHashesAtCommit(
     if (!def) {
       reject(
         refname,
-        `${prefix} reviewer "${approval.reviewer}" not defined in .stamp/config.yml at this commit`,
+        `${prefix} reviewer "${approval.reviewer}" not defined in .stamp/config.yml at merge-base`,
       );
     }
     let promptBytes: string;
     try {
-      promptBytes = run(["show", `${sha}:${def.prompt}`]);
+      promptBytes = run(["show", `${baseSha}:${def.prompt}`]);
     } catch {
       reject(
         refname,
-        `${prefix} reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at this commit`,
+        `${prefix} reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at merge-base`,
       );
     }
     checkHashOrReject(prefix, refname, approval.reviewer, "prompt", hashPromptBytes(Buffer.from(promptBytes, "utf8")), approval.prompt_sha256!);

@@ -224,7 +224,16 @@ export async function reviewersTest(
   console.log(
     `  diff: ${resolved.base_sha.slice(0, 8)} → ${resolved.head_sha.slice(0, 8)}`,
   );
+  console.log(`  prompt sourced from working tree (test/iteration use case)`);
   console.log();
+
+  // INTENTIONALLY reads from disk, not base_sha tree. `stamp reviewers test`
+  // is the prompt-iteration loop ("$EDITOR security.md → test → re-edit"),
+  // so the on-disk version is exactly what the user wants invoked. The
+  // base-tree security boundary belongs to `stamp review` / `stamp merge`.
+  const def = config.reviewers[name]!;
+  const promptPath = join(repoRoot, def.prompt);
+  const systemPrompt = readFileSync(promptPath, "utf8");
 
   const result = await invokeReviewer({
     reviewer: name,
@@ -233,6 +242,7 @@ export async function reviewersTest(
     diff: resolved.diff,
     base_sha: resolved.base_sha,
     head_sha: resolved.head_sha,
+    systemPrompt,
   });
 
   console.log(bar);
@@ -403,7 +413,7 @@ export async function reviewersFetch(
   for (const line of yamlBlock.split("\n")) console.log(`    ${line}`);
   console.log();
   console.log(
-    `If the tools/mcp_servers in config.yml differ from the lock, \`stamp review\` will refuse to run with exit ${LOCK_DRIFT_EXIT}.`,
+    `Run \`stamp reviewers verify\` to check that the on-disk prompt + tools + mcp_servers match the lock (exit ${LOCK_DRIFT_EXIT} on drift).`,
   );
 }
 
