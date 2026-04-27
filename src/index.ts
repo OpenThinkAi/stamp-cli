@@ -10,6 +10,7 @@ process.on("warning", (warn) => {
 });
 
 import { Command } from "commander";
+import { runBootstrap } from "./commands/bootstrap.js";
 import { runInit } from "./commands/init.js";
 import {
   keysExport,
@@ -48,21 +49,76 @@ program
 program
   .command("init")
   .description(
-    "scaffold .stamp/ (three-persona starter: security/standards/product) and generate a keypair",
+    "scaffold .stamp/ (three-persona starter: security/standards/product), generate a keypair, and ensure AGENTS.md guidance",
   )
   .option(
     "--minimal",
     "scaffold a single placeholder reviewer instead of the three-persona starter",
   )
-  .action((opts: { minimal?: boolean }) => {
+  .option(
+    "--no-agents-md",
+    "skip creating or updating AGENTS.md at the repo root",
+  )
+  .action((opts: { minimal?: boolean; agentsMd: boolean }) => {
     try {
-      runInit({ minimal: opts.minimal });
+      runInit({ minimal: opts.minimal, agentsMd: opts.agentsMd });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`error: ${message}`);
       process.exit(1);
     }
   });
+
+program
+  .command("bootstrap")
+  .description(
+    "land real reviewers in a freshly-provisioned stamp repo (replaces the placeholder example reviewer in one command)",
+  )
+  .option(
+    "--reviewers <names>",
+    "comma-separated starter persona names (default: security,standards,product)",
+  )
+  .option(
+    "--from <dir>",
+    "use a project-specific .stamp/ seed dir instead of starter personas (must contain config.yml + reviewers/)",
+  )
+  .option("--no-push", "skip the final git push after merging")
+  .option("--remote <name>", "remote to push to", "origin")
+  .option("--dry-run", "print the plan without making changes")
+  .option("--force", "bypass the fresh-placeholder safety check")
+  .option(
+    "--no-agents-md",
+    "skip creating or updating AGENTS.md at the repo root",
+  )
+  .action(
+    async (opts: {
+      reviewers?: string;
+      from?: string;
+      push: boolean;
+      remote: string;
+      dryRun?: boolean;
+      force?: boolean;
+      agentsMd: boolean;
+    }) => {
+      try {
+        await runBootstrap({
+          reviewers: opts.reviewers
+            ? opts.reviewers.split(",").map((s) => s.trim()).filter(Boolean)
+            : undefined,
+          from: opts.from,
+          noPush: !opts.push,
+          remote: opts.remote,
+          dryRun: opts.dryRun,
+          force: opts.force,
+          agentsMd: opts.agentsMd,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`error: ${message}`);
+        process.exit(1);
+      }
+    },
+  );
 
 program
   .command("review")

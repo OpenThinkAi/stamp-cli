@@ -109,6 +109,41 @@ Either way, the merge is blocked until this reviewer's latest verdict on this SH
 
 ---
 
+## `stamp merge` fails with "required by rule but not defined"
+
+```
+error: reviewer "old-reviewer" is required by branch rule "main" but not
+       defined in the merged .stamp/config.yml ... Merge rolled back.
+```
+
+**Cause:** You tried to remove a reviewer from `reviewers:` while it was still in `branches.<name>.required:`, in a single change. The branch rule is enforced against the *committed* config (the post-merge tree), and that config no longer defines the reviewer it requires — so the merge can't be attested.
+
+**Why this is subtle:** the *gate* check (whose approvals are needed) uses the **pre-merge** required list, so the merge passes the gate. It's the post-merge attestation step that catches the inconsistency. The merge is rolled back, so your working tree is exactly as it was before `stamp merge`.
+
+**Fix — split into two commits:**
+
+```sh
+# 1. Drop it from required: but keep it defined.
+$EDITOR .stamp/config.yml      # remove `old-reviewer` from branches.main.required
+                               # leave reviewers.old-reviewer in place
+git commit -am "stamp: drop old-reviewer from required"
+stamp review --diff main..HEAD
+stamp merge HEAD --into main
+stamp push main
+
+# 2. Now that main no longer requires old-reviewer, remove it entirely.
+$EDITOR .stamp/config.yml      # delete reviewers.old-reviewer
+git rm .stamp/reviewers/old-reviewer.md
+git commit -m "stamp: drop old-reviewer entirely"
+stamp review --diff main..HEAD
+stamp merge HEAD --into main
+stamp push main
+```
+
+**For the placeholder→real swap specifically:** if you're trying to replace the `example` placeholder with real reviewers on a freshly-provisioned repo, **use `stamp bootstrap` instead** — it handles the chicken-and-egg automatically in one command (and keeps `example` defined-but-unrequired so the swap is re-runnable).
+
+---
+
 ## `stamp init` says "already initialized"
 
 Fine if you cloned a repo that was already stamped. `stamp init` is idempotent — in that case it just ensures your local keypair exists in `~/.stamp/keys/` and initializes `.git/stamp/state.db`. The output will say "synced to existing .stamp/ config" rather than "scaffolded fresh repo."
