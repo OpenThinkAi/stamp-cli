@@ -1,0 +1,25 @@
+{
+  "name": "stamp-mirror-only",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "~DEFAULT_BRANCH"
+      ]
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "update" }
+  ],
+  "bypass_actors": [
+    {
+      "actor_id": 0,
+      "actor_type": "User",
+      "bypass_mode": "always"
+    }
+  ]
+}

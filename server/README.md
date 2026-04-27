@@ -139,16 +139,24 @@ to push the ref.
 
 ### GitHub-side protection (recommended)
 
-On the GitHub mirror repo, enable branch protection on `main`:
+On the GitHub mirror repo, restrict pushes to `main` so only your
+designated mirror identity (the user/App that owns `GITHUB_BOT_TOKEN`)
+can update the branch. This ensures the only way a commit lands on
+GitHub's `main` is via a verified push through your stamp server.
+Humans with repo access can still fork/PR via GitHub's standard flow,
+but those PRs cannot merge — the ruleset blocks everyone except the
+bypass actor.
 
-- Settings → Branches → Add rule: `main`
-- "Restrict who can push to matching branches" → only the bot identity
-  that owns the PAT
+GitHub is phasing out the legacy "Branch protection rules" UI in favor
+of **Rulesets** (Settings → Rules → Rulesets). Many newer accounts only
+see the Ruleset surface now.
 
-This ensures the only way a commit lands on GitHub's `main` is via a
-verified push through your stamp server. Humans with repo access can still
-fork/PR via GitHub's standard flow, but those PRs cannot merge (branch
-protection blocks everyone except the bot).
+See [`docs/github-ruleset-setup.md`](../docs/github-ruleset-setup.md)
+for the full walkthrough (UI + CLI paths, the same-PAT-owner-bypass
+footgun, and the machine-user pattern that fixes it). The repo also
+ships [`docs/github-ruleset-template.json`](../docs/github-ruleset-template.json)
+— a sanitized config you edit (set the bypass actor's numeric ID) and
+import via `gh api -X POST /repos/<owner>/<repo>/rulesets --input ...`.
 
 ### Behaviors
 
