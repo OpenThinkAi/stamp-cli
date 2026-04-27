@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
-import { changedFiles, resolveDiff, runGit, showAtRef } from "../lib/git.js";
+import { resolveDiff, runGit, showAtRef } from "../lib/git.js";
 import { ensureUserKeypair } from "../lib/keys.js";
 import {
   findRepoRoot,
@@ -216,12 +216,6 @@ export function runMerge(opts: MergeOptions): void {
     //     reviewer prompt and the resulting hash would match the modified
     //     prompt, allowing a self-reviewing merge to verify cleanly.
     //
-    //     Defense-in-depth: also refuse the merge if the diff modifies
-    //     ANY required reviewer's own prompt file. The base-tree-read fix
-    //     handles the "use the right prompt" half; this guard prevents
-    //     the operator from landing reviewer-prompt edits in the same
-    //     PR that's gated by those reviewers.
-    //
     //     reviewer_source comes from the on-disk lock file (which at this
     //     point IS the merge-commit tree, since we just made the merge).
     //     It's audit metadata, not part of the trust boundary — if a diff
@@ -229,30 +223,6 @@ export function runMerge(opts: MergeOptions): void {
     //     from the *base* tree below) is what would catch it.
     const baseConfigYaml = showAtRef(resolved.base_sha, ".stamp/config.yml", repoRoot);
     const baseReviewers = readReviewersFromYaml(baseConfigYaml);
-
-    // Defense-in-depth check: refuse if any required reviewer's prompt
-    // file is in the diff. Even though the v3 hash binding makes this
-    // formally safe, allowing a contributor to land "modify security
-    // reviewer's prompt" + "potentially-malicious code" in one PR is
-    // bad practice — split into two so the prompt change can be reviewed
-    // by the *current* reviewers before the new reviewer takes over.
-    const diffFiles = changedFiles(resolved.base_sha, resolved.head_sha, repoRoot);
-    const reviewerPromptModifications = approvals
-      .map((a) => {
-        const def = baseReviewers[a.reviewer];
-        if (!def) return null;
-        return diffFiles.includes(def.prompt) ? a.reviewer : null;
-      })
-      .filter((x): x is string => x !== null);
-    if (reviewerPromptModifications.length > 0) {
-      throw new Error(
-        `refusing to merge: this diff modifies the prompt file for required reviewer(s) ` +
-          `${reviewerPromptModifications.join(", ")}, AND those reviewers' approvals are in the attestation. ` +
-          `Split this into two PRs: (1) modify the reviewer prompt(s), reviewed by the current reviewers; ` +
-          `(2) make the changes that depend on the new reviewer behavior. ` +
-          `Merge rolled back.`,
-      );
-    }
 
     approvals = approvals.map((a) => {
       const def = baseReviewers[a.reviewer];

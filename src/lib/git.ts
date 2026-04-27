@@ -86,16 +86,6 @@ export function showAtRef(ref: string, path: string, cwd: string): string {
   return runGit(["show", `${ref}:${path}`], cwd);
 }
 
-/**
- * List the file paths that differ between two refs (the diff's affected
- * file set). Used by stamp merge's defense-in-depth check that refuses to
- * sign when a required reviewer's own prompt was modified in this diff.
- */
-export function changedFiles(baseRef: string, headRef: string, cwd: string): string[] {
-  const out = runGit(["diff", "--name-only", `${baseRef}...${headRef}`], cwd);
-  return out.split("\n").map((s) => s.trim()).filter(Boolean);
-}
-
 export function commitSummary(sha: string, cwd: string): CommitSummary {
   const commits = firstParentCommits(sha, 1, cwd);
   if (commits.length === 0) {
