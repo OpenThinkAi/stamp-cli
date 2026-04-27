@@ -12,6 +12,7 @@ process.on("warning", (warn) => {
 import { Command } from "commander";
 import { runBootstrap } from "./commands/bootstrap.js";
 import { runInit } from "./commands/init.js";
+import { runProvision } from "./commands/provision.js";
 import {
   keysExport,
   keysGenerate,
@@ -166,6 +167,62 @@ program
           force: opts.force,
           agentsMd: opts.agentsMd,
           claudeMd: opts.claudeMd,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`error: ${message}`);
+        process.exit(1);
+      }
+    },
+  );
+
+program
+  .command("provision <name>")
+  .description(
+    "single-command server-gated repo setup: provision a bare repo on the stamp server (~/.stamp/server.yml or --server), clone it, run bootstrap, optionally create a GitHub mirror + apply the Ruleset",
+  )
+  .option(
+    "--server <host:port>",
+    "override ~/.stamp/server.yml with an inline endpoint",
+  )
+  .option(
+    "--org <github-org>",
+    "GitHub org or user to host the mirror repo under (skip mirror entirely if omitted)",
+  )
+  .option(
+    "--into <path>",
+    "where to clone the new repo locally (default: ./<name>)",
+  )
+  .option(
+    "--public",
+    "create the GitHub mirror repo as public instead of private",
+  )
+  .option("--no-mirror", "skip GitHub mirror creation + .stamp/mirror.yml")
+  .option("--no-ruleset", "skip applying the GitHub Ruleset on the mirror")
+  .option("--dry-run", "print the plan without making changes")
+  .action(
+    async (
+      name: string,
+      opts: {
+        server?: string;
+        org?: string;
+        into?: string;
+        public?: boolean;
+        mirror: boolean;
+        ruleset: boolean;
+        dryRun?: boolean;
+      },
+    ) => {
+      try {
+        await runProvision({
+          name,
+          server: opts.server,
+          org: opts.org,
+          into: opts.into,
+          privateRepo: !opts.public,
+          noMirror: !opts.mirror,
+          noRuleset: !opts.ruleset,
+          dryRun: opts.dryRun,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

@@ -17,8 +17,13 @@ RUN apk add --no-cache git openssh-server bash nodejs \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
  && mkdir -p /srv/git /home/git/.ssh /etc/stamp \
  && chown -R git:git /srv/git /home/git \
- && chmod 700 /home/git/.ssh \
- && ssh-keygen -A
+ && chmod 700 /home/git/.ssh
+# NOTE: ssh-keygen -A is intentionally NOT run at build time. Host keys
+# baked into the image rotate on every container rebuild, breaking every
+# operator's known_hosts on every redeploy. entrypoint.sh generates host
+# keys on first boot into /srv/git/.ssh-host-keys/ (the persistent volume)
+# and reuses them on subsequent boots, so the same image deployed multiple
+# times keeps the same host identity.
 
 # Harden sshd: no password auth, no root login.
 RUN sed -i \

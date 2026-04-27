@@ -40,6 +40,15 @@ export function userKeysDir(): string {
   return join(homedir(), ".stamp", "keys");
 }
 
+/**
+ * Per-user stamp-server config. Holds {host, port, user, repo_root_prefix}
+ * so commands like `stamp provision` can reach the operator's stamp server
+ * without making the agent guess at SSH endpoints.
+ */
+export function userServerConfigPath(): string {
+  return join(homedir(), ".stamp", "server.yml");
+}
+
 export function ensureDir(path: string, mode = 0o755): void {
   if (!existsSync(path)) {
     mkdirSync(path, { recursive: true, mode });

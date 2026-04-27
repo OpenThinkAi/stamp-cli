@@ -14,6 +14,47 @@ set -e
 # any build-time chown. Fix at boot so the git user can write its own repos.
 chown -R git:git /srv/git 2>/dev/null || true
 
+# SSH host-key persistence — the load-bearing fix for the recurring
+# "REMOTE HOST IDENTIFICATION HAS CHANGED" warning every operator hits
+# after a container redeploy. The keys live on the persistent volume,
+# not in the image, so the same project's stamp server keeps the same
+# host identity across rebuilds.
+HOST_KEY_DIR=/srv/git/.ssh-host-keys
+mkdir -p "$HOST_KEY_DIR"
+if [ ! -f "$HOST_KEY_DIR/ssh_host_ed25519_key" ]; then
+  echo "Generating fresh SSH host keys into $HOST_KEY_DIR (first boot for this volume)" >&2
+  ssh-keygen -t ed25519 -N "" -f "$HOST_KEY_DIR/ssh_host_ed25519_key" -q
+  ssh-keygen -t rsa -b 4096 -N "" -f "$HOST_KEY_DIR/ssh_host_rsa_key" -q
+  ssh-keygen -t ecdsa -b 521 -N "" -f "$HOST_KEY_DIR/ssh_host_ecdsa_key" -q
+fi
+# Pin the host-key directory to root:root every boot. The git user owns its
+# parent /srv/git (so it can write bare repos), so without this the git user
+# could in theory rename/delete .ssh-host-keys. The git user's surface is
+# heavily constrained anyway (forced command via new-stamp-repo / git-shell),
+# but belt-and-suspenders is cheap here.
+chown root:root "$HOST_KEY_DIR"
+chmod 700 "$HOST_KEY_DIR"
+chown root:root "$HOST_KEY_DIR"/ssh_host_*
+chmod 600 "$HOST_KEY_DIR"/ssh_host_*_key
+chmod 644 "$HOST_KEY_DIR"/ssh_host_*_key.pub
+# Point sshd at the persistent keys via /etc/ssh symlinks. We replace any
+# build-time-generated keys (which we no longer create, but defensive) so
+# there's exactly one set of keys in play.
+for keytype in ed25519 rsa ecdsa; do
+  rm -f "/etc/ssh/ssh_host_${keytype}_key" "/etc/ssh/ssh_host_${keytype}_key.pub"
+  ln -s "$HOST_KEY_DIR/ssh_host_${keytype}_key" "/etc/ssh/ssh_host_${keytype}_key"
+  ln -s "$HOST_KEY_DIR/ssh_host_${keytype}_key.pub" "/etc/ssh/ssh_host_${keytype}_key.pub"
+done
+
+# Print host-key fingerprints to logs at boot so operators can verify
+# the key the SSH client is being asked to trust. Useful when adding the
+# server to known_hosts for the first time, or when investigating a
+# legitimate vs. suspicious key change.
+echo "SSH host-key fingerprints (verify these match what your client sees):" >&2
+for keytype in ed25519 rsa ecdsa; do
+  ssh-keygen -lf "$HOST_KEY_DIR/ssh_host_${keytype}_key.pub" 2>&1 | sed 's/^/  /' >&2
+done
+
 if [ -n "$AUTHORIZED_KEYS" ]; then
   printf '%s\n' "$AUTHORIZED_KEYS" > /home/git/.ssh/authorized_keys
   chmod 600 /home/git/.ssh/authorized_keys
