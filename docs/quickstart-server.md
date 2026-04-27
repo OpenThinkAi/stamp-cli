@@ -45,44 +45,51 @@ The fastest path is Railway, but the image runs on any Docker host (Fly, a Linux
    EOF
    ```
 
-## Step 2 — Provision a repo
+## Step 2 — Tell stamp-cli where your server is (one-time, per-operator)
 
 ```sh
-ssh stamp new-stamp-repo myproject
+mkdir -p ~/.stamp
+cat > ~/.stamp/server.yml <<EOF
+host: <your-stamp-server-ssh-host>
+port: <your-stamp-server-ssh-port>
+EOF
 ```
 
-This creates a bare repo at `/srv/git/myproject.git` with:
-- the stamp-verify pre-receive hook installed
-- your operator pubkey seeded as the initial trusted signer
-- a placeholder `example` reviewer that auto-approves (so the bootstrap merge can land)
+For Railway TCP proxies the host/port show up under Settings → Networking → TCP Proxy. The `git` user and `/srv/git` repo path are the defaults; only override (`user:`, `repo_root_prefix:`) if you've changed them on the server image.
 
-The output prints a clone URL and the next-step commands.
+This file is per-operator config, not committed to any repo — it just tells your local stamp-cli which server commands like `stamp provision` should reach for.
 
-## Step 3 — Clone and bootstrap real reviewers
+## Step 3 — Provision and bootstrap a repo (one command)
 
 ```sh
-git clone ssh://stamp/srv/git/myproject.git
+stamp provision myproject --org <github-org-or-user>
+```
+
+This single command does everything: SSHes to your stamp server and creates the bare repo via `new-stamp-repo`, clones it locally, runs `stamp bootstrap` (which lands the three real reviewers via a signed merge), creates a private GitHub mirror repo, writes `.stamp/mirror.yml`, and applies the `stamp-mirror-only` Ruleset on the mirror so direct pushes from any other identity are rejected by GitHub.
+
+End state: `main` requires `security`, `standards`, `product` reviewers. Origin is your stamp server. GitHub holds the mirror, locked down to the bypass actor. The clone is at `./myproject` and ready to work in.
+
+```sh
+stamp provision myproject --dry-run                   # preview without changes
+stamp provision myproject --no-mirror                 # skip GitHub mirror entirely
+stamp provision myproject --org acme --public         # public mirror instead of private
+stamp provision myproject --server alt.host:2222      # one-off override of ~/.stamp/server.yml
+stamp provision myproject --into /elsewhere/myproj    # clone somewhere other than ./myproject
+```
+
+### Manual fallback (rarely needed)
+
+If `stamp provision` doesn't fit (custom server layout, unusual mirror config, debugging), the manual steps are:
+
+```sh
+ssh git@<stamp-host> -p <port> new-stamp-repo myproject
+git clone ssh://git@<stamp-host>:<port>/srv/git/myproject.git
 cd myproject
-stamp bootstrap
+stamp bootstrap                          # land real reviewers via the placeholder swap
+# (manually create the GitHub mirror, write .stamp/mirror.yml, apply ruleset)
 ```
 
-`stamp bootstrap` is the key command. It:
-
-1. Detects the placeholder state (only `example` reviewer required)
-2. Scaffolds three calibrated starter reviewers (`security`, `standards`, `product`) — same as `stamp init`
-3. Writes a new `.stamp/config.yml` requiring the three real reviewers
-4. Keeps `example` defined-but-unrequired (avoids the [chicken-and-egg](./troubleshooting.md#stamp-merge-fails-with-required-by-rule-but-not-defined) issue)
-5. Commits to `stamp/bootstrap`, runs the placeholder reviewer (auto-approves), merges to `main`, and pushes
-
-End state: `main` requires `security`, `standards`, `product`. The server hook accepts the swap-merge because the server reads the **pre-push** required list (still just `example` at that point) — the new reviewers kick in for the *next* push.
-
-```sh
-stamp bootstrap --dry-run    # see the plan without making changes
-stamp bootstrap --help       # all options
-stamp bootstrap --from /path/to/.stamp/   # use your own seed instead of the starters
-```
-
-If you already have a `.stamp/` you've prepared elsewhere (e.g. with `stamp init` in another project), pass it via `--from <dir>` and `stamp bootstrap` will install your reviewers instead of the three starters.
+`stamp bootstrap` accepts `--from /path/to/.stamp/` if you want to install a pre-prepared reviewer set instead of the three starters.
 
 ## Step 4 — Customize the reviewer prompts
 

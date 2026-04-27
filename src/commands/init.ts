@@ -108,9 +108,10 @@ export function runInit(opts: InitOptions = {}): void {
     throw new Error(
       `--mode server-gated requires origin to be a stamp server, but ${describeShape(remoteClass)}.\n` +
         `\n` +
-        `For server-gated enforcement: deploy a stamp server (see docs/quickstart-server.md), ` +
-        `provision a repo on it (\`ssh git@<stamp-host> new-stamp-repo <name>\`), clone the result, ` +
-        `then run \`stamp bootstrap\` (NOT \`stamp init\`) on the clone.\n` +
+        `For server-gated enforcement, the recommended one-command path is:\n` +
+        `  stamp provision <name> --org <github-org>\n` +
+        `(needs ~/.stamp/server.yml with your stamp server's host + port, or --server <host>:<port>).\n` +
+        `That command handles the bare-repo creation, clone, bootstrap merge, GitHub mirror, and Ruleset.\n` +
         `\n` +
         `For local-only / advisory use against this GitHub repo: re-run with \`stamp init --mode local-only\`. ` +
         `That mode is honest about the lack of server-side enforcement (signed merges still work, ` +
