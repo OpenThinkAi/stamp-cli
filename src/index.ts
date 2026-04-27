@@ -59,15 +59,46 @@ program
     "--no-agents-md",
     "skip creating or updating AGENTS.md at the repo root",
   )
-  .action((opts: { minimal?: boolean; agentsMd: boolean }) => {
-    try {
-      runInit({ minimal: opts.minimal, agentsMd: opts.agentsMd });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
-    }
-  });
+  .option(
+    "--mode <mode>",
+    "deployment mode: 'server-gated' (origin is a stamp server, gate is enforced) or 'local-only' (no server, advisory). Auto-detected from the configured remote if omitted.",
+  )
+  .option(
+    "--remote <name>",
+    "remote name to inspect for deployment-shape detection (default: origin)",
+    "origin",
+  )
+  .action(
+    (opts: {
+      minimal?: boolean;
+      agentsMd: boolean;
+      mode?: string;
+      remote: string;
+    }) => {
+      try {
+        let mode: "server-gated" | "local-only" | undefined;
+        if (opts.mode === undefined) {
+          mode = undefined;
+        } else if (opts.mode === "server-gated" || opts.mode === "local-only") {
+          mode = opts.mode;
+        } else {
+          throw new Error(
+            `--mode must be 'server-gated' or 'local-only' (got "${opts.mode}")`,
+          );
+        }
+        runInit({
+          minimal: opts.minimal,
+          agentsMd: opts.agentsMd,
+          mode,
+          remote: opts.remote,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`error: ${message}`);
+        process.exit(1);
+      }
+    },
+  );
 
 program
   .command("bootstrap")

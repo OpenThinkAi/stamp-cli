@@ -13,6 +13,7 @@ import {
   type StampConfig,
 } from "../lib/config.js";
 import { currentBranch, runGit } from "../lib/git.js";
+import { classifyRemote, describeShape } from "../lib/remote.js";
 import {
   ensureDir,
   findRepoRoot,
@@ -100,11 +101,30 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
       requiredOnTarget.length === 1 &&
       requiredOnTarget[0] === "example";
     if (!isFreshPlaceholder) {
+      // If origin is a public forge, the user almost certainly meant `stamp
+      // init` (the local-only/no-server path), not bootstrap (which only
+      // applies on a clone of a stamp-server-provisioned repo with the
+      // example placeholder seed). Surface that hint inline so the agent
+      // running this doesn't conclude "bootstrap isn't needed" and ship a
+      // config that nothing enforces.
+      const remoteClass = classifyRemote(opts.remote ?? "origin", repoRoot);
+      const deploymentHint =
+        remoteClass.shape === "forge-direct"
+          ? `\n\n` +
+            `Note: ${describeShape(remoteClass)}. \`stamp bootstrap\` runs in a clone of a ` +
+            `stamp-server-provisioned repo (one with the placeholder \`example\` reviewer ` +
+            `seeded by setup-repo.sh). Your origin is a public forge directly, so this ` +
+            `command isn't applicable. For local-only / advisory use against this remote, ` +
+            `run \`stamp init --mode local-only\` instead. For server-gated enforcement, ` +
+            `deploy a stamp server (docs/quickstart-server.md), provision a repo on it, ` +
+            `clone the result, then run \`stamp bootstrap\` on the clone.`
+          : "";
       throw new Error(
         `this repo doesn't look like a fresh placeholder bootstrap state. ` +
           `Expected: exactly one reviewer ("example") required by branch "${targetBranch}". ` +
           `Found reviewers: [${reviewerNames.join(", ")}], required: [${requiredOnTarget.join(", ")}]. ` +
-          `If you're sure you want to overwrite this config, re-run with --force.`,
+          `If you're sure you want to overwrite this config, re-run with --force.` +
+          deploymentHint,
       );
     }
   }

@@ -2,7 +2,7 @@
 
 This walks through standing up a stamp-server, provisioning a repo on it, landing real reviewers, and (optionally) mirroring verified commits to GitHub. End-to-end, ~15 minutes.
 
-If you just want to try stamp-cli locally with no server, see the [README's local quickstart](../README.md#quick-start-local-test) instead.
+This is the **server-gated** deployment shape — the only shape where the gate is actually enforced (the server's pre-receive hook rejects unstamped pushes). If you instead want to use stamp's reviewer/signing flow as a discipline aid against a GitHub repo *without* server-side enforcement (no rejection of direct `git push origin main`), see the [local-only path in the README](../README.md#local-only-path) — that's `stamp init --mode local-only`, not this walkthrough.
 
 ## Trust topology — read this first
 
