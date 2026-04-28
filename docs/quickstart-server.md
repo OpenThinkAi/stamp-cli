@@ -48,14 +48,17 @@ The fastest path is Railway, but the image runs on any Docker host (Fly, a Linux
 ## Step 2 — Tell stamp-cli where your server is (one-time, per-operator)
 
 ```sh
-mkdir -p ~/.stamp
-cat > ~/.stamp/server.yml <<EOF
-host: <your-stamp-server-ssh-host>
-port: <your-stamp-server-ssh-port>
-EOF
+stamp server config <your-stamp-server-ssh-host>:<your-stamp-server-ssh-port>
 ```
 
-For Railway TCP proxies the host/port show up under Settings → Networking → TCP Proxy. The `git` user and `/srv/git` repo path are the defaults; only override (`user:`, `repo_root_prefix:`) if you've changed them on the server image.
+For Railway TCP proxies the host/port show up under Settings → Networking → TCP Proxy. The `git` user and `/srv/git` repo path are the defaults; only override with `--user <name>` / `--repo-root-prefix <path>` if you've changed them on the server image.
+
+`stamp server config` writes `~/.stamp/server.yml` (mode 0o600). To inspect or remove it later:
+
+```sh
+stamp server config --show       # print the resolved config
+stamp server config --unset      # delete ~/.stamp/server.yml
+```
 
 This file is per-operator config, not committed to any repo — it just tells your local stamp-cli which server commands like `stamp provision` should reach for.
 

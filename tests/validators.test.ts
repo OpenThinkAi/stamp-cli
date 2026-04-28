@@ -43,6 +43,11 @@ import {
   STAMP_CLAUDE_END,
   STAMP_END,
 } from "../src/lib/agentsMd.ts";
+import {
+  formatServerConfigYaml,
+  runServerConfig,
+} from "../src/commands/server.ts";
+import { parseServerConfig as parseServerYaml } from "../src/lib/serverConfig.ts";
 
 // ---------- parseGithubOriginUrl ----------
 
@@ -241,6 +246,120 @@ describe("injectStampSection (AGENTS.md)", () => {
     const out = injectStampSection(existing, "server-gated");
     assert.match(out, /this is mine/);
     assert.match(out, /trailing user content/);
+  });
+});
+
+// ---------- formatServerConfigYaml ----------
+
+describe("formatServerConfigYaml", () => {
+  it("emits only host + port when user / repo_root_prefix are absent", () => {
+    const yaml = formatServerConfigYaml({ host: "stamp.example.com", port: 2222 });
+    const round = parseServerYaml(yaml);
+    assert.equal(round.host, "stamp.example.com");
+    assert.equal(round.port, 2222);
+    assert.equal(round.user, "git");
+    assert.equal(round.repoRootPrefix, "/srv/git");
+    assert.equal(yaml.includes("user:"), false, "should omit user when default");
+    assert.equal(
+      yaml.includes("repo_root_prefix:"),
+      false,
+      "should omit repo_root_prefix when default",
+    );
+  });
+
+  it("includes user + repo_root_prefix overrides when provided", () => {
+    const yaml = formatServerConfigYaml({
+      host: "x",
+      port: 22,
+      user: "alice",
+      repoRootPrefix: "/var/repos",
+    });
+    const round = parseServerYaml(yaml);
+    assert.equal(round.user, "alice");
+    assert.equal(round.repoRootPrefix, "/var/repos");
+  });
+
+  it("trims whitespace on overrides (defensive)", () => {
+    const yaml = formatServerConfigYaml({
+      host: "x",
+      port: 22,
+      user: "  alice  ",
+      repoRootPrefix: "  /var/repos  ",
+    });
+    const round = parseServerYaml(yaml);
+    assert.equal(round.user, "alice");
+    assert.equal(round.repoRootPrefix, "/var/repos");
+  });
+
+  it("treats empty-string overrides as 'use default' (no key emitted)", () => {
+    const yaml = formatServerConfigYaml({
+      host: "x",
+      port: 22,
+      user: "",
+      repoRootPrefix: "   ",
+    });
+    assert.equal(yaml.includes("user:"), false);
+    assert.equal(yaml.includes("repo_root_prefix:"), false);
+  });
+});
+
+// ---------- runServerConfig: argument validation ----------
+
+describe("runServerConfig validation", () => {
+  it("rejects no args (no mode chosen)", () => {
+    assert.throws(() => runServerConfig({}), /exactly one/);
+  });
+
+  it("rejects host:port + --show together (multiple modes)", () => {
+    assert.throws(
+      () => runServerConfig({ hostPort: "x:22", show: true }),
+      /exactly one/,
+    );
+  });
+
+  it("rejects --show + --unset together (multiple modes)", () => {
+    assert.throws(
+      () => runServerConfig({ show: true, unset: true }),
+      /exactly one/,
+    );
+  });
+
+  it("rejects --user with --show (only applies on write)", () => {
+    assert.throws(
+      () => runServerConfig({ show: true, user: "alice" }),
+      /only apply when writing/,
+    );
+  });
+
+  it("rejects --repo-root-prefix with --unset (only applies on write)", () => {
+    assert.throws(
+      () => runServerConfig({ unset: true, repoRootPrefix: "/v" }),
+      /only apply when writing/,
+    );
+  });
+
+  it("rejects malformed host:port (format error)", () => {
+    assert.throws(
+      () => runServerConfig({ hostPort: "not-a-spec" }),
+      /must be in the form <host>:<port>/,
+    );
+  });
+
+  it("rejects out-of-range port with the port-specific message (not the format one)", () => {
+    // Pinning the bug standards caught: a fixed wrap message would
+    // misleadingly tell the user the format is wrong when the format
+    // is fine and the port is out of range.
+    assert.throws(
+      () => runServerConfig({ hostPort: "x:99999" }),
+      /port must be an integer 1\.\.65535/,
+    );
+  });
+
+  it("error messages use 'stamp server config' context (not '--server')", () => {
+    assert.throws(
+      () => runServerConfig({ hostPort: "not-a-spec" }),
+      /stamp server config:/,
+    );
   });
 });
 
