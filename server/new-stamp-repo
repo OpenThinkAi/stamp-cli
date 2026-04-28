@@ -3,26 +3,59 @@
 # new-stamp-repo — one-line repo provisioning on a running stamp server.
 #
 # Usage (over SSH):
-#   ssh git@<host> new-stamp-repo <name> [<seed-stamp-dir>]
+#   ssh git@<host> new-stamp-repo <name>                          # placeholder seed
+#   ssh git@<host> new-stamp-repo <name> <seed-stamp-dir>         # custom .stamp/ seed
+#   ssh git@<host> new-stamp-repo <name> --from-tarball <path>    # brownfield migration
 #
 # Creates /srv/git/<name>.git with the stamp-verify hook installed and the
 # operator's public key (from $OPERATOR_PUB_KEY at container startup) as the
 # initial trusted signer.
 #
-# Optional <seed-stamp-dir> is a path on the SERVER (typically uploaded via
-# scp into /tmp first) containing a project-specific .stamp/ seed —
-# config.yml + reviewers/. When omitted, a placeholder example reviewer is
-# seeded.
+# Modes:
+#   - placeholder seed (no extra arg): scaffolds the auto-approving `example`
+#     reviewer; intended to be replaced via `stamp bootstrap` on first clone.
+#   - <seed-stamp-dir>: path on the SERVER (typically scp'd into /tmp first)
+#     containing config.yml + reviewers/ + optional mirror.yml; the bare repo
+#     is seeded directly with that .stamp/ config + a fresh empty initial
+#     commit.
+#   - --from-tarball <path>: path on the SERVER to a gzipped bare-clone of
+#     the operator's existing repo. The tarball is extracted as the bare
+#     repo, preserving the operator's full history + .stamp/ + trusted-keys.
+#     Used by `stamp provision --migrate-existing` for brownfield migration.
 #
 set -e
 
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-  echo "usage: new-stamp-repo <name> [<seed-stamp-dir>]" >&2
+usage() {
+  echo "usage: new-stamp-repo <name> [<seed-stamp-dir> | --from-tarball <tarball-path>]" >&2
   exit 2
+}
+
+if [ $# -lt 1 ]; then
+  usage
 fi
 
 NAME="$1"
-SEED_DIR="${2:-}"
+SEED_DIR=""
+FROM_TARBALL=""
+
+case $# in
+  1)
+    : # placeholder seed
+    ;;
+  2)
+    SEED_DIR="$2"
+    ;;
+  3)
+    if [ "$2" != "--from-tarball" ]; then
+      usage
+    fi
+    FROM_TARBALL="$3"
+    ;;
+  *)
+    usage
+    ;;
+esac
+
 REPO="/srv/git/${NAME}.git"
 # The setup-repo.sh script auto-discovers post-receive.cjs alongside
 # the pre-receive path, so we pass the .cjs form here to enable it.
@@ -44,7 +77,9 @@ fi
 # path>` line that's wrong over SSH. We print a server-aware footer below.
 export STAMP_SETUP_QUIET_NEXT_STEPS=1
 
-if [ -n "$SEED_DIR" ]; then
+if [ -n "$FROM_TARBALL" ]; then
+  /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" --from-tarball "$FROM_TARBALL"
+elif [ -n "$SEED_DIR" ]; then
   /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" "$SEED_DIR"
 else
   /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY"
@@ -55,9 +90,18 @@ fi
 # show <stamp-host> as a placeholder the user can substitute.
 echo
 echo "Next steps (substitute <stamp-host> with the SSH host you connected to):"
-echo "  1. Clone:        git clone ssh://git@<stamp-host>${REPO}"
-echo "  2. cd into the clone"
-if [ -z "$SEED_DIR" ]; then
+if [ -n "$FROM_TARBALL" ]; then
+  echo "  1. Update local origin to: ssh://git@<stamp-host>${REPO}"
+  echo "     (the bare already has your full history from the tarball — no push needed)"
+  echo "  2. Continue with the normal stamp review/merge cycle for new commits"
+elif [ -n "$SEED_DIR" ]; then
+  echo "  1. Clone:        git clone ssh://git@<stamp-host>${REPO}"
+  echo "  2. cd into the clone"
+  echo "  3. Customize .stamp/reviewers/ as needed, then start the normal"
+  echo "     stamp review/merge cycle."
+else
+  echo "  1. Clone:        git clone ssh://git@<stamp-host>${REPO}"
+  echo "  2. cd into the clone"
   echo "  3. Run:          stamp bootstrap"
   echo
   echo "     Installs real reviewers (security/standards/product) and replaces"
@@ -65,7 +109,4 @@ if [ -z "$SEED_DIR" ]; then
   echo "     options. To skip this step on future repos, scp your .stamp/"
   echo "     seed dir to /tmp/seed on the server and re-run with:"
   echo "       ssh git@<stamp-host> new-stamp-repo <name> /tmp/seed"
-else
-  echo "  3. Customize .stamp/reviewers/ as needed, then start the normal"
-  echo "     stamp review/merge cycle."
 fi

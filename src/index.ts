@@ -200,6 +200,10 @@ program
   .option("--no-mirror", "skip GitHub mirror creation + .stamp/mirror.yml")
   .option("--no-ruleset", "skip applying the GitHub Ruleset on the mirror")
   .option("--dry-run", "print the plan without making changes")
+  .option(
+    "--migrate-existing",
+    "brownfield: migrate the existing repo at cwd (with .stamp/ committed and origin → github) to server-gated; preserves history, renames origin → github, points new origin at the stamp server",
+  )
   .action(
     async (
       name: string,
@@ -211,6 +215,7 @@ program
         mirror: boolean;
         ruleset: boolean;
         dryRun?: boolean;
+        migrateExisting?: boolean;
       },
     ) => {
       try {
@@ -223,6 +228,7 @@ program
           noMirror: !opts.mirror,
           noRuleset: !opts.ruleset,
           dryRun: opts.dryRun,
+          migrateExisting: opts.migrateExisting,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
