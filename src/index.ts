@@ -28,6 +28,7 @@ import { runLog } from "./commands/log.js";
 import { runMerge } from "./commands/merge.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
+import { runServerConfig } from "./commands/server.js";
 import {
   reviewersAdd,
   reviewersEdit,
@@ -261,6 +262,39 @@ function handleCliError(err: unknown): never {
   console.error(`error: ${message}`);
   process.exit(isUsageError ? 2 : 1);
 }
+
+const server = program
+  .command("server")
+  .description(
+    "manage the per-operator stamp server config at ~/.stamp/server.yml (commands like `stamp provision` and `stamp server-repos` read this file).",
+  );
+server
+  .command("config [host:port]")
+  .description(
+    "write/inspect/remove ~/.stamp/server.yml. Provide exactly one of <host:port> (write), --show (print), or --unset (remove).",
+  )
+  .option("--show", "print the resolved config (or note if no config is set)")
+  .option("--unset", "remove ~/.stamp/server.yml")
+  .option("--user <user>", "SSH user when writing (default: git)")
+  .option("--repo-root-prefix <path>", "repo root prefix on the server when writing (default: /srv/git)")
+  .action(
+    (
+      hostPort: string | undefined,
+      opts: { show?: boolean; unset?: boolean; user?: string; repoRootPrefix?: string },
+    ) => {
+      try {
+        runServerConfig({
+          hostPort,
+          show: opts.show,
+          unset: opts.unset,
+          user: opts.user,
+          repoRootPrefix: opts.repoRootPrefix,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 
 const serverRepo = program
   .command("server-repos")

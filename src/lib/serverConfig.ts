@@ -84,21 +84,24 @@ export function parseServerConfig(
 }
 
 /**
- * Parse a `--server <host:port>` flag value into a ServerConfig. Defaults
- * for user / repo_root_prefix; the operator can use the file-based config
- * if they need to override those.
+ * Parse a `<host:port>` value (used by `--server` and by `stamp server
+ * config`) into a ServerConfig. Defaults for user / repo_root_prefix;
+ * the operator can use the file-based config if they need to override
+ * those. `context` controls the prefix on error messages so callers
+ * can produce diagnostics that match the surface they're invoked from
+ * (default "--server"; `stamp server config` passes its own).
  */
-export function parseServerFlag(value: string): ServerConfig {
+export function parseServerFlag(value: string, context = "--server"): ServerConfig {
   const m = value.trim().match(/^([^:]+):(\d+)$/);
   if (!m) {
     throw new Error(
-      `--server must be in the form <host>:<port> (got "${value}")`,
+      `${context} must be in the form <host>:<port> (got "${value}")`,
     );
   }
   const port = Number(m[2]);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(
-      `--server: port must be an integer 1..65535 (got "${m[2]}")`,
+      `${context}: port must be an integer 1..65535 (got "${m[2]}")`,
     );
   }
   return {
