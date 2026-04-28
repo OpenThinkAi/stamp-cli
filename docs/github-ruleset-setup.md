@@ -93,6 +93,23 @@ git push origin main
 
 From the stamp server's mirror push (same identity as the bypass actor) — should sail through normally.
 
+## `actor_type: User` vs `OrganizationAdmin`
+
+GitHub's Ruleset bypass-actor evaluator handles user-type actors differently between personal and org-owned repos:
+
+- **Personal repos** (`owner.type === "User"`): `actor_type: "User"` with `actor_id: <user-id>` works as expected. The named user can bypass.
+- **Org-owned repos** (`owner.type === "Organization"`): `actor_type: "User"` is **silently ignored** by GitHub's Ruleset evaluator. The API call to create the ruleset succeeds, the response shows the bypass actor present in `bypass_actors`, but `current_user_can_bypass` evaluates to `"never"` even when the calling user is the named actor. To bypass on org repos, use one of: `OrganizationAdmin` (any org admin, magic `actor_id: 1`), `Team`, `Integration` (a GitHub App), `RepositoryRole`, `DeployKey`.
+
+`stamp provision` and `stamp init` auto-detect the owner type and pick `OrganizationAdmin` for org repos, `User` for personal repos. The shipped template at `docs/github-ruleset-template.json` defaults to `User` (the simpler case); swap to `OrganizationAdmin` if you're applying to an org repo by hand:
+
+```json
+"bypass_actors": [
+  {"actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always"}
+]
+```
+
+`actor_id: 1` is GitHub's magic constant for "any org admin" — not a per-user ID. Anyone with the org admin role bypasses, which is the right scope for a one-person org or where the bot identity is itself an org admin. For tighter scoping (single bot identity only), use a `Team` or `Integration` (GitHub App) bypass instead.
+
 ## Why we omit `required_linear_history`
 
 Your raw GitHub-exported ruleset will often include `{ "type": "required_linear_history" }`. **Remove it before importing for stamp.** Stamp's `stamp merge` produces `--no-ff` merge commits with two parents (the previous main + the feature branch's HEAD). `required_linear_history` rejects any commit whose parent isn't a fast-forward ancestor — i.e., it explicitly rejects merge commits. Bypass actors are exempt from this rule too, so a correctly-configured bypass list still works around it; but it's confusing to leave a rule in place that exists only to be bypassed. The template ships without it.

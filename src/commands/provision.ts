@@ -28,7 +28,9 @@ import {
   applyStampRuleset,
   checkGhAvailable,
   lookupAuthenticatedUserId,
+  lookupRepoOwnerType,
   parseGithubOriginUrl,
+  type BypassActor,
 } from "../lib/ghRuleset.js";
 import {
   bareRepoSshUrl,
@@ -298,11 +300,31 @@ function applyMirrorRuleset(mirror: { owner: string; repo: string }): void {
     console.log(`      Try \`gh auth status\` and re-apply manually via docs/github-ruleset-setup.md.`);
     return;
   }
-  const result = applyStampRuleset(mirror.owner, mirror.repo, user.id);
+  const ownerType = lookupRepoOwnerType(mirror.owner, mirror.repo);
+  if (ownerType === null) {
+    console.log(
+      `note: GitHub Ruleset auto-apply skipped — couldn't determine whether ${mirror.owner}/${mirror.repo} is a personal or org repo.`,
+    );
+    console.log(`      For manual setup, see docs/github-ruleset-setup.md.`);
+    return;
+  }
+  // Org repos need actor_type="OrganizationAdmin" (actor_type="User"
+  // silently no-ops on org repos — GitHub accepts the entry but the
+  // bypass evaluator ignores it). Personal repos use actor_type="User".
+  const actor: BypassActor =
+    ownerType === "Organization"
+      ? { type: "OrganizationAdmin", id: 1 }
+      : { type: "User", id: user.id };
+  const actorDescription =
+    actor.type === "OrganizationAdmin"
+      ? "any org admin (your gh-authed user must be one to push as bypass)"
+      : `${user.login}, id ${user.id}`;
+
+  const result = applyStampRuleset(mirror.owner, mirror.repo, actor);
   switch (result.status) {
     case "created":
       console.log(
-        `GitHub Ruleset: created stamp-mirror-only on ${mirror.owner}/${mirror.repo} (bypass actor: ${user.login}, id ${user.id}).`,
+        `GitHub Ruleset: created stamp-mirror-only on ${mirror.owner}/${mirror.repo} (bypass actor: ${actorDescription}).`,
       );
       break;
     case "exists":

@@ -63,6 +63,48 @@ export function lookupAuthenticatedUserId(): { id: number; login: string } | nul
 }
 
 /**
+ * Look up the owner type of a github.com repo: "User" (personal account)
+ * or "Organization" (org-owned). Returns null on lookup failure.
+ *
+ * The owner type drives which bypass actor type the Ruleset gets:
+ *   - User-owned repos use actor_type="User" (the operator).
+ *   - Org-owned repos use actor_type="OrganizationAdmin" — GitHub's
+ *     Ruleset evaluator silently ignores actor_type="User" on org repos
+ *     (the bypass entry exists in the API response but doesn't actually
+ *     bypass anything), so we have to pick a type the evaluator honors.
+ */
+export function lookupRepoOwnerType(
+  owner: string,
+  repo: string,
+): "User" | "Organization" | null {
+  const r = spawnSync(
+    "gh",
+    ["api", `/repos/${owner}/${repo}`, "--jq", ".owner.type"],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  const t = r.stdout.trim();
+  if (t === "User" || t === "Organization") return t;
+  return null;
+}
+
+/**
+ * Bypass actor descriptor — the part of the Ruleset that says "this
+ * principal is allowed past the rules." Two shapes for now:
+ *
+ *   - { type: "User", id: <numeric> } — works on personal repos. The
+ *     gh-authenticated user is the typical id.
+ *   - { type: "OrganizationAdmin", id: 1 } — magic constant 1 means "any
+ *     org admin." Works on org-owned repos; "User" doesn't.
+ *
+ * Future shapes (Integration / Team / DeployKey) can be added without
+ * changing call sites.
+ */
+export type BypassActor =
+  | { type: "User"; id: number }
+  | { type: "OrganizationAdmin"; id: 1 };
+
+/**
  * Parse a github.com origin URL into { owner, repo }. The single regex
  * matches all the URL shapes git supports for github (ssh://, scp-style
  * git@host:path, https://) via the `[:/]` character class. The non-greedy
@@ -84,7 +126,7 @@ export function parseGithubOriginUrl(
  * actor populated. `required_linear_history` is deliberately omitted —
  * stamp's --no-ff merge commits would be rejected by it.
  */
-export function buildRulesetPayload(actorId: number): unknown {
+export function buildRulesetPayload(actor: BypassActor): unknown {
   return {
     name: "stamp-mirror-only",
     target: "branch",
@@ -102,8 +144,8 @@ export function buildRulesetPayload(actorId: number): unknown {
     ],
     bypass_actors: [
       {
-        actor_id: actorId,
-        actor_type: "User",
+        actor_id: actor.id,
+        actor_type: actor.type,
         bypass_mode: "always",
       },
     ],
@@ -153,13 +195,13 @@ export interface ApplyRulesetResult {
 export function applyStampRuleset(
   owner: string,
   repo: string,
-  actorId: number,
+  actor: BypassActor,
 ): ApplyRulesetResult {
   const existing = findExistingStampRuleset(owner, repo);
   if (existing !== null) {
     return { status: "exists", rulesetId: existing };
   }
-  const payload = buildRulesetPayload(actorId);
+  const payload = buildRulesetPayload(actor);
   const r = spawnSync(
     "gh",
     [
