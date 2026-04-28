@@ -6,7 +6,9 @@ import {
   applyStampRuleset,
   checkGhAvailable,
   lookupAuthenticatedUserId,
+  lookupRepoOwnerType,
   parseGithubOriginUrl,
+  type BypassActor,
 } from "../lib/ghRuleset.js";
 import { classifyRemote, describeShape } from "../lib/remote.js";
 import {
@@ -462,11 +464,35 @@ function applyGitHubRulesetWithReporting(remoteUrl: string): void {
     return;
   }
 
-  const result = applyStampRuleset(parsed.owner, parsed.repo, user.id);
+  // Pick a bypass actor type that GitHub will actually honor:
+  //   - personal repos: actor_type="User", id=gh-authenticated user
+  //   - org repos: actor_type="OrganizationAdmin", id=1 (the magic constant
+  //     for "any org admin"). actor_type="User" silently no-ops on org
+  //     repos — GitHub accepts the API call but the bypass entry doesn't
+  //     evaluate.
+  const ownerType = lookupRepoOwnerType(parsed.owner, parsed.repo);
+  if (ownerType === null) {
+    console.log(
+      `note: GitHub Ruleset auto-apply skipped — couldn't determine whether ${parsed.owner}/${parsed.repo} is a personal or org repo.`,
+    );
+    console.log(`      For manual setup, see docs/github-ruleset-setup.md.`);
+    console.log();
+    return;
+  }
+  const actor: BypassActor =
+    ownerType === "Organization"
+      ? { type: "OrganizationAdmin", id: 1 }
+      : { type: "User", id: user.id };
+  const actorDescription =
+    actor.type === "OrganizationAdmin"
+      ? "any org admin (your gh-authed user must be one to push as bypass)"
+      : `${user.login}, id ${user.id}`;
+
+  const result = applyStampRuleset(parsed.owner, parsed.repo, actor);
   switch (result.status) {
     case "created":
       console.log(
-        `GitHub Ruleset: created stamp-mirror-only on ${parsed.owner}/${parsed.repo} (bypass actor: ${user.login}, id ${user.id}).`,
+        `GitHub Ruleset: created stamp-mirror-only on ${parsed.owner}/${parsed.repo} (bypass actor: ${actorDescription}).`,
       );
       console.log(
         `                Direct \`git push origin main\` from any other identity will now be rejected by GitHub.`,
