@@ -20,13 +20,15 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
 import { runGit } from "../lib/git.js";
 import {
   applyStampRuleset,
   checkGhAvailable,
   lookupAuthenticatedUserId,
+  parseGithubOriginUrl,
 } from "../lib/ghRuleset.js";
 import {
   bareRepoSshUrl,
@@ -51,8 +53,18 @@ export interface ProvisionOptions {
   noRuleset?: boolean;
   /** Print the plan and exit without changing anything. */
   dryRun?: boolean;
-  /** Mark the GitHub mirror repo as private (default true). */
+  /** Mark the GitHub mirror repo as private (default true). Ignored in --migrate-existing. */
   privateRepo?: boolean;
+  /**
+   * Brownfield migration mode: take the existing repo at cwd (already
+   * stamp-init'd, with a GitHub remote and history) and migrate it to
+   * server-gated topology. Provisions a bare repo on the stamp server
+   * seeded from the existing local repo's full state via tarball,
+   * renames the existing origin to `github`, points origin at the stamp
+   * server, writes mirror.yml from the existing GitHub URL. Does NOT
+   * create a new GitHub repo — the existing remote IS the mirror.
+   */
+  migrateExisting?: boolean;
 }
 
 export async function runProvision(opts: ProvisionOptions): Promise<void> {
@@ -72,6 +84,15 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
         `  - or pass --server <host>:<port> on the command line.\n` +
         `\nSee docs/quickstart-server.md for how to deploy a stamp server first.`,
     );
+  }
+
+  // Brownfield migration is a separate flow — different inputs (existing
+  // local repo, not a fresh clone target), different ops (rename remotes,
+  // tarball-seed), and different mirror handling (existing GitHub remote,
+  // not gh repo create). Branch early so the greenfield code stays clean.
+  if (opts.migrateExisting) {
+    await runMigrateExisting(opts, server);
+    return;
   }
 
   // 2. Resolve clone destination.
@@ -315,5 +336,338 @@ function printSuccess(args: {
   }
   console.log(bar);
   console.log(`\nNext: cd ${args.cloneTarget}, then work on a feature branch and go through stamp review/merge/push.`);
+}
+
+// ---------- brownfield migration ----------
+
+/**
+ * Migrate an existing local repo to server-gated topology. Inputs:
+ *   - cwd is a git repo with .stamp/ committed and an `origin` remote
+ *     pointing at github.com (the future mirror destination).
+ *   - opts.name names the bare repo to create on the stamp server.
+ *
+ * Steps:
+ *   1. Sanity-check cwd: is a git repo, has .stamp/, has origin → github.
+ *   2. tar | scp the existing repo as a bare-clone to the server.
+ *   3. ssh new-stamp-repo --from-tarball: extracts the tarball as the
+ *      bare repo (preserves operator's full history, .stamp/, trusted-keys).
+ *   4. Locally: rename origin → github, add new origin → stamp server.
+ *   5. Write .stamp/mirror.yml from the now-`github` remote URL.
+ *   6. Apply the GitHub Ruleset on the existing GitHub repo.
+ *
+ * Net effect: same local SHAs, same GitHub repo, server is now origin and
+ * GitHub is the downstream mirror. No bootstrap merge needed (operator's
+ * existing .stamp/config.yml IS the gate config; no placeholder swap dance).
+ */
+async function runMigrateExisting(
+  opts: ProvisionOptions,
+  server: ServerConfig,
+): Promise<void> {
+  const repoRoot = process.cwd();
+
+  // Surface flag-conflict early. --org, --into, and --public/--no-public
+  // (privateRepo) only apply to the greenfield path; in migrate mode the
+  // mirror destination comes from the existing origin URL and there's no
+  // separate clone target. Silent-ignore is the worst option for an agent
+  // that passed these expecting them to do something.
+  const ignoredFlags: string[] = [];
+  if (opts.org !== undefined) ignoredFlags.push("--org");
+  if (opts.into !== undefined) ignoredFlags.push("--into");
+  if (opts.privateRepo === false) ignoredFlags.push("--public");
+  if (ignoredFlags.length > 0) {
+    console.log(
+      `warning: ${ignoredFlags.join(", ")} ignored under --migrate-existing — ` +
+        `the mirror destination comes from the existing \`origin\` remote, ` +
+        `and there's no separate clone (cwd is the source).`,
+    );
+    console.log();
+  }
+
+  // 1. Pre-flight checks. The migrate path makes destructive changes to
+  // the local repo's remotes and to the stamp server, so refuse loudly
+  // when the inputs aren't shaped like we expect — BEFORE any external
+  // call. Order matters: checks that don't mutate anything come first,
+  // and we re-validate "is github remote already taken" / "is origin
+  // already a stamp server URL" so a half-completed prior run doesn't
+  // strand the operator with a duplicate remote.
+  ensureCwdIsGitRepo(repoRoot);
+  ensureStampInitDone(repoRoot);
+  const githubOriginUrl = readOriginUrl(repoRoot);
+  const mirrorParse = parseGithubOriginUrl(githubOriginUrl);
+  if (!mirrorParse) {
+    throw new Error(
+      `existing origin (${githubOriginUrl}) doesn't look like a github.com URL. ` +
+        `--migrate-existing assumes the current origin is the GitHub repo that will become ` +
+        `the downstream mirror. If your existing remote isn't GitHub, this command isn't for you yet.`,
+    );
+  }
+  ensureNoConflictingRemotes(repoRoot);
+  ensureWorkingTreeClean(repoRoot);
+
+  // 2. Print the plan.
+  printMigratePlan({ opts, server, repoRoot, mirror: mirrorParse });
+
+  if (opts.dryRun) {
+    console.log("\n(dry run — no changes made)");
+    return;
+  }
+
+  // 3. Build the bare-clone tarball locally and scp to the server.
+  const stagingDir = mkdtempSync(join(tmpdir(), "stamp-migrate-"));
+  const bareCloneDir = join(stagingDir, `${opts.name}.git`);
+  const tarballPath = join(stagingDir, `${opts.name}.tar.gz`);
+  try {
+    console.log(`\nBuilding bare-clone tarball of existing repo`);
+    runGit(["clone", "--bare", repoRoot, bareCloneDir], stagingDir);
+    runTarGz(stagingDir, `${opts.name}.git`, tarballPath);
+
+    console.log(`Uploading tarball to ${server.host}:${server.port}`);
+    const remoteTarballPath = `/tmp/stamp-migrate-${opts.name}-${process.pid}.tar.gz`;
+    scpToServer(server, tarballPath, remoteTarballPath);
+
+    // 4. Provision the bare repo on the server from the tarball.
+    console.log(`Provisioning bare repo on ${server.host}:${server.port} from tarball`);
+    sshRunNewStampRepoFromTarball(server, opts.name, remoteTarballPath);
+
+    // 5. Clean up the remote tarball — best effort. The server may not
+    // allow rm via the forced-command setup; ignore failure.
+    sshTryRemoveRemoteFile(server, remoteTarballPath);
+  } finally {
+    rmSync(stagingDir, { recursive: true, force: true });
+  }
+
+  // 6. Rewire local remotes. Existing origin → github (preserved as the
+  // mirror destination); new origin → stamp server (the new source of truth).
+  console.log(`Rewiring local remotes: origin → github, new origin → stamp server`);
+  runGit(["remote", "rename", "origin", "github"], repoRoot);
+  const stampSshUrl = bareRepoSshUrl(server, opts.name);
+  runGit(["remote", "add", "origin", stampSshUrl], repoRoot);
+
+  // 7. Write .stamp/mirror.yml so the post-receive hook on the server
+  // knows where to mirror. Skipped under --no-mirror.
+  if (!opts.noMirror) {
+    writeMirrorYml(repoRoot, mirrorParse);
+  }
+
+  // 8. Apply the GitHub Ruleset on the existing GitHub repo. Skipped
+  // under --no-ruleset.
+  if (!opts.noMirror && !opts.noRuleset) {
+    applyMirrorRuleset(mirrorParse);
+  }
+
+  // 9. Success.
+  printMigrateSuccess({ repoRoot, server, repoName: opts.name, mirror: mirrorParse, opts });
+}
+
+function ensureCwdIsGitRepo(cwd: string): void {
+  try {
+    runGit(["rev-parse", "--is-inside-work-tree"], cwd);
+  } catch {
+    throw new Error(
+      `--migrate-existing must run inside an existing git repository. ` +
+        `cwd (${cwd}) is not a git working tree. ` +
+        `cd into your existing repo first, then re-run.`,
+    );
+  }
+}
+
+function ensureStampInitDone(cwd: string): void {
+  if (!existsSync(join(cwd, ".stamp", "config.yml"))) {
+    throw new Error(
+      `--migrate-existing expects this repo to already be stamp-init'd ` +
+        `(${join(cwd, ".stamp/config.yml")} not found). Run \`stamp init --mode local-only\` ` +
+        `first, calibrate your reviewers, then re-run with --migrate-existing.`,
+    );
+  }
+}
+
+function readOriginUrl(cwd: string): string {
+  try {
+    return runGit(["remote", "get-url", "origin"], cwd).trim();
+  } catch {
+    throw new Error(
+      `--migrate-existing expects the existing repo to have an \`origin\` remote ` +
+        `pointing at the GitHub repo that will become the mirror. No origin found. ` +
+        `Add it first: \`git remote add origin git@github.com:<owner>/<repo>.git\``,
+    );
+  }
+}
+
+/**
+ * Refuse to proceed if a `github` remote already exists. Catches the
+ * "user re-ran --migrate-existing on an already-migrated repo" case before
+ * we provision a duplicate bare on the server. Without this check, the
+ * remote rename later in the flow would fail AFTER the server-side
+ * provisioning, leaving the operator with a stranded bare repo and no
+ * mirror.yml.
+ *
+ * Other defensive checks (e.g. "origin already points at the stamp
+ * server") are unreachable here — the caller validated origin parses as
+ * a github.com URL before this runs, so origin can't be a stamp ssh URL
+ * by construction. Keep this function focused on the one real concern.
+ */
+function ensureNoConflictingRemotes(cwd: string): void {
+  const remotes = runGit(["remote"], cwd)
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (remotes.includes("github")) {
+    throw new Error(
+      `a \`github\` remote already exists in this repo. --migrate-existing renames ` +
+        `the existing \`origin\` (your GitHub URL) to \`github\`, so the slot must be free. ` +
+        `If you've already run --migrate-existing here, the migration is already done — ` +
+        `nothing to do. Otherwise: rename or remove the existing \`github\` remote first.`,
+    );
+  }
+}
+
+function ensureWorkingTreeClean(cwd: string): void {
+  const dirty = runGit(["status", "--porcelain", "--untracked-files=no"], cwd).trim();
+  if (dirty) {
+    throw new Error(
+      `working tree has uncommitted changes. --migrate-existing rewires remotes; ` +
+        `commit or stash your work first.`,
+    );
+  }
+}
+
+function runTarGz(parentDir: string, dirName: string, outputPath: string): void {
+  // Pack the bare-clone dir as a gzipped tarball. `-C parentDir dirName`
+  // preserves the top-level directory name inside the archive so the
+  // server-side --strip-components=1 + extraction lands cleanly.
+  const result = spawnSync("tar", ["-czf", outputPath, "-C", parentDir, dirName], {
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `tar -czf failed (exit ${result.status}). Cannot package the existing repo for upload.`,
+    );
+  }
+}
+
+function scpToServer(
+  server: ServerConfig,
+  localPath: string,
+  remotePath: string,
+): void {
+  // scp -P <port> <local> <user>@<host>:<remote>
+  const result = spawnSync(
+    "scp",
+    [
+      "-P",
+      String(server.port),
+      localPath,
+      `${server.user}@${server.host}:${remotePath}`,
+    ],
+    { stdio: ["ignore", "inherit", "inherit"] },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `scp to ${server.user}@${server.host}:${server.port} failed (exit ${result.status}). ` +
+        `Common causes: SSH key isn't authorized, host-key mismatch, or the server doesn't allow scp.`,
+    );
+  }
+}
+
+function sshRunNewStampRepoFromTarball(
+  server: ServerConfig,
+  name: string,
+  remoteTarballPath: string,
+): void {
+  const result = spawnSync(
+    "ssh",
+    [
+      "-p",
+      String(server.port),
+      `${server.user}@${server.host}`,
+      "new-stamp-repo",
+      name,
+      "--from-tarball",
+      remoteTarballPath,
+    ],
+    { stdio: ["ignore", "inherit", "inherit"] },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `ssh new-stamp-repo ${name} --from-tarball failed (exit ${result.status}). ` +
+        `Common causes: server doesn't have the new-stamp-repo --from-tarball mode yet (server image is older than 0.7.1), ` +
+        `the bare repo path already exists, or the tarball is malformed.`,
+    );
+  }
+}
+
+function sshTryRemoveRemoteFile(
+  server: ServerConfig,
+  remotePath: string,
+): void {
+  spawnSync(
+    "ssh",
+    [
+      "-p",
+      String(server.port),
+      `${server.user}@${server.host}`,
+      "rm",
+      "-f",
+      remotePath,
+    ],
+    { stdio: ["ignore", "ignore", "ignore"] },
+  );
+}
+
+function printMigratePlan(args: {
+  opts: ProvisionOptions;
+  server: ServerConfig;
+  repoRoot: string;
+  mirror: { owner: string; repo: string };
+}): void {
+  const bar = "─".repeat(72);
+  console.log(bar);
+  console.log("stamp provision --migrate-existing — plan");
+  console.log(bar);
+  console.log(fmt("source repo", args.repoRoot));
+  console.log(fmt("repo name", args.opts.name));
+  console.log(fmt("stamp server", `${args.server.user}@${args.server.host}:${args.server.port}`));
+  console.log(fmt("bare repo path", `${args.server.repoRootPrefix}/${args.opts.name}.git`));
+  console.log(
+    fmt("seed", "tarball of existing repo (full history + .stamp/ + trusted-keys preserved)"),
+  );
+  console.log(fmt("origin", "stamp server (was: github)"));
+  console.log(fmt("github", `mirror destination (${args.mirror.owner}/${args.mirror.repo})`));
+  if (!args.opts.noMirror) {
+    console.log(fmt("mirror.yml", "written to .stamp/mirror.yml"));
+  } else {
+    console.log(fmt("mirror.yml", "skipped (--no-mirror)"));
+  }
+  if (!args.opts.noMirror && !args.opts.noRuleset) {
+    console.log(fmt("GitHub Ruleset", `apply stamp-mirror-only on ${args.mirror.owner}/${args.mirror.repo}`));
+  } else {
+    console.log(fmt("GitHub Ruleset", "skipped"));
+  }
+  console.log(bar);
+}
+
+function printMigrateSuccess(args: {
+  repoRoot: string;
+  server: ServerConfig;
+  repoName: string;
+  mirror: { owner: string; repo: string };
+  opts: ProvisionOptions;
+}): void {
+  const bar = "─".repeat(72);
+  console.log(`\n${bar}`);
+  console.log(`✓ migrated to server-gated`);
+  console.log(bar);
+  console.log(fmt("repo", args.repoRoot));
+  console.log(fmt("origin", bareRepoSshUrl(args.server, args.repoName)));
+  console.log(fmt("github", `https://github.com/${args.mirror.owner}/${args.mirror.repo} (mirror)`));
+  console.log(bar);
+  if (!args.opts.noMirror) {
+    console.log(`\nmirror.yml was added to .stamp/. Commit it through the normal stamp flow:`);
+    console.log(`  git checkout -b chore/add-mirror-yml`);
+    console.log(`  git add .stamp/mirror.yml && git commit -m "stamp: add mirror.yml"`);
+    console.log(`  stamp review --diff main..chore/add-mirror-yml`);
+    console.log(`  git checkout main && stamp merge chore/add-mirror-yml --into main`);
+    console.log(`  stamp push main`);
+  }
 }
 

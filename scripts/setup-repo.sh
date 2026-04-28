@@ -43,15 +43,35 @@
 #
 set -euo pipefail
 
-if [[ $# -lt 3 || $# -gt 4 ]]; then
-  echo "usage: $0 <repo-dir> <hook-script> <trusted-pub-key> [<seed-stamp-dir>]" >&2
-  exit 2
-fi
+REPO_DIR="${1:-}"
+HOOK_SCRIPT="${2:-}"
+PUB_KEY="${3:-}"
+SEED_DIR=""
+FROM_TARBALL=""
 
-REPO_DIR="$1"
-HOOK_SCRIPT="$2"
-PUB_KEY="$3"
-SEED_DIR="${4:-}"
+# Fourth arg is either a seed-dir path (existing behavior) or
+# `--from-tarball <tarball-path>` (brownfield migration: the tarball IS a
+# bare clone of the operator's existing repo, extracted in place as the
+# bare repo so the existing history is preserved).
+case $# in
+  3)
+    : # placeholder seed
+    ;;
+  4)
+    SEED_DIR="$4"
+    ;;
+  5)
+    if [[ "$4" != "--from-tarball" ]]; then
+      echo "usage: $0 <repo-dir> <hook-script> <trusted-pub-key> [<seed-stamp-dir> | --from-tarball <tarball-path>]" >&2
+      exit 2
+    fi
+    FROM_TARBALL="$5"
+    ;;
+  *)
+    echo "usage: $0 <repo-dir> <hook-script> <trusted-pub-key> [<seed-stamp-dir> | --from-tarball <tarball-path>]" >&2
+    exit 2
+    ;;
+esac
 
 if [[ -e "$REPO_DIR" ]]; then
   echo "error: $REPO_DIR already exists" >&2
@@ -98,28 +118,53 @@ FP=$(compute_fingerprint "$PUB_KEY")
 SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 
-echo "→ creating bare repo at $REPO_DIR"
-git init --bare --quiet --initial-branch=main "$REPO_DIR"
-
-# Seed BEFORE installing the hook — this is the bootstrap bypass per DESIGN.md.
-# Once the hook is in place, every push is verified.
-echo "→ seeding initial commit (pre-hook, per DESIGN.md bootstrap rule)"
-git init --quiet --initial-branch=main "$SCRATCH/work"
-cd "$SCRATCH/work"
-git config user.email "stamp-setup@local"
-git config user.name "stamp-setup"
-
-mkdir -p .stamp/reviewers .stamp/trusted-keys
-
-if [[ -n "$SEED_DIR" ]]; then
-  echo "→ using project-specific seed from $SEED_DIR"
-  cp "$SEED_DIR/config.yml" .stamp/config.yml
-  cp -R "$SEED_DIR/reviewers/." .stamp/reviewers/
-  if [[ -f "$SEED_DIR/mirror.yml" ]]; then
-    cp "$SEED_DIR/mirror.yml" .stamp/mirror.yml
+if [[ -n "$FROM_TARBALL" ]]; then
+  # Brownfield migration path: the tarball IS a bare clone of the
+  # operator's existing repo (history, .stamp/, trusted-keys, the works).
+  # Extract it as the bare repo. No seed commit is created — the operator's
+  # existing history becomes the bare's history. Hooks install AFTER, so
+  # the existing commits never go through verification (they came from
+  # before this repo was server-gated). Per DESIGN.md "Bootstrap" rule:
+  # filesystem operations bypass the hook by definition.
+  if [[ ! -f "$FROM_TARBALL" ]]; then
+    echo "error: --from-tarball file not found at $FROM_TARBALL" >&2
+    exit 1
+  fi
+  echo "→ extracting existing repo from tarball into $REPO_DIR"
+  mkdir -p "$REPO_DIR"
+  # The tarball was created with `tar -czf - -C <parent> <bare.git>`, so it
+  # contains a single top-level directory (the bare clone) — strip that
+  # component so contents land directly in REPO_DIR.
+  tar -xzf "$FROM_TARBALL" -C "$REPO_DIR" --strip-components=1
+  # Verify it really is a bare repo. `git rev-parse --is-bare-repository`
+  # exits 0 only inside a bare repo with the right layout.
+  if ! GIT_DIR="$REPO_DIR" git rev-parse --is-bare-repository >/dev/null 2>&1; then
+    echo "error: $FROM_TARBALL did not contain a bare git repository" >&2
+    exit 1
   fi
 else
-  cat > .stamp/config.yml <<'EOF'
+  echo "→ creating bare repo at $REPO_DIR"
+  git init --bare --quiet --initial-branch=main "$REPO_DIR"
+
+  # Seed BEFORE installing the hook — this is the bootstrap bypass per DESIGN.md.
+  # Once the hook is in place, every push is verified.
+  echo "→ seeding initial commit (pre-hook, per DESIGN.md bootstrap rule)"
+  git init --quiet --initial-branch=main "$SCRATCH/work"
+  cd "$SCRATCH/work"
+  git config user.email "stamp-setup@local"
+  git config user.name "stamp-setup"
+
+  mkdir -p .stamp/reviewers .stamp/trusted-keys
+
+  if [[ -n "$SEED_DIR" ]]; then
+    echo "→ using project-specific seed from $SEED_DIR"
+    cp "$SEED_DIR/config.yml" .stamp/config.yml
+    cp -R "$SEED_DIR/reviewers/." .stamp/reviewers/
+    if [[ -f "$SEED_DIR/mirror.yml" ]]; then
+      cp "$SEED_DIR/mirror.yml" .stamp/mirror.yml
+    fi
+  else
+    cat > .stamp/config.yml <<'EOF'
 branches:
   main:
     required:
@@ -129,7 +174,7 @@ reviewers:
     prompt: .stamp/reviewers/example.md
 EOF
 
-  cat > .stamp/reviewers/example.md <<'EOF'
+    cat > .stamp/reviewers/example.md <<'EOF'
 # example reviewer (bootstrap only — auto-approves everything)
 
 > **WARNING — DO NOT use this reviewer for real code review.** It is a
@@ -160,14 +205,15 @@ This placeholder solves that bootstrap problem and is meant to be retired
 (or kept defined-but-unrequired) immediately after. Run `stamp bootstrap`
 on first clone to land real reviewers automatically.
 EOF
-fi
+  fi
 
-cp "$PUB_KEY" ".stamp/trusted-keys/${FP}.pub"
+  cp "$PUB_KEY" ".stamp/trusted-keys/${FP}.pub"
 
-git add .stamp
-git commit --quiet -m "bootstrap: seed stamp config + first trusted key"
+  git add .stamp
+  git commit --quiet -m "bootstrap: seed stamp config + first trusted key"
 
-git push --quiet "$REPO_DIR" main
+  git push --quiet "$REPO_DIR" main
+fi  # end of seed-vs-tarball branch
 
 echo "→ installing stamp-verify hook (now active for all subsequent pushes)"
 install -m 0755 "$HOOK_SCRIPT" "$REPO_DIR/hooks/pre-receive"
@@ -182,7 +228,8 @@ if [[ -f "$POST_HOOK" ]]; then
 fi
 
 USED_PLACEHOLDER_SEED=0
-if [[ -z "$SEED_DIR" ]]; then
+# Placeholder seed only when neither --from-tarball nor seed-dir was given.
+if [[ -z "$SEED_DIR" && -z "$FROM_TARBALL" ]]; then
   USED_PLACEHOLDER_SEED=1
 fi
 
@@ -200,6 +247,8 @@ echo "  seeded branch:    main"
 echo "  trusted key:      ${FP}.pub"
 if [[ $USED_PLACEHOLDER_SEED -eq 1 ]]; then
   echo "  reviewer seed:    placeholder \`example\` (auto-approves)"
+elif [[ -n "$FROM_TARBALL" ]]; then
+  echo "  reviewer seed:    existing repo state from $FROM_TARBALL (brownfield migration)"
 else
   echo "  reviewer seed:    $SEED_DIR"
 fi
