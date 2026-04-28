@@ -21,11 +21,19 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
+import { matchesAnyTagPattern, resolveTagPatterns } from "../lib/refPatterns.js";
 
 interface MirrorConfig {
   github?: {
     repo: string; // "owner/repo"
     branches: string[];
+    /**
+     * Glob patterns of tags to mirror, normalized by resolveTagPatterns.
+     * Empty array = no tag mirroring (also the default when the operator
+     * doesn't include a `tags:` key at all). Tag pushes still need to land
+     * on the stamp server first; this just controls the GitHub mirror leg.
+     */
+    tags: string[];
   };
 }
 
@@ -73,22 +81,61 @@ function main(): void {
     const parts = line.split(/\s+/);
     if (parts.length < 3) continue;
     const [_oldSha, newSha, refname] = parts as [string, string, string];
-    if (newSha === ZERO_SHA) continue; // deletion
-    if (!refname.startsWith("refs/heads/")) continue;
-    const branch = refname.slice("refs/heads/".length);
+    if (newSha === ZERO_SHA) continue; // deletion — never mirror deletions
 
-    const cfg = readMirrorConfig(newSha);
-    if (!cfg?.github) continue;
-    if (!cfg.github.branches.includes(branch)) continue;
+    if (refname.startsWith("refs/heads/")) {
+      const branch = refname.slice("refs/heads/".length);
+      const cfg = readMirrorConfig(newSha);
+      if (!cfg?.github) continue;
+      if (!cfg.github.branches.includes(branch)) continue;
+      mirrorRef(`branch ${branch}`, refname, newSha, cfg.github.repo);
+      continue;
+    }
 
-    mirrorBranch(branch, refname, newSha, cfg.github.repo);
+    if (refname.startsWith("refs/tags/")) {
+      const tag = refname.slice("refs/tags/".length);
+      // Tag mirror config has to be read from the tip of a branch (since
+      // .stamp/mirror.yml lives on a branch tree, not on the tag). The tag
+      // commit itself usually IS reachable via main, so we read mirror.yml
+      // from `main` if it exists. If main can't be read, skip — without a
+      // mirror config there's nothing to do.
+      const cfg = readMirrorConfigFromMainBranch();
+      if (!cfg?.github) continue;
+      if (cfg.github.tags.length === 0) continue;
+      if (!matchesAnyTagPattern(tag, cfg.github.tags)) continue;
+      mirrorRef(`tag ${tag}`, refname, newSha, cfg.github.repo);
+      continue;
+    }
+
+    // Ignore other refs (refs/notes/, refs/replace/, etc.).
   }
+}
+
+/**
+ * Read mirror.yml from the `main` branch (mirror config doesn't ride along
+ * on tags themselves — tags point at commits, not at trees with their own
+ * mirror.yml semantics, and we want one source of truth per repo). Returns
+ * null if main doesn't exist or doesn't contain mirror.yml.
+ */
+function readMirrorConfigFromMainBranch(): MirrorConfig | null {
+  let mainSha: string;
+  try {
+    mainSha = run(["rev-parse", "refs/heads/main"]).trim();
+  } catch {
+    return null;
+  }
+  if (!mainSha) return null;
+  return readMirrorConfig(mainSha);
 }
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
-function mirrorBranch(
-  branch: string,
+/**
+ * Push a single ref (branch or tag) to the configured GitHub mirror.
+ * `label` is operator-friendly text for log lines ("branch main", "tag v1.0.0").
+ */
+function mirrorRef(
+  label: string,
   refname: string,
   newSha: string,
   githubRepo: string,
@@ -96,7 +143,7 @@ function mirrorBranch(
   const token = process.env["GITHUB_BOT_TOKEN"];
   if (!token) {
     warn(
-      `mirror: GITHUB_BOT_TOKEN not set in environment; skipping mirror of ${branch} → ${githubRepo}`,
+      `mirror: GITHUB_BOT_TOKEN not set in environment; skipping mirror of ${label} → ${githubRepo}`,
     );
     return;
   }
@@ -118,16 +165,16 @@ function mirrorBranch(
 
   if (result.status === 0) {
     info(
-      `mirror: pushed ${branch} (${newSha.slice(0, 8)}) → github.com/${githubRepo}`,
+      `mirror: pushed ${label} (${newSha.slice(0, 8)}) → github.com/${githubRepo}`,
     );
   } else {
     const errOut = scrubTokenUrls((result.stderr ?? "").trim());
     warn(
-      `mirror: push to github.com/${githubRepo} failed (exit ${result.status})`,
+      `mirror: push of ${label} to github.com/${githubRepo} failed (exit ${result.status})`,
     );
     if (errOut) warn(`mirror: ${errOut.replace(/\n/g, "\nmirror: ")}`);
     warn(
-      `mirror: main push already accepted; mirror out-of-sync. Retry manually with: ` +
+      `mirror: stamp-server push already accepted; mirror out-of-sync. Retry manually with: ` +
         `git push https://...@github.com/${githubRepo}.git ${refname}`,
     );
   }
@@ -137,7 +184,7 @@ function mirrorBranch(
 // example in DESIGN.md and server/README.md so the operator sees
 // consistent text at every touchpoint.
 const SCHEMA_HINT =
-  "expected schema: github: { repo: owner/repo, branches: [main] }";
+  "expected schema: github: { repo: owner/repo, branches: [main], tags?: [\"v*\"] | true }";
 
 function readMirrorConfig(sha: string): MirrorConfig | null {
   // Absence of the file is normal — repos without mirror configured just
@@ -210,10 +257,19 @@ function readMirrorConfig(sha: string): MirrorConfig | null {
     );
     return null;
   }
+  const tags = resolveTagPatterns(gh.tags);
+  if (tags === null) {
+    warn(
+      `mirror: .stamp/mirror.yml has invalid 'github.tags' (expected list of glob strings, or 'true' for all tags) — tags will not be mirrored. ${SCHEMA_HINT}.`,
+    );
+    // Fall through with tags=[] so branch mirroring still works; tag pushes
+    // just won't be mirrored. Same posture as a missing tags field.
+  }
   return {
     github: {
       repo: gh.repo,
       branches: gh.branches.map(String),
+      tags: tags ?? [],
     },
   };
 }

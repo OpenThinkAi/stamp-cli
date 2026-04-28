@@ -282,7 +282,11 @@ function writeMirrorYml(
     `github:\n` +
     `  repo: ${mirror.owner}/${mirror.repo}\n` +
     `  branches:\n` +
-    `    - main\n`;
+    `    - main\n` +
+    `  # Mirror tags to GitHub too — uncomment if you publish on tag push\n` +
+    `  # (npm/Cargo/PyPI release workflows). Glob patterns or 'true' for all.\n` +
+    `  # tags:\n` +
+    `  #   - "v*"\n`;
   const path = `${cloneTarget}/.stamp/mirror.yml`;
   // .stamp/ exists already on the clone (created by the placeholder seed
   // when new-stamp-repo ran on the server side). If it doesn't, the bootstrap

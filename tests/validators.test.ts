@@ -51,6 +51,11 @@ import {
   filterLiveBareRepoNames,
   normalizeRepoName,
 } from "../src/commands/serverRepo.ts";
+import {
+  globToRegex,
+  matchesAnyTagPattern,
+  resolveTagPatterns,
+} from "../src/lib/refPatterns.ts";
 import { parseServerConfig as parseServerYaml } from "../src/lib/serverConfig.ts";
 
 // ---------- parseGithubOriginUrl ----------
@@ -431,6 +436,107 @@ describe("filterLiveBareRepoNames", () => {
     // a `notes.txt`) from showing up as confusing list entries.
     const raw = ["notes.txt", "scratch", "real.git"].join("\n");
     assert.deepEqual(filterLiveBareRepoNames(raw), ["real"]);
+  });
+});
+
+// ---------- refPatterns (mirror.yml tags:) ----------
+
+describe("globToRegex", () => {
+  it("matches a literal tag name verbatim", () => {
+    assert.equal(globToRegex("v1.0.0").test("v1.0.0"), true);
+  });
+
+  it("does NOT treat regex meta in literals as wildcards (the . bug)", () => {
+    // Pre-fix: a naive `*`→`.*`  pass would also let `.` match anything,
+    // so `v1.0.0` would match `v1x0x0`. Pin that we escape regex meta.
+    assert.equal(globToRegex("v1.0.0").test("v1x0x0"), false);
+  });
+
+  it("treats * as 'zero or more characters'", () => {
+    assert.equal(globToRegex("v*").test("v1.0.0"), true);
+    assert.equal(globToRegex("v*").test("v"), true);
+    assert.equal(globToRegex("v*").test("u1.0.0"), false);
+  });
+
+  it("treats ? as 'exactly one character'", () => {
+    assert.equal(globToRegex("v?.0").test("v1.0"), true);
+    assert.equal(globToRegex("v?.0").test("v.0"), false);
+    assert.equal(globToRegex("v?.0").test("v10.0"), false);
+  });
+
+  it("anchors the pattern (substring matches don't slip through)", () => {
+    assert.equal(globToRegex("v*").test("xv1.0.0"), false);
+    assert.equal(globToRegex("v1").test("v1.0.0"), false);
+  });
+
+  it("escapes other regex metacharacters that operators don't expect to mean anything", () => {
+    // +, ^, $, (, ), |, [, ], {, } in a glob should be literals.
+    assert.equal(globToRegex("v(1)").test("v(1)"), true);
+    assert.equal(globToRegex("v+1").test("v+1"), true);
+    assert.equal(globToRegex("v+1").test("v1"), false);
+  });
+});
+
+describe("resolveTagPatterns", () => {
+  it("undefined → [] (no tag mirroring; default behavior)", () => {
+    assert.deepEqual(resolveTagPatterns(undefined), []);
+  });
+
+  it("null → [] (operator wrote 'tags:' with no value)", () => {
+    assert.deepEqual(resolveTagPatterns(null), []);
+  });
+
+  it("false → [] (explicit opt-out)", () => {
+    assert.deepEqual(resolveTagPatterns(false), []);
+  });
+
+  it("true → ['*'] (mirror all tags)", () => {
+    assert.deepEqual(resolveTagPatterns(true), ["*"]);
+  });
+
+  it("array of strings is returned as-is", () => {
+    assert.deepEqual(resolveTagPatterns(["v*", "rc-*"]), ["v*", "rc-*"]);
+  });
+
+  it("empty array stays empty (operator opted out via empty list)", () => {
+    assert.deepEqual(resolveTagPatterns([]), []);
+  });
+
+  it("non-string element → null (config error)", () => {
+    assert.equal(resolveTagPatterns(["v*", 123]), null);
+  });
+
+  it("empty string element → null (config error)", () => {
+    assert.equal(resolveTagPatterns(["v*", ""]), null);
+  });
+
+  it("string at top level → null (operator probably forgot the dash)", () => {
+    assert.equal(resolveTagPatterns("v*"), null);
+  });
+
+  it("number at top level → null", () => {
+    assert.equal(resolveTagPatterns(42), null);
+  });
+});
+
+describe("matchesAnyTagPattern", () => {
+  it("returns true when any pattern matches", () => {
+    assert.equal(matchesAnyTagPattern("v1.0.0", ["v*", "rc-*"]), true);
+    assert.equal(matchesAnyTagPattern("rc-2", ["v*", "rc-*"]), true);
+  });
+
+  it("returns false when no pattern matches", () => {
+    assert.equal(matchesAnyTagPattern("hotfix", ["v*", "rc-*"]), false);
+  });
+
+  it("empty pattern list never matches (= no tag mirroring)", () => {
+    assert.equal(matchesAnyTagPattern("v1.0.0", []), false);
+  });
+
+  it("the all-tags shortcut ['*'] matches everything", () => {
+    assert.equal(matchesAnyTagPattern("v1.0.0", ["*"]), true);
+    assert.equal(matchesAnyTagPattern("hotfix-2026", ["*"]), true);
+    assert.equal(matchesAnyTagPattern("", ["*"]), true);
   });
 });
 
