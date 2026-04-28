@@ -44,12 +44,14 @@ export interface ServerRepoRestoreOptions extends ServerRepoBaseOptions {
 export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promise<void> {
   // Validate inputs BEFORE resolving server config — so a bad name surfaces
   // as a UsageError (exit 2) regardless of whether the server is reachable.
-  validateRepoName(opts.name);
+  // normalizeRepoName strips a trailing `.git` so operators can pass either
+  // `foo` or `foo.git` (the form `list` displayed before 0.7.7).
+  const name = normalizeRepoName(opts.name);
   if (opts.alsoGithub !== undefined) validateGithubRepoSpec(opts.alsoGithub);
   const server = resolveServer(opts.server);
 
   const action = opts.purge ? "PURGE (irreversible)" : "soft-delete (recoverable via restore)";
-  console.log(`About to ${action} bare repo: ${opts.name}`);
+  console.log(`About to ${action} bare repo: ${name}`);
   console.log(`On server: ${server.user}@${server.host}:${server.port}`);
   if (opts.alsoGithub) {
     console.log(
@@ -59,7 +61,7 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
   console.log();
 
   if (!opts.yes) {
-    const expected = opts.purge ? `purge ${opts.name}` : `delete ${opts.name}`;
+    const expected = opts.purge ? `purge ${name}` : `delete ${name}`;
     const got = await prompt(`Type "${expected}" to confirm: `);
     if (got.trim() !== expected) {
       console.log("note: aborted");
@@ -70,7 +72,7 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
   // Server-side delete first. If GitHub deletion is requested, do it AFTER
   // the server side succeeds — failing in either order leaves a recoverable
   // state on at least one side.
-  const args = ["delete-stamp-repo", opts.name];
+  const args = ["delete-stamp-repo", name];
   if (opts.purge) args.push("--purge");
   const result = spawnSync(
     "ssh",
@@ -90,8 +92,8 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
   if (!opts.purge) {
     console.log();
     console.log(`Recovery:`);
-    console.log(`  stamp server-repos restore ${opts.name}                 # bring it back`);
-    console.log(`  stamp server-repos delete ${opts.name} --purge          # nuke for real`);
+    console.log(`  stamp server-repos restore ${name}                 # bring it back`);
+    console.log(`  stamp server-repos delete ${name} --purge          # nuke for real`);
   }
 
   if (opts.alsoGithub) {
@@ -124,18 +126,19 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
 export async function runServerRepoRestore(opts: ServerRepoRestoreOptions): Promise<void> {
   // Validate inputs BEFORE resolving server config — so a bad name or
   // --from value surfaces as a UsageError (exit 2) regardless of whether
-  // the server is reachable.
-  validateRepoName(opts.name);
-  if (opts.asName !== undefined) validateRepoName(opts.asName);
+  // the server is reachable. normalizeRepoName strips a trailing `.git`
+  // (operator-natural).
+  const name = normalizeRepoName(opts.name);
+  const asName = opts.asName !== undefined ? normalizeRepoName(opts.asName) : undefined;
   if (opts.from !== undefined) validateTrashEntryName(opts.from);
   const server = resolveServer(opts.server);
 
-  const args = ["restore-stamp-repo", opts.name];
+  const args = ["restore-stamp-repo", name];
   if (opts.from) {
     args.push("--from", opts.from);
   }
-  if (opts.asName) {
-    args.push("--as", opts.asName);
+  if (asName) {
+    args.push("--as", asName);
   }
   const result = spawnSync(
     "ssh",
@@ -189,11 +192,7 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
   if (result.status !== 0) {
     throw new Error(`list failed (exit ${result.status}).`);
   }
-  const entries = result.stdout
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((s) => s !== ".ssh-host-keys" && s !== ".trash");
+  const entries = filterLiveBareRepoNames(result.stdout);
   if (entries.length === 0) {
     console.log("(no live bare repos)");
     return;
@@ -229,6 +228,38 @@ export class UsageError extends Error {
     super(message);
     this.name = "UsageError";
   }
+}
+
+/**
+ * Canonicalize a repo name: strip a trailing `.git` (operators copy-paste
+ * the bare-repo dirname from `list` and don't realize it's the storage
+ * suffix, not the canonical name) then validate the stripped form. Returns
+ * the canonical name so callers can use one source of truth without
+ * re-stripping. The server-side scripts always append `.git` themselves —
+ * passing `<name>.git` produced `<name>.git.git` and a "does not exist"
+ * error before this normalization landed.
+ */
+export function normalizeRepoName(name: string): string {
+  const canonical = name.endsWith(".git") ? name.slice(0, -4) : name;
+  validateRepoName(canonical);
+  return canonical;
+}
+
+/**
+ * Filter `ls -1 /srv/git/` output to the live bare repos and display them
+ * without the `.git` suffix. Drops on-volume metadata (`.trash`,
+ * `.ssh-host-keys`) and filesystem artifacts (`lost+found` on ext4
+ * volumes). Displaying without `.git` matches the form operators pass
+ * to `delete` / `restore` — copy-paste from the list output Just Works.
+ */
+export function filterLiveBareRepoNames(rawOutput: string): string[] {
+  return rawOutput
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((s) => s.endsWith(".git"))
+    .map((s) => s.slice(0, -4))
+    .filter((s) => s.length > 0);
 }
 
 function validateRepoName(name: string): void {

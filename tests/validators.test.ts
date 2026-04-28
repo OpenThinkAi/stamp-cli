@@ -47,6 +47,10 @@ import {
   formatServerConfigYaml,
   runServerConfig,
 } from "../src/commands/server.ts";
+import {
+  filterLiveBareRepoNames,
+  normalizeRepoName,
+} from "../src/commands/serverRepo.ts";
 import { parseServerConfig as parseServerYaml } from "../src/lib/serverConfig.ts";
 
 // ---------- parseGithubOriginUrl ----------
@@ -360,6 +364,73 @@ describe("runServerConfig validation", () => {
       () => runServerConfig({ hostPort: "not-a-spec" }),
       /stamp server config:/,
     );
+  });
+});
+
+// ---------- normalizeRepoName ----------
+
+describe("normalizeRepoName", () => {
+  it("returns canonical name unchanged", () => {
+    assert.equal(normalizeRepoName("spotfxTEST5"), "spotfxTEST5");
+  });
+
+  it("strips a trailing .git (the bug from the 'list' display form)", () => {
+    // Pre-0.7.7 the validator threw on `spotfxTEST5.git`; post-0.7.7 it's
+    // accepted as the operator-natural form (matches what `list` printed).
+    assert.equal(normalizeRepoName("spotfxTEST5.git"), "spotfxTEST5");
+  });
+
+  it("strips only one .git suffix (a name like foo.git.git becomes foo.git, then validates)", () => {
+    // Defensive: if someone really has `foo.git` as the canonical name, this
+    // still works after the strip — the resulting `foo.git` is a valid
+    // canonical name. The double-extension that plagued 0.7.6 was a
+    // server-side artifact, not an input we want to support directly.
+    assert.equal(normalizeRepoName("foo.git.git"), "foo.git");
+  });
+
+  it("rejects names that are invalid even after stripping", () => {
+    assert.throws(() => normalizeRepoName("lost+found"), /must start with/);
+    assert.throws(() => normalizeRepoName("foo..bar"), /'\.\.'/);
+    assert.throws(() => normalizeRepoName("-leading-dash"), /must start with/);
+  });
+
+  it("strips .git then re-validates (e.g. '+invalid.git' is still rejected)", () => {
+    assert.throws(() => normalizeRepoName("foo+bar.git"), /must start with/);
+  });
+});
+
+// ---------- filterLiveBareRepoNames ----------
+
+describe("filterLiveBareRepoNames", () => {
+  it("strips .git suffix from bare-repo dirs and drops on-volume metadata", () => {
+    const raw = [
+      "budget.git",
+      "keeb-cooker.git",
+      "lost+found",
+      "open-audit.git",
+      ".trash",
+      ".ssh-host-keys",
+      "scrub.git",
+      "",
+    ].join("\n");
+    assert.deepEqual(filterLiveBareRepoNames(raw), [
+      "budget",
+      "keeb-cooker",
+      "open-audit",
+      "scrub",
+    ]);
+  });
+
+  it("returns empty array on empty input", () => {
+    assert.deepEqual(filterLiveBareRepoNames(""), []);
+  });
+
+  it("ignores entries that don't end in .git (positive filter, not a denylist)", () => {
+    // Anything that isn't a bare repo directory is dropped — this keeps
+    // future filesystem artifacts (e.g. an admin SSH'ing in and creating
+    // a `notes.txt`) from showing up as confusing list entries.
+    const raw = ["notes.txt", "scratch", "real.git"].join("\n");
+    assert.deepEqual(filterLiveBareRepoNames(raw), ["real"]);
   });
 });
 
