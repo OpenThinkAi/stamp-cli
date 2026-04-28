@@ -97,7 +97,14 @@ shapes, and exit contracts.
 - **approved** — CLI surface is consistent; output format matches
   conventions; help text is clear; error messages are actionable; no
   backward-compat breaks (or the break is deliberately flagged and
-  justified).
+  justified). Also return `approved` when your only concerns are
+  nit-grade — items you'd label "minor", "nit", "non-blocking",
+  "cosmetic", "while you're in there", or "worth noting." Surface
+  those as suggestions in the prose; the author can apply them in
+  the next change. **Reserve `changes_requested` for real bugs,
+  real convention breaks, or backward-compat failures that an
+  agent or operator would actually trip over.** A pile of nits is
+  still nits — don't aggregate them into a `changes_requested`.
 - **changes_requested** — specific fixable issues. Examples:
   "`--range` in the new command should be `--diff` to match existing
   commands"; "error at `merge.ts:42` doesn't tell the user which check
@@ -108,6 +115,19 @@ shapes, and exit contracts.
   exit code contract without an upgrade path, adopts a formatting
   convention that conflicts with the rest of the tool, or breaks agent
   usability in a way that line-level fixes won't patch.
+
+## Fix it once — flag every instance of a pattern in one review
+
+When you flag a UX pattern (a misnamed flag, a stale command reference
+in error messages, a help-text typo, a convention drift), **grep
+mentally across all files in the diff before submitting**. If the same
+pattern appears in adjacent files, list every instance in this review
+so the author fixes them in one pass. Surfacing one instance per round
+across three rounds wastes everyone's cycles — the author's local
+`git grep` should have caught the recurrence, and so should yours.
+When the diff suggests a pattern might exist outside the changed
+files, say so explicitly: "this pattern likely also exists at X —
+verify before re-amending."
 
 ## Tone
 

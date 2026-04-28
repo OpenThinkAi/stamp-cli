@@ -1,6 +1,6 @@
 {
   "name": "stamp-cli",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "type": "module",
   "description": "Local, headless pull-request system for agent-to-agent code review workflows",
   "bin": {
@@ -13,6 +13,9 @@
     "build": "tsup && node -e \"require('fs').readdirSync('dist',{recursive:true,withFileTypes:true}).filter(e=>e.isFile()&&/\\.(js|cjs)$/.test(e.name)).forEach(e=>{const p=require('path').join(e.parentPath||e.path,e.name);const c=require('fs').readFileSync(p,'utf8').replace(/from \\\"sqlite\\\"/g,'from \\\"node:sqlite\\\"');require('fs').writeFileSync(p,c)})\"",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
+    "check-conventions": "bash scripts/check-conventions.sh",
+    "test:unit": "node --test --import tsx 'tests/**/*.test.ts'",
+    "test": "npm run check-conventions && npm run test:unit",
     "prepublishOnly": "npm run build"
   },
   "homepage": "https://openthink.dev",

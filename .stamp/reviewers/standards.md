@@ -75,7 +75,14 @@ Duplication is cheaper than the wrong model.
 
 ## Verdict criteria
 
-- **approved** — clean, idiomatic, right-sized for the change.
+- **approved** — clean, idiomatic, right-sized for the change. Also
+  return `approved` when your only concerns are nit-grade — items
+  you'd label "minor", "nit", "non-blocking", "cosmetic", "while you're
+  in there", or "worth noting." Surface those as suggestions in the
+  prose; the author can apply them with the next change. **Reserve
+  `changes_requested` for real bugs, real convention breaks, or real
+  correctness gaps.** A pile of nits is still nits — don't aggregate
+  them into a `changes_requested`.
 - **changes_requested** — specific fixes with file:line. Examples:
   "remove unused `CheckResult` import at `merge.ts:18`"; "inline the
   `makeStrategyFactory` function at `checks.ts:9` — only one caller";
@@ -85,6 +92,20 @@ Duplication is cheaper than the wrong model.
   direction: introduces a pattern or layer that doesn't fit, adopts a
   new dependency the project doesn't need, creates the wrong shape.
   The author should rethink, not tweak.
+
+## Fix it once — flag every instance of a pattern in one review
+
+When you flag a pattern (a misnamed export, a stale string reference, a
+missing validation, an inconsistent helper), **grep mentally across all
+files in the diff before submitting**. If the same pattern appears in
+adjacent files, list every instance in this review so the author fixes
+them in one pass. Catching `list-trash` in `serverRepo.ts` in round 1,
+then `list-trash` in `index.ts:300` in round 2, then `list-trash` in
+`server/restore-stamp-repo` in round 3 wastes everyone's cycles. The
+author's `git grep` should have caught all three at once; so should
+yours. When you can't tell whether a pattern recurs (file outside the
+diff), say so explicitly: "this pattern likely also exists at X — verify
+before re-amending."
 
 ## Tone
 
