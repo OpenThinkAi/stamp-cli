@@ -127,9 +127,11 @@ github:
   repo: owner/repo
   branches:
     - main
+  tags:           # optional; absent/empty = no tag mirroring
+    - "v*"        # array of glob patterns, or `true` for all tags
 ```
 
-Read by the server-side post-receive hook after a push is accepted. For each configured branch, the hook pushes to `https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<repo>.git`. `GITHUB_BOT_TOKEN` comes from `/etc/stamp/env` on the server (populated by the entrypoint from a Railway env var; sshd strips custom env vars from sessions, so a file is the reliable transport). Mirror failures log to stderr but don't block the stamped push.
+Read by the server-side post-receive hook after a push is accepted. For each configured branch, the hook pushes to `https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<repo>.git`. The same goes for tag pushes whose ref name matches one of the `tags:` patterns (added in 0.7.8 — repos that publish on tag push, like npm/Cargo/PyPI release workflows, need this so the action fires). `GITHUB_BOT_TOKEN` comes from `/etc/stamp/env` on the server (populated by the entrypoint from a Railway env var; sshd strips custom env vars from sessions, so a file is the reliable transport). Mirror failures log to stderr but don't block the stamped push.
 
 ## Security model
 

@@ -119,10 +119,18 @@ github:
   repo: your-user/your-repo       # GitHub "owner/repo" of the mirror destination
   branches:
     - main
+  tags:                            # optional — mirror tags to GitHub too
+    - "v*"                         # glob patterns (or `true` for all tags)
 ```
 
-Only branches listed here are mirrored. Other refs are pushed to your stamp
-server but not to GitHub.
+Only branches and tags listed here are mirrored. Other refs are pushed to your
+stamp server but not to GitHub. The `tags:` field is optional — when absent or
+empty, no tags are mirrored (the pre-0.7.8 behavior).
+
+Tag mirroring exists for repos that publish on tag push (npm `on: push: tags`,
+Cargo, PyPI, etc.). Without it, `git push origin v1.0.0` lands on the stamp
+server but the GitHub action never fires; the workaround was a parallel
+`git push github v1.0.0` that bypasses the stamp gate.
 
 ### Server-side credentials
 
