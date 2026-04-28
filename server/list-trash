@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# list-trash — enumerate soft-deleted (trashed) bare repos under
+# /srv/git/.trash/. Output is one prose line per entry, key:value style
+# to match the rest of stamp-cli's listing convention:
+#
+#   <trash-entry-name>  size: <human-size>  deleted-at: <utc-ts-from-name>
+#
+# Run via:
+#   ssh git@<host> list-trash
+#
+set -e
+
+GIT_ROOT=/srv/git
+TRASH_DIR="$GIT_ROOT/.trash"
+
+if [ ! -d "$TRASH_DIR" ]; then
+  # Empty/missing trash dir is the common case; print a header-ish line so
+  # the client can tell "command ran, nothing here" from "command failed."
+  echo "(no trash — $TRASH_DIR does not exist)"
+  exit 0
+fi
+
+# Iterate the glob directly. Sorted oldest-first by name (UTC timestamp
+# prefix sorts chronologically). `[ -d ]` filters the unmatched-glob
+# literal so empty trash exits cleanly. Glob-loop form matches the
+# pattern used in delete-stamp-repo / restore-stamp-repo — consistent
+# across all three scripts.
+found=0
+for entry in "$TRASH_DIR"/*.git; do
+  [ -d "$entry" ] || continue
+  found=1
+  base=$(basename "$entry")
+  size=$(du -sh "$entry" 2>/dev/null | awk '{print $1}')
+  # Extract the timestamp prefix (everything before the first `-` followed
+  # by the rest of the name). The format is <YYYYMMDDTHHMMSSZ>-<name>.git.
+  ts=$(printf '%s' "$base" | sed -n 's/^\([0-9]\{8\}T[0-9]\{6\}Z\)-.*/\1/p')
+  printf '%s  size: %s  deleted-at: %s\n' "$base" "${size:-?}" "${ts:-?}"
+done
+if [ $found -eq 0 ]; then
+  echo "(trash is empty)"
+fi
