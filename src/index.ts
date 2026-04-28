@@ -14,6 +14,11 @@ import { runBootstrap } from "./commands/bootstrap.js";
 import { runInit } from "./commands/init.js";
 import { runProvision } from "./commands/provision.js";
 import {
+  runServerRepoDelete,
+  runServerRepoList,
+  runServerRepoRestore,
+} from "./commands/serverRepo.js";
+import {
   keysExport,
   keysGenerate,
   keysList,
@@ -238,6 +243,99 @@ program
     },
   );
 
+// Shared CLI catch shape: usage errors (bad name shape, malformed --from,
+// etc.) get exit 2; everything else gets exit 1. Per the documented
+// exit-code contract — 2 means "you passed bad args, fix and retry"; 1
+// means "the operation failed mid-flight, decide whether to retry."
+// Most commands don't currently throw UsageError, so they still exit 1
+// as before; the path is in place for future commands that need to
+// distinguish.
+function handleCliError(err: unknown): never {
+  const message = err instanceof Error ? err.message : String(err);
+  // Match by .name rather than instanceof — TypeScript/tsup-bundled
+  // modules can produce distinct class identities for the same exported
+  // class depending on import paths, which makes `instanceof UsageError`
+  // unreliable. The name property is set in UsageError's constructor.
+  const isUsageError =
+    err instanceof Error && (err as Error).name === "UsageError";
+  console.error(`error: ${message}`);
+  process.exit(isUsageError ? 2 : 1);
+}
+
+const serverRepo = program
+  .command("server-repos")
+  .description(
+    "manage bare repos on the stamp server (list / delete / restore). Uses ~/.stamp/server.yml or --server.",
+  );
+serverRepo
+  .command("list")
+  .description(
+    "list bare repos on the stamp server (default: live repos; --trash: soft-deleted entries awaiting restore or purge)",
+  )
+  .option("--server <host:port>", "override ~/.stamp/server.yml")
+  .option("--trash", "list soft-deleted (trashed) entries instead of live repos")
+  .action((opts: { server?: string; trash?: boolean }) => {
+    try {
+      runServerRepoList({ server: opts.server, trash: opts.trash });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+serverRepo
+  .command("delete <name>")
+  .description("soft-delete (default) or --purge a bare repo on the stamp server")
+  .option("--server <host:port>", "override ~/.stamp/server.yml")
+  .option("--purge", "hard delete (no recovery; also clears any trashed copies)")
+  .option("--also-github <owner/repo>", "also `gh repo delete` the GitHub mirror after server-side success")
+  .option(
+    "--yes",
+    "skip the typed-confirmation prompts — both the initial delete prompt and the secondary GitHub-mirror prompt when --also-github is set (use only in non-interactive contexts)",
+  )
+  .action(
+    async (
+      name: string,
+      opts: { server?: string; purge?: boolean; alsoGithub?: string; yes?: boolean },
+    ) => {
+      try {
+        await runServerRepoDelete({
+          name,
+          server: opts.server,
+          purge: opts.purge,
+          alsoGithub: opts.alsoGithub,
+          yes: opts.yes,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
+serverRepo
+  .command("restore <name>")
+  .description("restore the most recent soft-deleted copy of <name> (or a specific one via --from)")
+  .option("--server <host:port>", "override ~/.stamp/server.yml")
+  .option(
+    "--from <trash-entry>",
+    "restore a specific trash entry (see `stamp server-repos list --trash` for names)",
+  )
+  .option("--as <new-name>", "restore under a different live name")
+  .action(
+    async (
+      name: string,
+      opts: { server?: string; from?: string; as?: string },
+    ) => {
+      try {
+        await runServerRepoRestore({
+          name,
+          server: opts.server,
+          from: opts.from,
+          asName: opts.as,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
+
 program
   .command("review")
   .description(
@@ -249,9 +347,7 @@ program
     try {
       await runReview({ diff: opts.diff, only: opts.only });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 
@@ -267,9 +363,7 @@ program
     try {
       runStatus({ diff: opts.diff, into: opts.into });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 
@@ -281,9 +375,7 @@ program
     try {
       runMerge({ branch, into: opts.into });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 
@@ -295,9 +387,7 @@ program
     try {
       runPush({ target, remote: opts.remote });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 
@@ -308,9 +398,7 @@ program
     try {
       runVerify(sha);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 
@@ -331,9 +419,7 @@ program
       const { runUi } = await import("./commands/ui.js");
       runUi();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 
@@ -438,9 +524,7 @@ reviewers
     try {
       await reviewersTest(name, opts.diff);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 reviewers
@@ -465,9 +549,7 @@ reviewers
     try {
       await reviewersFetch(name, { from: opts.from });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`error: ${message}`);
-      process.exit(1);
+      handleCliError(err);
     }
   });
 reviewers

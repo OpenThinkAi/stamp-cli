@@ -1,0 +1,116 @@
+#!/bin/sh
+#
+# delete-stamp-repo — soft-delete (default) or purge (--purge) a bare
+# repo on the stamp server.
+#
+# Soft delete: `mv` the bare to /srv/git/.trash/<utc-timestamp>-<name>.git.
+# Same volume → atomic, no data movement, restorable via
+# restore-stamp-repo. Trash sits indefinitely until --purge is used or an
+# operator nukes /srv/git/.trash/ manually.
+#
+# Hard delete (--purge): `rm -rf` BOTH the live repo (if present) AND
+# every trashed copy of <name> (if any). The semantic is "<name> is gone,
+# period" — purging doesn't leave behind half-cleaned state. Errors only
+# if neither a live nor a trashed copy was found.
+#
+# Usage:
+#   ssh git@<host> delete-stamp-repo <name>           # soft delete
+#   ssh git@<host> delete-stamp-repo <name> --purge   # hard delete (no recovery)
+#
+set -e
+
+usage() {
+  echo "usage: delete-stamp-repo <name> [--purge]" >&2
+  exit 2
+}
+
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+  usage
+fi
+
+NAME="$1"
+PURGE=0
+if [ $# -eq 2 ]; then
+  if [ "$2" != "--purge" ]; then usage; fi
+  PURGE=1
+fi
+
+# Validate name shape: must start with [A-Za-z0-9_] and match
+# [A-Za-z0-9._-]+. Same rules as the client-side validateRepoName in
+# src/commands/serverRepo.ts. The shell case alone wasn't strict enough
+# (it permitted whitespace, `;`, `$`, etc.); use a printf-into-grep -E
+# regex so direct-ssh callers (without the TS wrapper) get the same
+# enforcement. Exit 2 for invalid usage, matching the contract for
+# argument errors elsewhere in the script.
+case "$NAME" in
+  ""|"."|".."|*"/"*|*".."*|.*|-*)
+    echo "error: invalid repo name '$NAME' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+    exit 2
+    ;;
+esac
+if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*$'; then
+  echo "error: invalid repo name '$NAME' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+  exit 2
+fi
+
+GIT_ROOT=/srv/git
+TRASH_DIR="$GIT_ROOT/.trash"
+LIVE_REPO="$GIT_ROOT/${NAME}.git"
+
+# Defensive: refuse to operate on the protected paths even if the validator
+# above somehow let one through. Belt-and-suspenders.
+case "$LIVE_REPO" in
+  "$GIT_ROOT"|"$GIT_ROOT/"|"$TRASH_DIR"|"$GIT_ROOT/.ssh-host-keys"|"$GIT_ROOT/.ssh-host-keys/")
+    echo "error: refusing to act on protected path $LIVE_REPO" >&2
+    exit 1
+    ;;
+esac
+
+if [ $PURGE -eq 1 ]; then
+  # Purge mode: nuke the live repo if present, AND any trashed copies.
+  removed_anything=0
+  if [ -d "$LIVE_REPO" ]; then
+    rm -rf "$LIVE_REPO"
+    echo "purged: $LIVE_REPO"
+    removed_anything=1
+  fi
+  if [ -d "$TRASH_DIR" ]; then
+    # Iterate timestamp-prefixed entries and string-compare the suffix
+    # exactly. Glob-suffix matching like *-${NAME}.git would over-match:
+    # purge of `bar` would also match `<ts>-foo-bar.git`. Strict suffix
+    # equality on `<ts>-<NAME>.git` avoids the silent-collateral path.
+    for trashed in "$TRASH_DIR"/*.git; do
+      [ -d "$trashed" ] || continue
+      base=$(basename "$trashed")
+      # Strip exactly the timestamp prefix (16 chars + dash = 17).
+      remainder=$(printf '%s' "$base" | sed -n 's/^[0-9]\{8\}T[0-9]\{6\}Z-//p')
+      if [ "$remainder" = "${NAME}.git" ]; then
+        rm -rf "$trashed"
+        echo "purged: $trashed"
+        removed_anything=1
+      fi
+    done
+  fi
+  if [ $removed_anything -eq 0 ]; then
+    echo "error: no live or trashed copy of '$NAME' found" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+# Soft delete mode.
+if [ ! -d "$LIVE_REPO" ]; then
+  echo "error: $LIVE_REPO does not exist" >&2
+  exit 1
+fi
+
+mkdir -p "$TRASH_DIR"
+TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+TRASHED="$TRASH_DIR/${TIMESTAMP}-${NAME}.git"
+mv "$LIVE_REPO" "$TRASHED"
+# Recovery hints intentionally NOT printed here — the client wraps this
+# script and prints `stamp server-repos restore <name>` etc. as the
+# user-facing fix path. Operators running this directly via ssh see the
+# echoed trash path and can derive the rest from the script's own --help
+# (the usage line at the top).
+echo "soft-deleted: $TRASHED"

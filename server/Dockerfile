@@ -36,12 +36,18 @@ COPY --from=builder /build/dist/hooks/pre-receive.cjs /etc/stamp/pre-receive.cjs
 COPY --from=builder /build/dist/hooks/post-receive.cjs /etc/stamp/post-receive.cjs
 COPY scripts/setup-repo.sh /usr/local/bin/setup-repo.sh
 COPY server/new-stamp-repo /usr/local/bin/new-stamp-repo
+COPY server/delete-stamp-repo /usr/local/bin/delete-stamp-repo
+COPY server/restore-stamp-repo /usr/local/bin/restore-stamp-repo
+COPY server/list-trash /usr/local/bin/list-trash
 COPY server/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /etc/stamp/pre-receive.cjs \
              /etc/stamp/post-receive.cjs \
              /usr/local/bin/setup-repo.sh \
              /usr/local/bin/new-stamp-repo \
+             /usr/local/bin/delete-stamp-repo \
+             /usr/local/bin/restore-stamp-repo \
+             /usr/local/bin/list-trash \
              /entrypoint.sh
 
 EXPOSE 22

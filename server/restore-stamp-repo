@@ -1,0 +1,143 @@
+#!/bin/sh
+#
+# restore-stamp-repo — restore the most recent (or a specific) trashed copy
+# of a bare repo back to its live path.
+#
+# Usage:
+#   ssh git@<host> restore-stamp-repo <name>                    # most recent
+#   ssh git@<host> restore-stamp-repo <name> --from <trashname> # specific
+#   ssh git@<host> restore-stamp-repo <name> --as <new-name>    # rename on restore
+#
+# Refuses if a live repo with the destination name already exists.
+#
+set -e
+
+usage() {
+  echo "usage: restore-stamp-repo <name> [--from <trash-entry>] [--as <new-name>]" >&2
+  exit 2
+}
+
+if [ $# -lt 1 ]; then usage; fi
+
+NAME="$1"
+shift
+FROM=""
+AS_NAME=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from)
+      shift
+      [ $# -gt 0 ] || usage
+      FROM="$1"
+      shift
+      ;;
+    --as)
+      shift
+      [ $# -gt 0 ] || usage
+      AS_NAME="$1"
+      shift
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+# Validate NAME and AS_NAME: same regex shape as the client-side validator
+# (must start with [A-Za-z0-9_], rest are [A-Za-z0-9._-]). Reject empty
+# and any path-escape attempts. The case + grep belt-and-suspenders is
+# deliberate: case is fast for the obvious bad shapes (path separators,
+# leading dot/dash); the regex covers everything else (whitespace, `$`,
+# `;`, etc.) so direct-ssh callers get the same enforcement as the
+# wrapper provides. Exit 2 for argument errors.
+validate_name() {
+  case "$1" in
+    "")
+      echo "error: empty name" >&2
+      exit 2
+      ;;
+    "."|".."|*"/"*|*".."*|.*|-*)
+      echo "error: invalid name '$1' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+      exit 2
+      ;;
+  esac
+  if ! printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*$'; then
+    echo "error: invalid name '$1' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+    exit 2
+  fi
+}
+
+validate_name "$NAME"
+if [ -n "$AS_NAME" ]; then
+  validate_name "$AS_NAME"
+fi
+
+# --from points at a trash-entry filename (NOT a path). Validate it has
+# the exact shape `<UTC-timestamp>-<name>.git` we produced, so a value
+# like `../somerepo.git` can't escape /srv/git/.trash/ and clobber a
+# live repo via mv.
+if [ -n "$FROM" ]; then
+  case "$FROM" in
+    *"/"*|*".."*|.*|-*)
+      echo "error: --from must be a trash-entry filename (no path components, no leading '.' or '-')" >&2
+      exit 2
+      ;;
+  esac
+  # Strict shape check: <YYYYMMDDTHHMMSSZ>-<name>.git
+  if ! printf '%s' "$FROM" | grep -Eq '^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9_][A-Za-z0-9._-]*\.git$'; then
+    echo "error: --from must match <YYYYMMDDTHHMMSSZ>-<name>.git (got '$FROM')" >&2
+    exit 2
+  fi
+fi
+
+GIT_ROOT=/srv/git
+TRASH_DIR="$GIT_ROOT/.trash"
+DEST_NAME="${AS_NAME:-$NAME}"
+DEST="$GIT_ROOT/${DEST_NAME}.git"
+
+if [ ! -d "$TRASH_DIR" ]; then
+  echo "error: no trash directory at $TRASH_DIR — nothing to restore" >&2
+  exit 1
+fi
+
+# Pick which trashed entry to restore.
+if [ -n "$FROM" ]; then
+  SOURCE="$TRASH_DIR/$FROM"
+  if [ ! -d "$SOURCE" ]; then
+    echo "error: trash entry '$FROM' not found at $SOURCE" >&2
+    echo "       (run \`stamp server-repos list --trash\` to see what's available)" >&2
+    exit 1
+  fi
+else
+  # Pick the most recent trashed entry whose name (after the timestamp
+  # prefix) matches `<NAME>.git` exactly. Iterating with strict-suffix
+  # comparison instead of `*-<NAME>.git` glob avoids matching
+  # `<ts>-foo-<NAME>.git` when `<NAME>` happens to be a suffix of
+  # another repo. Glob expands sorted by sh's collation, which for our
+  # UTC-timestamped names is also chronological — so the last match wins.
+  # Glob form (matching delete-stamp-repo's style) avoids the unquoted
+  # command-substitution antipattern.
+  SOURCE=""
+  for candidate in "$TRASH_DIR"/*.git; do
+    [ -d "$candidate" ] || continue
+    base=$(basename "$candidate")
+    remainder=$(printf '%s' "$base" | sed -n 's/^[0-9]\{8\}T[0-9]\{6\}Z-//p')
+    if [ "$remainder" = "${NAME}.git" ]; then
+      SOURCE="$candidate"
+    fi
+  done
+  if [ -z "$SOURCE" ]; then
+    echo "error: no trashed copy of '$NAME' found in $TRASH_DIR" >&2
+    echo "       (run \`stamp server-repos list --trash\` to see what's available)" >&2
+    exit 1
+  fi
+fi
+
+if [ -e "$DEST" ]; then
+  echo "error: destination $DEST already exists. Pick a different --as name, or delete the live copy first." >&2
+  exit 1
+fi
+
+mv "$SOURCE" "$DEST"
+echo "restored: $DEST (from $SOURCE)"
