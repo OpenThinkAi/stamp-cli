@@ -6,6 +6,7 @@ import {
   DEFAULT_PRODUCT_PROMPT,
   DEFAULT_SECURITY_PROMPT,
   DEFAULT_STANDARDS_PROMPT,
+  findBranchRule,
   loadConfig,
   parseConfigFromYaml,
   stringifyConfig,
@@ -91,7 +92,7 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
   }
 
   const currentConfig = loadConfig(configFile);
-  const targetRule = currentConfig.branches[targetBranch];
+  const targetRule = findBranchRule(currentConfig.branches, targetBranch);
   if (!targetRule) {
     throw new Error(
       `.stamp/config.yml has no rule for branch "${targetBranch}". Switch to your protected branch first.`,

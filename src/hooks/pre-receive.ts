@@ -28,6 +28,7 @@ import {
   type AttestationPayload,
 } from "../lib/attestation.js";
 import { fingerprintFromPem } from "../lib/keys.js";
+import { globToRegex, isGlobPattern } from "../lib/refPatterns.js";
 import {
   hashMcpServers,
   hashPromptBytes,
@@ -93,7 +94,7 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
     );
   }
 
-  const rule = config.branches[branch];
+  const rule = resolveBranchRule(config.branches, branch);
   if (!rule) {
     // Not a protected branch — pass.
     return;
@@ -358,6 +359,33 @@ function run(args: string[]): string {
       `git ${args.join(" ")} failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+/**
+ * Hook-local mirror of lib/config.ts's findBranchRule. Kept here so the
+ * hook stays self-contained (it already maintains its own readConfigAt /
+ * BranchRule shape rather than importing loadConfig). Same resolution
+ * rule: exact key first, then glob fallback, error on multi-glob match.
+ */
+function resolveBranchRule(
+  branches: Record<string, BranchRule>,
+  branchName: string,
+): BranchRule | undefined {
+  const exact = branches[branchName];
+  if (exact !== undefined) return exact;
+  const matchingKeys: string[] = [];
+  for (const key of Object.keys(branches)) {
+    if (!isGlobPattern(key)) continue;
+    if (globToRegex(key).test(branchName)) matchingKeys.push(key);
+  }
+  if (matchingKeys.length === 0) return undefined;
+  if (matchingKeys.length > 1) {
+    throw new Error(
+      `branch "${branchName}" matches multiple glob patterns in .stamp/config.yml: ${matchingKeys.map((k) => `"${k}"`).join(", ")}. ` +
+        `Tighten the patterns or add an exact-match key for "${branchName}".`,
+    );
+  }
+  return branches[matchingKeys[0]!];
 }
 
 function readConfigAt(sha: string): StampConfigAtRef | null {

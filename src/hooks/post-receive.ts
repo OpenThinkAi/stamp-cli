@@ -21,11 +21,20 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { matchesAnyTagPattern, resolveTagPatterns } from "../lib/refPatterns.js";
+import {
+  matchesAnyPattern,
+  matchesAnyTagPattern,
+  resolveTagPatterns,
+} from "../lib/refPatterns.js";
 
 interface MirrorConfig {
   github?: {
     repo: string; // "owner/repo"
+    /**
+     * Branches to mirror. Each entry is a glob pattern (literal names like
+     * `main` are valid no-metachar globs and still match exactly). Same
+     * `*` / `?` grammar as the `tags:` field; see refPatterns.ts.
+     */
     branches: string[];
     /**
      * Glob patterns of tags to mirror, normalized by resolveTagPatterns.
@@ -87,7 +96,7 @@ function main(): void {
       const branch = refname.slice("refs/heads/".length);
       const cfg = readMirrorConfig(newSha);
       if (!cfg?.github) continue;
-      if (!cfg.github.branches.includes(branch)) continue;
+      if (!matchesAnyPattern(branch, cfg.github.branches)) continue;
       mirrorRef(`branch ${branch}`, refname, newSha, cfg.github.repo);
       continue;
     }
@@ -182,9 +191,11 @@ function mirrorRef(
 
 // Canonical schema shape used in warning messages. Matches the YAML
 // example in DESIGN.md and server/README.md so the operator sees
-// consistent text at every touchpoint.
+// consistent text at every touchpoint. Branch and tag entries both accept
+// glob patterns (`*`, `?`); literal names like `main` are no-metachar
+// globs and still match exactly.
 const SCHEMA_HINT =
-  "expected schema: github: { repo: owner/repo, branches: [main], tags?: [\"v*\"] | true }";
+  "expected schema: github: { repo: owner/repo, branches: [main, \"release/*\"], tags?: [\"v*\"] | true }";
 
 function readMirrorConfig(sha: string): MirrorConfig | null {
   // Absence of the file is normal — repos without mirror configured just
@@ -253,7 +264,7 @@ function readMirrorConfig(sha: string): MirrorConfig | null {
   }
   if (!Array.isArray(gh.branches)) {
     warn(
-      `mirror: .stamp/mirror.yml missing or non-array 'github.branches' (expected list of branch names) — skipping mirror. ${SCHEMA_HINT}.`,
+      `mirror: .stamp/mirror.yml missing or non-array 'github.branches' (expected list of branch names or glob patterns) — skipping mirror. ${SCHEMA_HINT}.`,
     );
     return null;
   }

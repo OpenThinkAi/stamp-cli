@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { loadConfig, type StampConfig } from "../lib/config.js";
+import { findBranchRule, loadConfig, type StampConfig } from "../lib/config.js";
 import { latestVerdicts, openDb, type Verdict } from "../lib/db.js";
 import { resolveDiff } from "../lib/git.js";
 import {
@@ -38,7 +38,7 @@ export function runStatus(opts: StatusOptions): void {
   const resolved = resolveDiff(opts.diff, repoRoot);
 
   const target = opts.into ?? inferTarget(opts.diff);
-  const rule = config.branches[target];
+  const rule = findBranchRule(config.branches, target);
   if (!rule) {
     throw new Error(
       `no branch rule for "${target}" in .stamp/config.yml. ` +
