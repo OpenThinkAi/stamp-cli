@@ -162,6 +162,20 @@ branches:
 
 The gate runs against the rule for the branch you're merging into (`stamp merge <branch> --into <target>` reads `branches.<target>.required`). A reviewer can exist in `reviewers:` without being required by any branch — it still runs on `stamp review` but doesn't gate merges.
 
+Branch keys also accept `*` / `?` glob patterns. Common shapes:
+
+```yaml
+branches:
+  main:
+    required: [security, standards, product]
+  "release/*":            # everything under refs/heads/release/
+    required: [security, product]
+  "team-?/*":             # one-character team code, then anything
+    required: [security]
+```
+
+Lookup is exact-key-first: a literal `release/v3.2:` entry overrides `release/*` for that one branch. Two glob keys that both match the same branch (e.g. `release/*` and `*/v3.2`) is a config error — add an exact-match key for the overlap.
+
 ## Calibration workflow
 
 Writing a persona in the abstract doesn't work. Calibrate against real diffs:

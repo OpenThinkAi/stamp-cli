@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { allPassed, runChecks } from "../lib/checks.js";
-import { loadConfig } from "../lib/config.js";
+import { findBranchRule, loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
 import { resolveDiff, runGit, showAtRef } from "../lib/git.js";
 import { ensureUserKeypair } from "../lib/keys.js";
@@ -72,7 +72,7 @@ export function runMerge(opts: MergeOptions): void {
   const revspec = `${opts.into}..${opts.branch}`;
   const resolved = resolveDiff(revspec, repoRoot);
 
-  const rule = config.branches[opts.into];
+  const rule = findBranchRule(config.branches, opts.into);
   if (!rule) {
     throw new Error(
       `no branch rule for "${opts.into}" in .stamp/config.yml`,
@@ -166,7 +166,7 @@ export function runMerge(opts: MergeOptions): void {
     //    diff). That case still needs the documented two-phase workaround
     //    (or `stamp bootstrap` for the placeholder→real swap).
     const postMergeConfig = loadConfig(stampConfigFile(repoRoot));
-    const postMergeRule = postMergeConfig.branches[opts.into];
+    const postMergeRule = findBranchRule(postMergeConfig.branches, opts.into);
     if (!postMergeRule) {
       throw new Error(
         `.stamp/config.yml in the merged tree has no rule for branch "${opts.into}" — ` +

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
+import { globToRegex, isGlobPattern } from "./refPatterns.js";
 
 export interface CheckDef {
   /** Short name used in config and attestation payloads — e.g. "build", "test" */
@@ -229,6 +230,45 @@ function parseStringMap(input: unknown, path: string): Record<string, string> {
 
 export function stringifyConfig(config: StampConfig): string {
   return stringify(config);
+}
+
+/**
+ * Resolve the branch rule for a literal branch name. Map keys may be
+ * literal branch names OR glob patterns (`*`, `?` — same grammar as
+ * mirror.yml's `tags:` field; see refPatterns.ts).
+ *
+ * Resolution rule, exact-first then glob:
+ *   1. If a key matches `branchName` literally, that rule wins. Exact
+ *      keys without metacharacters never participate in glob matching.
+ *   2. Otherwise, scan keys that contain `*` or `?` and test each as a
+ *      glob. If exactly one matches, return it. If multiple match, throw
+ *      with the conflicting keys named so the operator can disambiguate.
+ *   3. If nothing matches, return undefined.
+ *
+ * The undefined return mirrors the prior `branches[name]` behavior so
+ * callers that treat "no rule = unprotected" still work. Callers that
+ * require a rule should keep their existing throw with the same wording.
+ */
+export function findBranchRule(
+  branches: Record<string, BranchRule>,
+  branchName: string,
+): BranchRule | undefined {
+  const exact = branches[branchName];
+  if (exact !== undefined) return exact;
+
+  const matchingKeys: string[] = [];
+  for (const key of Object.keys(branches)) {
+    if (!isGlobPattern(key)) continue;
+    if (globToRegex(key).test(branchName)) matchingKeys.push(key);
+  }
+  if (matchingKeys.length === 0) return undefined;
+  if (matchingKeys.length > 1) {
+    throw new Error(
+      `branch "${branchName}" matches multiple glob patterns in .stamp/config.yml: ${matchingKeys.map((k) => `"${k}"`).join(", ")}. ` +
+        `Tighten the patterns or add an exact-match key for "${branchName}".`,
+    );
+  }
+  return branches[matchingKeys[0]!];
 }
 
 /**

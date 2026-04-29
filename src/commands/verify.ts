@@ -3,7 +3,11 @@ import {
   parseCommitAttestation,
   type AttestationPayload,
 } from "../lib/attestation.js";
-import { parseConfigFromYaml, type StampConfig } from "../lib/config.js";
+import {
+  findBranchRule,
+  parseConfigFromYaml,
+  type StampConfig,
+} from "../lib/config.js";
 import { findTrustedKey } from "../lib/keys.js";
 import { findRepoRoot } from "../lib/paths.js";
 import {
@@ -121,8 +125,10 @@ export function runVerify(sha: string): void {
     );
   }
 
-  // 5. Check approvals satisfy config for target branch.
-  const rule = config.branches[payload.target_branch];
+  // 5. Check approvals satisfy config for target branch. The lookup is
+  //    glob-aware: a config key of "release/*" resolves for a literal
+  //    target_branch of "release/v3.2".
+  const rule = findBranchRule(config.branches, payload.target_branch);
   if (!rule) {
     fail(
       sha,

@@ -112,6 +112,8 @@ reviewers:
 
 Names are user-chosen. The above is an example, not a fixed set. `required_checks` is optional; if omitted, only the reviewer gate applies.
 
+**Branch-key glob patterns:** entries under `branches:` accept the same `*` / `?` glob grammar as `mirror.yml`'s `tags:` and `branches:` (see `lib/refPatterns.ts`). A literal key like `main` still matches that one branch; a pattern like `release/*` matches any branch under that prefix. Resolution rule: an exact key wins over any glob; if no exact key matches, the rule looks for a glob that does. If two glob keys both match the pushed branch (e.g. `release/*` and `*/v3.2` against `release/v3.2`), the lookup throws — add an exact key for the overlapping name to disambiguate. Attestations always record `target_branch` as the literal pushed branch, so verifiers transparently re-resolve through the same glob path.
+
 **`required_checks` semantics (Phase 2.A):**
 
 - Each check is `{ name, run }` — `run` is a shell command.
@@ -125,8 +127,9 @@ Names are user-chosen. The above is an example, not a fixed set. `required_check
 ```yaml
 github:
   repo: owner/repo
-  branches:
+  branches:       # array of glob patterns; literal names like `main` match exactly
     - main
+    - "release/*"
   tags:           # optional; absent/empty = no tag mirroring
     - "v*"        # array of glob patterns, or `true` for all tags
 ```
