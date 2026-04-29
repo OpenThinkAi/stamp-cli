@@ -53,9 +53,12 @@ import {
 } from "../src/commands/serverRepo.ts";
 import {
   globToRegex,
+  isGlobPattern,
+  matchesAnyPattern,
   matchesAnyTagPattern,
   resolveTagPatterns,
 } from "../src/lib/refPatterns.ts";
+import { findBranchRule, type BranchRule } from "../src/lib/config.ts";
 import { parseServerConfig as parseServerYaml } from "../src/lib/serverConfig.ts";
 
 // ---------- parseGithubOriginUrl ----------
@@ -537,6 +540,114 @@ describe("matchesAnyTagPattern", () => {
     assert.equal(matchesAnyTagPattern("v1.0.0", ["*"]), true);
     assert.equal(matchesAnyTagPattern("hotfix-2026", ["*"]), true);
     assert.equal(matchesAnyTagPattern("", ["*"]), true);
+  });
+});
+
+// ---------- glob matching for branch refs (issue #9) ----------
+
+describe("matchesAnyPattern (branch / generic ref names)", () => {
+  it("matches a literal branch name without metachars", () => {
+    assert.equal(matchesAnyPattern("main", ["main"]), true);
+    assert.equal(matchesAnyPattern("develop", ["main"]), false);
+  });
+
+  it("matches a glob with slashes — release/v3.2 against release/*", () => {
+    // The * metachar must cross /, otherwise common branch families like
+    // `release/*` or `team-foo/feature` wouldn't be expressible.
+    assert.equal(matchesAnyPattern("release/v3.2", ["release/*"]), true);
+    assert.equal(matchesAnyPattern("release/v3.2/hotfix", ["release/*"]), true);
+  });
+
+  it("returns true if any of multiple patterns match", () => {
+    assert.equal(matchesAnyPattern("staging", ["main", "staging", "release/*"]), true);
+    assert.equal(matchesAnyPattern("release/v1", ["main", "release/*"]), true);
+  });
+
+  it("empty pattern list never matches", () => {
+    assert.equal(matchesAnyPattern("main", []), false);
+  });
+
+  it("matchesAnyTagPattern is the same function under the back-compat name", () => {
+    // Pin the alias so a future rename doesn't silently change behavior.
+    assert.equal(matchesAnyTagPattern, matchesAnyPattern);
+  });
+});
+
+describe("isGlobPattern", () => {
+  it("returns true for strings with * or ?", () => {
+    assert.equal(isGlobPattern("release/*"), true);
+    assert.equal(isGlobPattern("v?.0"), true);
+    assert.equal(isGlobPattern("*"), true);
+  });
+
+  it("returns false for plain literal names", () => {
+    assert.equal(isGlobPattern("main"), false);
+    assert.equal(isGlobPattern("release/v1"), false);
+    assert.equal(isGlobPattern(""), false);
+  });
+});
+
+describe("findBranchRule (config.yml branches: glob support, issue #9)", () => {
+  const ruleMain: BranchRule = { required: ["security"] };
+  const ruleRelease: BranchRule = { required: ["security", "standards"] };
+  const ruleTeam: BranchRule = { required: ["product"] };
+
+  it("returns undefined when no key matches (unprotected branch)", () => {
+    const branches = { main: ruleMain };
+    assert.equal(findBranchRule(branches, "feature/x"), undefined);
+  });
+
+  it("returns the rule on exact key match", () => {
+    const branches = { main: ruleMain };
+    assert.equal(findBranchRule(branches, "main"), ruleMain);
+  });
+
+  it("falls back to glob match when no exact key", () => {
+    const branches = { "release/*": ruleRelease };
+    assert.equal(findBranchRule(branches, "release/v3.2"), ruleRelease);
+  });
+
+  it("exact key wins over glob (more specific intent)", () => {
+    // An operator who wrote both `release/v3.2: ...` and `release/*: ...`
+    // expects the exact key to govern that one branch and the glob to
+    // catch the rest. Pin the precedence so a future refactor can't
+    // accidentally flip it.
+    const branches = {
+      "release/*": ruleRelease,
+      "release/v3.2": ruleMain,
+    };
+    assert.equal(findBranchRule(branches, "release/v3.2"), ruleMain);
+    assert.equal(findBranchRule(branches, "release/v4.0"), ruleRelease);
+  });
+
+  it("throws with both keys named when multiple globs match the same branch", () => {
+    // Ambiguous configs are surfaced as errors rather than silently
+    // resolved by insertion order — the operator almost certainly meant
+    // to write a more specific exact key for the overlap case.
+    const branches = {
+      "release/*": ruleRelease,
+      "*/v3.2": ruleTeam,
+    };
+    assert.throws(
+      () => findBranchRule(branches, "release/v3.2"),
+      (err: Error) => {
+        assert.match(err.message, /matches multiple glob patterns/);
+        assert.match(err.message, /"release\/\*"/);
+        assert.match(err.message, /"\*\/v3\.2"/);
+        return true;
+      },
+    );
+  });
+
+  it("literal keys never participate in glob matching", () => {
+    // Without this, a literal key like `main` would pass globToRegex too
+    // (no metachars → exact-string regex), which is fine for `main` but
+    // would change semantics for keys that happen to contain `.` or
+    // `+` — those would gain regex-meta meaning if treated as patterns.
+    // Guard with isGlobPattern at the call site so literals stay literal.
+    const branches = { "main.staging": ruleMain };
+    assert.equal(findBranchRule(branches, "mainXstaging"), undefined);
+    assert.equal(findBranchRule(branches, "main.staging"), ruleMain);
   });
 });
 

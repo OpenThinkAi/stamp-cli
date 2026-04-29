@@ -119,8 +119,9 @@ If you want a public GitHub mirror that deploy pipelines can integrate with:
    ```yaml
    github:
      repo: your-user/your-repo
-     branches:
+     branches:        # literal names or `*` / `?` glob patterns
        - main
+       - "release/*"
    ```
 4. **Set up the GitHub-side ruleset** on the mirror's `main` so only your designated mirror identity can update the branch. Without this, anyone with repo write access can `git push origin main` and bypass the entire stamp gate. See [`github-ruleset-setup.md`](./github-ruleset-setup.md) for the full walkthrough — both UI and CLI paths, plus a [`github-ruleset-template.json`](./github-ruleset-template.json) you can `gh api`-import after editing in your bypass actor's numeric ID. (Note: GitHub is phasing out the legacy "Branch protection rules" UI in favor of "Rulesets"; many newer repos only see the Ruleset surface now.)
 

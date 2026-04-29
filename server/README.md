@@ -119,13 +119,17 @@ github:
   repo: your-user/your-repo       # GitHub "owner/repo" of the mirror destination
   branches:
     - main
+    - "release/*"                  # glob patterns; literal names match exactly
   tags:                            # optional — mirror tags to GitHub too
     - "v*"                         # glob patterns (or `true` for all tags)
 ```
 
-Only branches and tags listed here are mirrored. Other refs are pushed to your
-stamp server but not to GitHub. The `tags:` field is optional — when absent or
-empty, no tags are mirrored (the pre-0.7.8 behavior).
+Only branches and tags whose names match an entry are mirrored — `branches:`
+takes the same `*` / `?` glob grammar as `tags:`, so a literal `main` matches
+just that branch and `release/*` catches every branch under that prefix.
+Other refs are pushed to your stamp server but not to GitHub. The `tags:`
+field is optional — when absent or empty, no tags are mirrored (the
+pre-0.7.8 behavior).
 
 Tag mirroring exists for repos that publish on tag push (npm `on: push: tags`,
 Cargo, PyPI, etc.). Without it, `git push origin v1.0.0` lands on the stamp
