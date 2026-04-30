@@ -1,0 +1,6 @@
+github:
+  repo: OpenThinkAi/stamp-cli
+  branches:
+    - main
+  tags:
+    - "v*"
