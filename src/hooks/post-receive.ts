@@ -121,11 +121,12 @@ async function main(): Promise<void> {
     if (refname.startsWith("refs/tags/")) {
       const tag = refname.slice("refs/tags/".length);
       // Tag mirror config has to be read from the tip of a branch (since
-      // .stamp/mirror.yml lives on a branch tree, not on the tag). The tag
-      // commit itself usually IS reachable via main, so we read mirror.yml
-      // from `main` if it exists. If main can't be read, skip — without a
-      // mirror config there's nothing to do.
-      const cfg = readMirrorConfigFromMainBranch();
+      // .stamp/mirror.yml lives on a branch tree, not on the tag). We read
+      // it from whatever branch the bare repo's HEAD points at — that's
+      // the operator's chosen default branch (often `main`, but `master`,
+      // `trunk`, etc. all need to work). If HEAD or the resolved ref
+      // fails, the helper warns and returns null so the skip is visible.
+      const cfg = readMirrorConfigFromHeadBranch();
       if (!cfg?.github) continue;
       if (cfg.github.tags.length === 0) continue;
       if (!matchesAnyTagPattern(tag, cfg.github.tags)) continue;
@@ -138,20 +139,35 @@ async function main(): Promise<void> {
 }
 
 /**
- * Read mirror.yml from the `main` branch (mirror config doesn't ride along
- * on tags themselves — tags point at commits, not at trees with their own
- * mirror.yml semantics, and we want one source of truth per repo). Returns
- * null if main doesn't exist or doesn't contain mirror.yml.
+ * Read mirror.yml from the bare repo's HEAD branch (mirror config doesn't
+ * ride along on tags themselves — tags point at commits, not at trees with
+ * their own mirror.yml semantics, and we want one source of truth per repo).
+ * `git symbolic-ref HEAD` resolves the operator's actual default branch —
+ * `master`, `trunk`, `main`, anything — instead of pinning to a `main`
+ * literal that silently no-ops on repos that don't use that name. Falls
+ * back to `refs/heads/main` only if HEAD itself is unreadable (detached or
+ * unset on a freshly initialized bare repo). Warns and returns null when
+ * the resolved ref fails to rev-parse, so the operator sees the skipped
+ * mirror leg in the push transcript instead of having it disappear.
  */
-function readMirrorConfigFromMainBranch(): MirrorConfig | null {
-  let mainSha: string;
+export function readMirrorConfigFromHeadBranch(): MirrorConfig | null {
+  let headRef: string;
   try {
-    mainSha = run(["rev-parse", "refs/heads/main"]).trim();
+    headRef = run(["symbolic-ref", "HEAD"]).trim();
   } catch {
+    headRef = "refs/heads/main";
+  }
+  let sha: string;
+  try {
+    sha = run(["rev-parse", headRef]).trim();
+  } catch {
+    warn(
+      `mirror: tag push received but ${headRef} doesn't resolve in the bare repo; skipping tag mirror.`,
+    );
     return null;
   }
-  if (!mainSha) return null;
-  return readMirrorConfig(mainSha);
+  if (!sha) return null;
+  return readMirrorConfig(sha);
 }
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
