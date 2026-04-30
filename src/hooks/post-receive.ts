@@ -22,6 +22,11 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import {
+  decideMirrorStatus,
+  postCommitStatus,
+  type MirrorStatusDecision,
+} from "../lib/mirrorStatus.js";
+import {
   matchesAnyPattern,
   matchesAnyTagPattern,
   resolveTagPatterns,
@@ -79,7 +84,19 @@ function scrubTokenUrls(s: string): string {
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-function main(): void {
+// Single deterministic context so operators can mark `stamp/verified` as a
+// required check in their GitHub branch ruleset. Don't add a suffix per
+// reviewer or per branch — that would multiply required-check rows on
+// every PR for no operator benefit.
+const STATUS_CONTEXT = "stamp/verified";
+
+// Cap how many per-commit status POSTs a single push can issue. A normal
+// pardini-style flow is single-digit commits; the cap exists so a one-time
+// big mirror (e.g. first push of a long-lived stamped branch) can't exhaust
+// the bot's status-creates quota in a single hook invocation.
+const STATUS_POST_LIMIT = 100;
+
+async function main(): Promise<void> {
   loadServerEnvFile();
 
   const stdin = readAllStdin();
@@ -89,7 +106,7 @@ function main(): void {
   for (const line of lines) {
     const parts = line.split(/\s+/);
     if (parts.length < 3) continue;
-    const [_oldSha, newSha, refname] = parts as [string, string, string];
+    const [oldSha, newSha, refname] = parts as [string, string, string];
     if (newSha === ZERO_SHA) continue; // deletion — never mirror deletions
 
     if (refname.startsWith("refs/heads/")) {
@@ -97,7 +114,7 @@ function main(): void {
       const cfg = readMirrorConfig(newSha);
       if (!cfg?.github) continue;
       if (!matchesAnyPattern(branch, cfg.github.branches)) continue;
-      mirrorRef(`branch ${branch}`, refname, newSha, cfg.github.repo);
+      await mirrorRef(`branch ${branch}`, refname, oldSha, newSha, cfg.github.repo);
       continue;
     }
 
@@ -112,7 +129,7 @@ function main(): void {
       if (!cfg?.github) continue;
       if (cfg.github.tags.length === 0) continue;
       if (!matchesAnyTagPattern(tag, cfg.github.tags)) continue;
-      mirrorRef(`tag ${tag}`, refname, newSha, cfg.github.repo);
+      await mirrorRef(`tag ${tag}`, refname, oldSha, newSha, cfg.github.repo);
       continue;
     }
 
@@ -140,15 +157,18 @@ function readMirrorConfigFromMainBranch(): MirrorConfig | null {
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
 /**
- * Push a single ref (branch or tag) to the configured GitHub mirror.
- * `label` is operator-friendly text for log lines ("branch main", "tag v1.0.0").
+ * Push a single ref (branch or tag) to the configured GitHub mirror, then
+ * publish a `stamp/verified` commit status to GitHub for each commit in
+ * the pushed range. `label` is operator-friendly text for log lines
+ * ("branch main", "tag v1.0.0").
  */
-function mirrorRef(
+async function mirrorRef(
   label: string,
   refname: string,
+  oldSha: string,
   newSha: string,
   githubRepo: string,
-): void {
+): Promise<void> {
   const token = process.env["GITHUB_BOT_TOKEN"];
   if (!token) {
     warn(
@@ -176,6 +196,7 @@ function mirrorRef(
     info(
       `mirror: pushed ${label} (${newSha.slice(0, 8)}) → github.com/${githubRepo}`,
     );
+    await postStatuses(label, refname, oldSha, newSha, githubRepo, token);
   } else {
     const errOut = scrubTokenUrls((result.stderr ?? "").trim());
     warn(
@@ -187,6 +208,130 @@ function mirrorRef(
         `git push https://...@github.com/${githubRepo}.git ${refname}`,
     );
   }
+}
+
+/**
+ * For each commit in the just-pushed range, post a `stamp/verified` commit
+ * status to GitHub. Trusted keys are read from the tip of the pushed ref —
+ * pre-receive already accepted the push, so the tip's trusted-keys set is
+ * the authoritative one for this push (and the `signer_key_id` recorded in
+ * each attestation is invariant once signed, so reading at the tip rather
+ * than per-commit doesn't change correctness).
+ *
+ * Failures of any individual status POST warn and continue: the mirror
+ * push has already succeeded, and a missing status is recoverable by the
+ * operator (re-trigger the hook or post manually).
+ */
+async function postStatuses(
+  label: string,
+  refname: string,
+  oldSha: string,
+  newSha: string,
+  githubRepo: string,
+  token: string,
+): Promise<void> {
+  const trustedKeys = readTrustedKeyPemsAt(newSha);
+  if (trustedKeys.length === 0) {
+    warn(
+      `mirror: no trusted keys readable at ${newSha.slice(0, 8)}; ${STATUS_CONTEXT} statuses for ${label} would all fail-mark — skipping status post.`,
+    );
+    return;
+  }
+
+  const shas = listShasInPushRange(oldSha, newSha, refname);
+  if (shas.length === 0) return;
+
+  let posted = 0;
+  let truncated = false;
+  for (const sha of shas) {
+    if (posted >= STATUS_POST_LIMIT) {
+      truncated = true;
+      break;
+    }
+    let decision: MirrorStatusDecision;
+    try {
+      const message = readCommitMessage(sha);
+      decision = decideMirrorStatus(message, trustedKeys);
+    } catch (err) {
+      warn(
+        `mirror: status decision for ${sha.slice(0, 8)} failed (${err instanceof Error ? err.message : String(err)}); skipping.`,
+      );
+      continue;
+    }
+    try {
+      await postCommitStatus(githubRepo, sha, decision, token, STATUS_CONTEXT);
+      posted++;
+      info(
+        `mirror: ${STATUS_CONTEXT} ${decision.state} for ${sha.slice(0, 8)} on github.com/${githubRepo}`,
+      );
+    } catch (err) {
+      warn(
+        `mirror: status post for ${sha.slice(0, 8)} on github.com/${githubRepo} failed — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  if (truncated) {
+    warn(
+      `mirror: status posts capped at ${STATUS_POST_LIMIT} for ${label}; ${shas.length - STATUS_POST_LIMIT} commit(s) without ${STATUS_CONTEXT} status. Re-run the hook or post manually for the older shas.`,
+    );
+  }
+}
+
+/**
+ * Enumerate the commits a status should be posted for. Branches use
+ * `--first-parent oldSha..newSha` so we report on the merges/commits that
+ * landed on the protected ref itself, not every commit they brought in
+ * via a feature-branch second parent. Branch creations (oldSha all zeros)
+ * and tag pushes both fall back to the single tip commit — there's no
+ * meaningful range to walk.
+ */
+function listShasInPushRange(
+  oldSha: string,
+  newSha: string,
+  refname: string,
+): string[] {
+  if (oldSha === ZERO_SHA || refname.startsWith("refs/tags/")) {
+    return [newSha];
+  }
+  let out: string;
+  try {
+    out = run(["rev-list", "--first-parent", `${oldSha}..${newSha}`]).trim();
+  } catch {
+    return [newSha];
+  }
+  if (!out) return [];
+  return out.split("\n");
+}
+
+function readCommitMessage(sha: string): string {
+  // %B is the raw body of the commit message, including all trailers,
+  // without the headers `git cat-file -p` would prepend.
+  return run(["log", "-1", "--format=%B", sha]);
+}
+
+/**
+ * Read every `.pub` under `.stamp/trusted-keys/` at the given commit and
+ * return the PEM contents. Mirrors the lookup pre-receive does, but
+ * returns an opaque PEM list — the consumer (decideMirrorStatus) hashes
+ * each PEM into a fingerprint itself.
+ */
+function readTrustedKeyPemsAt(sha: string): string[] {
+  let lsOut: string;
+  try {
+    lsOut = run(["ls-tree", "-r", "--name-only", sha, ".stamp/trusted-keys/"]);
+  } catch {
+    return [];
+  }
+  const files = lsOut.split("\n").filter((f) => f.endsWith(".pub"));
+  const pems: string[] = [];
+  for (const path of files) {
+    try {
+      pems.push(run(["show", `${sha}:${path}`]));
+    } catch {
+      // skip unreadable
+    }
+  }
+  return pems;
 }
 
 // Canonical schema shape used in warning messages. Matches the YAML
@@ -312,12 +457,14 @@ function warn(msg: string): void {
   process.stderr.write(`${msg}\n`);
 }
 
-try {
-  main();
-} catch (err) {
-  warn(
-    `mirror: internal error — ${err instanceof Error ? err.message : String(err)}`,
-  );
-  // Exit 0 regardless — post-receive failures shouldn't affect the push result.
-}
-process.exit(0);
+// Run as async so per-commit GitHub status posts can await fetch responses
+// before the hook exits and Node would otherwise tear down in-flight
+// sockets. Exit 0 regardless — post-receive failures shouldn't affect the
+// push result.
+void main()
+  .catch((err: unknown) => {
+    warn(
+      `mirror: internal error — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  })
+  .finally(() => process.exit(0));

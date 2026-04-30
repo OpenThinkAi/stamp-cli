@@ -44,6 +44,13 @@ import {
   STAMP_END,
 } from "../src/lib/agentsMd.ts";
 import {
+  formatTrailers,
+  type AttestationPayload,
+} from "../src/lib/attestation.ts";
+import { generateKeypair } from "../src/lib/keys.ts";
+import { signBytes } from "../src/lib/signing.ts";
+import { decideMirrorStatus } from "../src/lib/mirrorStatus.ts";
+import {
   formatServerConfigYaml,
   runServerConfig,
 } from "../src/commands/server.ts";
@@ -648,6 +655,115 @@ describe("findBranchRule (config.yml branches: glob support, issue #9)", () => {
     const branches = { "main.staging": ruleMain };
     assert.equal(findBranchRule(branches, "mainXstaging"), undefined);
     assert.equal(findBranchRule(branches, "main.staging"), ruleMain);
+  });
+});
+
+// ---------- decideMirrorStatus (mirror hook commit-status decision) ----------
+
+describe("decideMirrorStatus", () => {
+  // Build a minimal attestation payload + signature so the test exercises
+  // the same parse/verify path the hook uses, without needing a live git
+  // repo. Anything not asserted by the function under test is omitted.
+  function buildSignedCommitMessage(): {
+    message: string;
+    publicKeyPem: string;
+    fingerprint: string;
+  } {
+    const kp = generateKeypair();
+    const payload: AttestationPayload = {
+      schema_version: 3,
+      base_sha: "0000000000000000000000000000000000000001",
+      head_sha: "0000000000000000000000000000000000000002",
+      target_branch: "main",
+      approvals: [
+        { reviewer: "security", verdict: "approved", review_sha: "abc" },
+        { reviewer: "standards", verdict: "approved", review_sha: "def" },
+      ],
+      checks: [],
+      signer_key_id: kp.fingerprint,
+    };
+    const payloadBytes = Buffer.from(JSON.stringify(payload), "utf8");
+    const signature = signBytes(kp.privateKeyPem, payloadBytes);
+    const message =
+      `Merge feature into main\n\n` + formatTrailers(payload, signature) + `\n`;
+    return { message, publicKeyPem: kp.publicKeyPem, fingerprint: kp.fingerprint };
+  }
+
+  it("flags a commit with no Stamp trailers as failure", () => {
+    const decision = decideMirrorStatus("Plain old commit, no trailers.\n", []);
+    assert.equal(decision.state, "failure");
+    assert.match(decision.description, /Stamp-Payload/);
+  });
+
+  it("flags a commit whose signer key is not in the trusted set as failure", () => {
+    const { message } = buildSignedCommitMessage();
+    // Pass a different keypair's PEM as the only "trusted" key — the
+    // signer's fingerprint won't match anything in the set.
+    const otherKey = generateKeypair();
+    const decision = decideMirrorStatus(message, [otherKey.publicKeyPem]);
+    assert.equal(decision.state, "failure");
+    assert.match(decision.description, /not in trusted-keys/);
+  });
+
+  it("returns success when a trusted key matches the signer and verifies", () => {
+    const { message, publicKeyPem, fingerprint } = buildSignedCommitMessage();
+    const decision = decideMirrorStatus(message, [publicKeyPem]);
+    assert.equal(decision.state, "success", decision.description);
+    assert.match(decision.description, new RegExp(fingerprint));
+    assert.match(decision.description, /security/);
+    assert.match(decision.description, /standards/);
+  });
+
+  it("flags a commit whose signature does not verify as failure", () => {
+    const { publicKeyPem } = buildSignedCommitMessage();
+    // Build a message with a corrupted Stamp-Verified value: a real-looking
+    // base64 signature that won't verify against the payload + key.
+    const kp = generateKeypair();
+    const payload: AttestationPayload = {
+      schema_version: 3,
+      base_sha: "0000000000000000000000000000000000000001",
+      head_sha: "0000000000000000000000000000000000000002",
+      target_branch: "main",
+      approvals: [],
+      checks: [],
+      signer_key_id: kp.fingerprint,
+    };
+    const payloadBytes = Buffer.from(JSON.stringify(payload), "utf8");
+    const realSig = signBytes(kp.privateKeyPem, payloadBytes);
+    // Flip every byte of the signature to guarantee non-verification while
+    // keeping the base64 length valid.
+    const corruptedSig = Buffer.from(realSig, "base64")
+      .map((b) => b ^ 0xff)
+      .toString("base64");
+    const message =
+      `Merge feature into main\n\n` +
+      `Stamp-Payload: ${payloadBytes.toString("base64")}\n` +
+      `Stamp-Verified: ${corruptedSig}\n`;
+    const decision = decideMirrorStatus(message, [publicKeyPem, kp.publicKeyPem]);
+    assert.equal(decision.state, "failure");
+    assert.match(decision.description, /signature does not verify/);
+  });
+
+  it("ignores malformed PEMs in the trusted-key list rather than throwing", () => {
+    const { message, publicKeyPem } = buildSignedCommitMessage();
+    // A garbage entry should be silently skipped — operator config errors
+    // shouldn't block stamp-verified status posts for unrelated commits.
+    const decision = decideMirrorStatus(message, [
+      "not-a-pem\n",
+      publicKeyPem,
+    ]);
+    assert.equal(decision.state, "success", decision.description);
+  });
+
+  it("truncates descriptions over 140 chars so GitHub doesn't 422 the post", () => {
+    // No trailers branch produces a fixed short description; force the
+    // longer signer-key path by feeding a parsed-but-rejected payload.
+    const { message } = buildSignedCommitMessage();
+    const decision = decideMirrorStatus(message, []);
+    assert.ok(
+      decision.description.length <= 140,
+      `description must be ≤ 140 chars (was ${decision.description.length})`,
+    );
   });
 });
 

@@ -204,6 +204,33 @@ git push https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<owner>/<repo>.git 
 
 ---
 
+## `stamp/verified` commit status missing or red on a GitHub PR
+
+After 0.7.10, the mirror hook posts a per-commit `stamp/verified` status to GitHub for every commit in a mirrored push. If a commit shows up red on a `<stamped-branch> → main` PR, or no `stamp/verified` row appears at all, the hook printed the reason to stderr at push time:
+
+```
+remote: mirror: stamp/verified failure for <sha8> on github.com/<owner>/<repo>
+remote: mirror: status post for <sha8> on github.com/<owner>/<repo> failed — HTTP 403 …
+```
+
+**`failure` with reason "no Stamp-Payload / Stamp-Verified trailers":** the commit landed without going through `stamp merge`. Either the protected-branch list in `.stamp/config.yml` doesn't cover this branch (a bypass-able branch can carry direct commits), or the commit predates stamp adoption. Re-create the commit via the standard flow if you want it green.
+
+**`failure` with reason "signer key … not in trusted-keys at this ref":** the commit is signed, but by a key whose public counterpart isn't committed under `.stamp/trusted-keys/`. Either the operator rotated keys without re-merging the new public key onto the protected branch first, or the merge was signed by a key that was never authorized. Add the public key under `.stamp/trusted-keys/` via a stamped merge, then re-push.
+
+**No `stamp/verified` row at all on a commit:** the GitHub status POST itself failed. The hook logs the HTTP error at push time. Common causes:
+- `GITHUB_BOT_TOKEN` PAT lacks the `commit statuses: write` (or fine-grained equivalent) on the mirror repo.
+- The hook hit the per-push cap (100 statuses) for an unusually large initial mirror — older commits in the range will not have a row. Re-trigger the hook for a small follow-up push, or post manually:
+  ```sh
+  curl -sS -X POST -H "Authorization: Bearer $GITHUB_BOT_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    https://api.github.com/repos/<owner>/<repo>/statuses/<sha> \
+    -d '{"state":"success","context":"stamp/verified","description":"manual backfill"}'
+  ```
+
+The stamp push itself is unaffected by status-post failures — they're best-effort.
+
+---
+
 ## "Reviewer not configured" from `stamp reviewers test`
 
 ```
