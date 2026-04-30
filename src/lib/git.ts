@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 export interface ResolvedDiff {
   /** Original revspec as passed by the user, e.g. "main..HEAD" */
@@ -84,6 +84,37 @@ export function commitMessage(sha: string, cwd: string): string {
  */
 export function showAtRef(ref: string, path: string, cwd: string): string {
   return runGit(["show", `${ref}:${path}`], cwd);
+}
+
+/**
+ * True when `<path>` exists in the tree at `<ref>`. Use this when "missing"
+ * is a legitimate state to branch on rather than an error to recover from —
+ * e.g. probing for an optional file like a reviewer lock that may or may
+ * not be pinned.
+ *
+ * Branches on `git cat-file -e`'s exit code: 0 = present, 128 = absent
+ * (git's catch-all for "path or ref didn't resolve"), anything else =
+ * unexpected failure (rethrown). Matches the status-128 = "legitimate
+ * bootstrap state" convention loadConfigAtSha already uses in verify.ts.
+ *
+ * Use this instead of try/catch around `git show` when absence is expected,
+ * so genuine non-128 failures aren't silently swallowed as "absent."
+ */
+export function pathExistsAtRef(
+  ref: string,
+  path: string,
+  cwd: string,
+): boolean {
+  const result = spawnSync("git", ["cat-file", "-e", `${ref}:${path}`], {
+    cwd,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  if (result.status === 0) return true;
+  if (result.status === 128) return false;
+  const stderr = result.stderr?.toString("utf8").trim() ?? "";
+  throw new Error(
+    `git cat-file -e ${ref}:${path} failed (status ${result.status}): ${stderr || "(no stderr)"}`,
+  );
 }
 
 /**

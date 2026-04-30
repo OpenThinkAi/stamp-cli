@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
 import { latestReviews, openDb } from "../lib/db.js";
-import { resolveDiff, runGit, showAtRef } from "../lib/git.js";
+import { pathExistsAtRef, resolveDiff, runGit, showAtRef } from "../lib/git.js";
 import { ensureUserKeypair } from "../lib/keys.js";
 import {
   findRepoRoot,
@@ -306,14 +306,16 @@ function readReviewerSource(
   repoRoot: string,
 ): { source: string; ref: string } | null {
   // Read the committed lock file (not the on-disk copy) so the attestation
-  // reflects what's in the merge commit's tree. Absence is not an error —
-  // unpinned reviewers just produce no reviewer_source field.
-  let raw: string;
-  try {
-    raw = git(["show", `HEAD:.stamp/reviewers/${reviewerName}.lock.json`], repoRoot);
-  } catch {
+  // reflects what's in the merge commit's tree. Absence is the documented
+  // un-pinned default and produces no reviewer_source field — check
+  // existence first so a real `git show` failure (corrupted object, etc.)
+  // still propagates and rolls the merge back rather than masquerading as
+  // "unpinned."
+  const path = `.stamp/reviewers/${reviewerName}.lock.json`;
+  if (!pathExistsAtRef("HEAD", path, repoRoot)) {
     return null;
   }
+  const raw = git(["show", `HEAD:${path}`], repoRoot);
   try {
     const parsed = JSON.parse(raw) as { source?: string; ref?: string };
     if (typeof parsed.source === "string" && typeof parsed.ref === "string") {
@@ -325,8 +327,4 @@ function readReviewerSource(
   return null;
 }
 
-// Local alias so the existing call sites stay terse. The actual implementation
-// (with stderr capture, etc.) lives in lib/git.ts as runGit() — shared with
-// commands/bootstrap.ts. Some readReviewerSource probes here are *expected* to
-// fail on missing paths; runGit's stderr capture stops those from leaking.
 const git = runGit;
