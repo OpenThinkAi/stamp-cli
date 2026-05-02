@@ -85,16 +85,21 @@ jobs:
       # --provenance requires id-token: write and a Trusted Publisher on
       # the npm side; attaches an SLSA build attestation to the tarball.
       #
-      # npx npm@latest (not bare 'npm publish'): Node 22 bundles npm 10.x,
+      # npx npm@<pinned> (not bare 'npm publish'): Node 22 bundles npm 10.x,
       # which supports OIDC only for provenance signing but NOT for
       # authenticating the registry PUT — that requires npm 11.5.1+.
       # Self-upgrading via 'npm install -g npm@latest' breaks on hosted
       # runners (MODULE_NOT_FOUND on promise-retry as the running npm
-      # replaces its own modules mid-flight). npx fetches a clean npm@latest
+      # replaces its own modules mid-flight). npx fetches a clean npm
       # per-run without touching the globally-installed npm.
+      #
+      # Pinned to a specific version (not @latest) because this step holds
+      # id-token: write — npm@latest would auto-adopt any new npm release
+      # the moment it ships, including a compromised one. Bump explicitly
+      # when a newer npm is needed; lower bound is 11.5.1 for OIDC publish.
       - name: publish
         if: steps.check.outputs.published == 'false'
-        run: npx -y npm@latest publish --access public --provenance --tag "${{ steps.version.outputs.dist_tag }}"
+        run: npx -y npm@11.13.0 publish --access public --provenance --tag "${{ steps.version.outputs.dist_tag }}"
 
       - name: tag release
         if: steps.check.outputs.published == 'false'
