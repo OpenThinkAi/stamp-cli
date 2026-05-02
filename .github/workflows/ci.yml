@@ -16,12 +16,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
+    # Explicit minimum scope for GITHUB_TOKEN: this job only needs to read
+    # the source. Org-level defaults can still grant write; setting this at
+    # the job level removes any doubt across org-policy changes.
+    permissions:
+      contents: read
+
     steps:
+      # SHA-pinned for the same reasons as publish.yml (see comment there).
+      # Smaller blast radius here (read-only token, fork PRs run in fork
+      # context), but consistency with publish.yml means a future change
+      # that adds secrets won't silently inherit a mutable-tag foot-gun.
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"

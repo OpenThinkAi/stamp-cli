@@ -25,11 +25,16 @@ jobs:
       id-token: write
 
     steps:
+      # Actions are pinned by full commit SHA (not mutable tag) because this
+      # workflow holds id-token: write for npm Trusted Publishing — a moved
+      # @v4 tag would let an upstream compromise ship malicious stamp-cli to
+      # every downstream installer. Dependabot's github-actions ecosystem
+      # keeps these SHAs current with annotated PRs.
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: setup node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
