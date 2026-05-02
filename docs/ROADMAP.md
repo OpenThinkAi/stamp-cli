@@ -43,7 +43,6 @@ The repo is public and `stamp-cli@0.2.0` is on npm. Pre-public audit shipped all
 
 **Deferred from 2.E (post-public, nice-to-have):**
 
-- Cap the attestation trailer size before `JSON.parse` in `lib/attestation.ts` (theoretical prototype-pollution / DoS via oversized JSON; realistic risk low).
 - `THIRD-PARTY-NOTICES.md` for Apache-2.0 transitive deps.
 - Genericize `docs/personas.md`'s concrete example project reference.
 

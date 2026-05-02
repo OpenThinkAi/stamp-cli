@@ -73,6 +73,17 @@ export const STAMP_PAYLOAD_TRAILER = "Stamp-Payload";
 export const STAMP_VERIFIED_TRAILER = "Stamp-Verified";
 
 /**
+ * Hard cap on the base64 trailer value AND its decoded bytes. parseCommit-
+ * Attestation runs on every new commit in the pre-receive hook BEFORE the
+ * Ed25519 signature is checked, so an attacker who can produce a commit
+ * (any push attempt) could otherwise force JSON.parse on a multi-megabyte
+ * payload before reaching the signature verification step that would
+ * reject it. 64KB is generous for any sane attestation — the largest real
+ * payloads are a few KB even with full tool-call traces.
+ */
+export const MAX_TRAILER_BYTES = 64 * 1024;
+
+/**
  * Serialize the payload to the exact bytes that will be signed. We do NOT
  * canonicalize JSON — the signer and verifier both operate on the base64
  * Stamp-Payload trailer value, so whatever bytes we produce here are the
@@ -120,7 +131,11 @@ export function parseCommitAttestation(
   const b64Sig = sigMatch[1]?.trim();
   if (!b64Payload || !b64Sig) return null;
 
+  // Bail before allocating or parsing if the trailer is oversized — both as
+  // a base64 string and as decoded bytes. See MAX_TRAILER_BYTES rationale.
+  if (b64Payload.length > MAX_TRAILER_BYTES) return null;
   const payloadBytes = trailerValueToPayloadBytes(b64Payload);
+  if (payloadBytes.length > MAX_TRAILER_BYTES) return null;
   const payload = JSON.parse(payloadBytes.toString("utf8")) as AttestationPayload;
   return { payload, payloadBytes, signatureBase64: b64Sig };
 }
