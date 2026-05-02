@@ -56,7 +56,38 @@ case $# in
     ;;
 esac
 
-REPO="/srv/git/${NAME}.git"
+# Validate name shape: must start with [A-Za-z0-9_] and match
+# [A-Za-z0-9._-]+. Same rules as the client-side validateRepoName in
+# src/commands/serverRepo.ts and the sister scripts delete-stamp-repo
+# and restore-stamp-repo. Without this, names like `../tmp/foo` would
+# resolve to `/tmp/foo.git` and escape the /srv/git prefix; `.trash/foo`
+# would inject a bare repo into the trash directory. The case+grep pair
+# is deliberate — case is fast for the obvious bad shapes (path
+# separators, leading dot/dash); grep -E catches everything else
+# (whitespace, `;`, `$`, etc.) so direct-ssh callers without the TS
+# wrapper get the same enforcement. Exit 2 for argument errors.
+case "$NAME" in
+  ""|"."|".."|*"/"*|*".."*|.*|-*)
+    echo "error: invalid repo name '$NAME' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+    exit 2
+    ;;
+esac
+if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*$'; then
+  echo "error: invalid repo name '$NAME' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+  exit 2
+fi
+
+GIT_ROOT=/srv/git
+REPO="$GIT_ROOT/${NAME}.git"
+
+# Defensive: refuse to resolve to any of the protected paths even if the
+# validator above somehow let one through. Mirrors delete-stamp-repo.
+case "$REPO" in
+  "$GIT_ROOT"|"$GIT_ROOT/"|"$GIT_ROOT/.trash"|"$GIT_ROOT/.trash/"|"$GIT_ROOT/.ssh-host-keys"|"$GIT_ROOT/.ssh-host-keys/")
+    echo "error: refusing to act on protected path $REPO" >&2
+    exit 1
+    ;;
+esac
 # The setup-repo.sh script auto-discovers post-receive.cjs alongside
 # the pre-receive path, so we pass the .cjs form here to enable it.
 HOOK="/etc/stamp/pre-receive.cjs"
