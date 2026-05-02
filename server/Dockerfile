@@ -1,5 +1,9 @@
 # Build the stamp-verify hook in a first stage so runtime image stays small.
-FROM node:22-alpine AS builder
+# Base images are pinned by digest (not just tag) so two builds 24h apart
+# produce byte-identical userspace, and a re-push of the upstream tag by an
+# attacker cannot silently change the runtime. Renovate / Dependabot's
+# `docker` ecosystem keeps the digest current with annotated PRs.
+FROM node:22-alpine3.21@sha256:af8023ec879993821f6d5b21382ed915622a1b0f1cc03dbeb6804afaf01f8885 AS builder
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json tsup.config.ts ./
 RUN npm ci
@@ -7,7 +11,12 @@ COPY src ./src
 RUN npm run build
 
 # Runtime: bare git server + sshd + node (to run the hook) + the hook itself.
-FROM alpine:3.19
+# Bumped from alpine:3.19 (EOL 2025-11-01 — no further security updates for
+# git/openssh/musl/openssl) to alpine:3.21 (supported through 2027-04). The
+# image runs sshd exposed to the internet on every stamp-server deploy, so
+# being on a supported package set matters. Pinned by digest for the same
+# reason as the builder.
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 # sed step unlocks the git account (alpine's adduser -D leaves password as "!",
 # which openssh treats as "locked"; "*" means no password but unlocked, which

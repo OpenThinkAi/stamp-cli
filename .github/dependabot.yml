@@ -20,3 +20,8 @@ updates:
     groups:
       dev-deps:
         dependency-type: development
+
+  - package-ecosystem: docker
+    directory: /server
+    schedule:
+      interval: weekly
