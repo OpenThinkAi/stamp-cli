@@ -45,6 +45,10 @@ import {
 } from "../src/lib/agentsMd.ts";
 import {
   formatTrailers,
+  MAX_TRAILER_BYTES,
+  parseCommitAttestation,
+  STAMP_PAYLOAD_TRAILER,
+  STAMP_VERIFIED_TRAILER,
   type AttestationPayload,
 } from "../src/lib/attestation.ts";
 import { generateKeypair } from "../src/lib/keys.ts";
@@ -764,6 +768,45 @@ describe("decideMirrorStatus", () => {
       decision.description.length <= 140,
       `description must be ≤ 140 chars (was ${decision.description.length})`,
     );
+  });
+});
+
+describe("parseCommitAttestation (trailer size cap)", () => {
+  // Defends the pre-receive hook path: parseCommitAttestation runs on every
+  // pushed commit BEFORE the Ed25519 signature is verified, so an oversized
+  // Stamp-Payload trailer would force a multi-megabyte JSON.parse before the
+  // signature check could reject the commit.
+  it("rejects an oversized base64 trailer without parsing", () => {
+    // One byte over the cap as a base64 string (no decode required to trip).
+    // The decoded-bytes guard in parseCommitAttestation is belt-and-
+    // suspenders: base64 always inflates ~4/3, so a payload that passes
+    // the b64-length check cannot exceed the cap once decoded — but the
+    // second check is kept defensively in case the b64 source ever changes.
+    const oversizedB64 = "a".repeat(MAX_TRAILER_BYTES + 1);
+    const message = [
+      "subject",
+      "",
+      `${STAMP_PAYLOAD_TRAILER}: ${oversizedB64}`,
+      `${STAMP_VERIFIED_TRAILER}: dGVzdA==`,
+    ].join("\n");
+    assert.equal(parseCommitAttestation(message), null);
+  });
+
+  it("accepts a normally-sized payload", () => {
+    const payload: AttestationPayload = {
+      schema_version: 3,
+      base_sha: "a".repeat(40),
+      head_sha: "b".repeat(40),
+      target_branch: "main",
+      approvals: [],
+      checks: [],
+      signer_key_id: "sha256:" + "c".repeat(64),
+    };
+    const trailers = formatTrailers(payload, "dGVzdA==");
+    const message = `subject\n\n${trailers}`;
+    const parsed = parseCommitAttestation(message);
+    assert.ok(parsed !== null);
+    assert.equal(parsed.payload.target_branch, "main");
   });
 });
 
