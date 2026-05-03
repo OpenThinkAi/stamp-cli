@@ -33,7 +33,11 @@ FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d650
 # bash is intentionally still installed — entrypoint.sh and several wrapper
 # scripts use bash-isms. The git USER doesn't get a bash login shell;
 # system-level scripts run as root via the entrypoint.
-RUN apk add --no-cache git openssh-server bash nodejs \
+# netcat-openbsd is installed for the HEALTHCHECK loopback probe at the
+# bottom of this file. Alpine's busybox `nc` also supports `-z`, but its
+# behavior has drifted between busybox versions; pinning to OpenBSD nc
+# keeps the probe semantics stable across Alpine point releases.
+RUN apk add --no-cache git openssh-server bash nodejs netcat-openbsd \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
  && mkdir -p /srv/git /home/git/.ssh /home/git/git-shell-commands /etc/stamp \
@@ -46,12 +50,57 @@ RUN apk add --no-cache git openssh-server bash nodejs \
 # and reuses them on subsequent boots, so the same image deployed multiple
 # times keeps the same host identity.
 
-# Harden sshd: no password auth, no root login.
-RUN sed -i \
-      -e 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' \
-      -e 's/^#*PermitRootLogin.*/PermitRootLogin no/' \
-      -e 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' \
-      /etc/ssh/sshd_config
+# Harden sshd: no password auth, no root login, no forwarding of any kind,
+# tightened connection-establishment limits.
+#
+# Forwarding: git-shell blocks the *interactive* command surface, but ssh
+# port/agent/X11/StreamLocal forwarding is negotiated independently of the
+# user's shell. Without these flags, any holder of a key in AUTHORIZED_KEYS
+# can `ssh -L`, `ssh -R`, or `ssh -D` against the stamp container — turning
+# the SSH endpoint into a SOCKS proxy into the host's private network and
+# an outbound tunnel from it. Nothing in stamp's documented workflow uses
+# forwarding (pushers do `git push` and `ssh git@<host> new-stamp-repo …`
+# only), so disabling all five surfaces is a strict tightening.
+#
+# Connection limits: pubkey-only auth removes the brute-force concern, but
+# pre-auth slot exhaustion is still cheap. MaxStartups 10:50:50 begins
+# probabilistic 50% dropping at 10 concurrent unauthed handshakes and full
+# dropping at 50, leaving headroom for parallel CI pushes while bounding
+# the worst case; MaxAuthTries 3 + LoginGraceTime 30 close the half-open-
+# handshake hold. MaxSessions 5 caps multiplexed channels per accepted
+# connection — git push needs one channel, `ssh new-stamp-repo` needs one;
+# 5 is a generous ceiling that prevents a single connection from opening
+# hundreds of channels for resource consumption.
+#
+# Implementation note: we PREPEND these directives to sshd_config rather
+# than sed-edit-in-place. OpenSSH uses "first obtained value wins" for
+# these keys, so prepending guarantees the directive applies regardless
+# of whether the stock Alpine sshd_config already mentions the key (an
+# in-place sed s/^#*Foo.*/Foo no/ silently no-ops on absent keys, and
+# Alpine's stock config does not include AllowStreamLocalForwarding,
+# PermitTunnel, or MaxStartups in every version — exactly the keys
+# whose compiled-in defaults are insecure for our threat model).
+RUN { \
+      printf '%s\n' \
+        '# Stamp hardening — prepended; OpenSSH uses first-match for these.' \
+        'PasswordAuthentication no' \
+        'PermitRootLogin no' \
+        'PubkeyAuthentication yes' \
+        'AllowTcpForwarding no' \
+        'AllowAgentForwarding no' \
+        'AllowStreamLocalForwarding no' \
+        'X11Forwarding no' \
+        'GatewayPorts no' \
+        'PermitTunnel no' \
+        'MaxAuthTries 3' \
+        'LoginGraceTime 30' \
+        'MaxStartups 10:50:50' \
+        'MaxSessions 5' \
+        ''; \
+      cat /etc/ssh/sshd_config; \
+    } > /etc/ssh/sshd_config.new \
+ && mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config \
+ && chmod 0644 /etc/ssh/sshd_config
 
 COPY --from=builder /build/dist/hooks/pre-receive.cjs /etc/stamp/pre-receive.cjs
 COPY --from=builder /build/dist/hooks/post-receive.cjs /etc/stamp/post-receive.cjs
@@ -86,4 +135,14 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && chmod 0755 /home/git/git-shell-commands
 
 EXPOSE 22
+
+# HEALTHCHECK lets the orchestrator (Railway/Fly/Docker) distinguish a
+# running container from one whose sshd has crashed or hung while PID 1
+# (entrypoint.sh) is still alive. Without it, pushers see "connection
+# refused" while the platform reports the service as healthy. nc against
+# loopback:22 is the cheapest TCP-level probe; an actual ssh handshake
+# would require a key and pollute auth logs.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD nc -z 127.0.0.1 22 || exit 1
+
 CMD ["/entrypoint.sh"]
