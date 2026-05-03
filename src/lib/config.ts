@@ -19,14 +19,23 @@ export interface BranchRule {
 /**
  * A single entry in a reviewer's `tools:` list. Either:
  *   - a bare string for a tool that has no per-tool config (Read, Grep, Glob)
- *   - an object form `{ name, allowed_hosts? }` for tools that need per-call
- *     gating. WebFetch REQUIRES the object form with a non-empty
+ *   - an object form `{ name, allowed_hosts?, path_prefix? }` for tools that
+ *     need per-call gating. WebFetch REQUIRES the object form with a non-empty
  *     `allowed_hosts` array — a bare `"WebFetch"` is rejected at invocation
  *     time because an unrestricted WebFetch is an exfiltration channel for
  *     diff content (a malicious diff plants a URL, the reviewer follows it,
  *     the diff context flows out).
+ *
+ *     `allowed_hosts` is a *domain-level* allowlist. To pin the URL shape
+ *     too — e.g. only `/repos/` paths on `api.github.com` — set
+ *     `path_prefix` on the same entry. When present, the runtime hook
+ *     rejects any URL whose `URL.pathname` does not begin with that prefix.
+ *     Query strings are never inspected (GitHub/Linear/Notion APIs use them
+ *     legitimately). AGT-036 / audit M4.
  */
-export type ToolSpec = string | { name: string; allowed_hosts?: string[] };
+export type ToolSpec =
+  | string
+  | { name: string; allowed_hosts?: string[]; path_prefix?: string };
 
 /**
  * Loose, policy-free ToolSpec parser used wherever the SAFE_TOOLS policy
@@ -47,12 +56,27 @@ export function parseToolsLoose(input: unknown[]): ToolSpec[] {
     if (entry && typeof entry === "object" && !Array.isArray(entry)) {
       const e = entry as Record<string, unknown>;
       if (typeof e.name !== "string" || !e.name) continue;
-      const spec: { name: string; allowed_hosts?: string[] } = { name: e.name };
+      const spec: {
+        name: string;
+        allowed_hosts?: string[];
+        path_prefix?: string;
+      } = { name: e.name };
       if (Array.isArray(e.allowed_hosts)) {
         const hosts = e.allowed_hosts.filter(
           (h): h is string => typeof h === "string" && h.length > 0,
         );
         if (hosts.length > 0) spec.allowed_hosts = hosts;
+      }
+      // Mirror the strict parser: only carry path_prefix when it's a
+      // non-empty string starting with "/". Anything else is treated as
+      // absent so the loose-parsed canonical form stays hash-equivalent
+      // with what the strict parser would have accepted.
+      if (
+        typeof e.path_prefix === "string" &&
+        e.path_prefix.length > 0 &&
+        e.path_prefix.startsWith("/")
+      ) {
+        spec.path_prefix = e.path_prefix;
       }
       out.push(spec);
     }
@@ -258,7 +282,17 @@ function parseTools(input: unknown, reviewerName: string): ToolSpec[] | undefine
             `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
         );
       }
-      const spec: { name: string; allowed_hosts?: string[] } = { name: e.name };
+      if (e.path_prefix !== undefined && e.name !== "WebFetch") {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}].path_prefix is only valid on WebFetch ` +
+            `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
+        );
+      }
+      const spec: {
+        name: string;
+        allowed_hosts?: string[];
+        path_prefix?: string;
+      } = { name: e.name };
       if (e.allowed_hosts !== undefined) {
         if (!Array.isArray(e.allowed_hosts)) {
           throw new Error(
@@ -280,8 +314,32 @@ function parseTools(input: unknown, reviewerName: string): ToolSpec[] | undefine
         // rule consistently for both string and object input shapes.
         if (hosts.length > 0) spec.allowed_hosts = hosts;
       }
+      // path_prefix is opt-in. When present it must be a non-empty string
+      // starting with "/" so the runtime check (`URL.pathname.startsWith(p)`)
+      // is meaningful — a relative or empty value would either match
+      // nothing or match everything, neither of which the operator would
+      // expect from the YAML. AGT-036 / audit M4.
+      if (e.path_prefix !== undefined) {
+        if (typeof e.path_prefix !== "string") {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].path_prefix must be a string`,
+          );
+        }
+        if (e.path_prefix.length === 0) {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].path_prefix must be non-empty`,
+          );
+        }
+        if (!e.path_prefix.startsWith("/")) {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].path_prefix must start with "/" ` +
+              `(got "${e.path_prefix}"). Use the full URL path prefix, e.g. "/repos/" or "/api/".`,
+          );
+        }
+        spec.path_prefix = e.path_prefix;
+      }
       // WebFetch requires non-empty allowed_hosts (the bare-string and
-      // empty-array paths both fail here). The runtime canUseTool callback
+      // empty-array paths both fail here). The runtime PreToolUse hook
       // assumes allowed_hosts is present and non-empty for any WebFetch
       // entry that reaches it.
       if (e.name === "WebFetch" && !spec.allowed_hosts) {

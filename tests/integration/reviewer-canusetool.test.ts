@@ -1,13 +1,15 @@
 /**
- * SDK-integration test for AGT-035 / audit M3.
+ * SDK-integration test for AGT-035 (Read scoping) and AGT-036 (WebFetch
+ * path_prefix).
  *
  * The unit tests (`reviewer-canusetool.test.ts`) pin the deny logic in
  * `checkReviewerTool` directly. This file pins the orthogonal concern the
- * QA bounce surfaced: that the Claude Agent SDK actually invokes our hook
- * for tools the reviewer pre-approves via `allowedTools`. The previous
- * `canUseTool`-based gate was structurally inert — pre-approved tools
- * skipped the callback entirely — and the gap was only discovered at QA
- * because there was no automated check for it. This file is the gap-closer.
+ * AGT-035 QA bounce surfaced: that the Claude Agent SDK actually invokes
+ * our hook for tools the reviewer pre-approves via `allowedTools`. The
+ * previous `canUseTool`-based gate was structurally inert — pre-approved
+ * tools skipped the callback entirely — and the gap was only discovered
+ * at QA because there was no automated check for it. AGT-036 extends
+ * the same invariant to WebFetch+path_prefix.
  *
  * The test stands up a real `query()` call shaped like `invokeReviewer`:
  * `cwd` set to a temp dir, `allowedTools: ["Read"]`, the same
@@ -85,7 +87,7 @@ describe("PreToolUse hook fires for Read (AGT-035 AC #5)", () => {
                       toolName: input.tool_name,
                       toolInput: input.tool_input,
                       repoRoot,
-                      webFetchHosts: new Set(),
+                      webFetchPolicy: new Map(),
                     });
                     if (result.allow) return {};
                     denyReasonSeen = result.reason;
@@ -163,7 +165,7 @@ describe("PreToolUse hook fires for Read (AGT-035 AC #5)", () => {
                       toolName: input.tool_name,
                       toolInput: input.tool_input,
                       repoRoot,
-                      webFetchHosts: new Set(),
+                      webFetchPolicy: new Map(),
                     });
                     hookInvocations.push({
                       tool_name: input.tool_name,
@@ -198,6 +200,179 @@ describe("PreToolUse hook fires for Read (AGT-035 AC #5)", () => {
         reads.some((r) => r.allowed),
         `At least one Read invocation should have been allowed by the hook ` +
           `(in-repo README.md path). Saw: ${JSON.stringify(reads)}`,
+      );
+    },
+  );
+});
+
+describe("PreToolUse hook fires for WebFetch path_prefix (AGT-036 AC #7/#8)", () => {
+  // AGT-036 invariant: the WebFetch path_prefix gate routes through the
+  // same hook as Read/Grep/Glob, so we re-pin the SDK-actually-invokes-our-
+  // hook contract specifically for WebFetch. The hook denies BEFORE the
+  // fetch hits the network, so this test does not require outbound HTTP.
+  it(
+    "denies an out-of-prefix WebFetch via PreToolUse — SDK actually invokes the hook",
+    { skip: skipReason, timeout: 60_000 },
+    async () => {
+      const repoRoot = realpathSync(
+        mkdtempSync(path.join(tmpdir(), "stamp-agt036-")),
+      );
+      writeFileSync(path.join(repoRoot, "README.md"), "# fixture\n");
+
+      const policy = new Map<string, { path_prefix?: string }>([
+        ["api.github.com", { path_prefix: "/repos/" }],
+      ]);
+
+      const hookInvocations: Array<{ tool_name: string; allowed: boolean }> = [];
+      let denyReasonSeen: string | null = null;
+
+      const q = query({
+        prompt:
+          "Use the WebFetch tool exactly once to fetch the URL " +
+          "https://api.github.com/users/octocat/exfil with prompt 'summarize'. " +
+          "After your single WebFetch attempt, briefly state in plain text " +
+          "whether the call succeeded or was denied, then stop.",
+        options: {
+          cwd: repoRoot,
+          allowedTools: ["WebFetch"],
+          maxTurns: 3,
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [
+                  async (input) => {
+                    if (input.hook_event_name !== "PreToolUse") return {};
+                    const result = checkReviewerTool({
+                      toolName: input.tool_name,
+                      toolInput: input.tool_input,
+                      repoRoot,
+                      webFetchPolicy: policy,
+                    });
+                    hookInvocations.push({
+                      tool_name: input.tool_name,
+                      allowed: result.allow,
+                    });
+                    if (result.allow) return {};
+                    denyReasonSeen = result.reason;
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: "PreToolUse",
+                        permissionDecision: "deny",
+                        permissionDecisionReason: result.reason,
+                      },
+                    };
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      for await (const _ of q) {
+        // drain
+      }
+
+      const fetches = hookInvocations.filter(
+        (h) => h.tool_name === "WebFetch",
+      );
+      assert.ok(
+        fetches.length >= 1,
+        `PreToolUse hook should have fired for WebFetch at least once; ` +
+          `saw ${hookInvocations.length} invocation(s) total: ` +
+          `${JSON.stringify(hookInvocations)}. If 0, the SDK is bypassing ` +
+          `the hook for pre-approved tools — the same failure mode AGT-035 ` +
+          `was filed to fix.`,
+      );
+      assert.ok(
+        denyReasonSeen !== null,
+        "checkReviewerTool should have produced a deny reason for the out-of-prefix URL",
+      );
+      assert.match(
+        denyReasonSeen ?? "",
+        /path_prefix "\/repos\/"/,
+        "deny reason should name the configured path_prefix",
+      );
+    },
+  );
+
+  it(
+    "allows an in-prefix WebFetch via PreToolUse (regression)",
+    { skip: skipReason, timeout: 60_000 },
+    async () => {
+      // The hook MUST allow in-prefix URLs even though we don't actually
+      // care that the network call succeeds — outbound HTTP from the test
+      // host may legitimately fail. We only assert the hook permitted the
+      // call (i.e. checkReviewerTool returned allow=true) and the SDK
+      // actually invoked the hook for WebFetch.
+      const repoRoot = realpathSync(
+        mkdtempSync(path.join(tmpdir(), "stamp-agt036-ok-")),
+      );
+      writeFileSync(path.join(repoRoot, "README.md"), "# fixture\n");
+
+      const policy = new Map<string, { path_prefix?: string }>([
+        ["api.github.com", { path_prefix: "/repos/" }],
+      ]);
+
+      const hookInvocations: Array<{ tool_name: string; allowed: boolean }> = [];
+
+      const q = query({
+        prompt:
+          "Use the WebFetch tool exactly once to fetch the URL " +
+          "https://api.github.com/repos/octocat/Hello-World with prompt " +
+          "'one-sentence summary'. After your single WebFetch attempt, " +
+          "briefly say whether it succeeded, then stop.",
+        options: {
+          cwd: repoRoot,
+          allowedTools: ["WebFetch"],
+          maxTurns: 3,
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [
+                  async (input) => {
+                    if (input.hook_event_name !== "PreToolUse") return {};
+                    const result = checkReviewerTool({
+                      toolName: input.tool_name,
+                      toolInput: input.tool_input,
+                      repoRoot,
+                      webFetchPolicy: policy,
+                    });
+                    hookInvocations.push({
+                      tool_name: input.tool_name,
+                      allowed: result.allow,
+                    });
+                    if (result.allow) return {};
+                    return {
+                      hookSpecificOutput: {
+                        hookEventName: "PreToolUse",
+                        permissionDecision: "deny",
+                        permissionDecisionReason: result.reason,
+                      },
+                    };
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      for await (const _ of q) {
+        // drain
+      }
+
+      const fetches = hookInvocations.filter(
+        (h) => h.tool_name === "WebFetch",
+      );
+      assert.ok(
+        fetches.length >= 1,
+        `Hook should have fired for WebFetch; saw ${JSON.stringify(hookInvocations)}`,
+      );
+      assert.ok(
+        fetches.some((r) => r.allowed),
+        `At least one WebFetch invocation should have been allowed by the hook ` +
+          `(in-prefix /repos/ URL). Saw: ${JSON.stringify(fetches)}`,
       );
     },
   );
