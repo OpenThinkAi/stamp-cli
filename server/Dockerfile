@@ -63,10 +63,14 @@ RUN apk add --no-cache git openssh-server bash nodejs netcat-openbsd \
 # only), so disabling all five surfaces is a strict tightening.
 #
 # Connection limits: pubkey-only auth removes the brute-force concern, but
-# pre-auth slot exhaustion is still cheap. MaxStartups 10:50:50 keeps
-# capacity for parallel CI pushes (drops only at 10 concurrent unauthed
-# handshakes) while bounding the worst case; MaxAuthTries 3 + LoginGraceTime
-# 30 close the half-open-handshake hold.
+# pre-auth slot exhaustion is still cheap. MaxStartups 10:50:50 begins
+# probabilistic 50% dropping at 10 concurrent unauthed handshakes and full
+# dropping at 50, leaving headroom for parallel CI pushes while bounding
+# the worst case; MaxAuthTries 3 + LoginGraceTime 30 close the half-open-
+# handshake hold. MaxSessions 5 caps multiplexed channels per accepted
+# connection — git push needs one channel, `ssh new-stamp-repo` needs one;
+# 5 is a generous ceiling that prevents a single connection from opening
+# hundreds of channels for resource consumption.
 #
 # Implementation note: we PREPEND these directives to sshd_config rather
 # than sed-edit-in-place. OpenSSH uses "first obtained value wins" for
