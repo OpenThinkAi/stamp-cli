@@ -74,9 +74,11 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
   // state on at least one side.
   const args = ["delete-stamp-repo", name];
   if (opts.purge) args.push("--purge");
+  // `--` before the destination terminates ssh's option processing —
+  // belt-and-suspenders for the validation in serverConfig.ts.
   const result = spawnSync(
     "ssh",
-    ["-p", String(server.port), `${server.user}@${server.host}`, ...args],
+    ["-p", String(server.port), "--", `${server.user}@${server.host}`, ...args],
     { stdio: ["ignore", "inherit", "inherit"] },
   );
   if (result.status !== 0) {
@@ -142,7 +144,7 @@ export async function runServerRepoRestore(opts: ServerRepoRestoreOptions): Prom
   }
   const result = spawnSync(
     "ssh",
-    ["-p", String(server.port), `${server.user}@${server.host}`, ...args],
+    ["-p", String(server.port), "--", `${server.user}@${server.host}`, ...args],
     { stdio: ["ignore", "inherit", "inherit"] },
   );
   if (result.status !== 0) {
@@ -163,7 +165,7 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
   if (opts.trash) {
     const result = spawnSync(
       "ssh",
-      ["-p", String(server.port), `${server.user}@${server.host}`, "list-trash"],
+      ["-p", String(server.port), "--", `${server.user}@${server.host}`, "list-trash"],
       { stdio: ["ignore", "inherit", "inherit"] },
     );
     if (result.status !== 0) {
@@ -182,6 +184,7 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
     [
       "-p",
       String(server.port),
+      "--",
       `${server.user}@${server.host}`,
       "ls",
       "-1",

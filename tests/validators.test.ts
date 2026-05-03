@@ -204,6 +204,92 @@ describe("parseServerConfig", () => {
   it("rejects non-yaml input", () => {
     assert.throws(() => parseServerConfig("not a mapping"), /mapping/);
   });
+
+  // AC #5: hostnames with non-leading hyphens are valid stamp servers
+  // (Railway gives `*.railway.app`, operators routinely run `my-server`-
+  // style hosts). Pin this so a future regex tightening doesn't break it.
+  it("accepts hostnames with non-leading hyphens", () => {
+    const cfg = parseServerConfig("host: my-server.example.com\nport: 22\n");
+    assert.equal(cfg.host, "my-server.example.com");
+  });
+
+  it("accepts usernames with non-leading hyphens or dots", () => {
+    const cfg = parseServerConfig(
+      "host: x\nport: 22\nuser: git-bot\n",
+    );
+    assert.equal(cfg.user, "git-bot");
+    const cfg2 = parseServerConfig(
+      "host: x\nport: 22\nuser: user.name\n",
+    );
+    assert.equal(cfg2.user, "user.name");
+  });
+
+  // AC #1 + #2 + #4: shape rejection matrix. Each invalid shape × each
+  // field. The hostile shape we're defending against is anything starting
+  // with `-` (which ssh's getopt re-parses as an option, most dangerously
+  // `-oProxyCommand=...`).
+  describe("shape validation", () => {
+    type Field = "host" | "user" | "repo_root_prefix";
+    type Shape = { name: string; value: string };
+
+    const shapes: Shape[] = [
+      { name: "leading dash (the ssh-option-injection primitive)", value: "-oProxyCommand=evil" },
+      { name: "embedded equals", value: "bad=value" },
+      { name: "embedded space", value: "bad value" },
+      { name: "control character", value: "bad\x01value" },
+    ];
+
+    function configFor(field: Field, value: string): string {
+      const yamlValue = JSON.stringify(value); // YAML strings honor JSON escapes
+      switch (field) {
+        case "host":
+          return `host: ${yamlValue}\nport: 22\n`;
+        case "user":
+          return `host: x\nport: 22\nuser: ${yamlValue}\n`;
+        case "repo_root_prefix":
+          return `host: x\nport: 22\nrepo_root_prefix: ${yamlValue}\n`;
+      }
+    }
+
+    for (const field of ["host", "user", "repo_root_prefix"] as const) {
+      for (const shape of shapes) {
+        it(`rejects ${field} with ${shape.name}`, () => {
+          assert.throws(
+            () => parseServerConfig(configFor(field, shape.value)),
+            (err: Error) => {
+              assert.match(err.message, new RegExp(`'${field}'`));
+              assert.match(err.message, /invalid shape/);
+              return true;
+            },
+          );
+        });
+      }
+    }
+
+    // repo_root_prefix-specific: reject relative paths and `..` traversal
+    // segments (the regex only accepts segments whose first char is non-dot).
+    it("rejects repo_root_prefix that is not an absolute path", () => {
+      assert.throws(
+        () => parseServerConfig("host: x\nport: 22\nrepo_root_prefix: srv/git\n"),
+        /'repo_root_prefix'.*invalid shape/,
+      );
+    });
+
+    it("rejects repo_root_prefix containing a .. traversal segment", () => {
+      assert.throws(
+        () => parseServerConfig("host: x\nport: 22\nrepo_root_prefix: /srv/../etc\n"),
+        /'repo_root_prefix'.*invalid shape/,
+      );
+    });
+
+    // Defaults must pass shape validation — pinning so a future regex
+    // tightening that breaks the defaults is caught at unit level.
+    it("default user 'git' and repo_root_prefix '/srv/git' validate", () => {
+      const cfg = parseServerConfig("host: x\nport: 22\n");
+      assert.equal(cfg.user, "git");
+      assert.equal(cfg.repoRootPrefix, "/srv/git");
+    });
+  });
 });
 
 describe("parseServerFlag", () => {
@@ -213,12 +299,40 @@ describe("parseServerFlag", () => {
     assert.equal(cfg.port, 2222);
   });
 
+  it("accepts hostnames with non-leading hyphens", () => {
+    const cfg = parseServerFlag("my-server.example.com:22");
+    assert.equal(cfg.host, "my-server.example.com");
+  });
+
   it("rejects missing port", () => {
     assert.throws(() => parseServerFlag("stamp.example.com"), /<host>:<port>/);
   });
 
   it("rejects non-integer port", () => {
     assert.throws(() => parseServerFlag("x:abc"), /<host>:<port>/);
+  });
+
+  // AC #1 + #2 + #4: shape rejection for the host (the only operator-
+  // provided field in the flag form — user / repo_root_prefix default).
+  describe("host shape validation", () => {
+    const shapes: Array<{ name: string; value: string }> = [
+      { name: "leading dash (the ssh-option-injection primitive)", value: "-oProxyCommand=evil" },
+      { name: "embedded equals", value: "bad=host" },
+      { name: "trailing dash", value: "bad-" },
+    ];
+
+    for (const shape of shapes) {
+      it(`rejects host with ${shape.name}`, () => {
+        assert.throws(
+          () => parseServerFlag(`${shape.value}:22`),
+          (err: Error) => {
+            assert.match(err.message, /'host'/);
+            assert.match(err.message, /invalid shape/);
+            return true;
+          },
+        );
+      });
+    }
   });
 });
 
