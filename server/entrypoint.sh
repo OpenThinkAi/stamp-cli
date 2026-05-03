@@ -14,6 +14,14 @@ set -e
 # any build-time chown. Fix at boot so the git user can write its own repos.
 chown -R git:git /srv/git 2>/dev/null || true
 
+# Sticky bit on /srv/git: prevents the git user from renaming or deleting
+# root-owned subdirectories like .ssh-host-keys. Without sticky, write
+# permission on the parent directory grants rename/delete on its children
+# regardless of child ownership; the prior chmod 700 on .ssh-host-keys
+# only protected the contents, not the directory entry. Sticky bit is the
+# canonical fix (mirrors /tmp).
+chmod +t /srv/git
+
 # SSH host-key persistence — the load-bearing fix for the recurring
 # "REMOTE HOST IDENTIFICATION HAS CHANGED" warning every operator hits
 # after a container redeploy. The keys live on the persistent volume,
@@ -63,17 +71,26 @@ fi
 
 if [ -n "$OPERATOR_PUB_KEY" ]; then
   printf '%s\n' "$OPERATOR_PUB_KEY" > /etc/stamp/operator.pub
-  chmod 644 /etc/stamp/operator.pub
-  chown git:git /etc/stamp/operator.pub
+  # Root-owned, world-readable. The git user (which runs new-stamp-repo
+  # via git-shell) reads it via the world bit; nothing else needs to
+  # write it after this entrypoint sets it up. Pre-A.2-cluster-B the
+  # file was git-owned, which let an interactive-shell pusher REPLACE
+  # the seed trusted-key for newly-provisioned repos.
+  chown root:root /etc/stamp/operator.pub
+  chmod 0444 /etc/stamp/operator.pub
 fi
 
 # sshd strips custom environment variables by default, so hooks invoked
 # through SSH sessions don't see things like GITHUB_BOT_TOKEN. Persist
-# them to a file the hooks can read directly. Chown to the git user so
-# only that user (which runs the hooks) can read the secret.
+# them to a file the hooks can read directly. Owned by root, group git
+# with mode 0640 so the hook process (running as git user) can read via
+# group membership but cannot WRITE — and a pusher who somehow gets shell
+# access despite git-shell still cannot edit it. Pre-cluster-B the file
+# was git:git mode 0600, which made the mode-600 protection illusory
+# (the shell-having user IS the file owner).
 : > /etc/stamp/env
-chmod 600 /etc/stamp/env
-chown git:git /etc/stamp/env
+chown root:git /etc/stamp/env
+chmod 0640 /etc/stamp/env
 
 write_env_var() {
   local name="$1"
@@ -100,8 +117,15 @@ for repo in /srv/git/*.git; do
     src="/etc/stamp/${hook}.cjs"
     if [ -f "$src" ]; then
       cp "$src" "$repo/hooks/$hook"
-      chmod +x "$repo/hooks/$hook"
-      chown git:git "$repo/hooks/$hook"
+      # Root-owned, mode 0755: git can EXECUTE the hook (which is what git-
+      # receive-pack does at push time) but cannot REPLACE it. Pre-cluster-B
+      # the per-repo hook was git:git, so even with git-shell a sufficiently
+      # creative pusher could overwrite the hook between container restarts.
+      # entrypoint refreshes hooks on every boot, so attacker windows close
+      # at the next restart — but routine redeploys don't happen on attacker
+      # timing. Root-owned hooks close the window entirely.
+      chown root:root "$repo/hooks/$hook"
+      chmod 0755 "$repo/hooks/$hook"
     fi
   done
 done

@@ -208,10 +208,37 @@ and the refresh loop runs before sshd starts accepting connections.
 **Break-glass manual refresh** (useful if you need to push a hook update
 without restarting the container, or you're debugging):
 
+The git account uses `git-shell` and does not accept interactive commands,
+so the previous `ssh git@<host> '<pipeline>'` form no longer works. Use
+your platform's web console / container exec instead — Railway's
+in-dashboard shell, `fly ssh console`, `docker exec`, etc.:
+
 ```sh
-ssh git@stamp 'for r in /srv/git/*.git; do
+# Inside the container, as root:
+for r in /srv/git/*.git; do
   cp /etc/stamp/pre-receive.cjs  "$r/hooks/pre-receive"
   cp /etc/stamp/post-receive.cjs "$r/hooks/post-receive"
-  chmod +x "$r/hooks/pre-receive" "$r/hooks/post-receive"
-done'
+  chown root:root "$r/hooks/pre-receive" "$r/hooks/post-receive"
+  chmod 0755 "$r/hooks/pre-receive" "$r/hooks/post-receive"
+done
 ```
+
+## SSH access model
+
+The `git` account is configured with `git-shell` rather than `bash`.
+Authenticated pushers can:
+
+- `git push` / `git fetch` / `git clone` (via the built-in
+  `git-receive-pack`, `git-upload-pack`, `git-upload-archive` commands)
+- `ssh git@<host> new-stamp-repo <name> [...]`
+- `ssh git@<host> delete-stamp-repo <name> [--purge]`
+- `ssh git@<host> restore-stamp-repo <name> [--from <trash-entry>] [--as <new-name>]`
+- `ssh git@<host> list-trash`
+
+…but cannot get an interactive shell, run arbitrary commands, or read
+the per-deployment env file (`/etc/stamp/env`, which holds the GitHub
+mirror token and is owned `root:git` mode 0640). The wrapper scripts are
+symlinked under `/home/git/git-shell-commands/` at image build time.
+
+For container-level diagnostics — log inspection, manual hook refresh,
+disk usage — use your platform's web console or `<platform> exec`.
