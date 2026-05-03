@@ -342,6 +342,49 @@ See [`docs/personas.md`](./docs/personas.md) for reviewer-prompt guidance and
 [`docs/troubleshooting.md`](./docs/troubleshooting.md) for common failures
 with concrete fixes.
 
+## Data flow / privacy
+
+stamp-cli runs reviewers by sending the diff to Anthropic. Operators
+working with sensitive content should know the data-flow contract before
+running their first `stamp review`.
+
+**What gets sent to Anthropic on every `stamp review`:**
+
+- The full unified diff between `base_sha` and `head_sha`, including all
+  added and removed lines, comments, fixtures, and any strings or
+  credentials present in the changeset.
+- The reviewer's prompt file (read from the merge-base tree).
+- The configured tool allowlist + MCP server names for that reviewer.
+
+**What stays local:**
+
+- Reviewer prose, verdicts, and tool-call traces are persisted to
+  `.git/stamp/state.db` (a sqlite file under the repo's git common
+  dir). This file is not committed and not pushed.
+- Your Ed25519 signing key (`~/.stamp/keys/`) never leaves your machine.
+
+**What gets attached to the merge commit and mirrored to GitHub:**
+
+- The signed `Stamp-Payload` trailer carrying approvals, base/head
+  SHAs, signer key fingerprint, and a tool-call audit trace (tool
+  names + input hashes — not the diff content itself).
+
+**Disclosure on first run.** The first `stamp review` in a repo prints
+a short note (to stderr) pointing at this section. The notice is
+recorded under `.git/stamp/llm-notice-shown` and not repeated. To
+suppress it unconditionally — agent loops, CI workers, environments
+where the disclosure has already been baked into team docs — set
+`STAMP_SUPPRESS_LLM_NOTICE=1`.
+
+**Anthropic's data handling.** Reviewer calls go through the Claude
+Agent SDK, which inherits whatever auth + retention posture you have
+configured for Claude Code on your machine (Anthropic API key, Zero
+Data Retention contract, etc.). See Anthropic's
+[privacy policy](https://www.anthropic.com/privacy) and
+[usage policy](https://www.anthropic.com/legal/aup) for the
+authoritative terms; configure accordingly before running stamp on
+content you're not free to share.
+
 ## Security model
 
 **What this protects against.** Author-agents cannot merge unreviewed code,

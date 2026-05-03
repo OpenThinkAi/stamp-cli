@@ -8,6 +8,7 @@ import {
   type ResolvedDiff,
 } from "../lib/git.js";
 import { invokeReviewer, type ReviewerInvocation } from "../lib/reviewer.js";
+import { maybePrintLlmNotice } from "../lib/llmNotice.js";
 import {
   findRepoRoot,
   stampConfigFile,
@@ -111,6 +112,11 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     }
     promptBytesByReviewer.set(name, bytes);
   }
+
+  // Per-repo, one-time LLM data-flow disclosure (suppress with
+  // STAMP_SUPPRESS_LLM_NOTICE=1). Fires before invocation so operators
+  // can ctrl-c if the diff content is sensitive.
+  maybePrintLlmNotice(repoRoot);
 
   console.log(
     `running ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} in parallel: ${reviewerNames.join(", ")}`,

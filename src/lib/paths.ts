@@ -37,6 +37,15 @@ export function stampStateDbPath(repoRoot: string): string {
 }
 
 /**
+ * Marker file that records "we have shown the LLM data-flow notice in this
+ * repo at least once." Lives next to state.db under the git common dir so
+ * it's per-repo (not per-worktree, not committed).
+ */
+export function stampLlmNoticeMarkerPath(repoRoot: string): string {
+  return join(gitCommonDir(repoRoot), "stamp", "llm-notice-shown");
+}
+
+/**
  * Resolve the git common directory for `repoRoot`. For a normal checkout this
  * is `<repoRoot>/.git`; for a worktree, `<repoRoot>/.git` is a *file* of the
  * form `gitdir: <path>` and the real common dir lives at `<gitdir>/commondir`
