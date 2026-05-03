@@ -155,6 +155,25 @@ export async function invokeReviewer(params: {
     "stamp-verdict": verdictServer,
   };
 
+  // Bound the agent loop two ways: maxTurns caps the model/tool round-trip
+  // count (a misbehaving prompt with WebFetch + MCP can otherwise iterate
+  // for as long as the SDK lets it, racking up API spend), and a wall-clock
+  // timeout via AbortController guards against a stuck MCP subprocess
+  // holding the review open indefinitely. Both defaults are operator-
+  // overridable via env vars for the rare reviewer that legitimately needs
+  // headroom; without overrides the bounds are tight enough that a
+  // pathological run gives up in single-digit minutes.
+  const maxTurns = parseIntEnv("STAMP_REVIEWER_MAX_TURNS", 8);
+  const timeoutMs = parseIntEnv("STAMP_REVIEWER_TIMEOUT_MS", 5 * 60 * 1000);
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => {
+    abortController.abort(
+      new Error(
+        `reviewer "${params.reviewer}" exceeded ${timeoutMs}ms wall-clock budget — raise STAMP_REVIEWER_TIMEOUT_MS to extend it`,
+      ),
+    );
+  }, timeoutMs);
+
   const q = query({
     prompt: userPrompt,
     options: {
@@ -162,6 +181,8 @@ export async function invokeReviewer(params: {
       systemPrompt: augmentedSystemPrompt,
       allowedTools,
       mcpServers,
+      maxTurns,
+      abortController,
       canUseTool: async (toolName, input) => {
         // WebFetch host allowlist enforcement. Anything else passes
         // through — the SAFE_TOOLS allowlist at config-parse time already
@@ -208,6 +229,7 @@ export async function invokeReviewer(params: {
   let errorMessage: string | null = null;
   const toolCalls: ToolCall[] = [];
 
+  try {
   for await (const msg of q) {
     // Capture tool-use blocks from assistant messages for the audit trace.
     // SDKAssistantMessage.message.content is an array of content blocks; the
@@ -241,6 +263,21 @@ export async function invokeReviewer(params: {
       }
       break;
     }
+  }
+  } catch (err) {
+    // Surface AbortController-driven cancellation with the abort reason
+    // (which carries the wall-clock timeout context) rather than the
+    // generic "AbortError" the SDK throws.
+    if (abortController.signal.aborted) {
+      const reason =
+        abortController.signal.reason instanceof Error
+          ? abortController.signal.reason.message
+          : String(abortController.signal.reason ?? "aborted");
+      throw new Error(reason);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 
   if (errorMessage) throw new Error(errorMessage);
@@ -440,6 +477,22 @@ export function parseLastLineVerdict(text: string, reviewer: string): Verdict {
     );
   }
   return match[1] as Verdict;
+}
+
+/**
+ * Read a positive integer from process.env or fall back to a default.
+ * Used for the reviewer cap envs (STAMP_REVIEWER_MAX_TURNS,
+ * STAMP_REVIEWER_TIMEOUT_MS, etc.). Silently falls back to the default if
+ * the env value isn't a positive integer — agent harnesses sometimes
+ * inject empty strings, and noisy parse-failures aren't worth blocking
+ * a review on.
+ */
+function parseIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return n;
 }
 
 export function stripLastLineVerdict(text: string): string {
