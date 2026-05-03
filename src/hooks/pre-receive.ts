@@ -71,7 +71,22 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
   // if the operator wants to prevent ref deletion).
   if (newSha === ZERO_SHA) return;
 
-  // Only enforce on refs/heads/*.
+  // Tag pushes: a tag is accepted iff the commit it points at is reachable
+  // from at least one protected branch (i.e., it was already verified when
+  // it landed on that branch). Without this gate, a push of
+  // <unverified-sha>:refs/tags/v9.99.99 would be mirrored to GitHub and
+  // trigger any publish-on-tag workflow downstream operators have wired up
+  // (npm release on tag, Cargo, PyPI, etc.). The stamp-cli post-receive
+  // mirror added tag mirroring in 0.7.8 specifically because those flows
+  // are common, so the same trust must apply to tag refs as to branch refs.
+  if (refname.startsWith("refs/tags/")) {
+    verifyTagPush(newSha, refname);
+    return;
+  }
+
+  // Other ref classes (refs/notes/, refs/replace/, etc.) are not currently
+  // mirrored and not used by the stamp protocol; pass through. If a future
+  // change starts mirroring any of these, this allow-list must tighten.
   if (!refname.startsWith("refs/heads/")) return;
   const branch = refname.slice("refs/heads/".length);
 
@@ -115,6 +130,102 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
   for (const sha of newCommits) {
     verifyCommit(sha, branch, rule, trustedKeys, refname);
   }
+}
+
+/**
+ * Verify a tag push: the pointed-at commit must be reachable from at least
+ * one protected branch. Reads config from the bare repo's HEAD (the default
+ * branch) — tag pushes don't carry their own branch context, so we anchor
+ * on the operator-chosen default for "what counts as a protected branch."
+ *
+ * Handles both lightweight and annotated tags via `^{commit}` peeling.
+ *
+ * Exported via the module's verifyRef path; not unit-tested in isolation
+ * because every interesting case requires a real git repo. The reviewer +
+ * required-checks gates on PRs touching this file are the practical
+ * coverage; integration is exercised by stamp-cli's own dogfooding push.
+ */
+function verifyTagPush(newSha: string, refname: string): void {
+  // Resolve to the underlying commit. For lightweight tags, newSha already
+  // IS the commit. For annotated tags, newSha is the tag object and
+  // ^{commit} peels through the tag to its target.
+  let pointedCommit: string;
+  try {
+    pointedCommit = run(["rev-parse", `${newSha}^{commit}`]).trim();
+  } catch (err) {
+    reject(
+      refname,
+      `cannot resolve tag ${newSha.slice(0, 8)} to a commit: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Find the bare repo's default branch via HEAD; that's the canonical
+  // place to read .stamp/config.yml from for tag verification (tags
+  // themselves don't have a branch context).
+  let headRef: string;
+  try {
+    headRef = run(["symbolic-ref", "HEAD"]).trim();
+  } catch {
+    reject(
+      refname,
+      `cannot read repo HEAD; tag pushes require a bootstrapped default branch`,
+    );
+  }
+  let defaultBranchTip: string;
+  try {
+    defaultBranchTip = run(["rev-parse", headRef]).trim();
+  } catch {
+    reject(
+      refname,
+      `cannot resolve ${headRef}; repo is not bootstrapped`,
+    );
+  }
+
+  const config = readConfigAt(defaultBranchTip);
+  if (!config) {
+    reject(
+      refname,
+      `no readable .stamp/config.yml at ${defaultBranchTip.slice(0, 8)}; tag pushes require a bootstrapped repo`,
+    );
+  }
+
+  // Enumerate every existing branch ref and keep the ones whose name
+  // matches a rule in config.branches (exact or glob). A tag is acceptable
+  // iff the pointed commit is reachable from at least one of these.
+  const branchListing = run([
+    "for-each-ref",
+    "--format=%(refname:short)",
+    "refs/heads/",
+  ]);
+  const allBranches = branchListing.split("\n").filter((b) => b.length > 0);
+
+  const protectedBranches: string[] = [];
+  for (const b of allBranches) {
+    if (resolveBranchRule(config.branches, b)) protectedBranches.push(b);
+  }
+
+  if (protectedBranches.length === 0) {
+    reject(
+      refname,
+      `no protected branches configured in .stamp/config.yml at the default branch; cannot evaluate tag push`,
+    );
+  }
+
+  for (const b of protectedBranches) {
+    const tip = run(["rev-parse", `refs/heads/${b}`]).trim();
+    if (isAncestor(pointedCommit, tip)) {
+      // Pointed commit is in the verified history of a protected branch —
+      // it has already been gated by the same rules at branch-push time.
+      return;
+    }
+  }
+
+  reject(
+    refname,
+    `tag points at commit ${pointedCommit.slice(0, 8)} which is not reachable from any protected branch ` +
+      `(${protectedBranches.join(", ")}). Tags can only point at commits that have already passed branch verification — ` +
+      `merge to a protected branch first via the stamp flow, then create the tag from that commit.`,
+  );
 }
 
 function verifyCommit(
