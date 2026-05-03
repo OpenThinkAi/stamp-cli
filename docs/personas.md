@@ -229,9 +229,19 @@ reviewers:
         args: ["-y", "@tacticlabs/linear-mcp-server"]
         env:
           LINEAR_API_KEY: $LINEAR_API_KEY   # resolved from caller's env at invocation
+        allowed_env: [LINEAR_API_KEY]       # required: which operator env-vars this server may read
 ```
 
-`tools:` names Claude Agent SDK built-ins (`Read`, `Grep`, `WebFetch`, etc.). `mcp_servers:` declares stdio-transport MCP servers as a map of `name → { command, args?, env? }`. Env values may reference `$VAR` or `${VAR}` — resolved from `process.env` at invocation; an unset reference fails the `stamp review` run with a clear error naming the missing var.
+`tools:` names Claude Agent SDK built-ins (`Read`, `Grep`, `WebFetch`, etc.). `mcp_servers:` declares stdio-transport MCP servers as a map of `name → { command, args?, env?, allowed_env? }`. Env values may reference `$VAR` or `${VAR}` — resolved from `process.env` at invocation, gated by an allowlist (see below); an unset or non-allowlisted reference fails the `stamp review` run with a clear error naming the missing var.
+
+**MCP env interpolation is allowlist-gated.** A `$VAR` reference in `mcp_servers.<server>.env` only resolves if `VAR` appears in the union of two sources, otherwise the run fails fast:
+
+- **`STAMP_REVIEWER_ENV_ALLOWLIST`** (operator env, comma-separated): the security trust anchor. Lives outside the committed config so a hostile in-tree edit cannot widen it. Set this to the tight set of names your operator environment is willing to expose (e.g. `STAMP_REVIEWER_ENV_ALLOWLIST=LINEAR_API_KEY,GITHUB_TOKEN`). Names that don't match the POSIX identifier shape (`[A-Za-z_][A-Za-z0-9_]*`) are silently dropped.
+- **`mcp_servers.<server>.allowed_env: [NAMES]`** (per-config, optional): documentation that travels with the reviewer config. The field's bytes flow into the reviewer's `mcp_sha256` attestation, so a config flip from `[LINEAR_API_KEY]` to `[AWS_SECRET_ACCESS_KEY]` is visible as attestation drift to verifiers. Validated strictly at config-load time — entries must be POSIX identifier strings.
+
+Default is **deny-all**: a config that uses `$VAR` interpolation while neither allowlist contains the name will fail at invocation. The fix is to either widen `STAMP_REVIEWER_ENV_ALLOWLIST` or add the name to the server's `allowed_env`.
+
+**Operator env is the only source that holds against a hostile in-tree config edit.** Per-config `allowed_env` is documentation/attestation — a malicious config can also flip its own `allowed_env`. In practice, set `STAMP_REVIEWER_ENV_ALLOWLIST` tightly on every machine that runs `stamp review`; treat per-server `allowed_env` as locality and a drift anchor for verifiers, not as the security floor. AGT-038 / audit L2.
 
 **`allowed_hosts` is a domain-level allowlist, not a path-level one.** It constrains *which host* a reviewer's WebFetch can target, but by default does not constrain *which URL* on that host. A bare `allowed_hosts: [linear.app]` means the reviewer can fetch any path on `linear.app`. For personas that talk to a narrow API — `api.github.com/repos/...`, `api.linear.app/api/...`, etc. — set the optional `path_prefix:` on the same WebFetch entry to pin the URL shape:
 
@@ -289,6 +299,7 @@ mcp_servers:
     args: ["-y", "@tacticlabs/linear-mcp-server"]
     env:
       LINEAR_API_KEY: $LINEAR_API_KEY
+    allowed_env: [LINEAR_API_KEY]
 ```
 
 Tag the source repo with versions (e.g. `v3.2`). Consumers pin to specific tags.

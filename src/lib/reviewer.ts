@@ -2,7 +2,13 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { McpServerDef, ReviewerDef, StampConfig, ToolSpec } from "./config.js";
+import {
+  ENV_IDENTIFIER_REGEX,
+  type McpServerDef,
+  type ReviewerDef,
+  type StampConfig,
+  type ToolSpec,
+} from "./config.js";
 import type { Verdict } from "./db.js";
 import { checkMcpCommand, loadMcpAllowlist } from "./toolAllowlist.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
@@ -545,9 +551,15 @@ function resolveMcpServers(
   reviewerName: string,
 ): Record<string, McpServerResolved> | undefined {
   if (!def.mcp_servers) return undefined;
+  // Operator env allowlist is read once per invocation: any new env state
+  // introduced by an MCP launch can't influence the gate retroactively, and
+  // single read keeps log/error wording consistent across servers.
+  const operatorAllowlist = parseEnvAllowlist(
+    process.env.STAMP_REVIEWER_ENV_ALLOWLIST,
+  );
   const out: Record<string, McpServerResolved> = {};
   for (const [serverName, cfg] of Object.entries(def.mcp_servers)) {
-    out[serverName] = buildServer(cfg, reviewerName, serverName);
+    out[serverName] = buildServer(cfg, reviewerName, serverName, operatorAllowlist);
   }
   return out;
 }
@@ -556,16 +568,25 @@ function buildServer(
   cfg: McpServerDef,
   reviewerName: string,
   serverName: string,
+  operatorAllowlist: Set<string>,
 ): McpServerResolved {
   const resolved: McpServerResolved = { type: "stdio", command: cfg.command };
   if (cfg.args) resolved.args = cfg.args;
   if (cfg.env) {
+    // Effective allowlist for this server's env block: union of operator env
+    // and the per-server `allowed_env` list. Default deny when both are empty
+    // — see `expandEnvRefs` for the throw paths and the migration messaging.
+    const effectiveAllowlist = new Set(operatorAllowlist);
+    for (const name of cfg.allowed_env ?? []) {
+      effectiveAllowlist.add(name);
+    }
     const env: Record<string, string> = {};
     for (const [key, rawValue] of Object.entries(cfg.env)) {
       env[key] = expandEnvRefs(rawValue, {
         reviewer: reviewerName,
         server: serverName,
         field: `env.${key}`,
+        allowlist: effectiveAllowlist,
       });
     }
     resolved.env = env;
@@ -573,18 +594,70 @@ function buildServer(
   return resolved;
 }
 
-// Expands $VAR and ${VAR} references in an MCP env value against process.env.
-// Matches POSIX-style identifiers: [A-Za-z_][A-Za-z0-9_]*. Unset vars fail
-// fast with a message naming the missing var and where it was declared, so
-// an agent loop doesn't get a confusing mid-stream MCP failure.
-function expandEnvRefs(
+/**
+ * Parse the operator-supplied `STAMP_REVIEWER_ENV_ALLOWLIST` into a set of
+ * env-var names. Comma-separated, whitespace-trimmed. Names that don't match
+ * the POSIX identifier shape are silently dropped — operator-env is a runtime
+ * trust anchor that may be set by harnesses or shells that inject odd values,
+ * and noisy parse-failures aren't worth blocking a review on (the per-config
+ * `allowed_env` field is the strict-validation path; see `parseMcpServers`).
+ *
+ * Empty or unset → empty set, which combined with default-deny semantics in
+ * `expandEnvRefs` means a config that uses `$VAR` interpolation but neither
+ * mechanism is configured will fail fast with an actionable message rather
+ * than silently expose every operator env-var.
+ */
+export function parseEnvAllowlist(raw: string | undefined): Set<string> {
+  if (!raw) return new Set();
+  const out = new Set<string>();
+  for (const entry of raw.split(",")) {
+    const name = entry.trim();
+    if (!name) continue;
+    if (!ENV_IDENTIFIER_REGEX.test(name)) continue;
+    out.add(name);
+  }
+  return out;
+}
+
+/**
+ * Expand `$VAR` / `${VAR}` references in an MCP env value against
+ * `process.env`, gated by `ctx.allowlist`. Matches POSIX-style identifiers:
+ * `[A-Za-z_][A-Za-z0-9_]*`.
+ *
+ * Two distinct error paths so operators can triage:
+ *   - **Not allowlisted** → name is missing from both `STAMP_REVIEWER_ENV_ALLOWLIST`
+ *     and the server's `allowed_env`. The error tells operators about both
+ *     mechanisms. Closes the audit's L2 finding (a hostile rename like
+ *     `LINEAR_API_KEY: $AWS_SECRET_ACCESS_KEY` would land here).
+ *   - **Allowlisted but unset** → name is in the allowlist but not exported.
+ *     Preserved from the prior implementation; the message tells operators
+ *     to export the var.
+ *
+ * Exported so unit tests can hit it directly without spinning up an SDK
+ * query — same pattern as `denyIfOutsideRepo` and `checkReviewerTool`.
+ */
+export function expandEnvRefs(
   value: string,
-  ctx: { reviewer: string; server: string; field: string },
+  ctx: {
+    reviewer: string;
+    server: string;
+    field: string;
+    allowlist: Set<string>;
+  },
 ): string {
   return value.replace(
     /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
     (_, a, b) => {
       const name = a ?? b;
+      if (!ctx.allowlist.has(name)) {
+        throw new Error(
+          `reviewer "${ctx.reviewer}" declared mcp_servers.${ctx.server}.${ctx.field} ` +
+            `referencing $${name}, but ${name} is not in the env allowlist. ` +
+            `Add ${name} to STAMP_REVIEWER_ENV_ALLOWLIST (operator env, comma-separated) ` +
+            `or to mcp_servers.${ctx.server}.allowed_env in .stamp/config.yml. ` +
+            `By default no operator env-vars are exposed to MCP servers.`,
+        );
+      }
       const resolved = process.env[name];
       if (resolved === undefined) {
         throw new Error(

@@ -103,7 +103,9 @@ export interface ReviewerDef {
    * MCP servers to expose to the reviewer agent. Keys are server names used
    * in the reviewer prompt (e.g. "linear"); values are stdio server configs.
    * Env values may reference shell env vars via $VAR or ${VAR} — resolved at
-   * invocation time; unset vars cause `stamp review` to fail fast.
+   * invocation time, gated by an allowlist (operator env
+   * `STAMP_REVIEWER_ENV_ALLOWLIST` and/or per-server `allowed_env`); unset
+   * or non-allowlisted names cause `stamp review` to fail fast.
    */
   mcp_servers?: Record<string, McpServerDef>;
 }
@@ -112,7 +114,26 @@ export interface McpServerDef {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /**
+   * Per-server opt-in allowlist of operator env-var names that this server's
+   * `env:` `$VAR` / `${VAR}` references may resolve. Optional; the operator
+   * env `STAMP_REVIEWER_ENV_ALLOWLIST` is the other allowlist source. A
+   * `$VAR` reference resolves iff `VAR` appears in the union of these two
+   * sources AND is set in `process.env`. Names must be POSIX identifiers
+   * (`[A-Za-z_][A-Za-z0-9_]*`) and are validated at config-load time.
+   */
+  allowed_env?: string[];
 }
+
+/**
+ * POSIX env-var identifier shape. Used to validate `allowed_env` entries at
+ * config-load time (strict — config bytes are committed and re-hashed by
+ * verifiers, a typo there is a bug worth surfacing) and to filter the
+ * comma-separated `STAMP_REVIEWER_ENV_ALLOWLIST` values at invocation time
+ * (lenient — silently drop malformed names rather than block a review on
+ * a harness-injected garbage env string).
+ */
+export const ENV_IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface StampConfig {
   branches: Record<string, BranchRule>;
@@ -392,13 +413,43 @@ function parseMcpServers(
       r.env,
       `config.reviewers.${reviewerName}.mcp_servers.${serverName}.env`,
     );
+    const allowed_env = r.allowed_env === undefined ? undefined : parseEnvIdentifierArray(
+      r.allowed_env,
+      `config.reviewers.${reviewerName}.mcp_servers.${serverName}.allowed_env`,
+    );
     out[serverName] = {
       command: r.command,
       ...(args ? { args } : {}),
       ...(env ? { env } : {}),
+      ...(allowed_env ? { allowed_env } : {}),
     };
   }
   return out;
+}
+
+/**
+ * Parse `allowed_env` entries: array of POSIX env-var identifier strings.
+ * Strict at config-load time — the bytes are committed and the hash flows
+ * into `mcp_sha256` attestation, so a typo or invalid identifier here is a
+ * config bug that should surface before the first review, not silently get
+ * dropped (which is what `parseEnvAllowlist` does for the operator env var).
+ */
+function parseEnvIdentifierArray(input: unknown, path: string): string[] {
+  if (!Array.isArray(input)) {
+    throw new Error(`${path} must be an array of POSIX env-var identifier strings`);
+  }
+  return input.map((v, i) => {
+    if (typeof v !== "string") {
+      throw new Error(`${path}[${i}] must be a string`);
+    }
+    if (!ENV_IDENTIFIER_REGEX.test(v)) {
+      throw new Error(
+        `${path}[${i}] "${v}" is not a valid POSIX env-var identifier ` +
+          `(must match [A-Za-z_][A-Za-z0-9_]*)`,
+      );
+    }
+    return v;
+  });
 }
 
 function parseStringArray(input: unknown, path: string): string[] {

@@ -9,6 +9,7 @@ import {
 import { join, relative, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
+  ENV_IDENTIFIER_REGEX,
   EXAMPLE_REVIEWER_PROMPT,
   loadConfig,
   stringifyConfig,
@@ -625,6 +626,28 @@ function validateMcpServersFromSource(
         env[k] = String(v);
       }
       def.env = env;
+    }
+    if (e.allowed_env !== undefined) {
+      if (!Array.isArray(e.allowed_env)) {
+        throw new Error(
+          `config.yaml from ${source}@${ref}: mcp_servers.${name}.allowed_env must be an array of POSIX env-var identifier strings`,
+        );
+      }
+      const allowed: string[] = [];
+      for (const [i, v] of e.allowed_env.entries()) {
+        if (typeof v !== "string") {
+          throw new Error(
+            `config.yaml from ${source}@${ref}: mcp_servers.${name}.allowed_env[${i}] must be a string`,
+          );
+        }
+        if (!ENV_IDENTIFIER_REGEX.test(v)) {
+          throw new Error(
+            `config.yaml from ${source}@${ref}: mcp_servers.${name}.allowed_env[${i}] "${v}" is not a valid POSIX env-var identifier (must match [A-Za-z_][A-Za-z0-9_]*)`,
+          );
+        }
+        allowed.push(v);
+      }
+      def.allowed_env = allowed;
     }
     out[name] = def;
   }
