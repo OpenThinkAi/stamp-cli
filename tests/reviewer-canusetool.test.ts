@@ -13,7 +13,7 @@
  *   production behaviour.
  * - The integration concern — does the SDK actually invoke the
  *   PreToolUse hook for Read/Grep/Glob? — is covered by the gated
- *   integration test in `reviewer-canusetool.integration.test.ts`.
+ *   integration test at `tests/integration/reviewer-canusetool.test.ts`.
  */
 
 import { strict as assert } from "node:assert";
@@ -110,7 +110,7 @@ const noWebHosts = new Set<string>();
 describe("checkReviewerTool — Read", () => {
   // AC #5 named target — `Read('/etc/hosts')` must be denied. The unit
   // pins the deny logic; the integration test pins that the SDK actually
-  // runs the hook (see reviewer-canusetool.integration.test.ts).
+  // runs the hook (see tests/integration/reviewer-canusetool.test.ts).
   it("denies Read('/etc/hosts')", () => {
     const r = checkReviewerTool({
       toolName: "Read",
