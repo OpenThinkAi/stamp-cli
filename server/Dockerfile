@@ -18,13 +18,25 @@ RUN npm run build
 # reason as the builder.
 FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
-# sed step unlocks the git account (alpine's adduser -D leaves password as "!",
-# which openssh treats as "locked"; "*" means no password but unlocked, which
-# is what we want for pubkey-only auth).
+# Restricted shell: git-shell prevents authenticated SSH users from getting
+# an interactive bash. Pushers can still run git-receive-pack / git-upload-
+# pack (built into git-shell) plus the wrapper scripts symlinked into
+# /home/git/git-shell-commands/ below. Without this, every AUTHORIZED_KEYS
+# pusher would have shell on the container and could `cat /etc/stamp/env`
+# to exfiltrate the GitHub bot token, or replace the per-repo hooks with
+# no-ops between container restarts.
+#
+# The sed step unlocks the git account (alpine's adduser -D leaves password
+# as "!", which openssh treats as "locked"; "*" means no password but
+# unlocked, which is what we want for pubkey-only auth).
+#
+# bash is intentionally still installed — entrypoint.sh and several wrapper
+# scripts use bash-isms. The git USER doesn't get a bash login shell;
+# system-level scripts run as root via the entrypoint.
 RUN apk add --no-cache git openssh-server bash nodejs \
- && adduser -D -s /bin/bash -h /home/git git \
+ && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
- && mkdir -p /srv/git /home/git/.ssh /etc/stamp \
+ && mkdir -p /srv/git /home/git/.ssh /home/git/git-shell-commands /etc/stamp \
  && chown -R git:git /srv/git /home/git \
  && chmod 700 /home/git/.ssh
 # NOTE: ssh-keygen -A is intentionally NOT run at build time. Host keys
@@ -58,6 +70,20 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/restore-stamp-repo \
              /usr/local/bin/list-trash \
              /entrypoint.sh
+
+# Symlink the operator-facing wrapper scripts into the directory git-shell
+# scans for allowed commands. With these in place, `ssh git@<host> new-
+# stamp-repo <name>` continues to work exactly as before — the only thing
+# pushers lose is interactive shell access, which they shouldn't have had.
+# git-shell's built-in commands (git-receive-pack, git-upload-pack,
+# git-upload-archive) cover normal git push/fetch operations without
+# needing entries here.
+RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-repo \
+ && ln -s /usr/local/bin/delete-stamp-repo /home/git/git-shell-commands/delete-stamp-repo \
+ && ln -s /usr/local/bin/restore-stamp-repo /home/git/git-shell-commands/restore-stamp-repo \
+ && ln -s /usr/local/bin/list-trash /home/git/git-shell-commands/list-trash \
+ && chown -R root:git /home/git/git-shell-commands \
+ && chmod 0755 /home/git/git-shell-commands
 
 EXPOSE 22
 CMD ["/entrypoint.sh"]
