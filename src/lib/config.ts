@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 import { globToRegex, isGlobPattern } from "./refPatterns.js";
+import { SAFE_TOOLS } from "./toolAllowlist.js";
 
 export interface CheckDef {
   /** Short name used in config and attestation payloads — e.g. "build", "test" */
@@ -15,15 +16,65 @@ export interface BranchRule {
   required_checks?: CheckDef[];
 }
 
+/**
+ * A single entry in a reviewer's `tools:` list. Either:
+ *   - a bare string for a tool that has no per-tool config (Read, Grep, Glob)
+ *   - an object form `{ name, allowed_hosts? }` for tools that need per-call
+ *     gating. WebFetch REQUIRES the object form with a non-empty
+ *     `allowed_hosts` array — a bare `"WebFetch"` is rejected at invocation
+ *     time because an unrestricted WebFetch is an exfiltration channel for
+ *     diff content (a malicious diff plants a URL, the reviewer follows it,
+ *     the diff context flows out).
+ */
+export type ToolSpec = string | { name: string; allowed_hosts?: string[] };
+
+/**
+ * Loose, policy-free ToolSpec parser used wherever the SAFE_TOOLS policy
+ * doesn't apply (hash verification path, network-fetched config). Accepts
+ * both string shorthand and object form `{ name, allowed_hosts? }` and
+ * filters out structurally-invalid entries silently — callers that need
+ * strict validation use `parseTools` (config-load path) instead. Single
+ * implementation shared by reviewerHash + reviewers-fetch so the two paths
+ * cannot drift on schema additions.
+ */
+export function parseToolsLoose(input: unknown[]): ToolSpec[] {
+  const out: ToolSpec[] = [];
+  for (const entry of input) {
+    if (typeof entry === "string") {
+      if (entry) out.push(entry);
+      continue;
+    }
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      const e = entry as Record<string, unknown>;
+      if (typeof e.name !== "string" || !e.name) continue;
+      const spec: { name: string; allowed_hosts?: string[] } = { name: e.name };
+      if (Array.isArray(e.allowed_hosts)) {
+        const hosts = e.allowed_hosts.filter(
+          (h): h is string => typeof h === "string" && h.length > 0,
+        );
+        if (hosts.length > 0) spec.allowed_hosts = hosts;
+      }
+      out.push(spec);
+    }
+  }
+  return out;
+}
+
 export interface ReviewerDef {
   prompt: string;
   /**
-   * Claude Agent SDK built-in tools the reviewer may call during review
-   * (e.g. ["Read", "Grep", "WebFetch"]). Absent or empty → reviewer runs
-   * with zero tools (the safe default, matches pre-tools stamp behavior).
-   * Mapped to the SDK's `allowedTools` option at invocation time.
+   * Claude Agent SDK built-in tools the reviewer may call during review.
+   * The set of permitted tool names is constrained at invocation time to
+   * the SAFE_TOOLS list in lib/toolAllowlist.ts (read-only investigation
+   * tools only — Bash / Edit / Write / Task are disallowed).
+   *
+   * Object form (e.g. `{ name: "WebFetch", allowed_hosts: ["linear.app"] }`)
+   * is required for tools that need per-call gating. Plain strings remain
+   * supported for tools without per-tool config.
+   *
+   * Absent or empty → reviewer runs with zero tools (safe default).
    */
-  tools?: string[];
+  tools?: ToolSpec[];
   /**
    * MCP servers to expose to the reviewer agent. Keys are server names used
    * in the reviewer prompt (e.g. "linear"); values are stdio server configs.
@@ -143,21 +194,111 @@ function parseChecks(input: unknown, branchName: string): CheckDef[] | undefined
   return out;
 }
 
-function parseTools(input: unknown, reviewerName: string): string[] | undefined {
+function parseTools(input: unknown, reviewerName: string): ToolSpec[] | undefined {
   if (input === undefined || input === null) return undefined;
   if (!Array.isArray(input)) {
     throw new Error(
-      `config.reviewers.${reviewerName}.tools must be an array of tool names`,
+      `config.reviewers.${reviewerName}.tools must be an array`,
     );
   }
-  const out: string[] = [];
-  for (const entry of input) {
-    if (typeof entry !== "string" || !entry) {
-      throw new Error(
-        `config.reviewers.${reviewerName}.tools entries must be non-empty strings`,
-      );
+  const safeSet = new Set<string>(SAFE_TOOLS);
+  const out: ToolSpec[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const entry = input[i];
+
+    // String form: shorthand for tools without per-tool config.
+    if (typeof entry === "string") {
+      if (!entry) {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}] is an empty string`,
+        );
+      }
+      if (!safeSet.has(entry)) {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}] = "${entry}" is not in the SAFE_TOOLS set ` +
+            `(${SAFE_TOOLS.join(", ")}). Adding a new tool requires a code change to ` +
+            `src/lib/toolAllowlist.ts so the addition is reviewed and signed.`,
+        );
+      }
+      if (entry === "WebFetch") {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}] = "WebFetch" must use the object form ` +
+            `with a non-empty allowed_hosts list, e.g. { name: "WebFetch", allowed_hosts: ["linear.app"] }. ` +
+            `An unrestricted WebFetch lets a malicious diff plant a URL the reviewer will follow, ` +
+            `exfiltrating diff context to attacker-chosen destinations.`,
+        );
+      }
+      out.push(entry);
+      continue;
     }
-    out.push(entry);
+
+    // Object form: required for tools with per-call gating (currently WebFetch).
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      const e = entry as Record<string, unknown>;
+      if (typeof e.name !== "string" || !e.name) {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}].name must be a non-empty string`,
+        );
+      }
+      if (!safeSet.has(e.name)) {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}].name = "${e.name}" is not in the SAFE_TOOLS set ` +
+            `(${SAFE_TOOLS.join(", ")}). Adding a new tool requires a code change to ` +
+            `src/lib/toolAllowlist.ts so the addition is reviewed and signed.`,
+        );
+      }
+      // allowed_hosts is meaningful only for tools with per-call host gating
+      // (currently just WebFetch). Reject it on other tools rather than
+      // silently accepting — silently-accepted-but-ignored fields drift
+      // into hash divergence between the strict and loose parsers and
+      // confuse operators about which fields actually do something.
+      if (e.allowed_hosts !== undefined && e.name !== "WebFetch") {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}].allowed_hosts is only valid on WebFetch ` +
+            `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
+        );
+      }
+      const spec: { name: string; allowed_hosts?: string[] } = { name: e.name };
+      if (e.allowed_hosts !== undefined) {
+        if (!Array.isArray(e.allowed_hosts)) {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].allowed_hosts must be an array of strings`,
+          );
+        }
+        const hosts: string[] = [];
+        for (const h of e.allowed_hosts) {
+          if (typeof h !== "string" || !h) {
+            throw new Error(
+              `config.reviewers.${reviewerName}.tools[${i}].allowed_hosts entries must be non-empty strings`,
+            );
+          }
+          hosts.push(h);
+        }
+        // Match parseToolsLoose's canonical form: drop the property entirely
+        // when the array is empty so both parsers produce hash-equivalent
+        // output. The next check then fires the "WebFetch requires non-empty"
+        // rule consistently for both string and object input shapes.
+        if (hosts.length > 0) spec.allowed_hosts = hosts;
+      }
+      // WebFetch requires non-empty allowed_hosts (the bare-string and
+      // empty-array paths both fail here). The runtime canUseTool callback
+      // assumes allowed_hosts is present and non-empty for any WebFetch
+      // entry that reaches it.
+      if (e.name === "WebFetch" && !spec.allowed_hosts) {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}] WebFetch requires a non-empty allowed_hosts list. ` +
+            `In YAML block form:\n` +
+            `    - name: WebFetch\n` +
+            `      allowed_hosts: [linear.app, github.com]\n` +
+            `Everything not in this list is denied at the SDK boundary via canUseTool.`,
+        );
+      }
+      out.push(spec);
+      continue;
+    }
+    throw new Error(
+      `config.reviewers.${reviewerName}.tools[${i}] must be a tool name string or { name, allowed_hosts? } object`,
+    );
   }
   return out;
 }

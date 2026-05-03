@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
-import type { McpServerDef } from "./config.js";
+import { parseToolsLoose, type McpServerDef, type ToolSpec } from "./config.js";
 
 /**
  * Minimal reviewer-section extractor used by verify paths. Mirrors the
@@ -11,7 +11,7 @@ import type { McpServerDef } from "./config.js";
  */
 export interface ReviewerDefForHashing {
   prompt: string;
-  tools?: string[];
+  tools?: ToolSpec[];
   mcp_servers?: Record<string, unknown>;
 }
 
@@ -27,7 +27,7 @@ export function readReviewersFromYaml(
     if (typeof d.prompt !== "string") continue;
     out[name] = {
       prompt: d.prompt,
-      ...(Array.isArray(d.tools) ? { tools: d.tools.map(String) } : {}),
+      ...(Array.isArray(d.tools) ? { tools: parseToolsLoose(d.tools) } : {}),
       ...(d.mcp_servers && typeof d.mcp_servers === "object"
         ? { mcp_servers: d.mcp_servers as Record<string, unknown> }
         : {}),
@@ -80,8 +80,29 @@ export function hashPromptBytes(bytes: Buffer): string {
   return sha256Hex(bytes);
 }
 
-export function hashTools(tools: string[] | undefined): string {
-  const sorted = [...(tools ?? [])].sort();
+/**
+ * Canonicalize a tools list into a deterministic JSON form for hashing.
+ *
+ * Backward compat: pre-A.2 configs were `string[]`; new configs are
+ * `(string | { name, allowed_hosts? })[]`. The canonical form preserves
+ * the original shape per-entry — a string entry hashes as a JSON string,
+ * an object entry hashes as a canonicalized JSON object — so existing
+ * v3 attestations whose hashes were computed against pure-string tools
+ * continue to verify identically.
+ *
+ * Entries are sorted by their JSON string representation for determinism;
+ * this keeps tool ORDER from affecting the hash (a reviewer with tools
+ * `["Read", "Grep"]` and one with `["Grep", "Read"]` hash equally).
+ */
+export function hashTools(tools: ToolSpec[] | string[] | undefined): string {
+  const normalized: unknown[] = (tools ?? []).map((t) =>
+    typeof t === "string" ? t : (canonicalize(t) as unknown),
+  );
+  const sorted = [...normalized].sort((a, b) => {
+    const aKey = typeof a === "string" ? a : JSON.stringify(a);
+    const bKey = typeof b === "string" ? b : JSON.stringify(b);
+    return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
+  });
   return sha256Hex(JSON.stringify(sorted));
 }
 

@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import type { McpServerDef, ReviewerDef, StampConfig } from "./config.js";
+import type { McpServerDef, ReviewerDef, StampConfig, ToolSpec } from "./config.js";
 import type { Verdict } from "./db.js";
+import { checkMcpCommand, loadMcpAllowlist } from "./toolAllowlist.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
 
 type McpServerResolved = {
@@ -114,10 +115,40 @@ export async function invokeReviewer(params: {
     ],
   });
 
-  const allowedTools = [
-    ...(def.tools ?? []),
-    "mcp__stamp-verdict__submit_verdict",
-  ];
+  // Reduce ToolSpec[] to (a) the SDK's allowedTools name list and (b) the
+  // per-tool host allowlist for WebFetch. parseTools at config-load time
+  // already enforced the SAFE_TOOLS allowlist and the WebFetch-requires-
+  // allowed_hosts rule, so here we just unpack the parsed shape.
+  const webFetchHosts = new Set<string>();
+  const allowedTools = ["mcp__stamp-verdict__submit_verdict"];
+  for (const spec of def.tools ?? []) {
+    if (typeof spec === "string") {
+      allowedTools.push(spec);
+      continue;
+    }
+    allowedTools.push(spec.name);
+    if (spec.name === "WebFetch" && spec.allowed_hosts) {
+      for (const h of spec.allowed_hosts) webFetchHosts.add(h.toLowerCase());
+    }
+  }
+
+  // MCP command validation runs at invocation time because it consults
+  // the per-repo .stamp/mcp-allowlist.yml. The config parser only checks
+  // shape; the policy decision (which commands are safe to spawn on this
+  // machine) happens here. Skip the file-stat entirely when this reviewer
+  // declared no MCP servers — common case.
+  if (def.mcp_servers) {
+    const perRepoMcpAllowlist = loadMcpAllowlist(params.repoRoot);
+    for (const [serverName, srv] of Object.entries(def.mcp_servers)) {
+      const reason = checkMcpCommand(srv.command, perRepoMcpAllowlist);
+      if (reason !== null) {
+        throw new Error(
+          `reviewer "${params.reviewer}" mcp_servers.${serverName}: ${reason}`,
+        );
+      }
+    }
+  }
+
   const mcpServersResolved = resolveMcpServers(def, params.reviewer);
   const mcpServers = {
     ...(mcpServersResolved ?? {}),
@@ -131,6 +162,44 @@ export async function invokeReviewer(params: {
       systemPrompt: augmentedSystemPrompt,
       allowedTools,
       mcpServers,
+      canUseTool: async (toolName, input) => {
+        // WebFetch host allowlist enforcement. Anything else passes
+        // through — the SAFE_TOOLS allowlist at config-parse time already
+        // gates which tools can appear here at all.
+        if (toolName === "WebFetch") {
+          const url = (input as { url?: unknown }).url;
+          if (typeof url !== "string") {
+            return {
+              behavior: "deny",
+              message: `WebFetch input.url must be a string`,
+            };
+          }
+          let parsed: URL;
+          try {
+            parsed = new URL(url);
+          } catch {
+            return {
+              behavior: "deny",
+              message: `WebFetch URL is not parseable: ${url}`,
+            };
+          }
+          if (!webFetchHosts.has(parsed.hostname.toLowerCase())) {
+            // webFetchHosts is guaranteed non-empty here — parseTools
+            // rejects WebFetch entries without a non-empty allowed_hosts,
+            // so the only path to this branch is "host not in a populated
+            // allowlist." No "<empty>" fallback needed.
+            return {
+              behavior: "deny",
+              message:
+                `WebFetch host "${parsed.hostname}" is not in allowed_hosts ` +
+                `(${[...webFetchHosts].join(", ")}). ` +
+                `Add it to the WebFetch entry's allowed_hosts under tools: ` +
+                `in .stamp/config.yml if intentional.`,
+            };
+          }
+        }
+        return { behavior: "allow", updatedInput: input };
+      },
       persistSession: false,
     },
   });

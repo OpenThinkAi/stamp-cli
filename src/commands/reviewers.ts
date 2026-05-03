@@ -12,7 +12,9 @@ import {
   EXAMPLE_REVIEWER_PROMPT,
   loadConfig,
   stringifyConfig,
+  parseToolsLoose,
   type McpServerDef,
+  type ToolSpec,
 } from "../lib/config.js";
 import {
   openDb,
@@ -358,13 +360,17 @@ export async function reviewersFetch(
   const configYaml = await fetchOptional(configUrl, "config.yaml");
 
   // Parse optional tool/MCP config. Keep unknown-shape at the network
-  // boundary; validate shape before it reaches the hash.
-  let tools: string[] | undefined;
+  // boundary; validate shape before it reaches the hash. parseToolsLoose
+  // accepts both string-shorthand and the object form
+  // `{ name, allowed_hosts? }` (see lib/config.ts ToolSpec) without
+  // enforcing SAFE_TOOLS — that policy fires when the config is loaded
+  // for invocation, not at fetch time.
+  let tools: ToolSpec[] | undefined;
   let mcpServers: Record<string, McpServerDef> | undefined;
   if (configYaml !== null) {
     const parsed = (parseYaml(configYaml) ?? {}) as Record<string, unknown>;
     if (Array.isArray(parsed.tools)) {
-      tools = parsed.tools.map(String);
+      tools = parseToolsLoose(parsed.tools);
     }
     if (parsed.mcp_servers !== undefined) {
       mcpServers = validateMcpServersFromSource(parsed.mcp_servers, source, ref);
@@ -627,7 +633,7 @@ function validateMcpServersFromSource(
 
 function buildConfigYamlHint(
   reviewerName: string,
-  tools: string[] | undefined,
+  tools: ToolSpec[] | undefined,
   mcpServers: Record<string, McpServerDef> | undefined,
 ): string {
   const reviewerBlock: Record<string, unknown> = {
