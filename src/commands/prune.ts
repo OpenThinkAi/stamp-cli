@@ -30,7 +30,9 @@ export function runPrune(opts: PruneOptions): void {
   const dbPath = stampStateDbPath(repoRoot);
 
   if (!existsSync(dbPath)) {
-    console.log("state.db does not exist; nothing to prune");
+    console.log(
+      `note: ${dbPath} does not exist; nothing to prune (state.db is created on first \`stamp review\`)`,
+    );
     return;
   }
 
@@ -45,21 +47,20 @@ export function runPrune(opts: PruneOptions): void {
     if (opts.dryRun) {
       const peek = peekPrunable(db, sqliteModifier);
       if (peek.total === 0) {
-        console.log(`nothing to prune (no rows older than ${humanLabel})`);
+        console.log(`note: nothing to prune (no rows older than ${humanLabel})`);
         return;
       }
       console.log(
-        `[dry-run] would prune ${peek.total} row${peek.total === 1 ? "" : "s"} older than ${humanLabel} (${peek.perReviewer.length} reviewer${peek.perReviewer.length === 1 ? "" : "s"} affected):`,
+        `would prune ${peek.total} row${peek.total === 1 ? "" : "s"} older than ${humanLabel} (${peek.perReviewer.length} reviewer${peek.perReviewer.length === 1 ? "" : "s"} affected):`,
       );
-      for (const row of peek.perReviewer) {
-        console.log(`  ${row.reviewer}: ${row.count} row${row.count === 1 ? "" : "s"}`);
-      }
+      printPerReviewer(peek.perReviewer);
+      console.log("\n(dry run — no changes made)");
       return;
     }
 
     const result = pruneReviews(db, sqliteModifier);
     if (result.total === 0) {
-      console.log(`nothing to prune (no rows older than ${humanLabel})`);
+      console.log(`note: nothing to prune (no rows older than ${humanLabel})`);
       return;
     }
     // VACUUM rewrites the whole file; must run outside any transaction. Run
@@ -70,10 +71,24 @@ export function runPrune(opts: PruneOptions): void {
     console.log(
       `${result.total} row${result.total === 1 ? "" : "s"} pruned (${result.perReviewer.length} reviewer${result.perReviewer.length === 1 ? "" : "s"} affected); db size ${sizeBefore} → ${sizeAfter} bytes`,
     );
-    for (const row of result.perReviewer) {
-      console.log(`  ${row.reviewer}: ${row.count} row${row.count === 1 ? "" : "s"}`);
-    }
+    printPerReviewer(result.perReviewer);
   } finally {
     db.close();
+  }
+}
+
+/**
+ * Render the per-reviewer breakdown with `padEnd`-aligned name columns,
+ * matching the established convention in `commands/log.ts:165` and
+ * `commands/reviewers.ts:471`. Width is computed from the longest name in
+ * this batch (clamped to 16 to match log.ts when names are short), so
+ * mixed-width reviewer slugs line up.
+ */
+function printPerReviewer(rows: Array<{ reviewer: string; count: number }>): void {
+  const maxNameLen = Math.max(16, ...rows.map((r) => r.reviewer.length));
+  for (const row of rows) {
+    console.log(
+      `  ${row.reviewer.padEnd(maxNameLen)}  ${row.count} row${row.count === 1 ? "" : "s"}`,
+    );
   }
 }

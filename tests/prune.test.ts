@@ -289,7 +289,10 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     const stdout = captureStdout(() =>
       runPrune({ olderThan: "30d" }),
     );
-    assert.match(stdout, /state\.db does not exist/);
+    // `note: ` prefix is the established convention for advisory no-ops
+    // (matches commands/server.ts:79,98). Pinning the prefix so a future
+    // refactor doesn't drop it.
+    assert.match(stdout, /^note: .*state\.db does not exist/m);
     assert.ok(!existsSync(dbPath));
   });
 
@@ -302,12 +305,21 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     const stdout = captureStdout(() =>
       runPrune({ olderThan: "7d", dryRun: true }),
     );
-    assert.match(stdout, /\[dry-run\] would prune 3 rows/);
-    assert.match(stdout, /security: 2 rows/);
+    // Dry-run uses the trailing `(dry run — no changes made)` marker
+    // (matches bootstrap.ts:155 / provision.ts:113,441), not a `[dry-run]`
+    // line prefix. Both shapes are agent-parseable, but only one of them
+    // is the established convention.
+    assert.match(stdout, /^would prune 3 rows/m);
+    assert.match(stdout, /\(dry run — no changes made\)/);
+    // Per-reviewer breakdown uses padEnd-aligned columns (matches
+    // log.ts:165 / reviewers.ts:471). The space between name and count
+    // must be at least 2 chars so the regex below tolerates the actual
+    // padded width.
+    assert.match(stdout, /  security {2,} 2 rows/);
     // count===1 must use the singular form. Older copies of this code
-    // hardcoded "rows" at both call sites, producing "standards: 1 rows" —
-    // the assertion below pins the pluralisation fix.
-    assert.match(stdout, /standards: 1 row\b/);
+    // hardcoded "rows" at both call sites, producing "1 rows" — pin
+    // the pluralisation fix on the singular case explicitly.
+    assert.match(stdout, /  standards {2,} 1 row\b/);
     assert.doesNotMatch(stdout, /1 rows/);
 
     // Rows still present.
@@ -330,9 +342,10 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     );
     assert.match(stdout, /^2 rows pruned \(2 reviewers affected\); db size \d+ → \d+ bytes/m);
     // count===1 in the live-path per-reviewer breakdown must use the
-    // singular form. Pins the same pluralisation fix as the dry-run test.
-    assert.match(stdout, /security: 1 row\b/);
-    assert.match(stdout, /standards: 1 row\b/);
+    // singular form AND the padEnd-aligned column shape. Pins both the
+    // pluralisation fix and the convention alignment.
+    assert.match(stdout, /  security {2,} 1 row\b/);
+    assert.match(stdout, /  standards {2,} 1 row\b/);
     assert.doesNotMatch(stdout, /1 rows/);
 
     // Rows actually gone.
@@ -357,7 +370,8 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     const stdout = captureStdout(() =>
       runPrune({ olderThan: "7d" }),
     );
-    assert.match(stdout, /nothing to prune \(no rows older than 7d\)/);
+    // `note: ` prefix is the established advisory-no-op convention.
+    assert.match(stdout, /^note: nothing to prune \(no rows older than 7d\)/m);
     // Row still there (no delete, no VACUUM).
     const db = openDb(dbPath);
     try {
