@@ -1,8 +1,21 @@
 # Build the stamp-verify hook in a first stage so runtime image stays small.
-# Base images are pinned by digest (not just tag) so two builds 24h apart
-# produce byte-identical userspace, and a re-push of the upstream tag by an
-# attacker cannot silently change the runtime. Renovate / Dependabot's
-# `docker` ecosystem keeps the digest current with annotated PRs.
+# Base images are pinned by digest (not just tag) so the *base userspace*
+# (the layers shipped inside the alpine and node-alpine images themselves)
+# is fixed across builds, and a re-push of the upstream tag by an attacker
+# cannot silently change those layers. Renovate / Dependabot's `docker`
+# ecosystem keeps the digest current with annotated PRs.
+#
+# Caveat — what the digest pin does NOT cover: the `apk add --no-cache`
+# step further down installs git, openssh-server, bash, nodejs,
+# netcat-openbsd, and tar from Alpine 3.21's mutable package repositories.
+# Those repos receive ongoing 3.21 patch updates, so two builds 24h apart
+# can resolve different package versions even on an identical base digest.
+# The image is therefore reproducible at the base-userspace layer but not
+# bit-for-bit reproducible end-to-end. We accept this: pinning every apk
+# package would add Renovate churn on a weekly cadence for marginal risk
+# reduction (this is a LOW-tier audit finding — see oaudit-may-2-2026
+# rerun-3 L5), and the digest pin still defeats the higher-impact attack
+# of upstream-tag re-push.
 FROM node:22-alpine3.21@sha256:af8023ec879993821f6d5b21382ed915622a1b0f1cc03dbeb6804afaf01f8885 AS builder
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json tsup.config.ts ./
