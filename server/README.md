@@ -242,3 +242,75 @@ symlinked under `/home/git/git-shell-commands/` at image build time.
 
 For container-level diagnostics — log inspection, manual hook refresh,
 disk usage — use your platform's web console or `<platform> exec`.
+
+## Container runtime — runs as root (accepted trade-off)
+
+The stamp server container runs as root in-container. `server/Dockerfile`
+deliberately does not include a `USER` directive. This is an accepted
+trade-off, not an oversight.
+
+### Why root is load-bearing
+
+Two parts of startup require root and don't have a straightforward
+in-image workaround under current orchestration:
+
+1. **sshd binds privileged port 22.** Operators connect via `ssh
+   git@<host>` on a Railway TCP proxy fronting container port 22. Binding
+   any port below 1024 requires `CAP_NET_BIND_SERVICE`, which in practice
+   means sshd starts as root.
+2. **`entrypoint.sh` manages permissions on persistent state before any
+   service starts.** Each boot it `chown`s `/srv/git/` (the volume comes
+   up root-owned on platform mounts) to the git user, generates/pins SSH
+   host keys to `root:root` mode `0600` in `/srv/git/.ssh-host-keys/`,
+   writes `/etc/stamp/operator.pub` as `root:root` mode `0444`, writes
+   `/etc/stamp/env` (which holds `GITHUB_BOT_TOKEN`) as `root:git` mode
+   `0640`, and refreshes every per-repo hook to `root:root` mode `0755`.
+   Several of these objects must remain unwritable by the git user
+   (which runs the SSH session and the hook process), so whatever sets
+   them up has to outrank that user.
+
+Both apply on every boot — not one-time setup that could happen in a
+privileged init followed by a `USER git` drop.
+
+### What this means in practice
+
+Authenticated SSH users are constrained to the `git` account with
+`git-shell` (see "SSH access model" above) — they cannot get an
+interactive shell, run arbitrary commands, or read `/etc/stamp/env`. The
+hardening in place (sticky bit on `/srv/git`, root-owned per-repo hooks,
+mode `0640 root:git` on the env file, root-owned `.ssh-host-keys/`) is
+defense in depth against the **git user**, not against in-container
+root. A future sshd RCE, a bug in the stamp pre-receive hook, or a
+compromised Alpine package would run with full root in the container —
+including read access to `GITHUB_BOT_TOKEN`, every bare repo, and the
+persistent host keys.
+
+This is the trade-off being accepted.
+
+### Deferred alternative
+
+If the trade-off is ever re-evaluated, the path forward is:
+
+1. Run sshd on an unprivileged port inside the container (e.g. `2222`).
+2. Have the platform's TCP proxy front the public port — Railway TCP
+   proxy 22→2222, equivalent on Fly/Docker/etc.
+3. After `entrypoint.sh` finishes its privileged setup (chowns, host-key
+   generation, env-file writes, hook refresh), drop to the git user —
+   either via `gosu` / `su-exec` at the end of the entrypoint, or by
+   structuring the entrypoint as a privileged setup phase that re-execs
+   sshd under a `USER git` directive.
+
+This is more invasive than the current shape and not currently warranted
+— it couples the public-port binding to a platform proxy hop and
+requires operator host config to follow. Documented so a future operator
+who decides the threat model has changed has a starting point.
+
+### Provenance
+
+This posture was reviewed in the May 2026 audit pass — finding **L4** in
+`oaudit-may-2-2026-rerun-3.md`, against repo HEAD `8e77f2f`. (The audit
+doc lives in the operator's local audit archive outside this repo, not
+in the repo tree; commit `8e77f2f` is the audited HEAD on `main`.) The
+auditor's pragmatic recommendation was option (a): accept the trade-off
+and document it. This section is that documentation; the deferred
+alternative above mirrors the auditor's option (b).
