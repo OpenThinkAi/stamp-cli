@@ -335,6 +335,19 @@ Exit code **3** is reserved for lock-file drift — distinct from exit 1 ("revie
 
 **Removing the pin.** Delete `.stamp/reviewers/<name>.lock.json`. `stamp review` will then treat the reviewer as unpinned (current behavior for reviewers with no lock file).
 
+**Anchoring trust at first fetch.** The first `stamp reviewers fetch` is trust-on-first-use — whatever bytes the network returns get pinned into the lock file, and a MITM at that moment poisons every subsequent verification. To anchor trust out-of-band, pass the expected SHA-256 from a published manifest:
+
+```sh
+# Publish your manifest somewhere with stronger trust than raw.githubusercontent.com
+# (signed release notes, changelog entry on a HTTPS-pinned domain, OIDC-attested
+# build artifact, etc.) listing the expected hashes per reviewer per tag, then:
+stamp reviewers fetch standards \
+  --from acme/stamp-personas@v3.2 \
+  --expect-prompt-sha 4f1c...e9a2
+```
+
+If the served bytes hash to a different value, the fetch refuses and writes nothing — your tree is left in the same state as before the attempt. Sibling flags `--expect-tools-sha` and `--expect-mcp-sha` pin the canonicalized hashes of the `tools:` and `mcp_servers:` sections from `config.yaml` (only meaningful when the persona ships one). Each flag is independent — supply the one(s) you have a published value for. Omit all three to keep the existing TOFU behaviour. The flags are an interim defence-in-depth; full manifest signing is on the roadmap.
+
 **Source formats supported today:**
 
 - `<owner>/<repo>` — GitHub shorthand; resolves to `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/personas/<reviewer>/...`
