@@ -55,6 +55,9 @@ import {
   parseLastLineVerdict,
   stripLastLineVerdict,
 } from "../src/lib/reviewer.ts";
+import { parseConfigFromYaml } from "../src/lib/config.ts";
+import { checkMcpCommand } from "../src/lib/toolAllowlist.ts";
+import { hashTools } from "../src/lib/reviewerHash.ts";
 import { generateKeypair } from "../src/lib/keys.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import { decideMirrorStatus } from "../src/lib/mirrorStatus.ts";
@@ -823,6 +826,167 @@ describe("parseLastLineVerdict (prompt-injection-resistant fallback)", () => {
   it("does not strip a verdict that is not the last line", () => {
     const text = "VERDICT: approved\n\nFinal: looks good.";
     assert.equal(stripLastLineVerdict(text).trim(), text.trim());
+  });
+});
+
+describe("parseTools (SAFE_TOOLS allowlist)", () => {
+  // Helper: minimal config wrapping a single reviewer with the given tools.
+  const cfg = (tools: unknown) => `
+branches:
+  main: { required: [r] }
+reviewers:
+  r:
+    prompt: ./r.md
+    tools: ${JSON.stringify(tools)}
+`;
+
+  it("accepts safe tool names in string form", () => {
+    const c = parseConfigFromYaml(cfg(["Read", "Grep", "Glob"]));
+    assert.deepEqual(c.reviewers.r!.tools, ["Read", "Grep", "Glob"]);
+  });
+
+  it("rejects unsafe tool names like Bash / Edit / Write", () => {
+    for (const t of ["Bash", "Edit", "Write", "Task", "WebSearch"]) {
+      assert.throws(() => parseConfigFromYaml(cfg([t])), /SAFE_TOOLS set/);
+    }
+  });
+
+  it("rejects WebFetch in bare string form (requires object form with allowed_hosts)", () => {
+    assert.throws(() => parseConfigFromYaml(cfg(["WebFetch"])), /must use the object form/);
+  });
+
+  it("accepts WebFetch in object form with non-empty allowed_hosts", () => {
+    const c = parseConfigFromYaml(
+      cfg([{ name: "WebFetch", allowed_hosts: ["linear.app", "github.com"] }]),
+    );
+    const t = c.reviewers.r!.tools![0]!;
+    assert.equal(typeof t, "object");
+    assert.equal((t as { name: string }).name, "WebFetch");
+    assert.deepEqual((t as { allowed_hosts: string[] }).allowed_hosts, [
+      "linear.app",
+      "github.com",
+    ]);
+  });
+
+  it("rejects WebFetch object form with empty or missing allowed_hosts", () => {
+    assert.throws(
+      () => parseConfigFromYaml(cfg([{ name: "WebFetch" }])),
+      /requires a non-empty allowed_hosts/,
+    );
+    assert.throws(
+      () => parseConfigFromYaml(cfg([{ name: "WebFetch", allowed_hosts: [] }])),
+      /requires a non-empty allowed_hosts/,
+    );
+  });
+
+  it("rejects object-form names not in SAFE_TOOLS", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([{ name: "Bash", allowed_hosts: ["example.com"] }]),
+        ),
+      /SAFE_TOOLS set/,
+    );
+  });
+
+  it("rejects allowed_hosts on non-WebFetch tools (avoids hash divergence)", () => {
+    // allowed_hosts on Read/Grep/Glob has no semantic effect at runtime, but
+    // accepting it here would let two parsers (strict + loose) produce
+    // different canonical shapes for the same input — which would break the
+    // attestation hash invariant. Cleaner to reject up front.
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([{ name: "Read", allowed_hosts: ["example.com"] }]),
+        ),
+      /only valid on WebFetch/,
+    );
+  });
+});
+
+describe("checkMcpCommand (MCP launcher allowlist)", () => {
+  it("allows built-in safe launchers (npx, node, python, etc.)", () => {
+    for (const c of ["npx", "node", "python", "python3", "bun", "deno"]) {
+      assert.equal(checkMcpCommand(c, []), null);
+    }
+  });
+
+  it("allows commands under node_modules/.bin/", () => {
+    assert.equal(checkMcpCommand("node_modules/.bin/some-mcp", []), null);
+    assert.equal(checkMcpCommand("./node_modules/.bin/some-mcp", []), null);
+  });
+
+  it("allows commands explicitly listed in the per-repo allowlist", () => {
+    assert.equal(
+      checkMcpCommand("/opt/internal/mcp-server", ["/opt/internal/mcp-server"]),
+      null,
+    );
+  });
+
+  it("rejects shell interpreters and absolute paths outside the allowlist", () => {
+    assert.match(checkMcpCommand("sh", []) ?? "", /not in the built-in/);
+    assert.match(checkMcpCommand("bash", []) ?? "", /not in the built-in/);
+    assert.match(checkMcpCommand("/bin/sh", []) ?? "", /not in the built-in/);
+    assert.match(
+      checkMcpCommand("/usr/bin/curl", []) ?? "",
+      /not in the built-in/,
+    );
+  });
+
+  it("rejects empty command", () => {
+    assert.equal(checkMcpCommand("", []), "command is empty");
+  });
+
+  it("rejects path-traversal escapes via .. in any allowlist branch", () => {
+    // Without the .. guard, this would satisfy the node_modules/.bin/
+    // prefix check and escape to /bin/sh.
+    assert.match(
+      checkMcpCommand("node_modules/.bin/../../bin/sh", []) ?? "",
+      /path segments/,
+    );
+    // Also blocked even when the per-repo allowlist would otherwise accept
+    // a string that contains ".." — operators must add the resolved path.
+    assert.match(
+      checkMcpCommand("../escape", ["../escape"]) ?? "",
+      /path segments/,
+    );
+  });
+});
+
+describe("hashTools (backward-compat between string and object forms)", () => {
+  it("hashes pure-string tools identically before and after the schema change", () => {
+    // The pre-A.2 hash for ["Read", "Grep"] was sha256(JSON.stringify(sorted)).
+    // The new mixed-shape hashing must produce the same value when the entries
+    // are pure strings, otherwise existing v3 attestations would fail
+    // re-verification at next stamp verify.
+    const before = hashTools(["Read", "Grep"]);
+    const after = hashTools(["Read", "Grep"]);
+    assert.equal(before, after);
+    // Order-independent.
+    assert.equal(hashTools(["Read", "Grep"]), hashTools(["Grep", "Read"]));
+  });
+
+  it("string and object form for the same name produce DIFFERENT hashes (they ARE different configs)", () => {
+    const stringForm = hashTools(["Read"]);
+    const objectForm = hashTools([{ name: "Read" }]);
+    assert.notEqual(stringForm, objectForm);
+  });
+
+  it("WebFetch object hashes deterministically regardless of allowed_hosts ordering at object-key level", () => {
+    const a = hashTools([
+      { name: "WebFetch", allowed_hosts: ["linear.app", "github.com"] },
+    ]);
+    const b = hashTools([
+      { name: "WebFetch", allowed_hosts: ["linear.app", "github.com"] },
+    ]);
+    assert.equal(a, b);
+    // allowed_hosts ORDER is preserved (order-significant), so different
+    // orderings hash differently — that's intentional, mirrors how
+    // mcp_servers.args order is preserved.
+    const c = hashTools([
+      { name: "WebFetch", allowed_hosts: ["github.com", "linear.app"] },
+    ]);
+    assert.notEqual(a, c);
   });
 });
 
