@@ -101,9 +101,9 @@ git add .stamp && git commit -m "stamp: scaffold starter reviewers"
 
 # Provision a bare "remote" with the verify hook
 cd ..
-./node_modules/stamp-cli/scripts/setup-repo.sh \
+./node_modules/@openthink/stamp/scripts/setup-repo.sh \
     /tmp/myproject.git \
-    ./node_modules/stamp-cli/dist/hooks/pre-receive.cjs \
+    ./node_modules/@openthink/stamp/dist/hooks/pre-receive.cjs \
     ~/.stamp/keys/ed25519.pub
 
 # Wire up the remote
