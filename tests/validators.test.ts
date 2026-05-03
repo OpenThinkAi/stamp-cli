@@ -1016,6 +1016,83 @@ reviewers:
       /only valid on WebFetch/,
     );
   });
+
+  // AGT-036 / audit M4: optional per-host URL-shape pin.
+  it("accepts WebFetch with path_prefix", () => {
+    const c = parseConfigFromYaml(
+      cfg([
+        {
+          name: "WebFetch",
+          allowed_hosts: ["api.github.com"],
+          path_prefix: "/repos/",
+        },
+      ]),
+    );
+    const t = c.reviewers.r!.tools![0]! as {
+      name: string;
+      allowed_hosts: string[];
+      path_prefix?: string;
+    };
+    assert.equal(t.name, "WebFetch");
+    assert.deepEqual(t.allowed_hosts, ["api.github.com"]);
+    assert.equal(t.path_prefix, "/repos/");
+  });
+
+  it("rejects path_prefix on non-WebFetch tools", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(cfg([{ name: "Read", path_prefix: "/repos/" }])),
+      /only valid on WebFetch/,
+    );
+  });
+
+  it("rejects path_prefix that does not start with '/'", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([
+            {
+              name: "WebFetch",
+              allowed_hosts: ["api.github.com"],
+              path_prefix: "repos/",
+            },
+          ]),
+        ),
+      /must start with "\/"/,
+    );
+  });
+
+  it("rejects empty-string path_prefix", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([
+            {
+              name: "WebFetch",
+              allowed_hosts: ["api.github.com"],
+              path_prefix: "",
+            },
+          ]),
+        ),
+      /must be non-empty/,
+    );
+  });
+
+  it("rejects non-string path_prefix", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([
+            {
+              name: "WebFetch",
+              allowed_hosts: ["api.github.com"],
+              path_prefix: 42,
+            },
+          ]),
+        ),
+      /must be a string/,
+    );
+  });
 });
 
 describe("checkMcpCommand (MCP launcher allowlist)", () => {
@@ -1101,6 +1178,32 @@ describe("hashTools (backward-compat between string and object forms)", () => {
       { name: "WebFetch", allowed_hosts: ["github.com", "linear.app"] },
     ]);
     assert.notEqual(a, c);
+  });
+
+  // AGT-036 / audit M4: adding the optional path_prefix field must NOT
+  // change the hash for existing entries that don't use it. Existing v3
+  // attestations were computed before path_prefix existed; if the loose
+  // parser added a default value or the canonicalizer emitted an absent
+  // field, those attestations would fail re-verification.
+  it("adding path_prefix support doesn't drift the hash of pre-AGT-036 entries", () => {
+    const before = hashTools([
+      { name: "WebFetch", allowed_hosts: ["api.github.com"] },
+    ]);
+    const same = hashTools([
+      { name: "WebFetch", allowed_hosts: ["api.github.com"] },
+    ]);
+    assert.equal(before, same);
+    // Adding path_prefix IS a config change and SHOULD produce a different
+    // hash — that's the security-meaningful difference we want signers to
+    // attest to.
+    const withPrefix = hashTools([
+      {
+        name: "WebFetch",
+        allowed_hosts: ["api.github.com"],
+        path_prefix: "/repos/",
+      },
+    ]);
+    assert.notEqual(before, withPrefix);
   });
 });
 

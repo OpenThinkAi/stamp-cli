@@ -103,6 +103,20 @@ function denyIfReviewerInternal(
 }
 
 /**
+ * Per-host WebFetch policy carried into the runtime gate. Built by
+ * `invokeReviewer` from the parsed reviewer config and consulted by
+ * `checkReviewerTool` on every WebFetch invocation.
+ *
+ * `path_prefix`, when set, pins the URL shape past the hostname: only
+ * URLs whose `URL.pathname` starts with that prefix are allowed. Query
+ * strings are intentionally NOT inspected — GitHub/Linear/Notion APIs
+ * use them legitimately. AGT-036 / audit M4.
+ */
+export interface WebFetchHostPolicy {
+  path_prefix?: string;
+}
+
+/**
  * Single source of truth for reviewer-tool gating. Called from the
  * `hooks.PreToolUse` callback in `invokeReviewer` AND directly from unit
  * tests, so the production logic and the test logic are the same code —
@@ -124,9 +138,9 @@ export function checkReviewerTool(args: {
   toolName: string;
   toolInput: unknown;
   repoRoot: string;
-  webFetchHosts: Set<string>;
+  webFetchPolicy: Map<string, WebFetchHostPolicy>;
 }): { allow: true } | { allow: false; reason: string } {
-  const { toolName, toolInput, repoRoot, webFetchHosts } = args;
+  const { toolName, toolInput, repoRoot, webFetchPolicy } = args;
   const input =
     toolInput && typeof toolInput === "object"
       ? (toolInput as Record<string, unknown>)
@@ -146,17 +160,34 @@ export function checkReviewerTool(args: {
         reason: `WebFetch URL is not parseable: ${url}`,
       };
     }
-    if (!webFetchHosts.has(parsed.hostname.toLowerCase())) {
-      // webFetchHosts is guaranteed non-empty here — parseTools rejects
+    const host = parsed.hostname.toLowerCase();
+    const policy = webFetchPolicy.get(host);
+    if (!policy) {
+      // webFetchPolicy is guaranteed non-empty here — parseTools rejects
       // WebFetch entries without a non-empty allowed_hosts, so the only
       // path here is "host not in a populated allowlist."
       return {
         allow: false,
         reason:
           `WebFetch host "${parsed.hostname}" is not in allowed_hosts ` +
-          `(${[...webFetchHosts].join(", ")}). ` +
+          `(${[...webFetchPolicy.keys()].join(", ")}). ` +
           `Add it to the WebFetch entry's allowed_hosts under tools: ` +
           `in .stamp/config.yml if intentional.`,
+      };
+    }
+    // Optional per-host URL-shape pin. Plain string-prefix on URL.pathname
+    // — query strings are excluded by URL parsing, so they never affect
+    // this check. Operators who want to constrain the path put a
+    // `path_prefix:` on the WebFetch entry; absence means host-only
+    // (today's behavior). AGT-036 / audit M4.
+    if (policy.path_prefix && !parsed.pathname.startsWith(policy.path_prefix)) {
+      return {
+        allow: false,
+        reason:
+          `WebFetch URL "${url}" path "${parsed.pathname}" does not match ` +
+          `path_prefix "${policy.path_prefix}" configured for host ` +
+          `"${parsed.hostname}". Widen path_prefix in .stamp/config.yml ` +
+          `or fetch a URL within the configured prefix.`,
       };
     }
     return { allow: true };
@@ -318,10 +349,14 @@ export async function invokeReviewer(params: {
   });
 
   // Reduce ToolSpec[] to (a) the SDK's allowedTools name list and (b) the
-  // per-tool host allowlist for WebFetch. parseTools at config-load time
-  // already enforced the SAFE_TOOLS allowlist and the WebFetch-requires-
-  // allowed_hosts rule, so here we just unpack the parsed shape.
-  const webFetchHosts = new Set<string>();
+  // per-host WebFetch policy (allowed_hosts + optional path_prefix).
+  // parseTools at config-load time already enforced the SAFE_TOOLS allowlist
+  // and the WebFetch-requires-allowed_hosts rule, so here we just unpack
+  // the parsed shape. The map's *keys* are the host allowlist; each value
+  // carries any per-host pins (today: path_prefix). Multiple WebFetch
+  // entries with overlapping hosts collapse on the host key — last writer
+  // wins, which matches the YAML's reading order.
+  const webFetchPolicy = new Map<string, WebFetchHostPolicy>();
   const allowedTools = ["mcp__stamp-verdict__submit_verdict"];
   for (const spec of def.tools ?? []) {
     if (typeof spec === "string") {
@@ -330,7 +365,11 @@ export async function invokeReviewer(params: {
     }
     allowedTools.push(spec.name);
     if (spec.name === "WebFetch" && spec.allowed_hosts) {
-      for (const h of spec.allowed_hosts) webFetchHosts.add(h.toLowerCase());
+      for (const h of spec.allowed_hosts) {
+        webFetchPolicy.set(h.toLowerCase(), {
+          ...(spec.path_prefix ? { path_prefix: spec.path_prefix } : {}),
+        });
+      }
     }
   }
 
@@ -400,7 +439,7 @@ export async function invokeReviewer(params: {
                   toolName: input.tool_name,
                   toolInput: input.tool_input,
                   repoRoot: params.repoRoot,
-                  webFetchHosts,
+                  webFetchPolicy,
                 });
                 if (result.allow) return {};
                 return {
