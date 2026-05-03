@@ -507,14 +507,48 @@ export function reviewersVerify(opts: ReviewersVerifyOptions): void {
 // fetch/verify internals
 // --------------------------------------------------------------------------
 
-function parseSourceSpec(from: string): { source: string; ref: string } {
+// Refs are template-concatenated into the raw-content URL by buildRawUrl
+// and become the trust anchor that the lock file pins against. A ref
+// containing `..`, a leading `/`, or a leading `-` could resolve to a
+// different repo/branch on raw.githubusercontent.com or an unrelated path
+// on a custom HTTPS host — so anything outside this shape is rejected
+// before any network I/O. The accepted set covers branch names, tags
+// (incl. `v1.2.3-beta`), `release/v3.2`-style namespaced refs, and
+// 40-char SHAs.
+const FETCH_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+export function validateFetchRef(ref: string, contextPath = "<inline>"): void {
+  if (!FETCH_REF_RE.test(ref)) {
+    throw new Error(
+      `${contextPath}: ref ${JSON.stringify(ref)} has an invalid shape. ` +
+        `Allowed: alphanumerics + . _ / -, must start with an alphanumeric.`,
+    );
+  }
+  // The regex permits `..` because `.` is a legal segment-internal
+  // character (e.g. `v1.2.3`); the explicit segment check rules out
+  // `..` and empty segments (`foo//bar`, trailing `/`) which would let
+  // a crafted ref escape the `<source>/<ref>/personas/...` namespace.
+  for (const segment of ref.split("/")) {
+    if (segment === ".." || segment === "") {
+      throw new Error(
+        `${contextPath}: ref ${JSON.stringify(ref)} contains a forbidden ${
+          segment === ".." ? "'..' traversal" : "empty"
+        } segment.`,
+      );
+    }
+  }
+}
+
+export function parseSourceSpec(from: string): { source: string; ref: string } {
   const at = from.lastIndexOf("@");
   if (at < 1 || at === from.length - 1) {
     throw new Error(
       `--from must be '<source>@<ref>' (e.g. 'acme/stamp-personas@v3.2'); got '${from}'`,
     );
   }
-  return { source: from.slice(0, at), ref: from.slice(at + 1) };
+  const ref = from.slice(at + 1);
+  validateFetchRef(ref, "--from");
+  return { source: from.slice(0, at), ref };
 }
 
 function buildRawUrl(source: string, ref: string, path: string): string {

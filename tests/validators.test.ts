@@ -80,6 +80,10 @@ import {
 } from "../src/lib/refPatterns.ts";
 import { findBranchRule, type BranchRule } from "../src/lib/config.ts";
 import { parseServerConfig as parseServerYaml } from "../src/lib/serverConfig.ts";
+import {
+  parseSourceSpec,
+  validateFetchRef,
+} from "../src/commands/reviewers.ts";
 
 // ---------- parseGithubOriginUrl ----------
 
@@ -1450,6 +1454,111 @@ reviewers:
     assert.throws(
       () => parseConfigFromYaml(cfg([42])),
       /must be a string/,
+    );
+  });
+});
+
+// ---------- parseSourceSpec / validateFetchRef ----------
+//
+// `stamp reviewers fetch --from <source>@<ref>` template-concatenates the
+// ref into a raw-content URL and pins the result into a lock file as the
+// trust anchor. A ref containing `..`, a leading `/`, or a leading `-`
+// would let a crafted call resolve to a different repo/branch on
+// raw.githubusercontent.com or an unrelated path on a custom HTTPS host
+// — so anything outside the documented shape is rejected before any
+// network I/O. (See AGT-039 / oaudit-may-2-2026-rerun-3 L3.)
+
+describe("validateFetchRef (--from ref shape)", () => {
+  describe("accepts the documented shapes", () => {
+    const accept: string[] = [
+      "main",
+      "v1.2.3",
+      "v1.2.3-beta",
+      "release/v3.2",
+      "feature/foo",
+      "users/alice/branch",
+      "0".repeat(40), // 40-char SHA-shaped
+      "abcdef0123456789abcdef0123456789abcdef01",
+    ];
+    for (const ref of accept) {
+      it(`accepts ${JSON.stringify(ref)}`, () => {
+        assert.doesNotThrow(() => validateFetchRef(ref));
+      });
+    }
+  });
+
+  describe("rejects traversal / option-injection shapes", () => {
+    const reject: Array<{ name: string; ref: string; match: RegExp }> = [
+      // Bare ".." trips the leading-dot regex check first, before the
+      // segment check ever runs — the surface error is "invalid shape",
+      // not "traversal". Both reject; pin which one fires so a future
+      // regex relaxation that lets `..` reach the segment check is
+      // caught here.
+      { name: "bare ..", ref: "..", match: /invalid shape/ },
+      { name: "embedded foo/../bar", ref: "foo/../bar", match: /traversal/ },
+      { name: "trailing /..", ref: "main/..", match: /traversal/ },
+      { name: "leading /", ref: "/etc/passwd", match: /invalid shape/ },
+      { name: "leading -", ref: "-flag", match: /invalid shape/ },
+      { name: "empty string", ref: "", match: /invalid shape/ },
+      { name: "leading dot", ref: ".hidden", match: /invalid shape/ },
+      { name: "double slash", ref: "foo//bar", match: /empty/ },
+      { name: "trailing slash", ref: "main/", match: /empty/ },
+      { name: "embedded space", ref: "main branch", match: /invalid shape/ },
+      { name: "query-string injection", ref: "main?evil=1", match: /invalid shape/ },
+      { name: "fragment injection", ref: "main#evil", match: /invalid shape/ },
+      { name: "control char", ref: "main\x01evil", match: /invalid shape/ },
+    ];
+    for (const c of reject) {
+      it(`rejects ${c.name} (${JSON.stringify(c.ref)})`, () => {
+        assert.throws(() => validateFetchRef(c.ref), c.match);
+      });
+    }
+  });
+});
+
+describe("parseSourceSpec (--from <source>@<ref>)", () => {
+  it("accepts shorthand owner/repo@tag", () => {
+    assert.deepEqual(parseSourceSpec("acme/stamp-personas@v3.2"), {
+      source: "acme/stamp-personas",
+      ref: "v3.2",
+    });
+  });
+
+  it("splits on the LAST @ (so https URLs containing @ keep working)", () => {
+    // The lastIndexOf('@') split lets a full HTTPS source survive a stray
+    // '@' in the path; pinning so a future regex tightening on source
+    // shape doesn't accidentally break this.
+    assert.deepEqual(
+      parseSourceSpec("https://example.com/path@deep@v1.0"),
+      { source: "https://example.com/path@deep", ref: "v1.0" },
+    );
+  });
+
+  it("rejects ref with .. traversal before any URL is built", () => {
+    assert.throws(
+      () => parseSourceSpec("acme/stamp-personas@foo/../bar"),
+      /--from: ref .* traversal/,
+    );
+  });
+
+  it("rejects ref with leading dash before any URL is built", () => {
+    assert.throws(
+      () => parseSourceSpec("acme/stamp-personas@-flag"),
+      /--from: ref .* invalid shape/,
+    );
+  });
+
+  it("rejects ref with leading slash before any URL is built", () => {
+    assert.throws(
+      () => parseSourceSpec("acme/stamp-personas@/abs"),
+      /--from: ref .* invalid shape/,
+    );
+  });
+
+  it("still rejects missing-ref shape with the original error", () => {
+    assert.throws(
+      () => parseSourceSpec("acme/stamp-personas@"),
+      /--from must be '<source>@<ref>'/,
     );
   });
 });
