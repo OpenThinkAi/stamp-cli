@@ -189,6 +189,8 @@ stamp reviewers test <name> --diff <revspec>      # invoke reviewer w/o recordin
 stamp reviewers show <name> [--limit <n>]         # verdict history + stats for calibration
 stamp reviewers remove <name> [--delete-file]     # de-register; optional rm of .md
 stamp reviewers fetch <name> --from <source@ref>  # install + pin from canonical source
+                                                   #   add --expect-prompt-sha <hex> (or --expect-tools-sha / --expect-mcp-sha)
+                                                   #   to anchor first-fetch trust against an out-of-band published manifest
 stamp reviewers verify [<name>]                   # check prompt/tool/mcp against lock; exit 3 on drift
 ```
 

@@ -609,13 +609,40 @@ reviewers
     "--from <source@ref>",
     "source repo and ref — '<owner>/<repo>@<tag>' (GitHub) or full 'https://' URL + ref",
   )
-  .action(async (name: string, opts: { from: string }) => {
-    try {
-      await reviewersFetch(name, { from: opts.from });
-    } catch (err) {
-      handleCliError(err);
-    }
-  });
+  .option(
+    "--expect-prompt-sha <sha256>",
+    "out-of-band trust anchor: refuse the fetch if prompt.md SHA-256 doesn't match (hex; 'sha256:' prefix tolerated)",
+  )
+  .option(
+    "--expect-tools-sha <sha256>",
+    "trust anchor for the canonicalized tools-array hash (only meaningful when config.yaml is present)",
+  )
+  .option(
+    "--expect-mcp-sha <sha256>",
+    "trust anchor for the canonicalized mcp_servers-map hash (only meaningful when config.yaml is present)",
+  )
+  .action(
+    async (
+      name: string,
+      opts: {
+        from: string;
+        expectPromptSha?: string;
+        expectToolsSha?: string;
+        expectMcpSha?: string;
+      },
+    ) => {
+      try {
+        await reviewersFetch(name, {
+          from: opts.from,
+          expectPromptSha: opts.expectPromptSha,
+          expectToolsSha: opts.expectToolsSha,
+          expectMcpSha: opts.expectMcpSha,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 reviewers
   .command("verify [name]")
   .description(

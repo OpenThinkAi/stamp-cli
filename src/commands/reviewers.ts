@@ -335,6 +335,57 @@ export interface ReviewersFetchOptions {
   /** Value of the --from flag: <source>@<ref>. Source is <owner>/<repo> or
    *  a full GitHub URL; ref is any git ref (tag, branch, commit). */
   from: string;
+  /** Optional out-of-band trust anchors. When supplied, the fetched bytes are
+   *  hashed and compared against these expected SHA-256 hex strings BEFORE
+   *  any persona file or lock file is written; mismatch throws and leaves
+   *  the working tree untouched. Mirrors the three fields the lock file
+   *  pins (`prompt_sha256` / `tools_sha256` / `mcp_sha256`) so an operator
+   *  with a published manifest can pin all three at first fetch. */
+  expectPromptSha?: string;
+  expectToolsSha?: string;
+  expectMcpSha?: string;
+}
+
+// SHA-256 hex is exactly 64 lowercase hex chars. Reject other shapes early
+// so a typo'd `--expect-*-sha` value (trailing whitespace, accidental
+// `sha256:` prefix, mixed case, truncated paste) fails fast with a clear
+// message instead of "computed hash didn't match <garbage>".
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+function normalizeExpectedSha(
+  flag: string,
+  raw: string | undefined,
+): string | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  // Tolerate (and strip) a leading `sha256:` since that's how the lock file
+  // and `stamp reviewers fetch` summary print hashes — operators copying
+  // from those displays shouldn't have to remember to drop the prefix.
+  const stripped = trimmed.startsWith("sha256:") ? trimmed.slice(7) : trimmed;
+  const lowered = stripped.toLowerCase();
+  if (!SHA256_HEX_RE.test(lowered)) {
+    throw new Error(
+      `${flag} ${JSON.stringify(raw)} is not a valid SHA-256 hex string ` +
+        `(expected 64 hex chars, optionally prefixed with 'sha256:').`,
+    );
+  }
+  return lowered;
+}
+
+function verifyExpectedHash(
+  label: string,
+  flag: string,
+  expected: string,
+  actual: string,
+): void {
+  if (expected !== actual) {
+    throw new Error(
+      `${label} hash mismatch — refusing to write persona or lock file.\n` +
+        `  expected (${flag}): sha256:${expected}\n` +
+        `  computed:           sha256:${actual}\n` +
+        `If you intended to change the pin, re-run with the new ${flag} value or omit the flag to accept TOFU.`,
+    );
+  }
 }
 
 export async function reviewersFetch(
@@ -344,6 +395,21 @@ export async function reviewersFetch(
   requireValidReviewerName(reviewerName);
   const repoRoot = findRepoRoot();
   const { source, ref } = parseSourceSpec(opts.from);
+
+  // Validate any --expect-*-sha flags up front so a typo fails before we
+  // make a network request, not after.
+  const expectPromptSha = normalizeExpectedSha(
+    "--expect-prompt-sha",
+    opts.expectPromptSha,
+  );
+  const expectToolsSha = normalizeExpectedSha(
+    "--expect-tools-sha",
+    opts.expectToolsSha,
+  );
+  const expectMcpSha = normalizeExpectedSha(
+    "--expect-mcp-sha",
+    opts.expectMcpSha,
+  );
 
   const reviewersDir = stampReviewersDir(repoRoot);
   if (!existsSync(reviewersDir)) {
@@ -378,21 +444,46 @@ export async function reviewersFetch(
     }
   }
 
-  // Write prompt to .stamp/reviewers/<name>.md
+  // Compute hashes BEFORE writing anything to disk so a mismatched
+  // --expect-*-sha leaves the working tree untouched (AC #3). The lock
+  // file records the same three fields, so we compute once and reuse.
   const promptPath = join(reviewersDir, `${reviewerName}.md`);
   const promptBytes = Buffer.from(promptText, "utf8");
+  const promptSha = hashPromptBytes(promptBytes);
+  const toolsSha = hashTools(tools);
+  const mcpSha = hashMcpServers(mcpServers);
+
+  if (expectPromptSha !== undefined) {
+    verifyExpectedHash("prompt.md", "--expect-prompt-sha", expectPromptSha, promptSha);
+  }
+  if (expectToolsSha !== undefined) {
+    verifyExpectedHash(
+      "tools (from config.yaml)",
+      "--expect-tools-sha",
+      expectToolsSha,
+      toolsSha,
+    );
+  }
+  if (expectMcpSha !== undefined) {
+    verifyExpectedHash(
+      "mcp_servers (from config.yaml)",
+      "--expect-mcp-sha",
+      expectMcpSha,
+      mcpSha,
+    );
+  }
+
+  // All expectations passed (or none supplied — TOFU). Safe to write.
   writeFileSync(promptPath, promptBytes);
 
-  // Compute hashes from the bytes we just wrote (identical to what verifiers
-  // will hash later).
   const lock: LockFile = {
     version: LOCK_FILE_VERSION,
     source,
     ref,
     reviewer: reviewerName,
-    prompt_sha256: hashPromptBytes(promptBytes),
-    tools_sha256: hashTools(tools),
-    mcp_sha256: hashMcpServers(mcpServers),
+    prompt_sha256: promptSha,
+    tools_sha256: toolsSha,
+    mcp_sha256: mcpSha,
     fetched_at: new Date().toISOString(),
   };
   writeLockFile(repoRoot, reviewerName, lock);
