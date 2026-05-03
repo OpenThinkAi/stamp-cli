@@ -42,11 +42,11 @@ const REVIEWER_INTERNAL_DENY_PREFIXES = [".stamp/trusted-keys/"];
  * `+ path.sep` guard prevents `<repoRoot>-evil/x` from matching `<repoRoot>`
  * as a string prefix.
  *
- * Returns `null` to allow, or a string deny-message to forward into a
- * `behavior: "deny"` response. Pure: no fs I/O, no symlink resolution
- * (calling realpath would add filesystem side-effects under SDK supervision
- * and a race surface; the operator-controls-the-worktree assumption in
- * stamp-cli's threat model makes lexical resolution proportionate here).
+ * Returns `null` to allow, or a string deny-message. Pure: no fs I/O, no
+ * symlink resolution (calling realpath would add filesystem side-effects
+ * under SDK supervision and a race surface; the operator-controls-the-
+ * worktree assumption in stamp-cli's threat model makes lexical resolution
+ * proportionate here).
  */
 export function denyIfOutsideRepo(
   inputPath: unknown,
@@ -72,7 +72,7 @@ export function denyIfOutsideRepo(
 
 /**
  * Reviewer-internal denylist check, run after the scope check passes for
- * Read. The `resolved` argument must be the canonicalised absolute path
+ * Read. The `resolvedAbs` argument must be the canonicalised absolute path
  * already produced by the scope check (we don't re-resolve here — keeps
  * the two checks consistent on what they consider "the file"). Returns a
  * deny-message or null.
@@ -100,6 +100,131 @@ function denyIfReviewerInternal(
     }
   }
   return null;
+}
+
+/**
+ * Single source of truth for reviewer-tool gating. Called from the
+ * `hooks.PreToolUse` callback in `invokeReviewer` AND directly from unit
+ * tests, so the production logic and the test logic are the same code —
+ * no parallel reimplementation that can drift.
+ *
+ * Why PreToolUse instead of `canUseTool`: the SDK's `canUseTool` callback
+ * is *bypassed* for tools that appear in `options.allowedTools`. Since the
+ * reviewer pre-approves Read/Grep/Glob/WebFetch via `allowedTools` so the
+ * model can see them, `canUseTool` never fires for those — gating logic
+ * placed there is structurally inert. The `hooks.PreToolUse` hook fires
+ * for every tool invocation regardless of `allowedTools` membership, which
+ * is what we actually want. (See AGT-035 spike notes / QA bounce.)
+ *
+ * Returns `{ allow: true }` for permitted calls or `{ allow: false, reason }`
+ * for denials. The hook caller maps that to the SDK's
+ * `hookSpecificOutput.permissionDecision` shape.
+ */
+export function checkReviewerTool(args: {
+  toolName: string;
+  toolInput: unknown;
+  repoRoot: string;
+  webFetchHosts: Set<string>;
+}): { allow: true } | { allow: false; reason: string } {
+  const { toolName, toolInput, repoRoot, webFetchHosts } = args;
+  const input =
+    toolInput && typeof toolInput === "object"
+      ? (toolInput as Record<string, unknown>)
+      : {};
+
+  if (toolName === "WebFetch") {
+    const url = input.url;
+    if (typeof url !== "string") {
+      return { allow: false, reason: `WebFetch input.url must be a string` };
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return {
+        allow: false,
+        reason: `WebFetch URL is not parseable: ${url}`,
+      };
+    }
+    if (!webFetchHosts.has(parsed.hostname.toLowerCase())) {
+      // webFetchHosts is guaranteed non-empty here — parseTools rejects
+      // WebFetch entries without a non-empty allowed_hosts, so the only
+      // path here is "host not in a populated allowlist."
+      return {
+        allow: false,
+        reason:
+          `WebFetch host "${parsed.hostname}" is not in allowed_hosts ` +
+          `(${[...webFetchHosts].join(", ")}). ` +
+          `Add it to the WebFetch entry's allowed_hosts under tools: ` +
+          `in .stamp/config.yml if intentional.`,
+      };
+    }
+    return { allow: true };
+  }
+
+  if (toolName === "Read") {
+    const filePath = input.file_path;
+    const denied = denyIfOutsideRepo(filePath, repoRoot, "Read");
+    if (denied) return { allow: false, reason: denied };
+    // After the scope check, also block reviewer-internal targets that
+    // no legitimate review needs but a hostile diff might try to exfil:
+    // attestation DB and trusted-key pubkeys.
+    const resolvedRoot = path.resolve(repoRoot);
+    const resolved = path.resolve(resolvedRoot, filePath as string);
+    const internal = denyIfReviewerInternal(
+      resolved,
+      resolvedRoot,
+      filePath as string,
+    );
+    if (internal) return { allow: false, reason: internal };
+    return { allow: true };
+  }
+
+  if (toolName === "Grep") {
+    // path is optional (the SDK defaults to cwd which is repoRoot).
+    // pattern is a regex, not a path — no scope check needed.
+    const grepPath = input.path;
+    if (grepPath !== undefined) {
+      const denied = denyIfOutsideRepo(grepPath, repoRoot, "Grep");
+      if (denied) return { allow: false, reason: denied };
+    }
+    return { allow: true };
+  }
+
+  if (toolName === "Glob") {
+    const globPath = input.path;
+    if (globPath !== undefined) {
+      const denied = denyIfOutsideRepo(globPath, repoRoot, "Glob");
+      if (denied) return { allow: false, reason: denied };
+    }
+    // Belt-and-suspenders: reject patterns that look like absolute paths
+    // or contain `..` segments. The path-scope check above prevents the
+    // literal escape, but a glob like `/etc/**/*` or `../../**` is almost
+    // certainly an intent to escape, and surfacing it loudly is friendlier
+    // than letting it match nothing inside repoRoot.
+    const pattern = input.pattern;
+    if (typeof pattern === "string") {
+      if (pattern.startsWith("/")) {
+        return {
+          allow: false,
+          reason: `Glob pattern "${pattern}" is absolute; reviewer globs are scoped to repoRoot.`,
+        };
+      }
+      if (pattern.split("/").some((seg) => seg === "..")) {
+        return {
+          allow: false,
+          reason: `Glob pattern "${pattern}" contains a '..' segment; reviewer globs are scoped to repoRoot.`,
+        };
+      }
+    }
+    return { allow: true };
+  }
+
+  // Other tools (the verdict-submission MCP tool, MCP-server tools the
+  // operator wired in) pass through. Config-load time has already
+  // gatekept which tools can appear in `allowedTools` at all via
+  // SAFE_TOOLS — there is no untrusted tool name reaching this branch.
+  return { allow: true };
 }
 
 export interface ReviewerInvocation {
@@ -260,100 +385,35 @@ export async function invokeReviewer(params: {
       mcpServers,
       maxTurns,
       abortController,
-      canUseTool: async (toolName, input) => {
-        // WebFetch host allowlist enforcement. Anything else passes
-        // through — the SAFE_TOOLS allowlist at config-parse time already
-        // gates which tools can appear here at all.
-        if (toolName === "WebFetch") {
-          const url = (input as { url?: unknown }).url;
-          if (typeof url !== "string") {
-            return {
-              behavior: "deny",
-              message: `WebFetch input.url must be a string`,
-            };
-          }
-          let parsed: URL;
-          try {
-            parsed = new URL(url);
-          } catch {
-            return {
-              behavior: "deny",
-              message: `WebFetch URL is not parseable: ${url}`,
-            };
-          }
-          if (!webFetchHosts.has(parsed.hostname.toLowerCase())) {
-            // webFetchHosts is guaranteed non-empty here — parseTools
-            // rejects WebFetch entries without a non-empty allowed_hosts,
-            // so the only path to this branch is "host not in a populated
-            // allowlist." No "<empty>" fallback needed.
-            return {
-              behavior: "deny",
-              message:
-                `WebFetch host "${parsed.hostname}" is not in allowed_hosts ` +
-                `(${[...webFetchHosts].join(", ")}). ` +
-                `Add it to the WebFetch entry's allowed_hosts under tools: ` +
-                `in .stamp/config.yml if intentional.`,
-            };
-          }
-        }
-        // Read/Grep/Glob: scope path inputs to repoRoot. Without this,
-        // SAFE_TOOLS-permitted built-ins inherit only the SDK's cwd
-        // handling as a sandbox — undocumented as a security boundary
-        // and out of stamp-cli's control. AGT-035 / audit M3.
-        if (toolName === "Read") {
-          const filePath = (input as { file_path?: unknown }).file_path;
-          const denied = denyIfOutsideRepo(filePath, params.repoRoot, "Read");
-          if (denied) return { behavior: "deny", message: denied };
-          // After the scope check, also block reviewer-internal targets
-          // that no legitimate review needs but a hostile diff might
-          // try to exfil — attestation DB and trusted-key pubkeys.
-          const resolvedRoot = path.resolve(params.repoRoot);
-          const resolved = path.resolve(resolvedRoot, filePath as string);
-          const internal = denyIfReviewerInternal(
-            resolved,
-            resolvedRoot,
-            filePath as string,
-          );
-          if (internal) return { behavior: "deny", message: internal };
-        }
-        if (toolName === "Grep") {
-          // path is optional (the SDK defaults to cwd which is repoRoot).
-          // pattern is a regex, not a path — no scope check needed.
-          const grepPath = (input as { path?: unknown }).path;
-          if (grepPath !== undefined) {
-            const denied = denyIfOutsideRepo(grepPath, params.repoRoot, "Grep");
-            if (denied) return { behavior: "deny", message: denied };
-          }
-        }
-        if (toolName === "Glob") {
-          const globPath = (input as { path?: unknown }).path;
-          if (globPath !== undefined) {
-            const denied = denyIfOutsideRepo(globPath, params.repoRoot, "Glob");
-            if (denied) return { behavior: "deny", message: denied };
-          }
-          // Belt-and-suspenders: reject patterns that look like absolute
-          // paths or contain `..` segments. The path-scope check above
-          // prevents the literal escape, but a glob like `/etc/**/*` or
-          // `../../**` is almost certainly an intent to escape and
-          // surfacing it loudly is friendlier than letting it match
-          // nothing inside repoRoot.
-          const pattern = (input as { pattern?: unknown }).pattern;
-          if (typeof pattern === "string") {
-            if (pattern.startsWith("/")) {
-              return {
-                behavior: "deny",
-                message: `Glob pattern "${pattern}" is absolute; reviewer globs are scoped to repoRoot.`,
-              };
-            }
-            if (pattern.split("/").some((seg) => seg === "..")) {
-              return {
-                behavior: "deny",
-                message: `Glob pattern "${pattern}" contains a '..' segment; reviewer globs are scoped to repoRoot.`,
-              };
-            }
-          }
-        }
-        return { behavior: "allow", updatedInput: input };
+      // PreToolUse fires for every tool call regardless of `allowedTools`
+      // membership, which is what we want for security gating: pre-approving
+      // a tool name in `allowedTools` should not bypass per-call validation.
+      // (The previously-shipped `canUseTool` gate was bypassed in production
+      // because pre-approved tools skip canUseTool entirely — AGT-035 QA.)
+      hooks: {
+        PreToolUse: [
+          {
+            hooks: [
+              async (input) => {
+                if (input.hook_event_name !== "PreToolUse") return {};
+                const result = checkReviewerTool({
+                  toolName: input.tool_name,
+                  toolInput: input.tool_input,
+                  repoRoot: params.repoRoot,
+                  webFetchHosts,
+                });
+                if (result.allow) return {};
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse",
+                    permissionDecision: "deny",
+                    permissionDecisionReason: result.reason,
+                  },
+                };
+              },
+            ],
+          },
+        ],
       },
       persistSession: false,
     },
