@@ -19,14 +19,23 @@ export interface BranchRule {
 /**
  * A single entry in a reviewer's `tools:` list. Either:
  *   - a bare string for a tool that has no per-tool config (Read, Grep, Glob)
- *   - an object form `{ name, allowed_hosts? }` for tools that need per-call
- *     gating. WebFetch REQUIRES the object form with a non-empty
+ *   - an object form `{ name, allowed_hosts?, path_prefix? }` for tools that
+ *     need per-call gating. WebFetch REQUIRES the object form with a non-empty
  *     `allowed_hosts` array — a bare `"WebFetch"` is rejected at invocation
  *     time because an unrestricted WebFetch is an exfiltration channel for
  *     diff content (a malicious diff plants a URL, the reviewer follows it,
  *     the diff context flows out).
+ *
+ *     `allowed_hosts` is a *domain-level* allowlist. To pin the URL shape
+ *     too — e.g. only `/repos/` paths on `api.github.com` — set
+ *     `path_prefix` on the same entry. When present, the runtime hook
+ *     rejects any URL whose `URL.pathname` does not begin with that prefix.
+ *     Query strings are never inspected (GitHub/Linear/Notion APIs use them
+ *     legitimately). AGT-036 / audit M4.
  */
-export type ToolSpec = string | { name: string; allowed_hosts?: string[] };
+export type ToolSpec =
+  | string
+  | { name: string; allowed_hosts?: string[]; path_prefix?: string };
 
 /**
  * Loose, policy-free ToolSpec parser used wherever the SAFE_TOOLS policy
@@ -47,12 +56,27 @@ export function parseToolsLoose(input: unknown[]): ToolSpec[] {
     if (entry && typeof entry === "object" && !Array.isArray(entry)) {
       const e = entry as Record<string, unknown>;
       if (typeof e.name !== "string" || !e.name) continue;
-      const spec: { name: string; allowed_hosts?: string[] } = { name: e.name };
+      const spec: {
+        name: string;
+        allowed_hosts?: string[];
+        path_prefix?: string;
+      } = { name: e.name };
       if (Array.isArray(e.allowed_hosts)) {
         const hosts = e.allowed_hosts.filter(
           (h): h is string => typeof h === "string" && h.length > 0,
         );
         if (hosts.length > 0) spec.allowed_hosts = hosts;
+      }
+      // Mirror the strict parser: only carry path_prefix when it's a
+      // non-empty string starting with "/". Anything else is treated as
+      // absent so the loose-parsed canonical form stays hash-equivalent
+      // with what the strict parser would have accepted.
+      if (
+        typeof e.path_prefix === "string" &&
+        e.path_prefix.length > 0 &&
+        e.path_prefix.startsWith("/")
+      ) {
+        spec.path_prefix = e.path_prefix;
       }
       out.push(spec);
     }
@@ -79,7 +103,9 @@ export interface ReviewerDef {
    * MCP servers to expose to the reviewer agent. Keys are server names used
    * in the reviewer prompt (e.g. "linear"); values are stdio server configs.
    * Env values may reference shell env vars via $VAR or ${VAR} — resolved at
-   * invocation time; unset vars cause `stamp review` to fail fast.
+   * invocation time, gated by an allowlist (operator env
+   * `STAMP_REVIEWER_ENV_ALLOWLIST` and/or per-server `allowed_env`); unset
+   * or non-allowlisted names cause `stamp review` to fail fast.
    */
   mcp_servers?: Record<string, McpServerDef>;
 }
@@ -88,7 +114,26 @@ export interface McpServerDef {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /**
+   * Per-server opt-in allowlist of operator env-var names that this server's
+   * `env:` `$VAR` / `${VAR}` references may resolve. Optional; the operator
+   * env `STAMP_REVIEWER_ENV_ALLOWLIST` is the other allowlist source. A
+   * `$VAR` reference resolves iff `VAR` appears in the union of these two
+   * sources AND is set in `process.env`. Names must be POSIX identifiers
+   * (`[A-Za-z_][A-Za-z0-9_]*`) and are validated at config-load time.
+   */
+  allowed_env?: string[];
 }
+
+/**
+ * POSIX env-var identifier shape. Used to validate `allowed_env` entries at
+ * config-load time (strict — config bytes are committed and re-hashed by
+ * verifiers, a typo there is a bug worth surfacing) and to filter the
+ * comma-separated `STAMP_REVIEWER_ENV_ALLOWLIST` values at invocation time
+ * (lenient — silently drop malformed names rather than block a review on
+ * a harness-injected garbage env string).
+ */
+export const ENV_IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface StampConfig {
   branches: Record<string, BranchRule>;
@@ -258,7 +303,17 @@ function parseTools(input: unknown, reviewerName: string): ToolSpec[] | undefine
             `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
         );
       }
-      const spec: { name: string; allowed_hosts?: string[] } = { name: e.name };
+      if (e.path_prefix !== undefined && e.name !== "WebFetch") {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}].path_prefix is only valid on WebFetch ` +
+            `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
+        );
+      }
+      const spec: {
+        name: string;
+        allowed_hosts?: string[];
+        path_prefix?: string;
+      } = { name: e.name };
       if (e.allowed_hosts !== undefined) {
         if (!Array.isArray(e.allowed_hosts)) {
           throw new Error(
@@ -280,8 +335,32 @@ function parseTools(input: unknown, reviewerName: string): ToolSpec[] | undefine
         // rule consistently for both string and object input shapes.
         if (hosts.length > 0) spec.allowed_hosts = hosts;
       }
+      // path_prefix is opt-in. When present it must be a non-empty string
+      // starting with "/" so the runtime check (`URL.pathname.startsWith(p)`)
+      // is meaningful — a relative or empty value would either match
+      // nothing or match everything, neither of which the operator would
+      // expect from the YAML. AGT-036 / audit M4.
+      if (e.path_prefix !== undefined) {
+        if (typeof e.path_prefix !== "string") {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].path_prefix must be a string`,
+          );
+        }
+        if (e.path_prefix.length === 0) {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].path_prefix must be non-empty`,
+          );
+        }
+        if (!e.path_prefix.startsWith("/")) {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].path_prefix must start with "/" ` +
+              `(got "${e.path_prefix}"). Use the full URL path prefix, e.g. "/repos/" or "/api/".`,
+          );
+        }
+        spec.path_prefix = e.path_prefix;
+      }
       // WebFetch requires non-empty allowed_hosts (the bare-string and
-      // empty-array paths both fail here). The runtime canUseTool callback
+      // empty-array paths both fail here). The runtime PreToolUse hook
       // assumes allowed_hosts is present and non-empty for any WebFetch
       // entry that reaches it.
       if (e.name === "WebFetch" && !spec.allowed_hosts) {
@@ -334,13 +413,47 @@ function parseMcpServers(
       r.env,
       `config.reviewers.${reviewerName}.mcp_servers.${serverName}.env`,
     );
+    const allowed_env = r.allowed_env === undefined ? undefined : parseEnvIdentifierArray(
+      r.allowed_env,
+      `config.reviewers.${reviewerName}.mcp_servers.${serverName}.allowed_env`,
+    );
     out[serverName] = {
       command: r.command,
       ...(args ? { args } : {}),
       ...(env ? { env } : {}),
+      ...(allowed_env ? { allowed_env } : {}),
     };
   }
   return out;
+}
+
+/**
+ * Parse `allowed_env` entries: array of POSIX env-var identifier strings.
+ * Strict at config-load time — the bytes are committed and the hash flows
+ * into `mcp_sha256` attestation, so a typo or invalid identifier here is a
+ * config bug that should surface before the first review, not silently get
+ * dropped (which is what `parseEnvAllowlist` does for the operator env var).
+ *
+ * Exported so the persona-fetch path in `commands/reviewers.ts` (which
+ * builds its YAML-path prefixes from `${source}@${ref}`) reuses the same
+ * regex + wording — single source of truth for the validator.
+ */
+export function parseEnvIdentifierArray(input: unknown, path: string): string[] {
+  if (!Array.isArray(input)) {
+    throw new Error(`${path} must be an array of POSIX env-var identifier strings`);
+  }
+  return input.map((v, i) => {
+    if (typeof v !== "string") {
+      throw new Error(`${path}[${i}] must be a string`);
+    }
+    if (!ENV_IDENTIFIER_REGEX.test(v)) {
+      throw new Error(
+        `${path}[${i}] "${v}" is not a valid POSIX env-var identifier ` +
+          `(must match [A-Za-z_][A-Za-z0-9_]*)`,
+      );
+    }
+    return v;
+  });
 }
 
 function parseStringArray(input: unknown, path: string): string[] {

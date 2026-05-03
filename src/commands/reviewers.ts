@@ -11,6 +11,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
   EXAMPLE_REVIEWER_PROMPT,
   loadConfig,
+  parseEnvIdentifierArray,
   stringifyConfig,
   parseToolsLoose,
   type McpServerDef,
@@ -625,6 +626,12 @@ function validateMcpServersFromSource(
         env[k] = String(v);
       }
       def.env = env;
+    }
+    if (e.allowed_env !== undefined) {
+      def.allowed_env = parseEnvIdentifierArray(
+        e.allowed_env,
+        `config.yaml from ${source}@${ref}: mcp_servers.${name}.allowed_env`,
+      );
     }
     out[name] = def;
   }

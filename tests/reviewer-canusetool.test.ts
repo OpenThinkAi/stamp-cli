@@ -105,7 +105,7 @@ describe("denyIfOutsideRepo (path-scope helper)", () => {
 });
 
 const repoRoot = "/tmp/repo";
-const noWebHosts = new Set<string>();
+const noWebHosts = new Map<string, { path_prefix?: string }>();
 
 describe("checkReviewerTool — Read", () => {
   // AC #5 named target — `Read('/etc/hosts')` must be denied. The unit
@@ -116,7 +116,7 @@ describe("checkReviewerTool — Read", () => {
       toolName: "Read",
       toolInput: { file_path: "/etc/hosts" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /resolves outside repoRoot/);
@@ -128,7 +128,7 @@ describe("checkReviewerTool — Read", () => {
       toolName: "Read",
       toolInput: { file_path: `${repoRoot}/../sibling/secret` },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
   });
@@ -139,7 +139,7 @@ describe("checkReviewerTool — Read", () => {
       toolName: "Read",
       toolInput: { file_path: `${repoRoot}/README.md` },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
   });
@@ -150,7 +150,7 @@ describe("checkReviewerTool — Read", () => {
       toolName: "Read",
       toolInput: { file_path: ".git/stamp/state.db" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /reviewer-internal|denied/);
@@ -162,7 +162,7 @@ describe("checkReviewerTool — Read", () => {
       toolName: "Read",
       toolInput: { file_path: ".stamp/trusted-keys/alice.pub" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /trust anchors|exfil-attractive|denied/);
@@ -182,7 +182,7 @@ describe("checkReviewerTool — Read", () => {
         toolName: "Read",
         toolInput: { file_path: p },
         repoRoot,
-        webFetchHosts: noWebHosts,
+        webFetchPolicy: noWebHosts,
       });
       assert.equal(r.allow, true, `Read('${p}') should be allowed`);
     }
@@ -195,7 +195,7 @@ describe("checkReviewerTool — Grep", () => {
       toolName: "Grep",
       toolInput: { pattern: "TODO" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
   });
@@ -205,7 +205,7 @@ describe("checkReviewerTool — Grep", () => {
       toolName: "Grep",
       toolInput: { pattern: "TODO", path: "src/" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
   });
@@ -215,7 +215,7 @@ describe("checkReviewerTool — Grep", () => {
       toolName: "Grep",
       toolInput: { pattern: "secret", path: "/etc" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /Grep path/);
@@ -228,7 +228,7 @@ describe("checkReviewerTool — Glob", () => {
       toolName: "Glob",
       toolInput: { pattern: "**/*.ts" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
   });
@@ -238,7 +238,7 @@ describe("checkReviewerTool — Glob", () => {
       toolName: "Glob",
       toolInput: { pattern: "**/*.ts", path: "src/" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
   });
@@ -248,7 +248,7 @@ describe("checkReviewerTool — Glob", () => {
       toolName: "Glob",
       toolInput: { pattern: "*", path: "/etc" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
   });
@@ -258,7 +258,7 @@ describe("checkReviewerTool — Glob", () => {
       toolName: "Glob",
       toolInput: { pattern: "/etc/**/*" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /absolute/);
@@ -269,7 +269,7 @@ describe("checkReviewerTool — Glob", () => {
       toolName: "Glob",
       toolInput: { pattern: "../**/*" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /'\.\.' segment/);
@@ -281,7 +281,7 @@ describe("checkReviewerTool — Glob", () => {
         toolName: "Glob",
         toolInput: { pattern: p },
         repoRoot,
-        webFetchHosts: noWebHosts,
+        webFetchPolicy: noWebHosts,
       });
       assert.equal(r.allow, true, `pattern ${p} should be allowed`);
     }
@@ -294,14 +294,17 @@ describe("checkReviewerTool — WebFetch", () => {
   // (canUseTool bypassed when the tool is in allowedTools). It now
   // routes through the same checkReviewerTool function and the same
   // PreToolUse hook — pin the contract here.
-  const hosts = new Set(["api.example.com", "docs.example.com"]);
+  const hosts = new Map<string, { path_prefix?: string }>([
+    ["api.example.com", {}],
+    ["docs.example.com", {}],
+  ]);
 
   it("allows a WebFetch to an allow-listed host", () => {
     const r = checkReviewerTool({
       toolName: "WebFetch",
       toolInput: { url: "https://api.example.com/v1/issues/42" },
       repoRoot,
-      webFetchHosts: hosts,
+      webFetchPolicy: hosts,
     });
     assert.equal(r.allow, true);
   });
@@ -311,7 +314,7 @@ describe("checkReviewerTool — WebFetch", () => {
       toolName: "WebFetch",
       toolInput: { url: "https://evil.example.org/exfil" },
       repoRoot,
-      webFetchHosts: hosts,
+      webFetchPolicy: hosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /not in allowed_hosts/);
@@ -322,7 +325,7 @@ describe("checkReviewerTool — WebFetch", () => {
       toolName: "WebFetch",
       toolInput: { url: 42 },
       repoRoot,
-      webFetchHosts: hosts,
+      webFetchPolicy: hosts,
     });
     assert.equal(r.allow, false);
   });
@@ -332,7 +335,7 @@ describe("checkReviewerTool — WebFetch", () => {
       toolName: "WebFetch",
       toolInput: { url: "not-a-url" },
       repoRoot,
-      webFetchHosts: hosts,
+      webFetchPolicy: hosts,
     });
     assert.equal(r.allow, false);
     if (!r.allow) assert.match(r.reason, /not parseable/);
@@ -343,7 +346,124 @@ describe("checkReviewerTool — WebFetch", () => {
       toolName: "WebFetch",
       toolInput: { url: "https://API.Example.com/x" },
       repoRoot,
-      webFetchHosts: hosts,
+      webFetchPolicy: hosts,
+    });
+    assert.equal(r.allow, true);
+  });
+});
+
+describe("checkReviewerTool — WebFetch path_prefix (AGT-036 / audit M4)", () => {
+  // Mixed list: bare-host entry (no path_prefix) + object-style entries
+  // with path_prefix. Pins both shapes against the same gate so a single
+  // config can use whichever is appropriate per host.
+  const policy = new Map<string, { path_prefix?: string }>([
+    ["linear.app", {}], // domain-level only (back-compat shape)
+    ["api.github.com", { path_prefix: "/repos/" }],
+    ["api.linear.app", { path_prefix: "/api/" }],
+  ]);
+
+  // AC #7: bare host entry — any path passes (back-compat).
+  it("allows any path on a host with no path_prefix", () => {
+    for (const url of [
+      "https://linear.app/",
+      "https://linear.app/some/random/path",
+      "https://linear.app/issues/ABC-1?include=comments",
+    ]) {
+      const r = checkReviewerTool({
+        toolName: "WebFetch",
+        toolInput: { url },
+        repoRoot,
+        webFetchPolicy: policy,
+      });
+      assert.equal(r.allow, true, `URL ${url} should pass (no path_prefix)`);
+    }
+  });
+
+  // AC #7: object-form host with path_prefix — in-prefix passes.
+  it("allows an in-prefix URL on a host with path_prefix", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.github.com/repos/owner/name/pulls/42" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, true);
+  });
+
+  // AC #7: out-of-prefix on the same host is rejected.
+  it("denies an out-of-prefix URL on a host with path_prefix", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.github.com/users/octocat/exfil" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, false);
+    // AC #4: the operator-readable error names the URL and the configured prefix.
+    if (!r.allow) {
+      assert.match(r.reason, /path_prefix "\/repos\/"/);
+      assert.match(r.reason, /api\.github\.com/);
+      assert.match(r.reason, /\/users\/octocat\/exfil/);
+    }
+  });
+
+  // AC #3: in-prefix URL with a query string passes (no query filtering).
+  it("allows an in-prefix URL with a query string", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: {
+        url:
+          "https://api.github.com/repos/owner/name/pulls?state=open&per_page=5",
+      },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, true);
+  });
+
+  // AC #3: pin the no-query-filtering guarantee against drift — even a
+  // long random-looking value must NOT cause a deny.
+  it("ignores query values entirely, even high-entropy ones", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: {
+        url:
+          "https://api.linear.app/api/issues/ABC-1?token=" +
+          "x".repeat(120),
+      },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, true);
+  });
+
+  // AC #7: mixed-list enforcement is per-host, not per-list.
+  it("enforces path_prefix only on hosts that have one configured", () => {
+    const free = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://linear.app/anything-goes/here" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(free.allow, true);
+    const denied = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.linear.app/internal/secret" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(denied.allow, false);
+  });
+
+  // path_prefix matching is plain string-prefix on URL.pathname. Pin the
+  // boundary case: a path that equals the prefix exactly is allowed,
+  // matching how `String.prototype.startsWith` behaves.
+  it("allows the prefix path itself (string-prefix match)", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.github.com/repos/" },
+      repoRoot,
+      webFetchPolicy: policy,
     });
     assert.equal(r.allow, true);
   });
@@ -358,7 +478,7 @@ describe("checkReviewerTool — pass-through", () => {
       toolName: "mcp__stamp-verdict__submit_verdict",
       toolInput: { verdict: "approved", prose: "looks good" },
       repoRoot,
-      webFetchHosts: noWebHosts,
+      webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
   });

@@ -52,12 +52,14 @@ import {
   type AttestationPayload,
 } from "../src/lib/attestation.ts";
 import {
+  expandEnvRefs,
+  parseEnvAllowlist,
   parseLastLineVerdict,
   stripLastLineVerdict,
 } from "../src/lib/reviewer.ts";
 import { parseConfigFromYaml } from "../src/lib/config.ts";
 import { checkMcpCommand } from "../src/lib/toolAllowlist.ts";
-import { hashTools } from "../src/lib/reviewerHash.ts";
+import { hashMcpServers, hashTools } from "../src/lib/reviewerHash.ts";
 import { generateKeypair } from "../src/lib/keys.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import { decideMirrorStatus } from "../src/lib/mirrorStatus.ts";
@@ -1016,6 +1018,83 @@ reviewers:
       /only valid on WebFetch/,
     );
   });
+
+  // AGT-036 / audit M4: optional per-host URL-shape pin.
+  it("accepts WebFetch with path_prefix", () => {
+    const c = parseConfigFromYaml(
+      cfg([
+        {
+          name: "WebFetch",
+          allowed_hosts: ["api.github.com"],
+          path_prefix: "/repos/",
+        },
+      ]),
+    );
+    const t = c.reviewers.r!.tools![0]! as {
+      name: string;
+      allowed_hosts: string[];
+      path_prefix?: string;
+    };
+    assert.equal(t.name, "WebFetch");
+    assert.deepEqual(t.allowed_hosts, ["api.github.com"]);
+    assert.equal(t.path_prefix, "/repos/");
+  });
+
+  it("rejects path_prefix on non-WebFetch tools", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(cfg([{ name: "Read", path_prefix: "/repos/" }])),
+      /only valid on WebFetch/,
+    );
+  });
+
+  it("rejects path_prefix that does not start with '/'", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([
+            {
+              name: "WebFetch",
+              allowed_hosts: ["api.github.com"],
+              path_prefix: "repos/",
+            },
+          ]),
+        ),
+      /must start with "\/"/,
+    );
+  });
+
+  it("rejects empty-string path_prefix", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([
+            {
+              name: "WebFetch",
+              allowed_hosts: ["api.github.com"],
+              path_prefix: "",
+            },
+          ]),
+        ),
+      /must be non-empty/,
+    );
+  });
+
+  it("rejects non-string path_prefix", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([
+            {
+              name: "WebFetch",
+              allowed_hosts: ["api.github.com"],
+              path_prefix: 42,
+            },
+          ]),
+        ),
+      /must be a string/,
+    );
+  });
 });
 
 describe("checkMcpCommand (MCP launcher allowlist)", () => {
@@ -1102,6 +1181,70 @@ describe("hashTools (backward-compat between string and object forms)", () => {
     ]);
     assert.notEqual(a, c);
   });
+
+  // AGT-036 / audit M4: adding the optional path_prefix field must NOT
+  // change the hash for existing entries that don't use it. Existing v3
+  // attestations were computed before path_prefix existed; if the loose
+  // parser added a default value or the canonicalizer emitted an absent
+  // field, those attestations would fail re-verification.
+  it("adding path_prefix support doesn't drift the hash of pre-AGT-036 entries", () => {
+    const before = hashTools([
+      { name: "WebFetch", allowed_hosts: ["api.github.com"] },
+    ]);
+    const same = hashTools([
+      { name: "WebFetch", allowed_hosts: ["api.github.com"] },
+    ]);
+    assert.equal(before, same);
+    // Adding path_prefix IS a config change and SHOULD produce a different
+    // hash — that's the security-meaningful difference we want signers to
+    // attest to.
+    const withPrefix = hashTools([
+      {
+        name: "WebFetch",
+        allowed_hosts: ["api.github.com"],
+        path_prefix: "/repos/",
+      },
+    ]);
+    assert.notEqual(before, withPrefix);
+  });
+});
+
+describe("hashMcpServers (backward-compat with new allowed_env field)", () => {
+  // AGT-038 / audit L2: adding the optional allowed_env field must NOT
+  // change the hash for existing mcp_servers entries that don't use it.
+  // Existing v3 attestations were computed before allowed_env existed;
+  // canonicalize() walks structurally and naturally omits absent keys
+  // from the JSON, so absence is a no-op for the hash. This test pins
+  // that invariant — symmetric to the path_prefix non-drift test above.
+  it("adding allowed_env support doesn't drift the hash of entries that don't use it", () => {
+    const before = hashMcpServers({
+      linear: {
+        command: "npx",
+        args: ["-y", "@tacticlabs/linear-mcp-server"],
+        env: { LINEAR_API_KEY: "$LINEAR_API_KEY" },
+      },
+    });
+    const same = hashMcpServers({
+      linear: {
+        command: "npx",
+        args: ["-y", "@tacticlabs/linear-mcp-server"],
+        env: { LINEAR_API_KEY: "$LINEAR_API_KEY" },
+      },
+    });
+    assert.equal(before, same);
+    // Adding allowed_env IS a config change and SHOULD produce a different
+    // hash — that's the security-meaningful difference verifiers want to
+    // see as drift when it flips.
+    const withAllowed = hashMcpServers({
+      linear: {
+        command: "npx",
+        args: ["-y", "@tacticlabs/linear-mcp-server"],
+        env: { LINEAR_API_KEY: "$LINEAR_API_KEY" },
+        allowed_env: ["LINEAR_API_KEY"],
+      },
+    });
+    assert.notEqual(before, withAllowed);
+  });
 });
 
 describe("parseCommitAttestation (trailer size cap)", () => {
@@ -1155,6 +1298,158 @@ describe("injectClaudeSection (CLAUDE.md)", () => {
       out.includes(STAMP_BEGIN),
       false,
       "CLAUDE.md must not contain the AGENTS.md begin marker",
+    );
+  });
+});
+
+describe("expandEnvRefs (MCP env-var allowlist)", () => {
+  // Helper: scoped env mutation that always restores.
+  const withEnv = (vars: Record<string, string | undefined>, fn: () => void) => {
+    const prev: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(vars)) {
+      prev[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      fn();
+    } finally {
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  };
+
+  const ctx = (allowlist: Set<string>) => ({
+    reviewer: "r1",
+    server: "linear",
+    field: "env.LINEAR_API_KEY",
+    allowlist,
+  });
+
+  it("resolves a $VAR reference whose name is in the allowlist", () => {
+    withEnv({ LINEAR_API_KEY: "secret-123" }, () => {
+      const out = expandEnvRefs("$LINEAR_API_KEY", ctx(new Set(["LINEAR_API_KEY"])));
+      assert.equal(out, "secret-123");
+    });
+  });
+
+  it("resolves ${VAR} brace form whose name is in the allowlist", () => {
+    withEnv({ LINEAR_API_KEY: "secret-123" }, () => {
+      const out = expandEnvRefs("${LINEAR_API_KEY}", ctx(new Set(["LINEAR_API_KEY"])));
+      assert.equal(out, "secret-123");
+    });
+  });
+
+  it("rejects a name not in the allowlist with a message naming the var, reviewer, server, and both mechanisms", () => {
+    withEnv({ AWS_SECRET_ACCESS_KEY: "should-never-leak" }, () => {
+      // Empty allowlist — neither operator env nor per-config opt-in lists this name.
+      assert.throws(
+        () => expandEnvRefs("$AWS_SECRET_ACCESS_KEY", ctx(new Set())),
+        (err: Error) => {
+          assert.match(err.message, /AWS_SECRET_ACCESS_KEY/);
+          assert.match(err.message, /reviewer "r1"/);
+          assert.match(err.message, /mcp_servers\.linear/);
+          assert.match(err.message, /STAMP_REVIEWER_ENV_ALLOWLIST/);
+          assert.match(err.message, /allowed_env/);
+          return true;
+        },
+      );
+    });
+  });
+
+  it("default-deny: throws when the allowlist is empty even if the var is set in process.env", () => {
+    withEnv({ LINEAR_API_KEY: "secret-123" }, () => {
+      assert.throws(
+        () => expandEnvRefs("$LINEAR_API_KEY", ctx(new Set())),
+        /not in the env allowlist/,
+      );
+    });
+  });
+
+  it("preserves the allowlisted-but-unset error path with its own distinguishable message", () => {
+    withEnv({ LINEAR_API_KEY: undefined }, () => {
+      // LINEAR_API_KEY is allowlisted but not exported — distinct from the
+      // not-allowlisted case (different remediation: export the var, not
+      // widen the allowlist).
+      assert.throws(
+        () => expandEnvRefs("$LINEAR_API_KEY", ctx(new Set(["LINEAR_API_KEY"]))),
+        (err: Error) => {
+          assert.match(err.message, /LINEAR_API_KEY/);
+          assert.match(err.message, /not set in the environment/);
+          assert.match(err.message, /Export it before running/);
+          return true;
+        },
+      );
+    });
+  });
+});
+
+describe("parseEnvAllowlist (STAMP_REVIEWER_ENV_ALLOWLIST parsing)", () => {
+  it("returns an empty set for undefined / empty string", () => {
+    assert.equal(parseEnvAllowlist(undefined).size, 0);
+    assert.equal(parseEnvAllowlist("").size, 0);
+  });
+
+  it("splits on comma and trims whitespace", () => {
+    const set = parseEnvAllowlist("  LINEAR_API_KEY ,GITHUB_TOKEN, NOTION_API_KEY ");
+    assert.deepEqual([...set].sort(), ["GITHUB_TOKEN", "LINEAR_API_KEY", "NOTION_API_KEY"]);
+  });
+
+  it("silently drops names that don't match the POSIX identifier regex", () => {
+    // Operator-env source is lenient by design — harness-injected garbage
+    // (e.g. trailing commas, names with hyphens, leading digits) shouldn't
+    // block a review. The strict-validation path is per-config `allowed_env`.
+    const set = parseEnvAllowlist("OK_NAME,bad-name,3LEADING_DIGIT,,VALID_2");
+    assert.deepEqual([...set].sort(), ["OK_NAME", "VALID_2"]);
+  });
+});
+
+describe("parseMcpServers (allowed_env field)", () => {
+  // Helper: minimal config wrapping a single reviewer with one MCP server
+  // declaring `allowed_env`. Mirrors the existing parseTools helper shape.
+  const cfg = (allowed_env: unknown) => `
+branches:
+  main: { required: [r] }
+reviewers:
+  r:
+    prompt: ./r.md
+    mcp_servers:
+      linear:
+        command: npx
+        args: ["-y", "@tacticlabs/linear-mcp-server"]
+        env:
+          LINEAR_API_KEY: $LINEAR_API_KEY
+        allowed_env: ${JSON.stringify(allowed_env)}
+`;
+
+  it("accepts an array of valid POSIX identifier strings", () => {
+    const c = parseConfigFromYaml(cfg(["LINEAR_API_KEY", "GITHUB_TOKEN"]));
+    const srv = c.reviewers.r!.mcp_servers!.linear!;
+    assert.deepEqual(srv.allowed_env, ["LINEAR_API_KEY", "GITHUB_TOKEN"]);
+  });
+
+  it("rejects allowed_env that isn't an array", () => {
+    assert.throws(
+      () => parseConfigFromYaml(cfg("LINEAR_API_KEY")),
+      /allowed_env must be an array/,
+    );
+  });
+
+  it("rejects allowed_env entries with hyphens / dots / leading digits", () => {
+    for (const bad of ["bad-name", "bad.name", "3LEADING"]) {
+      assert.throws(
+        () => parseConfigFromYaml(cfg([bad])),
+        /not a valid POSIX env-var identifier/,
+      );
+    }
+  });
+
+  it("rejects non-string entries", () => {
+    assert.throws(
+      () => parseConfigFromYaml(cfg([42])),
+      /must be a string/,
     );
   });
 });
