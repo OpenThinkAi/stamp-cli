@@ -36,7 +36,6 @@ import {
   peekPrunable,
   pruneReviews,
   recentReviewsByReviewer,
-  recordReview,
 } from "../src/lib/db.ts";
 import { parseRetentionDuration } from "../src/lib/duration.ts";
 import { stampStateDbPath } from "../src/lib/paths.ts";
@@ -190,6 +189,11 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     repo = join(tmp, "repo");
     mkdirSync(repo);
     git(["init", "-q", "-b", "main", repo], tmp);
+    // Set a local git identity so the `--allow-empty` commit below works on
+    // CI runners that don't have a global identity configured. Same pattern
+    // as tests/git.test.ts and tests/post-receive.test.ts.
+    git(["config", "user.email", "t@example.com"], repo);
+    git(["config", "user.name", "Test"], repo);
     git(["commit", "--allow-empty", "-q", "-m", "init"], repo);
     dbPath = stampStateDbPath(repo);
   });
@@ -300,7 +304,11 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     );
     assert.match(stdout, /\[dry-run\] would prune 3 rows/);
     assert.match(stdout, /security: 2 rows/);
-    assert.match(stdout, /standards: 1 rows/);
+    // count===1 must use the singular form. Older copies of this code
+    // hardcoded "rows" at both call sites, producing "standards: 1 rows" —
+    // the assertion below pins the pluralisation fix.
+    assert.match(stdout, /standards: 1 row\b/);
+    assert.doesNotMatch(stdout, /1 rows/);
 
     // Rows still present.
     const db = openDb(dbPath);
@@ -321,6 +329,11 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
       runPrune({ olderThan: "7d" }),
     );
     assert.match(stdout, /^2 rows pruned \(2 reviewers affected\); db size \d+ → \d+ bytes/m);
+    // count===1 in the live-path per-reviewer breakdown must use the
+    // singular form. Pins the same pluralisation fix as the dry-run test.
+    assert.match(stdout, /security: 1 row\b/);
+    assert.match(stdout, /standards: 1 row\b/);
+    assert.doesNotMatch(stdout, /1 rows/);
 
     // Rows actually gone.
     const db = openDb(dbPath);
@@ -369,8 +382,3 @@ function captureStdout(fn: () => void): string {
   }
   return chunks.join("");
 }
-
-// Silence unused imports when ts strict checks fire — recordReview is
-// referenced indirectly via insertAt's raw INSERT, which intentionally
-// bypasses recordReview to set explicit created_at strings.
-void recordReview;

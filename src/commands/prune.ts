@@ -52,7 +52,7 @@ export function runPrune(opts: PruneOptions): void {
         `[dry-run] would prune ${peek.total} row${peek.total === 1 ? "" : "s"} older than ${humanLabel} (${peek.perReviewer.length} reviewer${peek.perReviewer.length === 1 ? "" : "s"} affected):`,
       );
       for (const row of peek.perReviewer) {
-        console.log(`  ${row.reviewer}: ${row.count} rows`);
+        console.log(`  ${row.reviewer}: ${row.count} row${row.count === 1 ? "" : "s"}`);
       }
       return;
     }
@@ -71,7 +71,7 @@ export function runPrune(opts: PruneOptions): void {
       `${result.total} row${result.total === 1 ? "" : "s"} pruned (${result.perReviewer.length} reviewer${result.perReviewer.length === 1 ? "" : "s"} affected); db size ${sizeBefore} → ${sizeAfter} bytes`,
     );
     for (const row of result.perReviewer) {
-      console.log(`  ${row.reviewer}: ${row.count} rows`);
+      console.log(`  ${row.reviewer}: ${row.count} row${row.count === 1 ? "" : "s"}`);
     }
   } finally {
     db.close();
