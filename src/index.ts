@@ -377,9 +377,17 @@ program
   )
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")
-  .action(async (opts: { diff: string; only?: string }) => {
+  .option(
+    "--allow-large",
+    "bypass the 200KB diff size cap (raise STAMP_REVIEW_DIFF_CAP_BYTES for a different threshold)",
+  )
+  .action(async (opts: { diff: string; only?: string; allowLarge?: boolean }) => {
     try {
-      await runReview({ diff: opts.diff, only: opts.only });
+      await runReview({
+        diff: opts.diff,
+        only: opts.only,
+        allowLarge: opts.allowLarge,
+      });
     } catch (err) {
       handleCliError(err);
     }

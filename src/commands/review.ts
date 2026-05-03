@@ -19,7 +19,19 @@ import { serializeToolCalls } from "../lib/toolCalls.js";
 export interface ReviewOptions {
   diff: string;
   only?: string;
+  /**
+   * Bypass the per-invocation diff size cap (default 200KB). Required when
+   * the diff legitimately includes large generated content, vendored
+   * dependency updates, or multi-file refactors that exceed the cap. Each
+   * required reviewer receives the full diff in its user prompt, so an
+   * unbounded diff is also a denial-of-wallet vector against any team
+   * running stamp-cli on a public repo — the cap is the safe default.
+   */
+  allowLarge?: boolean;
 }
+
+/** Pre-invocation diff size cap, bytes. Operator-overridable via env var. */
+const DEFAULT_DIFF_SIZE_CAP_BYTES = 200 * 1024;
 
 export async function runReview(opts: ReviewOptions): Promise<void> {
   const repoRoot = findRepoRoot();
@@ -61,6 +73,20 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       `No changes between ${resolved.base_sha.slice(0, 8)} and ${resolved.head_sha.slice(0, 8)}.`,
     );
     return;
+  }
+
+  // Diff size cap: every required reviewer receives the full diff in its
+  // user prompt, so an attacker (or a legitimate-but-massive change) can
+  // bill the operator's Anthropic account at scale per stamp review run.
+  // Cap bytes-of-diff up front; operators bypass deliberately with
+  // --allow-large or by setting STAMP_REVIEW_DIFF_CAP_BYTES higher.
+  const diffCapBytes = parseDiffCapEnv() ?? DEFAULT_DIFF_SIZE_CAP_BYTES;
+  if (!opts.allowLarge && resolved.diff.length > diffCapBytes) {
+    throw new Error(
+      `diff is ${resolved.diff.length} bytes; cap is ${diffCapBytes} bytes (≈${Math.round(diffCapBytes / 1024)}KB). ` +
+        `Each reviewer receives the full diff, so an oversized review is also expensive at scale. ` +
+        `Re-run with --allow-large if this is intentional, or raise the cap with STAMP_REVIEW_DIFF_CAP_BYTES.`,
+    );
   }
 
   // SECURITY-CRITICAL: read .stamp/config.yml AND each reviewer's prompt
@@ -203,6 +229,14 @@ function printReview(
   console.log(`verdict: ${result.verdict}`);
   console.log(bar);
   console.log();
+}
+
+function parseDiffCapEnv(): number | null {
+  const raw = process.env["STAMP_REVIEW_DIFF_CAP_BYTES"];
+  if (!raw) return null;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
 }
 
 function printError(reviewer: string, err: unknown): void {
