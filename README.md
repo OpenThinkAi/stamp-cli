@@ -18,7 +18,7 @@ Part of the [OpenThink](https://openthink.dev) suite.
 ## Install
 
 ```sh
-npm install -g stamp-cli
+npm install -g @openthink/stamp
 ```
 
 Node 22.5+ required (we use `node:sqlite` and `node:crypto`'s Ed25519 APIs,
@@ -206,7 +206,7 @@ stamp keys trust <pub-file>                # deposit a key into .stamp/trusted-k
 **Maintenance:**
 
 ```
-stamp update                               # upgrade stamp-cli to the latest npm release
+stamp update                               # upgrade stamp to the latest npm release
 ```
 
 ## Configuration

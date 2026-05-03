@@ -306,7 +306,7 @@ stamp keys export                           # print public key PEM
 stamp keys trust <pub-file>                 # deposit a pub key into .stamp/trusted-keys/
 
 # Maintenance
-stamp update                                # npm install -g stamp-cli@latest
+stamp update                                # npm install -g @openthink/stamp@latest
 ```
 
 **Output format: prose.** Not JSON. The consumer is another Claude agent; LLMs read prose natively and JSON adds parse overhead without helping the reader. Control flow happens via exit codes.

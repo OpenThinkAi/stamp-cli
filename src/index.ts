@@ -448,7 +448,7 @@ program
 program
   .command("update")
   .description(
-    "upgrade stamp-cli to the latest npm release (runs 'npm install -g stamp-cli@latest')",
+    "upgrade stamp to the latest npm release (runs 'npm install -g @openthink/stamp@latest')",
   )
   .action(() => wrap(() => runUpdate()));
 

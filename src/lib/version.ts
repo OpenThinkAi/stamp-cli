@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Read version from the package.json that ships alongside the installed bundle.
-// Walk up from the current module's directory until we find the stamp-cli
+// Walk up from the current module's directory until we find the @openthink/stamp
 // package.json — robust to both the bundled shape (dist/...js → ../package.json)
 // and dev (tsx src/index.ts → ../../package.json).
 export function readPackageVersion(): string {
@@ -12,7 +12,7 @@ export function readPackageVersion(): string {
     try {
       const raw = readFileSync(join(dir, "package.json"), "utf8");
       const pkg = JSON.parse(raw) as { name?: string; version?: string };
-      if (pkg.name === "stamp-cli" && pkg.version) return pkg.version;
+      if (pkg.name === "@openthink/stamp" && pkg.version) return pkg.version;
     } catch {
       // not this directory
     }
@@ -20,5 +20,5 @@ export function readPackageVersion(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  throw new Error("could not locate stamp-cli package.json to read version");
+  throw new Error("could not locate @openthink/stamp package.json to read version");
 }

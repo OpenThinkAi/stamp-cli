@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readPackageVersion } from "../lib/version.js";
 
-const PKG_NAME = "stamp-cli";
+const PKG_NAME = "@openthink/stamp";
 
 // Strips prerelease/build suffix and compares as numeric major.minor.patch.
 // Returns >0 if a > b, <0 if a < b, 0 if equal. Good enough for stamp's
@@ -74,7 +74,7 @@ export function runUpdate(): void {
         `  (a) re-run with elevated permissions: sudo stamp update\n` +
         `  (b) configure npm to use a user-writable prefix — see npm's docs for\n` +
         `      "Resolving EACCES permissions errors when installing packages globally"\n` +
-        `If 'stamp-cli' was installed via a different tool (pnpm, yarn), upgrade\n` +
+        `If '@openthink/stamp' was installed via a different tool (pnpm, yarn), upgrade\n` +
         `through that tool instead — this command only uses 'npm install -g'.`,
     );
   }
