@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-stamp-cli is pre-1.0. Only the latest published `0.x` version on npm receives
+Only the latest published version of `@openthink/stamp` on npm receives
 security fixes. Users are expected to upgrade promptly; semver caveats noted
 in [`docs/ROADMAP.md`](./docs/ROADMAP.md) apply.
 

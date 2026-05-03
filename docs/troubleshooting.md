@@ -167,7 +167,7 @@ echo q | stamp ui              # won't work
 stamp ui | less                # won't work either
 ```
 
-Modern versions of stamp-cli detect this before invoking ink and print a clear error + exit 1. If you see the "Raw mode is not supported" stacktrace instead, you're on an old build — `npm install -g stamp-cli` the latest.
+Modern versions of stamp detect this before invoking ink and print a clear error + exit 1. If you see the "Raw mode is not supported" stacktrace instead, you're on an old build — `npm install -g @openthink/stamp` the latest.
 
 ---
 

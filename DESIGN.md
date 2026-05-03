@@ -306,7 +306,7 @@ stamp keys export                           # print public key PEM
 stamp keys trust <pub-file>                 # deposit a pub key into .stamp/trusted-keys/
 
 # Maintenance
-stamp update                                # npm install -g stamp-cli@latest
+stamp update                                # npm install -g @openthink/stamp@latest
 ```
 
 **Output format: prose.** Not JSON. The consumer is another Claude agent; LLMs read prose natively and JSON adds parse overhead without helping the reader. Control flow happens via exit codes.
@@ -392,4 +392,4 @@ Matches the `open-think` shape exactly.
 
 ## Naming note
 
-Tool brand is **stamp** (binary `stamp`, npm package `stamp-cli`). "Stamp" survives as the naming metaphor even though there's no `stamps` table — reviewers stamp a diff with their approval, the remote checks for the required stamps before accepting a push.
+Tool brand is **stamp** (project `stamp-cli`, binary `stamp`, npm package `@openthink/stamp`). "Stamp" survives as the naming metaphor even though there's no `stamps` table — reviewers stamp a diff with their approval, the remote checks for the required stamps before accepting a push.

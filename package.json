@@ -1,6 +1,6 @@
 {
-  "name": "stamp-cli",
-  "version": "0.7.19",
+  "name": "@openthink/stamp",
+  "version": "1.0.0",
   "type": "module",
   "description": "Local, headless pull-request system for agent-to-agent code review workflows",
   "bin": {
