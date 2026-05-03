@@ -105,18 +105,51 @@ export type BypassActor =
   | { type: "OrganizationAdmin"; id: 1 };
 
 /**
- * Parse a github.com origin URL into { owner, repo }. The single regex
- * matches all the URL shapes git supports for github (ssh://, scp-style
- * git@host:path, https://) via the `[:/]` character class. The non-greedy
- * repo segment plus the optional `\.git$` suffix correctly handles repos
- * with dots in their names (e.g. `has.dots.git` → repo = `has.dots`,
- * `has.dots` (no .git) → `has.dots`, `repo.git` → `repo`). Returns null
- * on a non-github URL.
+ * Parse a github.com origin URL into { owner, repo }. Two distinct shapes
+ * git supports for github are matched independently so an attacker can't
+ * smuggle "github.com/<owner>/<repo>" through the path or userinfo of a
+ * non-github URL:
+ *
+ *   - scp-style: anchored `^<user>@github.com:<owner>/<repo>[.git]?$`
+ *   - url-style: parsed via `new URL()`, then host-component equality
+ *     against "github.com" (not substring) and an explicit empty-port
+ *     check (preserves the documented `ssh://git@github.com:22/...`
+ *     limitation — see tests/validators.test.ts).
+ *
+ * Repo names with dots or dashes (`has.dots`, `foo-bar`) parse correctly;
+ * the non-greedy repo segment plus optional `\.git$` suffix handles the
+ * 0.7.1 dotted-repo bug. Returns null on any non-github URL or on URLs
+ * whose host merely contains "github.com" as a substring.
  */
 export function parseGithubOriginUrl(
   url: string,
 ): { owner: string; repo: string } | null {
-  const m = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
+  const scp = url.match(
+    /^[A-Za-z0-9._-]+@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/,
+  );
+  if (scp && scp[1] && scp[2]) {
+    return { owner: scp[1], repo: scp[2] };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.hostname.toLowerCase() !== "github.com") return null;
+  if (
+    parsed.protocol !== "https:" &&
+    parsed.protocol !== "http:" &&
+    parsed.protocol !== "ssh:" &&
+    parsed.protocol !== "git:"
+  ) {
+    return null;
+  }
+  if (parsed.port !== "") return null;
+
+  const path = parsed.pathname.replace(/^\//, "");
+  const m = path.match(/^([^/]+)\/([^/]+?)(?:\.git)?$/);
   return m && m[1] && m[2] ? { owner: m[1], repo: m[2] } : null;
 }
 

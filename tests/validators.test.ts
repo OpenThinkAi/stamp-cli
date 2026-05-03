@@ -134,6 +134,33 @@ describe("parseGithubOriginUrl", () => {
       url: "ssh://git@stamp.example.com:2222/srv/git/myproject.git",
       expect: null,
     },
+    // Attacker-shape rejections — the unanchored regex from before AGT-040
+    // matched `github.com[:/]` anywhere in the URL, so any non-github host
+    // whose path or userinfo happened to contain a "github.com/owner/repo"
+    // tail spoofed an owner/repo into the two GitHub-API call sites
+    // (init.ts:applyGitHubRulesetWithReporting, provision.ts:--migrate-existing).
+    // Each case here pins one concrete attacker shape that must continue
+    // to return null.
+    {
+      name: "path-injected URL on a non-github host returns null",
+      url: "https://attacker.example.com/path/github.com/owner/repo.git",
+      expect: null,
+    },
+    {
+      name: "subdomain-spoofed host (github.com.attacker.com) returns null",
+      url: "https://github.com.attacker.com/owner/repo.git",
+      expect: null,
+    },
+    {
+      name: "substring-spoofed host (evilgithub.com) returns null",
+      url: "https://evilgithub.com/owner/repo.git",
+      expect: null,
+    },
+    {
+      name: "userinfo-spoofed URL pointing at non-github host returns null",
+      url: "https://user@evil.com/github.com/owner/repo.git",
+      expect: null,
+    },
   ];
   for (const c of cases) {
     it(c.name, () => {
