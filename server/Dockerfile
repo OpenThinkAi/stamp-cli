@@ -16,7 +16,7 @@ RUN npm run build
 # image runs sshd exposed to the internet on every stamp-server deploy, so
 # being on a supported package set matters. Pinned by digest for the same
 # reason as the builder.
-FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 
 # Restricted shell: git-shell prevents authenticated SSH users from getting
 # an interactive bash. Pushers can still run git-receive-pack / git-upload-
