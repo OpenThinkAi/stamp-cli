@@ -306,6 +306,24 @@ When a reviewer doesn't call `submit_verdict` and its response also lacks a pars
 
 ---
 
+## Pruning old reviews from `state.db`
+
+Every `stamp review` records the reviewer's full prose response (including any diff lines or file content the reviewer's `Read`/`Grep`/`Glob` calls pulled in) into `<repoRoot>/.git/stamp/state.db`. The file is per-machine, never pushed, and chmoded `0600` on every `openDb`, but on long-lived repos the row count and the verbatim prose accumulate indefinitely. Two operator situations call for a prune:
+
+- **Long-lived repos.** Months of review history can grow `state.db` to several MB; the bulk is the `issues` column (verbatim prose). A periodic `stamp prune --older-than 90d` keeps the file's size bounded without losing the most recent verdicts that `stamp reviewers show` and `stamp log --reviews` rely on.
+- **Rotating sensitive content out of local prose.** If a recent diff carried a credential or other sensitive string and a reviewer quoted it back in its prose, that text is now in `state.db`. Pruning rows older than the rotation window strips the prose along with them.
+
+Use `--dry-run` first to preview what would be deleted (per-reviewer breakdown, total row count, no DB writes):
+
+```sh
+stamp prune --older-than 30d --dry-run
+stamp prune --older-than 30d           # actually delete + VACUUM
+```
+
+`<duration>` accepts `<n>d` (days), `<n>h` (hours), or `<n>m` (minutes) — e.g. `30d`, `12h`, `90m`. Whitespace, leading `+`, and zero values are rejected. The non-dry-run path runs `VACUUM` after the delete so the file actually shrinks; the output line `<n> rows pruned (...); db size <before> → <after> bytes` is the "did anything happen" feedback signal. **Pruned rows are unrecoverable** — `state.db` is per-machine and never pushed, so there's no upstream copy to restore from. If you want to keep an audit trail of older verdicts, copy `state.db` aside before pruning.
+
+---
+
 ## When all else fails
 
 - `stamp log --limit 5` — see what recently landed (or didn't)

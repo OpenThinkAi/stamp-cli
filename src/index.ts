@@ -26,6 +26,7 @@ import {
 } from "./commands/keys.js";
 import { runLog } from "./commands/log.js";
 import { runMerge } from "./commands/merge.js";
+import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
 import { runServerConfig } from "./commands/server.js";
@@ -450,6 +451,27 @@ program
     "upgrade stamp-cli to the latest npm release (runs 'npm install -g stamp-cli@latest')",
   )
   .action(() => wrap(() => runUpdate()));
+
+program
+  .command("prune")
+  .description(
+    "delete review-history rows older than <duration> from the per-machine state.db, then VACUUM. Use --dry-run first to preview.",
+  )
+  .requiredOption(
+    "--older-than <duration>",
+    "retention cutoff, e.g. 30d (days), 12h (hours), 90m (minutes)",
+  )
+  .option(
+    "--dry-run",
+    "print the per-reviewer breakdown that would be pruned without modifying the DB",
+  )
+  .action((opts: { olderThan: string; dryRun?: boolean }) => {
+    try {
+      runPrune({ olderThan: opts.olderThan, dryRun: opts.dryRun });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
 
 program
   .command("ui")
