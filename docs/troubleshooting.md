@@ -300,6 +300,22 @@ See `docs/personas.md` for the full design discussion (operator-env vs. per-conf
 
 ---
 
+## Hiding internal MCP server names from the public mirror (`STAMP_HASH_MCP_NAMES`)
+
+The `Stamp-Payload` trailer's `tool_calls[]` audit trace records each tool the reviewer's agent invoked. Tool *inputs* are SHA-256 hashed (so file paths, search terms, and MCP arguments stay out of the mirror), but tool *names* are recorded verbatim. Built-in SDK tools (`Read`, `Grep`, `Bash`, …) are not sensitive, but MCP-hosted tools are named `mcp__<server>__<tool>` — so a reviewer that talks to an internal MCP server (e.g. `mcp__acme-billing__lookup_invoice`, `mcp__internal-hr__get_employee`) discloses the existence and naming of that internal service to anyone with read access to the GitHub mirror.
+
+Operators in this position can opt in to hashing:
+
+```sh
+export STAMP_HASH_MCP_NAMES=1
+```
+
+on the machine that runs `stamp merge`. The attestation builder then rewrites MCP names to `mcp__sha256:<hex8>__sha256:<hex8>` (truncated SHA-256 of the server and tool segments) before signing. Built-in tool names are unaffected. The local `state.db` rows used by `stamp reviewers show` continue to carry verbatim names, so operators retain full local visibility — only the mirrored attestation is redacted.
+
+Off by default for backwards compatibility. The verifier treats `tool_calls[].tool` as opaque audit data, so flipping the flag does not affect signature verification or any existing stamp repo.
+
+---
+
 ## `stamp review` fails with "spooled to .git/stamp/failed-parses/…"
 
 When a reviewer doesn't call `submit_verdict` and its response also lacks a parseable `VERDICT:` line as its last non-empty line, `stamp review` writes the full raw model output to a per-machine spool file at `<repoRoot>/.git/stamp/failed-parses/<unix-ms>-<reviewer-slug>.txt` (mode `0600`; parent directory mode `0700`) and surfaces only the path, the reviewer name, and the line count in the thrown Error. The raw output stays out of stderr — and out of any centralised log collector that pipes stderr — because reviewer prose frequently quotes diff lines verbatim. To inspect the spooled output, `cat` the path printed in the error; to clean up old spools, delete files under that directory by hand for now (an automated prune is filed as AGT-044).
