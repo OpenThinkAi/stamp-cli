@@ -130,12 +130,44 @@ if [[ -n "$FROM_TARBALL" ]]; then
     echo "error: --from-tarball file not found at $FROM_TARBALL" >&2
     exit 1
   fi
+  # Pre-extraction entry-name check. Reject the tarball outright if any
+  # entry is absolute (`^/`) or contains a `..` path segment. We do this
+  # ahead of extraction because (a) busybox tar (older Alpine images) has
+  # had weaker path-traversal protections than GNU tar, and (b) even with
+  # GNU tar refusing such entries by default, an explicit reject + clear
+  # error message is more useful than tar's silent skip + nonzero exit.
+  # The regex matches a leading `/` OR a `..` segment bounded by start-of-
+  # string / `/` on each side (so legitimate names like `..foo` or
+  # `foo..bar` are not rejected). `tar -tzf` lists entries without
+  # extracting; works identically with busybox or GNU tar.
+  echo "→ inspecting tarball entries before extraction"
+  if BAD=$(tar -tzf "$FROM_TARBALL" | grep -E '^/|(^|/)\.\.(/|$)' | head -n 1); then
+    if [[ -n "$BAD" ]]; then
+      echo "error: tarball $FROM_TARBALL contains unsafe entry: $BAD" >&2
+      echo "       entries must not be absolute (^/) or contain a '..' path segment" >&2
+      exit 1
+    fi
+  fi
+
   echo "→ extracting existing repo from tarball into $REPO_DIR"
   mkdir -p "$REPO_DIR"
   # The tarball was created with `tar -czf - -C <parent> <bare.git>`, so it
   # contains a single top-level directory (the bare clone) — strip that
   # component so contents land directly in REPO_DIR.
-  tar -xzf "$FROM_TARBALL" -C "$REPO_DIR" --strip-components=1
+  #
+  # Hardening flags (GNU tar; ignored or no-op on busybox tar):
+  #   --no-same-owner        ignore uid/gid in tar headers; chown to current
+  #                          user. Prevents a tarball from claiming root- or
+  #                          other-user-owned files into the bare repo.
+  #   --no-same-permissions  apply current umask to extracted files instead
+  #                          of honoring tar header mode bits. Prevents
+  #                          setuid/setgid surprises and overly-loose perms.
+  #   --no-overwrite-dir     refuse to replace an existing directory's
+  #                          metadata with a tar entry's metadata. Belt-
+  #                          and-suspenders against a crafted tarball that
+  #                          tries to relax permissions on $REPO_DIR.
+  tar -xzf "$FROM_TARBALL" -C "$REPO_DIR" --strip-components=1 \
+      --no-same-owner --no-same-permissions --no-overwrite-dir
   # Verify it really is a bare repo. `git rev-parse --is-bare-repository`
   # exits 0 only inside a bare repo with the right layout.
   if ! GIT_DIR="$REPO_DIR" git rev-parse --is-bare-repository >/dev/null 2>&1; then
