@@ -33,6 +33,10 @@ FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d650
 # bash is intentionally still installed — entrypoint.sh and several wrapper
 # scripts use bash-isms. The git USER doesn't get a bash login shell;
 # system-level scripts run as root via the entrypoint.
+# netcat-openbsd is installed for the HEALTHCHECK loopback probe at the
+# bottom of this file. Alpine's busybox `nc` also supports `-z`, but its
+# behavior has drifted between busybox versions; pinning to OpenBSD nc
+# keeps the probe semantics stable across Alpine point releases.
 RUN apk add --no-cache git openssh-server bash nodejs netcat-openbsd \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
@@ -63,21 +67,36 @@ RUN apk add --no-cache git openssh-server bash nodejs netcat-openbsd \
 # capacity for parallel CI pushes (drops only at 10 concurrent unauthed
 # handshakes) while bounding the worst case; MaxAuthTries 3 + LoginGraceTime
 # 30 close the half-open-handshake hold.
-RUN sed -i \
-      -e 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' \
-      -e 's/^#*PermitRootLogin.*/PermitRootLogin no/' \
-      -e 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' \
-      -e 's/^#*AllowTcpForwarding.*/AllowTcpForwarding no/' \
-      -e 's/^#*AllowAgentForwarding.*/AllowAgentForwarding no/' \
-      -e 's/^#*AllowStreamLocalForwarding.*/AllowStreamLocalForwarding no/' \
-      -e 's/^#*X11Forwarding.*/X11Forwarding no/' \
-      -e 's/^#*GatewayPorts.*/GatewayPorts no/' \
-      -e 's/^#*PermitTunnel.*/PermitTunnel no/' \
-      -e 's/^#*MaxAuthTries.*/MaxAuthTries 3/' \
-      -e 's/^#*LoginGraceTime.*/LoginGraceTime 30/' \
-      -e 's/^#*MaxStartups.*/MaxStartups 10:50:50/' \
-      -e 's/^#*MaxSessions.*/MaxSessions 5/' \
-      /etc/ssh/sshd_config
+#
+# Implementation note: we PREPEND these directives to sshd_config rather
+# than sed-edit-in-place. OpenSSH uses "first obtained value wins" for
+# these keys, so prepending guarantees the directive applies regardless
+# of whether the stock Alpine sshd_config already mentions the key (an
+# in-place sed s/^#*Foo.*/Foo no/ silently no-ops on absent keys, and
+# Alpine's stock config does not include AllowStreamLocalForwarding,
+# PermitTunnel, or MaxStartups in every version — exactly the keys
+# whose compiled-in defaults are insecure for our threat model).
+RUN { \
+      printf '%s\n' \
+        '# Stamp hardening — prepended; OpenSSH uses first-match for these.' \
+        'PasswordAuthentication no' \
+        'PermitRootLogin no' \
+        'PubkeyAuthentication yes' \
+        'AllowTcpForwarding no' \
+        'AllowAgentForwarding no' \
+        'AllowStreamLocalForwarding no' \
+        'X11Forwarding no' \
+        'GatewayPorts no' \
+        'PermitTunnel no' \
+        'MaxAuthTries 3' \
+        'LoginGraceTime 30' \
+        'MaxStartups 10:50:50' \
+        'MaxSessions 5' \
+        ''; \
+      cat /etc/ssh/sshd_config; \
+    } > /etc/ssh/sshd_config.new \
+ && mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config \
+ && chmod 0644 /etc/ssh/sshd_config
 
 COPY --from=builder /build/dist/hooks/pre-receive.cjs /etc/stamp/pre-receive.cjs
 COPY --from=builder /build/dist/hooks/post-receive.cjs /etc/stamp/post-receive.cjs
