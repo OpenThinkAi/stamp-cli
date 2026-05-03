@@ -28,6 +28,51 @@ export interface ServerConfig {
 const DEFAULT_USER = "git";
 const DEFAULT_REPO_ROOT = "/srv/git";
 
+// Shape regexes for fields that get interpolated into ssh/scp argv as
+// `${user}@${host}` (and into the bare-repo path via `${repoRootPrefix}`).
+// The hostile shape we're defending against is anything starting with `-`
+// and containing `=` — ssh's getopt re-parses such an arg as an option,
+// most dangerously `-oProxyCommand=...` which invokes a shell command.
+// All three regexes disallow leading `-`, embedded `=`, whitespace, and
+// control characters; the `--`-before-destination guard at every ssh/scp
+// call site is the belt-and-suspenders second layer for any future code
+// path that bypasses these checks.
+const USER_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+// Hostnames must start AND end with alphanumeric, with internal `.` and
+// `-` allowed. Single-char hostnames are accepted. Matches what
+// parseServerFlag's `[^:]+` previously implied (no colons), now stricter:
+// no leading `-`, no `=`, no whitespace, no control chars.
+const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+// Repo-root prefix: absolute path, segments restricted to alnum/._- and
+// each segment must start with a non-dot character so `..` traversal
+// segments are structurally impossible. Trailing `/` is allowed for
+// operator typing comfort.
+const REPO_ROOT_RE = /^(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+\/?$/;
+
+type Field = "user" | "host" | "repo_root_prefix";
+
+function describeShape(field: Field): string {
+  switch (field) {
+    case "user":
+      return "alphanumerics + . _ -, must not start with -";
+    case "host":
+      return "hostname-shaped (alphanumerics + . -, must start and end with alphanumeric)";
+    case "repo_root_prefix":
+      return "absolute path with alphanumeric/. _ - segments, no .. components";
+  }
+}
+
+function validateField(field: Field, value: string, contextPath: string): void {
+  const re =
+    field === "user" ? USER_RE : field === "host" ? HOST_RE : REPO_ROOT_RE;
+  if (!re.test(value)) {
+    throw new Error(
+      `${contextPath}: '${field}' has an invalid shape (got ${JSON.stringify(value)}). ` +
+        `Allowed: ${describeShape(field)}.`,
+    );
+  }
+}
+
 /**
  * Load and validate ~/.stamp/server.yml. Returns null when the file doesn't
  * exist (so callers can fall back to a flag or print a friendly "set this
@@ -69,14 +114,18 @@ export function parseServerConfig(
   if (typeof obj.port !== "number" || !Number.isInteger(obj.port) || obj.port < 1 || obj.port > 65535) {
     throw new Error(`${contextPath}: 'port' is required and must be an integer 1..65535`);
   }
+  const host = obj.host.trim();
+  validateField("host", host, contextPath);
   const user =
     typeof obj.user === "string" && obj.user.trim() ? obj.user.trim() : DEFAULT_USER;
+  validateField("user", user, contextPath);
   const repoRootPrefix =
     typeof obj.repo_root_prefix === "string" && obj.repo_root_prefix.trim()
       ? obj.repo_root_prefix.trim()
       : DEFAULT_REPO_ROOT;
+  validateField("repo_root_prefix", repoRootPrefix, contextPath);
   return {
-    host: obj.host.trim(),
+    host,
     port: obj.port,
     user,
     repoRootPrefix,
@@ -104,8 +153,10 @@ export function parseServerFlag(value: string, context = "--server"): ServerConf
       `${context}: port must be an integer 1..65535 (got "${m[2]}")`,
     );
   }
+  const host = m[1]!;
+  validateField("host", host, context);
   return {
-    host: m[1]!,
+    host,
     port,
     user: DEFAULT_USER,
     repoRootPrefix: DEFAULT_REPO_ROOT,

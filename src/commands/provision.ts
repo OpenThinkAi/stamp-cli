@@ -223,11 +223,15 @@ function provisionBareRepoOnServer(
   // new-stamp-repo lives at /usr/local/bin on the server image (see
   // server/Dockerfile). It refuses if the repo already exists, which is
   // the right behavior — provisioning twice is almost always a mistake.
+  // The `--` before the destination terminates ssh's option processing —
+  // belt-and-suspenders against any future code path that would let a
+  // `-`-leading user/host slip past the shape regex in serverConfig.ts.
   const result = spawnSync(
     "ssh",
     [
       "-p",
       String(server.port),
+      "--",
       `${server.user}@${server.host}`,
       "new-stamp-repo",
       name,
@@ -576,12 +580,14 @@ function scpToServer(
   localPath: string,
   remotePath: string,
 ): void {
-  // scp -P <port> <local> <user>@<host>:<remote>
+  // scp -P <port> -- <local> <user>@<host>:<remote>
+  // `--` before the positional args terminates scp's option processing.
   const result = spawnSync(
     "scp",
     [
       "-P",
       String(server.port),
+      "--",
       localPath,
       `${server.user}@${server.host}:${remotePath}`,
     ],
@@ -605,6 +611,7 @@ function sshRunNewStampRepoFromTarball(
     [
       "-p",
       String(server.port),
+      "--",
       `${server.user}@${server.host}`,
       "new-stamp-repo",
       name,
@@ -631,6 +638,7 @@ function sshTryRemoveRemoteFile(
     [
       "-p",
       String(server.port),
+      "--",
       `${server.user}@${server.host}`,
       "rm",
       "-f",
