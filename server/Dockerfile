@@ -37,7 +37,15 @@ FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d650
 # bottom of this file. Alpine's busybox `nc` also supports `-z`, but its
 # behavior has drifted between busybox versions; pinning to OpenBSD nc
 # keeps the probe semantics stable across Alpine point releases.
-RUN apk add --no-cache git openssh-server bash nodejs netcat-openbsd \
+# tar (GNU tar) is installed because setup-repo.sh extracts operator-
+# supplied tarballs in the `--from-tarball` brownfield-migration path.
+# Alpine's busybox tar applet has historically had weaker path-traversal
+# protections than GNU tar (which has refused absolute paths and `..`
+# segments by default since 1.30). Installing the `tar` package puts GNU
+# tar at /usr/bin/tar ahead of busybox's applet, so plain `tar` invocations
+# in setup-repo.sh resolve to GNU. Combined with the pre-extraction
+# entry-name check in setup-repo.sh, this is defense in depth.
+RUN apk add --no-cache git openssh-server bash nodejs netcat-openbsd tar \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
  && mkdir -p /srv/git /home/git/.ssh /home/git/git-shell-commands /etc/stamp \
