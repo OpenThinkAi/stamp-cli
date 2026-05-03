@@ -26,6 +26,7 @@ import {
   postCommitStatus,
   type MirrorStatusDecision,
 } from "../lib/mirrorStatus.js";
+import { buildMirrorPushInvocation } from "../lib/mirrorPush.js";
 import {
   matchesAnyPattern,
   matchesAnyTagPattern,
@@ -74,10 +75,12 @@ function loadServerEnvFile(path = "/etc/stamp/env"): void {
   }
 }
 
-// Strips `x-access-token:<token>@` credentials out of any string before it's
-// forwarded to the pushing client. Git's push errors (e.g. "fatal: unable to
-// access 'https://...'") can echo the URL back, and the URL embeds the bot
-// token. Call this on every stderr/message that leaves the server.
+// Belt-and-suspenders redaction. The mirror push now passes the bot token
+// via `http.extraHeader` env-config (see buildMirrorPushInvocation) rather
+// than embedding it in the remote URL, so token-bearing URLs should never
+// leave git's stderr. Kept anyway: git can still echo `https://...@host/...`
+// shapes if it ever rewrites a URL via insteadOf or follows a redirect, and
+// the cost of an unmatched regex is negligible.
 function scrubTokenUrls(s: string): string {
   return s.replace(/x-access-token:[^@\s]*@/g, "x-access-token:***@");
 }
@@ -193,20 +196,21 @@ async function mirrorRef(
     return;
   }
 
-  const remoteUrl = `https://x-access-token:${token}@github.com/${githubRepo}.git`;
-
   // git push — use --force-with-lease where possible. A first push to a
   // fresh github repo needs a plain force; subsequent pushes should be
   // fast-forward since stamp is source of truth. Start with FF-only and
   // fall back to documented force-push on the operator's request.
-  const result = spawnSync(
-    "git",
-    ["push", remoteUrl, `${newSha}:${refname}`],
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    },
+  const { args, env } = buildMirrorPushInvocation(
+    githubRepo,
+    newSha,
+    refname,
+    token,
   );
+  const result = spawnSync("git", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+  });
 
   if (result.status === 0) {
     info(
@@ -220,8 +224,19 @@ async function mirrorRef(
     );
     if (errOut) warn(`mirror: ${errOut.replace(/\n/g, "\nmirror: ")}`);
     warn(
-      `mirror: stamp-server push already accepted; mirror out-of-sync. Retry manually with: ` +
-        `git push https://...@github.com/${githubRepo}.git ${refname}`,
+      `mirror: stamp-server push already accepted; mirror out-of-sync. ` +
+        `Retry manually with the bot token in env: ` +
+        `GITHUB_BOT_TOKEN=<pat> GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader ` +
+        // tr -d "\n" strips the line-wrap newline GNU base64 emits at 76 chars;
+        // without it, fine-grained PATs (90+ chars) produce a malformed
+        // Authorization header that silently fails the recovery push. printf
+        // "%s" "..." (vs. positional) is %-safe for tokens containing '%'.
+        // Using GIT_CONFIG_* env vars (not `-c http.extraHeader=...` argv)
+        // keeps the encoded token off `ps` / `/proc/<pid>/cmdline` for the
+        // recovery push too — same invariant the automated path enforces.
+        `GIT_CONFIG_VALUE_0="Authorization: Basic ` +
+        `$(printf '%s' "x-access-token:$GITHUB_BOT_TOKEN" | base64 | tr -d '\\n')" ` +
+        `git push https://github.com/${githubRepo}.git ${refname}`,
     );
   }
 }
