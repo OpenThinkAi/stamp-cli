@@ -456,12 +456,11 @@ async function runMigrateExisting(
     scpToServer(server, tarballPath, remoteTarballPath);
 
     // 4. Provision the bare repo on the server from the tarball.
+    // The server-side `new-stamp-repo --from-tarball` wrapper takes
+    // ownership of the uploaded tarball and removes it on exit (success
+    // or failure), so no client-side cleanup step is required.
     console.log(`Provisioning bare repo on ${server.host}:${server.port} from tarball`);
     sshRunNewStampRepoFromTarball(server, opts.name, remoteTarballPath);
-
-    // 5. Clean up the remote tarball — best effort. The server may not
-    // allow rm via the forced-command setup; ignore failure.
-    sshTryRemoveRemoteFile(server, remoteTarballPath);
   } finally {
     rmSync(stagingDir, { recursive: true, force: true });
   }
@@ -627,25 +626,6 @@ function sshRunNewStampRepoFromTarball(
         `the bare repo path already exists, or the tarball is malformed.`,
     );
   }
-}
-
-function sshTryRemoveRemoteFile(
-  server: ServerConfig,
-  remotePath: string,
-): void {
-  spawnSync(
-    "ssh",
-    [
-      "-p",
-      String(server.port),
-      "--",
-      `${server.user}@${server.host}`,
-      "rm",
-      "-f",
-      remotePath,
-    ],
-    { stdio: ["ignore", "ignore", "ignore"] },
-  );
 }
 
 function printMigratePlan(args: {

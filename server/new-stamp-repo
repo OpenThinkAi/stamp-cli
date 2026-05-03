@@ -109,6 +109,16 @@ fi
 export STAMP_SETUP_QUIET_NEXT_STEPS=1
 
 if [ -n "$FROM_TARBALL" ]; then
+  # Server-side cleanup of the operator-uploaded tarball. Lives here
+  # (inside the new-stamp-repo wrapper) rather than as a separate
+  # `ssh git@host rm /tmp/...` from the client because git-shell's
+  # forced-command allowlist (commit 4b83960) only runs the wrappers
+  # symlinked into /home/git/git-shell-commands/ — `rm` is not in
+  # that set, so a client-side cleanup attempt silently no-ops and
+  # the tarball persists. trap EXIT covers both successful extraction
+  # and `set -e`-induced failure inside setup-repo.sh, so no stranded
+  # tarballs in either case.
+  trap 'rm -f "$FROM_TARBALL"' EXIT
   /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" --from-tarball "$FROM_TARBALL"
 elif [ -n "$SEED_DIR" ]; then
   /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" "$SEED_DIR"
