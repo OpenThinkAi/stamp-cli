@@ -1,3 +1,4 @@
+import { chmodSync, existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dirname } from "node:path";
 import { ensureDir } from "./paths.js";
@@ -28,11 +29,30 @@ export interface RecordReviewInput {
 }
 
 export function openDb(path: string): DatabaseSync {
-  ensureDir(dirname(path));
+  // Tighten parent directory to 0700 so peer users on shared/dev machines
+  // can't enter `.git/stamp/` to read state.db (or its WAL sidecars). Done
+  // before opening the DB so a brand-new file inherits the locked-down
+  // ancestor. Idempotent: chmodSync runs on every open even if ensureDir
+  // no-oped, which tightens an already-existing 0755 dir from prior versions.
+  const dir = dirname(path);
+  ensureDir(dir, 0o700);
+  chmodSync(dir, 0o700);
+
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   initSchema(db);
+
+  // Tighten state.db itself plus the WAL sidecars (if SQLite has created
+  // them — `-wal` and `-shm` only exist while WAL writes are in flight or
+  // recently flushed). chmodSync targets the inode, not any open fd, so
+  // this is idempotent across opens; an in-flight write keeps its old fd
+  // mode but the on-disk bits flip immediately.
+  chmodSync(path, 0o600);
+  for (const sidecar of [`${path}-wal`, `${path}-shm`]) {
+    if (existsSync(sidecar)) chmodSync(sidecar, 0o600);
+  }
+
   return db;
 }
 
@@ -211,4 +231,61 @@ export function recentReviewsByReviewer(
     LIMIT ?
   `);
   return stmt.all(reviewer, limit) as unknown as ReviewRow[];
+}
+
+export interface PrunePerReviewer {
+  reviewer: string;
+  count: number;
+}
+
+export interface PrunePeekResult {
+  total: number;
+  perReviewer: PrunePerReviewer[];
+}
+
+/**
+ * Count rows older than `now − sqliteModifier` per reviewer, without
+ * deleting. Mirrors the row set that `pruneReviews` would delete given the
+ * same modifier. Used by `--dry-run` and to compute the "reviewers affected"
+ * count surfaced in non-dry-run output.
+ *
+ * `sqliteModifier` is a string suitable for SQLite's `datetime('now', ?)`
+ * (e.g. `-30 days`, `-12 hours`); produced by parseRetentionDuration so the
+ * cutoff is computed inside SQLite — avoids any wall-clock fencepost
+ * between JS `Date.now()` and the `created_at` strings written via
+ * `datetime('now')` at insert time.
+ */
+export function peekPrunable(
+  db: DatabaseSync,
+  sqliteModifier: string,
+): PrunePeekResult {
+  const stmt = db.prepare(`
+    SELECT reviewer, COUNT(*) AS count
+    FROM reviews
+    WHERE created_at < datetime('now', ?)
+    GROUP BY reviewer
+    ORDER BY reviewer
+  `);
+  const rows = stmt.all(sqliteModifier) as unknown as PrunePerReviewer[];
+  const total = rows.reduce((sum, r) => sum + r.count, 0);
+  return { total, perReviewer: rows };
+}
+
+/**
+ * Delete rows older than `now − sqliteModifier`. Returns the same shape as
+ * peekPrunable but with the actual deleted-row counts. The DELETE runs in
+ * a single statement; callers must run VACUUM separately (and outside any
+ * transaction) to actually shrink the file.
+ */
+export function pruneReviews(
+  db: DatabaseSync,
+  sqliteModifier: string,
+): PrunePeekResult {
+  const peek = peekPrunable(db, sqliteModifier);
+  if (peek.total === 0) return peek;
+  const del = db.prepare(
+    "DELETE FROM reviews WHERE created_at < datetime('now', ?)",
+  );
+  del.run(sqliteModifier);
+  return peek;
 }

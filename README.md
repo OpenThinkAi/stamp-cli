@@ -295,8 +295,10 @@ practice:
 
 - **Output is prose**, not JSON. LLMs read prose natively. No `--json` flag.
 - **Control flow is exit codes.** Agent loops branch on them.
-- **State is files.** `.stamp/config.yml`, `.git/stamp/state.db`, git commit
-  trailers. Easy to inspect, hard to lose.
+- **State is files.** `.stamp/config.yml`, `.git/stamp/state.db` (chmoded
+  `0600`; parent `.git/stamp/` chmoded `0700`), git commit trailers. Easy
+  to inspect, hard to lose. To bound retention on long-lived repos, run
+  `stamp prune --older-than 30d` (use `--dry-run` first to preview).
 - **Operations are idempotent.** `stamp init` is safe to re-run. `stamp
   review` accumulates history; re-invoking doesn't corrupt anything.
 
@@ -360,7 +362,13 @@ running their first `stamp review`.
 
 - Reviewer prose, verdicts, and tool-call traces are persisted to
   `.git/stamp/state.db` (a sqlite file under the repo's git common
-  dir). This file is not committed and not pushed.
+  dir; per-machine, not committed, not pushed). The DB is chmoded
+  `0600` and its parent directory `0700` on every open so peer users
+  on shared/dev machines can't read review prose. To bound retention
+  — long-lived repos accumulate every review's verbatim model output
+  indefinitely — use `stamp prune --older-than <duration>`
+  (e.g. `stamp prune --older-than 30d`; `--dry-run` previews without
+  deleting).
 - Your Ed25519 signing key (`~/.stamp/keys/`) never leaves your machine.
 
 **What gets attached to the merge commit and mirrored to GitHub:**
