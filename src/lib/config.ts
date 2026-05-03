@@ -433,8 +433,12 @@ function parseMcpServers(
  * into `mcp_sha256` attestation, so a typo or invalid identifier here is a
  * config bug that should surface before the first review, not silently get
  * dropped (which is what `parseEnvAllowlist` does for the operator env var).
+ *
+ * Exported so the persona-fetch path in `commands/reviewers.ts` (which
+ * builds its YAML-path prefixes from `${source}@${ref}`) reuses the same
+ * regex + wording — single source of truth for the validator.
  */
-function parseEnvIdentifierArray(input: unknown, path: string): string[] {
+export function parseEnvIdentifierArray(input: unknown, path: string): string[] {
   if (!Array.isArray(input)) {
     throw new Error(`${path} must be an array of POSIX env-var identifier strings`);
   }

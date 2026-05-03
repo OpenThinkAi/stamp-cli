@@ -59,7 +59,7 @@ import {
 } from "../src/lib/reviewer.ts";
 import { parseConfigFromYaml } from "../src/lib/config.ts";
 import { checkMcpCommand } from "../src/lib/toolAllowlist.ts";
-import { hashTools } from "../src/lib/reviewerHash.ts";
+import { hashMcpServers, hashTools } from "../src/lib/reviewerHash.ts";
 import { generateKeypair } from "../src/lib/keys.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import { decideMirrorStatus } from "../src/lib/mirrorStatus.ts";
@@ -1206,6 +1206,44 @@ describe("hashTools (backward-compat between string and object forms)", () => {
       },
     ]);
     assert.notEqual(before, withPrefix);
+  });
+});
+
+describe("hashMcpServers (backward-compat with new allowed_env field)", () => {
+  // AGT-038 / audit L2: adding the optional allowed_env field must NOT
+  // change the hash for existing mcp_servers entries that don't use it.
+  // Existing v3 attestations were computed before allowed_env existed;
+  // canonicalize() walks structurally and naturally omits absent keys
+  // from the JSON, so absence is a no-op for the hash. This test pins
+  // that invariant — symmetric to the path_prefix non-drift test above.
+  it("adding allowed_env support doesn't drift the hash of entries that don't use it", () => {
+    const before = hashMcpServers({
+      linear: {
+        command: "npx",
+        args: ["-y", "@tacticlabs/linear-mcp-server"],
+        env: { LINEAR_API_KEY: "$LINEAR_API_KEY" },
+      },
+    });
+    const same = hashMcpServers({
+      linear: {
+        command: "npx",
+        args: ["-y", "@tacticlabs/linear-mcp-server"],
+        env: { LINEAR_API_KEY: "$LINEAR_API_KEY" },
+      },
+    });
+    assert.equal(before, same);
+    // Adding allowed_env IS a config change and SHOULD produce a different
+    // hash — that's the security-meaningful difference verifiers want to
+    // see as drift when it flips.
+    const withAllowed = hashMcpServers({
+      linear: {
+        command: "npx",
+        args: ["-y", "@tacticlabs/linear-mcp-server"],
+        env: { LINEAR_API_KEY: "$LINEAR_API_KEY" },
+        allowed_env: ["LINEAR_API_KEY"],
+      },
+    });
+    assert.notEqual(before, withAllowed);
   });
 });
 

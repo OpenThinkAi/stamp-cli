@@ -274,6 +274,32 @@ stamp merge my-feature --into main
 
 ---
 
+## `stamp review` fails with "not in the env allowlist"
+
+After upgrading, a reviewer config that uses `$VAR` interpolation under `mcp_servers.<server>.env` (e.g. `LINEAR_API_KEY: $LINEAR_API_KEY`) fails fast with a message like:
+
+```
+reviewer "product" declared mcp_servers.linear.env.LINEAR_API_KEY referencing
+$LINEAR_API_KEY, but LINEAR_API_KEY is not in the env allowlist. Add
+LINEAR_API_KEY to STAMP_REVIEWER_ENV_ALLOWLIST (operator env, comma-separated)
+or to mcp_servers.linear.allowed_env in .stamp/config.yml. By default no
+operator env-vars are exposed to MCP servers.
+```
+
+This is the AGT-038 / audit-L2 hardening: MCP env-var interpolation is allowlist-gated, default-deny. Two fixes (use both for defense-in-depth):
+
+1. Export `STAMP_REVIEWER_ENV_ALLOWLIST=LINEAR_API_KEY,GITHUB_TOKEN,...` on the machine that runs `stamp review` — comma-separated, no spaces required. This is the operator-side trust anchor; keep it tight.
+2. Add `allowed_env: [LINEAR_API_KEY]` to the server block in `.stamp/config.yml`, alongside the existing `command:` / `args:` / `env:` keys. This flows into `mcp_sha256` attestation so a later flip is visible as drift.
+
+Distinguish the two failure modes:
+
+- **`not in the env allowlist`** — name is missing from both lists above. Fix: widen one of them.
+- **`is not set in the environment ... Export it before running 'stamp review'`** — name is allowlisted but the env var itself isn't exported. Fix: export it (or pick a different reviewer config).
+
+See `docs/personas.md` for the full design discussion (operator-env vs. per-config trade-offs and the threat model).
+
+---
+
 ## When all else fails
 
 - `stamp log --limit 5` — see what recently landed (or didn't)
