@@ -171,7 +171,7 @@ Granting tools expands what a malicious reviewer prompt can do beyond voting app
 
 The mitigation model is the same as `required_checks`: the reviewer gate on `.stamp/config.yml` changes. Additions of `tools:` entries or `mcp_servers:` blocks should be scrutinized by the security reviewer, and new MCP commands should be treated with the same skepticism as a new `required_checks.run` string. Conservative guidance:
 
-1. `Read` and `Grep` are reasonably safe for in-repo context (they respect cwd). Avoid `Bash` and `Write` — nothing a reviewer should need.
+1. `Read`, `Grep`, and `Glob` are scoped to `repoRoot` by an explicit allowlist enforced inside the SDK's `canUseTool` callback (path inputs are resolved against `repoRoot` and rejected if they escape; `.git/stamp/state.db` and `.stamp/trusted-keys/*` are denied even inside the repo). Avoid `Bash` and `Write` — nothing a reviewer should need.
 2. `WebFetch` should be enabled only when a reviewer genuinely needs it and the prompt constrains *where* it's allowed to fetch from. Consider an MCP server with narrowly scoped tools instead.
 3. Do not share MCP API keys across reviewers if a single-reviewer compromise shouldn't imply access to everything.
 
