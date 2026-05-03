@@ -1,19 +1,25 @@
 /**
- * Unit tests for the canUseTool path-scope helpers shipped in
- * src/lib/reviewer.ts to close audit M3 (AGT-035).
+ * Unit tests for the reviewer tool-gating helpers shipped in
+ * `src/lib/reviewer.ts` to close audit M3 (AGT-035).
  *
- * The integration concern — does the Claude Agent SDK actually invoke
- * canUseTool for Read/Grep/Glob? — is verified manually and recorded in
- * the PR description; the SDK is mocked at the unit level so this file
- * stays offline. The pure helper covers the path-resolution logic that
- * does the actual deny/allow work.
+ * Pinning notes:
+ * - Filename retains `canusetool` for git-history continuity, but the gate
+ *   is now `hooks.PreToolUse`, not `canUseTool` — the SDK bypasses
+ *   canUseTool for tools listed in `allowedTools`, so the prior gate was
+ *   structurally inert in production. See AGT-035 QA bounce.
+ * - These tests call the exported `checkReviewerTool` directly, which is
+ *   the same function the production PreToolUse hook delegates to. No
+ *   parallel reimplementation means the tests cannot drift from
+ *   production behaviour.
+ * - The integration concern — does the SDK actually invoke the
+ *   PreToolUse hook for Read/Grep/Glob? — is covered by the gated
+ *   integration test in `reviewer-canusetool.integration.test.ts`.
  */
 
 import { strict as assert } from "node:assert";
-import path from "node:path";
 import { describe, it } from "node:test";
 
-import { denyIfOutsideRepo } from "../src/lib/reviewer.ts";
+import { checkReviewerTool, denyIfOutsideRepo } from "../src/lib/reviewer.ts";
 
 describe("denyIfOutsideRepo (path-scope helper)", () => {
   const repoRoot = "/tmp/repo";
@@ -47,11 +53,7 @@ describe("denyIfOutsideRepo (path-scope helper)", () => {
   });
 
   it("denies a deeper relative .. traversal escape", () => {
-    const msg = denyIfOutsideRepo(
-      "src/../../escape",
-      repoRoot,
-      "Grep",
-    );
+    const msg = denyIfOutsideRepo("src/../../escape", repoRoot, "Grep");
     assert.match(msg ?? "", /Grep path/);
     assert.match(msg ?? "", /resolves outside repoRoot/);
   });
@@ -102,132 +104,68 @@ describe("denyIfOutsideRepo (path-scope helper)", () => {
   });
 });
 
-/**
- * Re-implement the canUseTool dispatch for unit testing, pulling the same
- * helper exports so we exercise the live deny/allow logic without standing
- * up an SDK subprocess. This mirrors the structure inside invokeReviewer's
- * canUseTool and lets us pin the AC #4 reviewer-internal denylist
- * (`.git/stamp/state.db`, `.stamp/trusted-keys/*`) and the AC #3 glob
- * pattern checks without coupling to the SDK's input shape.
- *
- * If the inline canUseTool branches drift from this re-implementation, the
- * test should be updated alongside, NOT silently — the test is the
- * structural pin. There's no path to extracting the dispatcher into its
- * own export without burdening the production code with a callback shape
- * just for testability.
- */
-type CanUseToolResult =
-  | { behavior: "allow"; updatedInput: unknown }
-  | { behavior: "deny"; message: string };
+const repoRoot = "/tmp/repo";
+const noWebHosts = new Set<string>();
 
-function makeDispatch(repoRoot: string) {
-  return async function dispatch(
-    toolName: string,
-    input: unknown,
-  ): Promise<CanUseToolResult> {
-    if (toolName === "Read") {
-      const filePath = (input as { file_path?: unknown }).file_path;
-      const denied = denyIfOutsideRepo(filePath, repoRoot, "Read");
-      if (denied) return { behavior: "deny", message: denied };
-      // Mirror the inline reviewer-internal denylist.
-      const resolvedRoot = path.resolve(repoRoot);
-      const resolved = path.resolve(resolvedRoot, filePath as string);
-      const rel = path.relative(resolvedRoot, resolved);
-      const internalPaths = [".git/stamp/state.db"];
-      const internalPrefixes = [".stamp/trusted-keys/"];
-      for (const denied2 of internalPaths) {
-        if (rel === denied2)
-          return {
-            behavior: "deny",
-            message: `Read of "${filePath as string}" denied: ${denied2} ...`,
-          };
-      }
-      for (const prefix of internalPrefixes) {
-        if (rel === prefix.replace(/\/$/, "") || rel.startsWith(prefix))
-          return {
-            behavior: "deny",
-            message: `Read of "${filePath as string}" denied: ${prefix}* ...`,
-          };
-      }
-    }
-    if (toolName === "Grep") {
-      const grepPath = (input as { path?: unknown }).path;
-      if (grepPath !== undefined) {
-        const denied = denyIfOutsideRepo(grepPath, repoRoot, "Grep");
-        if (denied) return { behavior: "deny", message: denied };
-      }
-    }
-    if (toolName === "Glob") {
-      const globPath = (input as { path?: unknown }).path;
-      if (globPath !== undefined) {
-        const denied = denyIfOutsideRepo(globPath, repoRoot, "Glob");
-        if (denied) return { behavior: "deny", message: denied };
-      }
-      const pattern = (input as { pattern?: unknown }).pattern;
-      if (typeof pattern === "string") {
-        if (pattern.startsWith("/"))
-          return {
-            behavior: "deny",
-            message: `Glob pattern "${pattern}" is absolute; ...`,
-          };
-        if (pattern.split("/").some((seg) => seg === ".."))
-          return {
-            behavior: "deny",
-            message: `Glob pattern "${pattern}" contains a '..' segment; ...`,
-          };
-      }
-    }
-    return { behavior: "allow", updatedInput: input };
-  };
-}
-
-describe("canUseTool dispatch — Read", () => {
-  const repoRoot = "/tmp/repo";
-  const dispatch = makeDispatch(repoRoot);
-
-  // AC #5 named target — verify the helper denies the audit's exact
-  // example. The integration concern (does the SDK actually invoke our
-  // canUseTool for Read?) is verified manually outside the test suite.
-  it("denies Read('/etc/hosts')", async () => {
-    const r = await dispatch("Read", { file_path: "/etc/hosts" });
-    assert.equal(r.behavior, "deny");
-    if (r.behavior === "deny") {
-      assert.match(r.message, /resolves outside repoRoot/);
-    }
+describe("checkReviewerTool — Read", () => {
+  // AC #5 named target — `Read('/etc/hosts')` must be denied. The unit
+  // pins the deny logic; the integration test pins that the SDK actually
+  // runs the hook (see reviewer-canusetool.integration.test.ts).
+  it("denies Read('/etc/hosts')", () => {
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: "/etc/hosts" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /resolves outside repoRoot/);
   });
 
   // AC #6: traversal that *starts inside* repoRoot but escapes via ..
-  it("denies Read('<repoRoot>/../sibling/secret') as a traversal", async () => {
-    const r = await dispatch("Read", {
-      file_path: `${repoRoot}/../sibling/secret`,
+  it("denies Read('<repoRoot>/../sibling/secret') as a traversal", () => {
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: `${repoRoot}/../sibling/secret` },
+      repoRoot,
+      webFetchHosts: noWebHosts,
     });
-    assert.equal(r.behavior, "deny");
+    assert.equal(r.allow, false);
   });
 
   // AC #7: regression — the legitimate happy-path is still allowed.
-  it("allows Read('<repoRoot>/README.md') (regression check)", async () => {
-    const r = await dispatch("Read", { file_path: `${repoRoot}/README.md` });
-    assert.equal(r.behavior, "allow");
+  it("allows Read('<repoRoot>/README.md') (regression check)", () => {
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: `${repoRoot}/README.md` },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, true);
   });
 
   // AC #4: reviewer-internal denylist (attestation DB).
-  it("denies Read('.git/stamp/state.db') even inside repoRoot", async () => {
-    const r = await dispatch("Read", { file_path: ".git/stamp/state.db" });
-    assert.equal(r.behavior, "deny");
-    if (r.behavior === "deny") {
-      assert.match(r.message, /reviewer-internal|denied/);
-    }
+  it("denies Read('.git/stamp/state.db') even inside repoRoot", () => {
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: ".git/stamp/state.db" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /reviewer-internal|denied/);
   });
 
   // AC #4: reviewer-internal denylist (trusted-keys directory).
-  it("denies Read('.stamp/trusted-keys/anyone.pub') even inside repoRoot", async () => {
-    const r = await dispatch("Read", {
-      file_path: ".stamp/trusted-keys/alice.pub",
+  it("denies Read('.stamp/trusted-keys/anyone.pub') even inside repoRoot", () => {
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: ".stamp/trusted-keys/alice.pub" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
     });
-    assert.equal(r.behavior, "deny");
-    if (r.behavior === "deny") {
-      assert.match(r.message, /trust anchors|exfil-attractive|denied/);
-    }
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /trust anchors|exfil-attractive|denied/);
   });
 
   it("allows Read of files in unrelated subdirs that contain 'stamp' in the name", () => {
@@ -235,82 +173,193 @@ describe("canUseTool dispatch — Read", () => {
     // substring match. A repo that contains a `docs/stamp-overview.md`
     // or `lib/stamp-helper.ts` must not be caught by the trusted-keys
     // prefix test.
-    return Promise.all([
-      dispatch("Read", { file_path: "docs/stamp-overview.md" }).then((r) =>
-        assert.equal(r.behavior, "allow"),
-      ),
-      dispatch("Read", { file_path: ".stamp/config.yml" }).then((r) =>
-        assert.equal(r.behavior, "allow"),
-      ),
-      dispatch("Read", { file_path: ".stamp/reviewers/security.md" }).then(
-        (r) => assert.equal(r.behavior, "allow"),
-      ),
-    ]);
-  });
-});
-
-describe("canUseTool dispatch — Grep", () => {
-  const repoRoot = "/tmp/repo";
-  const dispatch = makeDispatch(repoRoot);
-
-  it("allows Grep with no path (defaults to cwd which is repoRoot)", async () => {
-    const r = await dispatch("Grep", { pattern: "TODO" });
-    assert.equal(r.behavior, "allow");
-  });
-
-  it("allows Grep with a path inside the repo", async () => {
-    const r = await dispatch("Grep", { pattern: "TODO", path: "src/" });
-    assert.equal(r.behavior, "allow");
-  });
-
-  it("denies Grep with a path outside the repo", async () => {
-    const r = await dispatch("Grep", { pattern: "secret", path: "/etc" });
-    assert.equal(r.behavior, "deny");
-    if (r.behavior === "deny") {
-      assert.match(r.message, /Grep path/);
+    for (const p of [
+      "docs/stamp-overview.md",
+      ".stamp/config.yml",
+      ".stamp/reviewers/security.md",
+    ]) {
+      const r = checkReviewerTool({
+        toolName: "Read",
+        toolInput: { file_path: p },
+        repoRoot,
+        webFetchHosts: noWebHosts,
+      });
+      assert.equal(r.allow, true, `Read('${p}') should be allowed`);
     }
   });
 });
 
-describe("canUseTool dispatch — Glob", () => {
-  const repoRoot = "/tmp/repo";
-  const dispatch = makeDispatch(repoRoot);
-
-  it("allows Glob with no path", async () => {
-    const r = await dispatch("Glob", { pattern: "**/*.ts" });
-    assert.equal(r.behavior, "allow");
+describe("checkReviewerTool — Grep", () => {
+  it("allows Grep with no path (defaults to cwd which is repoRoot)", () => {
+    const r = checkReviewerTool({
+      toolName: "Grep",
+      toolInput: { pattern: "TODO" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, true);
   });
 
-  it("allows Glob with an in-repo path", async () => {
-    const r = await dispatch("Glob", { pattern: "**/*.ts", path: "src/" });
-    assert.equal(r.behavior, "allow");
+  it("allows Grep with a path inside the repo", () => {
+    const r = checkReviewerTool({
+      toolName: "Grep",
+      toolInput: { pattern: "TODO", path: "src/" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, true);
   });
 
-  it("denies Glob with an out-of-repo path", async () => {
-    const r = await dispatch("Glob", { pattern: "*", path: "/etc" });
-    assert.equal(r.behavior, "deny");
+  it("denies Grep with a path outside the repo", () => {
+    const r = checkReviewerTool({
+      toolName: "Grep",
+      toolInput: { pattern: "secret", path: "/etc" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /Grep path/);
+  });
+});
+
+describe("checkReviewerTool — Glob", () => {
+  it("allows Glob with no path", () => {
+    const r = checkReviewerTool({
+      toolName: "Glob",
+      toolInput: { pattern: "**/*.ts" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, true);
   });
 
-  it("denies an absolute glob pattern (belt-and-suspenders)", async () => {
-    const r = await dispatch("Glob", { pattern: "/etc/**/*" });
-    assert.equal(r.behavior, "deny");
-    if (r.behavior === "deny") {
-      assert.match(r.message, /absolute/);
-    }
+  it("allows Glob with an in-repo path", () => {
+    const r = checkReviewerTool({
+      toolName: "Glob",
+      toolInput: { pattern: "**/*.ts", path: "src/" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, true);
   });
 
-  it("denies a glob pattern containing a '..' segment", async () => {
-    const r = await dispatch("Glob", { pattern: "../**/*" });
-    assert.equal(r.behavior, "deny");
-    if (r.behavior === "deny") {
-      assert.match(r.message, /'\.\.' segment/);
-    }
+  it("denies Glob with an out-of-repo path", () => {
+    const r = checkReviewerTool({
+      toolName: "Glob",
+      toolInput: { pattern: "*", path: "/etc" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, false);
   });
 
-  it("allows ordinary recursive globs", async () => {
+  it("denies an absolute glob pattern (belt-and-suspenders)", () => {
+    const r = checkReviewerTool({
+      toolName: "Glob",
+      toolInput: { pattern: "/etc/**/*" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /absolute/);
+  });
+
+  it("denies a glob pattern containing a '..' segment", () => {
+    const r = checkReviewerTool({
+      toolName: "Glob",
+      toolInput: { pattern: "../**/*" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /'\.\.' segment/);
+  });
+
+  it("allows ordinary recursive globs", () => {
     for (const p of ["**/*.ts", "src/**/*.test.ts", "*.md"]) {
-      const r = await dispatch("Glob", { pattern: p });
-      assert.equal(r.behavior, "allow", `pattern ${p} should be allowed`);
+      const r = checkReviewerTool({
+        toolName: "Glob",
+        toolInput: { pattern: p },
+        repoRoot,
+        webFetchHosts: noWebHosts,
+      });
+      assert.equal(r.allow, true, `pattern ${p} should be allowed`);
     }
+  });
+});
+
+describe("checkReviewerTool — WebFetch", () => {
+  // The WebFetch host allowlist used to live in the canUseTool branch
+  // and was structurally inert for the same reason Read/Grep/Glob were
+  // (canUseTool bypassed when the tool is in allowedTools). It now
+  // routes through the same checkReviewerTool function and the same
+  // PreToolUse hook — pin the contract here.
+  const hosts = new Set(["api.example.com", "docs.example.com"]);
+
+  it("allows a WebFetch to an allow-listed host", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.example.com/v1/issues/42" },
+      repoRoot,
+      webFetchHosts: hosts,
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("denies a WebFetch to a non-allowlisted host", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://evil.example.org/exfil" },
+      repoRoot,
+      webFetchHosts: hosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /not in allowed_hosts/);
+  });
+
+  it("denies a WebFetch when the URL is not a string", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: 42 },
+      repoRoot,
+      webFetchHosts: hosts,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("denies a WebFetch when the URL is unparseable", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "not-a-url" },
+      repoRoot,
+      webFetchHosts: hosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /not parseable/);
+  });
+
+  it("matches hostname case-insensitively", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://API.Example.com/x" },
+      repoRoot,
+      webFetchHosts: hosts,
+    });
+    assert.equal(r.allow, true);
+  });
+});
+
+describe("checkReviewerTool — pass-through", () => {
+  // Tools not specifically gated (the verdict-submission MCP tool, MCP
+  // tools the operator wired in) pass through. SAFE_TOOLS at config-load
+  // time already gatekeeps which tool names can reach this function.
+  it("allows the verdict-submission MCP tool", () => {
+    const r = checkReviewerTool({
+      toolName: "mcp__stamp-verdict__submit_verdict",
+      toolInput: { verdict: "approved", prose: "looks good" },
+      repoRoot,
+      webFetchHosts: noWebHosts,
+    });
+    assert.equal(r.allow, true);
   });
 });
