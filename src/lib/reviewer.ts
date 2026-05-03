@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -534,13 +535,14 @@ export async function invokeReviewer(params: {
     verdict = submittedVerdict;
     prose = submittedProse;
   } else {
-    if (!finalText) {
-      throw new Error(
-        `reviewer "${params.reviewer}" produced no result message and did not call submit_verdict`,
-      );
-    }
-    verdict = parseLastLineVerdict(finalText, params.reviewer);
-    prose = stripLastLineVerdict(finalText);
+    // Both fallback failure modes (no result message at all, and a result
+    // message that didn't end with a VERDICT: line) flow through
+    // parseLastLineVerdict so they both go through the same spool-and-throw
+    // path — the operator sees a spool-file path in the Error rather than a
+    // tail of model prose that may quote diff lines.
+    const fallbackText = finalText ?? "";
+    verdict = parseLastLineVerdict(fallbackText, params.reviewer, params.repoRoot);
+    prose = stripLastLineVerdict(fallbackText);
   }
 
   return { reviewer: params.reviewer, prose, verdict, tool_calls: toolCalls };
@@ -755,34 +757,87 @@ function augmentSystemPrompt(reviewerPrompt: string, fenceHex: string): string {
  * convince the model to emit the verdict line as its literal final line,
  * which is much harder to achieve via in-diff text.
  */
-export function parseLastLineVerdict(text: string, reviewer: string): Verdict {
+export function parseLastLineVerdict(
+  text: string,
+  reviewer: string,
+  repoRoot: string,
+): Verdict {
   const lines = text.split("\n");
   let lastIdx = lines.length - 1;
   while (lastIdx >= 0 && lines[lastIdx]!.trim() === "") lastIdx--;
   if (lastIdx < 0) {
+    const spool = writeFailedParseSpool(repoRoot, reviewer, text);
     throw new Error(
-      `reviewer "${reviewer}" produced empty output and did not call submit_verdict`,
+      `reviewer "${reviewer}" produced empty output and did not call submit_verdict. ` +
+        `Raw output (${spool.lineCount} line${spool.lineCount === 1 ? "" : "s"}) ` +
+        `spooled to ${spool.path} (mode 0600).`,
     );
   }
   const lastLine = lines[lastIdx]!;
   const match = lastLine.match(VERDICT_LINE_REGEX);
   if (!match || !match[1]) {
-    // Diagnostic tail capped at 240 chars (down from the prior 500) so the
-    // operator can triage what the model actually produced without flooding
-    // logs with diff fragments — model prose often quotes diff lines, which
-    // is a privacy consideration when stderr ships to a logging service.
-    // The privacy spec's longer-term recommendation is to spool the full
-    // failed parse to a per-machine file under .git/stamp/failed-parses/
-    // and print the path; tracked separately.
-    const tail = text.slice(-240);
+    // Privacy: prior versions echoed a 240-char tail of the model output into
+    // the thrown Error message. Reviewer prose frequently quotes diff lines
+    // verbatim, so tails landed in stderr-shipped log collectors carrying
+    // repo-derived (and any secret-shaped) content. The full raw output is
+    // now spooled to a per-machine, mode-0600 file under
+    // `<repoRoot>/.git/stamp/failed-parses/`; the Error message names only
+    // the path, the reviewer, and the line count.
+    const spool = writeFailedParseSpool(repoRoot, reviewer, text);
     throw new Error(
       `reviewer "${reviewer}" did not call submit_verdict and the last non-empty line ` +
         `is not a VERDICT: line. Either call submit_verdict (preferred) or end the ` +
         `response with "VERDICT: approved" / "VERDICT: changes_requested" / ` +
-        `"VERDICT: denied" as the last non-empty line. Got tail:\n${tail}`,
+        `"VERDICT: denied" as the last non-empty line. ` +
+        `Raw output (${spool.lineCount} line${spool.lineCount === 1 ? "" : "s"}) ` +
+        `spooled to ${spool.path} (mode 0600).`,
     );
   }
   return match[1] as Verdict;
+}
+
+/**
+ * Reviewer slug, sanitised for use as a filename component. Anything outside
+ * `[A-Za-z0-9_-]` becomes `_` so an attacker-controlled reviewer name in
+ * `.stamp/reviewers/*.toml` cannot inject path separators or shell-meaningful
+ * chars into the spool path. Empty input collapses to a single `_` so we
+ * never produce a path ending in just `<ts>-.txt`.
+ */
+function sanitizeReviewerSlug(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9_-]/g, "_");
+  return cleaned === "" ? "_" : cleaned;
+}
+
+/**
+ * Write the full raw model output to a per-machine spool file under
+ * `<repoRoot>/.git/stamp/failed-parses/`. Returns the absolute path and the
+ * line count so the caller can build an Error message that includes neither
+ * a tail nor an excerpt of the raw text.
+ *
+ * - Directory: created with `recursive: true`, then `chmodSync` to 0700 so
+ *   inherited modes from `.git/stamp/` (often 0755) don't leak read access.
+ * - File: opened with `flag: 'wx'` and `mode: 0o600`. Exclusive create
+ *   prevents an attacker who got write access to the directory from
+ *   pre-creating the path with a permissive mode and having us write into
+ *   it; in the vanishing chance two failed-parses for the same reviewer
+ *   land in the same millisecond, EEXIST surfaces to the caller rather
+ *   than silently overwriting.
+ */
+function writeFailedParseSpool(
+  repoRoot: string,
+  reviewer: string,
+  text: string,
+): { path: string; lineCount: number } {
+  const dir = path.join(repoRoot, ".git", "stamp", "failed-parses");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const slug = sanitizeReviewerSlug(reviewer);
+  const filename = `${Date.now()}-${slug}.txt`;
+  const filepath = path.join(dir, filename);
+  writeFileSync(filepath, text, { flag: "wx", mode: 0o600 });
+  chmodSync(filepath, 0o600);
+  const lineCount = text === "" ? 0 : text.split("\n").length;
+  return { path: filepath, lineCount };
 }
 
 /**

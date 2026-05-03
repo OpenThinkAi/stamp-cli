@@ -300,6 +300,12 @@ See `docs/personas.md` for the full design discussion (operator-env vs. per-conf
 
 ---
 
+## `stamp review` fails with "spooled to .git/stamp/failed-parses/…"
+
+When a reviewer doesn't call `submit_verdict` and its response also lacks a parseable `VERDICT:` line as its last non-empty line, `stamp review` writes the full raw model output to a per-machine spool file at `<repoRoot>/.git/stamp/failed-parses/<unix-ms>-<reviewer-slug>.txt` (mode `0600`; parent directory mode `0700`) and surfaces only the path, the reviewer name, and the line count in the thrown Error. The raw output stays out of stderr — and out of any centralised log collector that pipes stderr — because reviewer prose frequently quotes diff lines verbatim. To inspect the spooled output, `cat` the path printed in the error; to clean up old spools, delete files under that directory by hand for now (an automated prune is filed as AGT-044).
+
+---
+
 ## When all else fails
 
 - `stamp log --limit 5` — see what recently landed (or didn't)
