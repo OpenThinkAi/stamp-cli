@@ -23,7 +23,7 @@ import {
   hashTools,
   readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
-import { parseToolCalls } from "../lib/toolCalls.js";
+import { parseToolCalls, redactToolCallsForAttestation } from "../lib/toolCalls.js";
 import { signBytes } from "../lib/signing.js";
 
 export interface MergeOptions {
@@ -111,7 +111,7 @@ export function runMerge(opts: MergeOptions): void {
     // agree even on platforms with core.autocrlf or .gitattributes filters.
     approvals = rule.required.map((name) => {
       const rev = byReviewer.get(name)!;
-      const toolCalls = parseToolCalls(rev.tool_calls);
+      const toolCalls = redactToolCallsForAttestation(parseToolCalls(rev.tool_calls));
       return {
         reviewer: rev.reviewer,
         verdict: rev.verdict,

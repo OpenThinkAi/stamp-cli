@@ -58,3 +58,40 @@ export function parseToolCalls(raw: string | null | undefined): ToolCall[] {
     return [];
   }
 }
+
+/**
+ * Rewrite an MCP tool name (`mcp__<server>__<tool>`) to its hashed form
+ * (`mcp__sha256:<hex8>__sha256:<hex8>`). Built-in SDK names — anything not
+ * starting with `mcp__` — are returned unchanged.
+ *
+ * The 8-hex-char (32-bit) prefix is intentional: a single review touches a
+ * handful of MCP names so collisions are negligible, and the `sha256:`
+ * literal anchors the format for a future verifier that wants to widen.
+ */
+export function redactMcpToolName(tool: string): string {
+  if (!tool.startsWith("mcp__")) return tool;
+  const rest = tool.slice("mcp__".length);
+  const sep = rest.indexOf("__");
+  if (sep < 0) return tool;
+  const server = rest.slice(0, sep);
+  const name = rest.slice(sep + 2);
+  if (!server || !name) return tool;
+  const h = (s: string) =>
+    createHash("sha256").update(s, "utf8").digest("hex").slice(0, 8);
+  return `mcp__sha256:${h(server)}__sha256:${h(name)}`;
+}
+
+/**
+ * Optionally redact MCP tool names in a tool-call list before they're
+ * embedded in the signed attestation. Off by default (verbatim names);
+ * `STAMP_HASH_MCP_NAMES=1` opts the operator into hashing so the public
+ * mirror doesn't disclose the existence of internal MCP servers.
+ *
+ * Applied at attestation-build time only: in-memory SDK traces and the
+ * local `reviews.tool_calls` DB column stay verbatim so operators retain
+ * full local visibility into what their reviewers did.
+ */
+export function redactToolCallsForAttestation(calls: ToolCall[]): ToolCall[] {
+  if (process.env.STAMP_HASH_MCP_NAMES !== "1") return calls;
+  return calls.map((c) => ({ ...c, tool: redactMcpToolName(c.tool) }));
+}
