@@ -291,6 +291,23 @@ export function runInit(opts: InitOptions = {}): void {
     );
   }
 
+  // Privacy disclosure: applies to every init path (first-time setup,
+  // additional-machine key deposit, already-trusted machine), since any
+  // operator who proceeds will run stamp review. Pull out of the
+  // first-time branch so the keyDeposited / already-trusted paths see it
+  // too — the per-repo first-run `note:` is the safety net but init is
+  // the right time to surface the data-flow contract.
+  console.log();
+  console.log(
+    "Privacy: every `stamp review` ships the diff to Anthropic via the Claude",
+  );
+  console.log(
+    "Agent SDK. See README \"Data flow / privacy\" for what's sent and how to",
+  );
+  console.log(
+    "opt out of the per-repo notice (STAMP_SUPPRESS_LLM_NOTICE=1).",
+  );
+
   // Loud agent-imperative footer. Prints regardless of mode — both
   // server-gated (where it's redundant but harmless) and local-only (where
   // the agent IS the enforcement and easily skips the rule by accident).
