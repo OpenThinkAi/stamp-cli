@@ -296,6 +296,21 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     assert.ok(!existsSync(dbPath));
   });
 
+  it("runPrune: bad duration throws even when state.db doesn't exist", () => {
+    process.chdir(repo);
+    // Regression for the AC #3 vs AC #6 ambiguity: a typo'd `--older-than`
+    // on a fresh repo (state.db missing) must still surface the parse error
+    // rather than being silently swallowed by the "nothing to prune" no-op.
+    // Pins parse-before-existsSync ordering in runPrune.
+    assert.ok(!existsSync(dbPath));
+    assert.throws(
+      () => runPrune({ olderThan: "nope" }),
+      /invalid duration "nope"/,
+    );
+    // No state.db materialised as a side effect either.
+    assert.ok(!existsSync(dbPath));
+  });
+
   it("runPrune --dry-run emits the per-reviewer breakdown without modifying", () => {
     insertAt(dbPath, "security", "2024-01-01 00:00:00");
     insertAt(dbPath, "security", "2024-01-02 00:00:00");

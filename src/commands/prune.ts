@@ -26,6 +26,11 @@ export interface PruneOptions {
  * No-ops cleanly when state.db doesn't exist (matching `reviewersShow`).
  */
 export function runPrune(opts: PruneOptions): void {
+  // Parse the duration first — before the no-state.db short-circuit — so a
+  // typo'd `--older-than` on a fresh repo still surfaces a parse error
+  // instead of being silently swallowed by the "nothing to prune" no-op.
+  const { sqliteModifier, humanLabel } = parseRetentionDuration(opts.olderThan);
+
   const repoRoot = findRepoRoot();
   const dbPath = stampStateDbPath(repoRoot);
 
@@ -35,10 +40,6 @@ export function runPrune(opts: PruneOptions): void {
     );
     return;
   }
-
-  // Parse before opening the DB so a bad duration doesn't even touch
-  // state.db (preserves the AC #3 contract: "no DB writes" on parse error).
-  const { sqliteModifier, humanLabel } = parseRetentionDuration(opts.olderThan);
 
   const sizeBefore = statSync(dbPath).size;
 
