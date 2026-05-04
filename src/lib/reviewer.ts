@@ -427,6 +427,30 @@ export async function invokeReviewer(params: {
    */
   systemPrompt: string;
 }): Promise<ReviewerInvocation> {
+  // Operator-declared LLM-disabled mode. Refuse to start any reviewer
+  // invocation that would ship a diff to Anthropic. Lets a regulated
+  // environment (DPA-bound, air-gapped, or just policy-strict) use
+  // stamp's signing + verification primitives — `stamp keys`, `stamp
+  // merge` against a previously-recorded review, `stamp verify`,
+  // `stamp log`, the pre-receive hook — without ever invoking the
+  // Claude Agent SDK. The check fires here so it covers `stamp
+  // review`, `stamp reviewers test`, and any future invokeReviewer
+  // caller automatically.
+  if (process.env.STAMP_NO_LLM === "1") {
+    throw new Error(
+      `STAMP_NO_LLM=1 is set; refusing to invoke the Claude Agent SDK ` +
+        `for reviewer "${params.reviewer}". With this env var on, stamp's ` +
+        `LLM-using surface (review / reviewers test / bootstrap) is ` +
+        `disabled — no diff content will leave the host. The signing, ` +
+        `verification, and merge primitives (stamp keys / stamp merge ` +
+        `/ stamp verify / stamp log / the pre-receive hook) all ` +
+        `continue to work; you can attest manual review by capturing ` +
+        `verdicts in state.db out-of-band before merge. Unset ` +
+        `STAMP_NO_LLM (or set it to anything other than "1") to ` +
+        `re-enable.`,
+    );
+  }
+
   const def = params.config.reviewers[params.reviewer];
   if (!def) {
     throw new Error(
