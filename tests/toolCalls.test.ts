@@ -1,17 +1,23 @@
 /**
- * Tests for AGT-045 — privacy: hash MCP server/tool names in mirrored
- * attestation.
+ * Tests for AGT-045 / v4 audit M-PR1 — privacy: hash MCP server/tool
+ * names in mirrored attestation.
  *
  * The threat: a reviewer that talks to internal MCP servers (e.g.
- * `mcp__acme-billing__lookup_invoice`) leaks the existence of that internal
- * service into the public mirror via the `Stamp-Payload` trailer's
- * `tool_calls[].tool` field. The opt-in `STAMP_HASH_MCP_NAMES=1` env var
- * rewrites those names at attestation-build time.
+ * `mcp__acme-billing__lookup_invoice`) leaks the existence of that
+ * internal service into the public mirror via the `Stamp-Payload`
+ * trailer's `tool_calls[].tool` field.
  *
- * AC #6 cases pinned here:
- *   - env-set + mcp__server__tool → mcp__sha256:<hex8>__sha256:<hex8>
- *   - env-set + built-in (no mcp__ prefix) → passthrough
- *   - env-unset → behavior identical to today (full passthrough)
+ * Defaults: redaction is **on**. `STAMP_HASH_MCP_NAMES=0` opts out for
+ * operators who want verbatim names (all-public MCP servers, debugging).
+ * Earlier versions defaulted to verbatim with `=1` opting in; v4 audit
+ * M-PR1 flipped the default to data-minimization.
+ *
+ * Cases pinned here:
+ *   - env-unset (default)  → mcp__server__tool → hashed; built-ins pass
+ *   - env="0"              → all entries pass through verbatim (the
+ *                            explicit operator-declared bypass)
+ *   - env="1"              → same as default (legacy opt-in still works)
+ *   - env="true"           → still hashed (only literal "0" disables)
  */
 
 import { strict as assert } from "node:assert";
@@ -55,8 +61,8 @@ describe("redactToolCallsForAttestation", () => {
     delete process.env.STAMP_HASH_MCP_NAMES;
   });
 
-  it("with STAMP_HASH_MCP_NAMES=1, hashes mcp__ entries and leaves built-ins alone", () => {
-    process.env.STAMP_HASH_MCP_NAMES = "1";
+  it("with STAMP_HASH_MCP_NAMES unset, hashes mcp__ entries by default and leaves built-ins alone", () => {
+    delete process.env.STAMP_HASH_MCP_NAMES;
     const input: ToolCall[] = [
       { tool: "Read", input_sha256: "a".repeat(64) },
       { tool: "mcp__acme-billing__lookup_invoice", input_sha256: "b".repeat(64) },
@@ -75,8 +81,8 @@ describe("redactToolCallsForAttestation", () => {
     assert.equal(out[2]!.input_sha256, "c".repeat(64));
   });
 
-  it("with STAMP_HASH_MCP_NAMES unset, returns the calls untouched", () => {
-    delete process.env.STAMP_HASH_MCP_NAMES;
+  it("with STAMP_HASH_MCP_NAMES=0, returns the calls untouched (explicit opt-out)", () => {
+    process.env.STAMP_HASH_MCP_NAMES = "0";
     const input: ToolCall[] = [
       { tool: "mcp__internal-hr__get_employee", input_sha256: "d".repeat(64) },
       { tool: "Read", input_sha256: "e".repeat(64) },
@@ -86,15 +92,31 @@ describe("redactToolCallsForAttestation", () => {
     assert.equal(out[1]!.tool, "Read");
   });
 
-  it("only treats the literal string '1' as opt-in (not 'true', not '0')", () => {
-    process.env.STAMP_HASH_MCP_NAMES = "true";
+  it("with STAMP_HASH_MCP_NAMES=1, hashes (back-compat with the legacy opt-in shape)", () => {
+    process.env.STAMP_HASH_MCP_NAMES = "1";
     const input: ToolCall[] = [
       { tool: "mcp__acme__x", input_sha256: "f".repeat(64) },
     ];
     assert.equal(
       redactToolCallsForAttestation(input)[0]!.tool,
-      "mcp__acme__x",
-      "STAMP_HASH_MCP_NAMES=true should NOT trigger redaction (strict =='1')",
+      `mcp__sha256:${h8("acme")}__sha256:${h8("x")}`,
     );
+  });
+
+  it("only treats the literal string '0' as opt-out (not 'false', not '')", () => {
+    // Defends against shell-quirks where an unset/empty/text-shaped env
+    // var could be conflated with disabled. Same pattern as
+    // STAMP_REQUIRE_HUMAN_MERGE.
+    for (const v of ["false", "", "no", "off"]) {
+      process.env.STAMP_HASH_MCP_NAMES = v;
+      const input: ToolCall[] = [
+        { tool: "mcp__acme__x", input_sha256: "f".repeat(64) },
+      ];
+      assert.equal(
+        redactToolCallsForAttestation(input)[0]!.tool,
+        `mcp__sha256:${h8("acme")}__sha256:${h8("x")}`,
+        `STAMP_HASH_MCP_NAMES=${JSON.stringify(v)} should NOT disable redaction (strict ==='0')`,
+      );
+    }
   });
 });
