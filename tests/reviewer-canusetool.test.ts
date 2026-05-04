@@ -17,7 +17,17 @@
  */
 
 import { strict as assert } from "node:assert";
-import { describe, it } from "node:test";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { checkReviewerTool, denyIfOutsideRepo } from "../src/lib/reviewer.ts";
 
@@ -504,5 +514,164 @@ describe("checkReviewerTool — pass-through", () => {
       webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
+  });
+});
+
+// ---- v4 audit M-S1 / M-LL1: symlink-aware path scope ------------------
+//
+// The lexical scope check (denyIfOutsideRepo) treats `<repoRoot>/pwn` as
+// in-repo even when `pwn` is a symlink whose target is outside the repo
+// or under a denylisted prefix. Node's fs APIs follow symlinks by
+// default, so a feature branch can commit `pwn -> /etc/passwd` (or
+// `pwn -> .git/stamp/state.db` to dodge the reviewer-internal denylist)
+// and `Read('pwn')` would return the target's contents. These tests use
+// real tmpdirs + real symlinks so the realpath check exercises the
+// actual filesystem path.
+
+describe("checkReviewerTool — symlink-aware Read scope (v4 audit M-S1/M-LL1)", () => {
+  let tmpRoot: string;
+  let realRoot: string;
+
+  beforeEach(() => {
+    // realpathSync to dodge macOS's /var → /private/var symlink: the
+    // repoRoot we pass to checkReviewerTool must be the canonical path
+    // git itself would emit, so equality assertions hold.
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-symlink-")));
+    realRoot = join(tmpRoot, "repo");
+    mkdirSync(realRoot);
+    // A real in-repo file so happy-path Read still works.
+    writeFileSync(join(realRoot, "README.md"), "# real");
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("denies Read of a symlink whose target is outside repoRoot", () => {
+    // /tmp/.../outside is sibling to repoRoot, so the symlink lands
+    // outside the repo even though the link itself is inside.
+    const outside = join(tmpRoot, "outside");
+    writeFileSync(outside, "secret");
+    symlinkSync(outside, join(realRoot, "pwn"));
+
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: "pwn" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) {
+      assert.match(r.reason, /symlink/);
+      assert.match(r.reason, /outside repoRoot/);
+    }
+  });
+
+  it("denies Read of a symlink to /etc/passwd-shaped absolute targets", () => {
+    symlinkSync("/etc/passwd", join(realRoot, "pwn"));
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: "pwn" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /symlink/);
+  });
+
+  it("denies Read of a symlink that resolves into the .git/stamp/ denylist", () => {
+    // Pre-create the denylisted target so the symlink resolves.
+    mkdirSync(join(realRoot, ".git", "stamp"), { recursive: true });
+    writeFileSync(join(realRoot, ".git", "stamp", "state.db"), "");
+    symlinkSync(
+      join(realRoot, ".git", "stamp", "state.db"),
+      join(realRoot, "pwn"),
+    );
+
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: "pwn" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /reviewer-internal|exfil/);
+  });
+
+  it("denies Read through a chain of symlinks (link → link → outside)", () => {
+    // Multi-hop symlink — realpath walks the whole chain so the final
+    // target is what's checked, not any intermediate hop.
+    const outside = join(tmpRoot, "outside");
+    writeFileSync(outside, "secret");
+    symlinkSync(outside, join(realRoot, "hop1"));
+    symlinkSync(join(realRoot, "hop1"), join(realRoot, "pwn"));
+
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: "pwn" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("allows Read of a symlink whose target is inside repoRoot", () => {
+    // Legit case: a symlink that just points at another in-repo file.
+    // Project layouts that use symlinked dotfiles or CI fixtures should
+    // still work.
+    writeFileSync(join(realRoot, "real.md"), "# real");
+    symlinkSync(join(realRoot, "real.md"), join(realRoot, "alias.md"));
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: "alias.md" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("allows Read of a non-existent path (no symlink to follow → fall back to lexical)", () => {
+    // The model often probes for files that don't exist yet (e.g. asking
+    // for a doc that's about to be added). The eventual fs.readFileSync
+    // will surface ENOENT naturally; the realpath check must not deny
+    // here.
+    const r = checkReviewerTool({
+      toolName: "Read",
+      toolInput: { file_path: "does-not-exist.md" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("denies Grep with a symlinked path whose target is outside repoRoot", () => {
+    // Grep takes an optional path; if the model points it at a symlinked
+    // dir, the same realpath rule applies.
+    mkdirSync(join(tmpRoot, "outside-dir"));
+    writeFileSync(join(tmpRoot, "outside-dir", "x.txt"), "data");
+    symlinkSync(join(tmpRoot, "outside-dir"), join(realRoot, "pwn-dir"));
+
+    const r = checkReviewerTool({
+      toolName: "Grep",
+      toolInput: { pattern: "data", path: "pwn-dir" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /symlink/);
+  });
+
+  it("denies Glob with a symlinked path whose target is outside repoRoot", () => {
+    mkdirSync(join(tmpRoot, "outside-dir"));
+    symlinkSync(join(tmpRoot, "outside-dir"), join(realRoot, "pwn-dir"));
+
+    const r = checkReviewerTool({
+      toolName: "Glob",
+      toolInput: { pattern: "*.txt", path: "pwn-dir" },
+      repoRoot: realRoot,
+      webFetchPolicy: new Map(),
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /symlink/);
   });
 });
