@@ -433,9 +433,11 @@ export async function invokeReviewer(params: {
   // stamp's signing + verification primitives — `stamp keys`, `stamp
   // merge` against a previously-recorded review, `stamp verify`,
   // `stamp log`, the pre-receive hook — without ever invoking the
-  // Claude Agent SDK. The check fires here so it covers `stamp
-  // review`, `stamp reviewers test`, and any future invokeReviewer
-  // caller automatically.
+  // Claude Agent SDK. This check is the safety net for any future
+  // invokeReviewer caller; the user-facing commands gate themselves
+  // earlier (`runReview` and `runBootstrap` short-circuit at the top
+  // before any state mutation), so an operator with the env var set
+  // sees the message once, not once per reviewer.
   if (process.env.STAMP_NO_LLM === "1") {
     throw new Error(
       `STAMP_NO_LLM=1 is set; refusing to invoke the Claude Agent SDK ` +
