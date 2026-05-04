@@ -295,10 +295,12 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
       runPrune({ olderThan: "30d" }),
     );
     // `note: ` prefix is the established convention for advisory no-ops
-    // (matches commands/server.ts:79,98). Pinning the prefix so a future
-    // refactor doesn't drop it.
-    assert.match(stdout, /^note: nothing to prune \(no state\.db/m);
-    assert.match(stdout, /no failed-parse spool/);
+    // (matches commands/server.ts:79,98). Pin both the prefix and the
+    // path-hint so a refactor can't silently drop either — the absolute
+    // paths help an operator debugging "where does stamp look?".
+    assert.match(stdout, /^note: nothing to prune \(neither/m);
+    assert.match(stdout, /state\.db/);
+    assert.match(stdout, /failed-parses/);
     assert.ok(!existsSync(dbPath));
   });
 

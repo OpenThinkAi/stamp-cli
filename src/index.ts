@@ -460,7 +460,10 @@ program
 program
   .command("prune")
   .description(
-    "delete review-history rows older than <duration> from the per-machine state.db, then VACUUM. Use --dry-run first to preview.",
+    "delete review-history rows older than <duration> from the per-machine " +
+      "state.db (then VACUUM), AND unlink failed-parse spool files under " +
+      ".git/stamp/failed-parses/ whose mtime is older than <duration>. Use " +
+      "--dry-run first to preview both passes.",
   )
   .requiredOption(
     "--older-than <duration>",
@@ -468,7 +471,8 @@ program
   )
   .option(
     "--dry-run",
-    "print the per-reviewer breakdown that would be pruned without modifying the DB",
+    "print the per-reviewer breakdown of state.db rows AND the list of " +
+      "spool file paths that would be pruned, without modifying anything",
   )
   .action((opts: { olderThan: string; dryRun?: boolean }) => {
     try {

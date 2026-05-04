@@ -52,8 +52,11 @@ export function runPrune(opts: PruneOptions): void {
   const spoolCutoffMs = Date.now() - durationMs;
 
   if (!existsSync(dbPath) && !existsSync(spoolDir)) {
+    // Surface the absolute paths so an operator debugging "where is
+    // stamp looking?" doesn't have to grep source. Both dirs route
+    // through gitCommonDir so they show the worktree-correct location.
     console.log(
-      `note: nothing to prune (no state.db, no failed-parse spool — both are created on first \`stamp review\`)`,
+      `note: nothing to prune (neither ${dbPath} nor ${spoolDir} exists — both are created on first \`stamp review\`)`,
     );
     return;
   }
