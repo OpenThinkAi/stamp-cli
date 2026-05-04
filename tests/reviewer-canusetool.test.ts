@@ -156,6 +156,29 @@ describe("checkReviewerTool — Read", () => {
     if (!r.allow) assert.match(r.reason, /reviewer-internal|denied/);
   });
 
+  // The whole `.git/stamp/` tree is reviewer-internal: state.db + WAL
+  // sidecars, llm-notice marker, failed-parse spools (which contain raw
+  // model prose that may quote diff lines). All deny via the `.git/stamp/`
+  // prefix, not just state.db by exact path. Pin the spool case so a future
+  // change to either denylist or spool location doesn't silently re-open
+  // this read.
+  it("denies Read of files under .git/stamp/ (spools, WAL sidecars, etc.)", () => {
+    for (const p of [
+      ".git/stamp/state.db-wal",
+      ".git/stamp/failed-parses/1234-security.txt",
+      ".git/stamp/llm-notice-shown",
+    ]) {
+      const r = checkReviewerTool({
+        toolName: "Read",
+        toolInput: { file_path: p },
+        repoRoot,
+        webFetchPolicy: noWebHosts,
+      });
+      assert.equal(r.allow, false, `Read('${p}') should be denied`);
+      if (!r.allow) assert.match(r.reason, /reviewer-internal|exfil/);
+    }
+  });
+
   // AC #4: reviewer-internal denylist (trusted-keys directory).
   it("denies Read('.stamp/trusted-keys/anyone.pub') even inside repoRoot", () => {
     const r = checkReviewerTool({

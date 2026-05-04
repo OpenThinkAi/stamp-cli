@@ -23,11 +23,14 @@
  */
 
 import { strict as assert } from "node:assert";
+import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
+  rmSync,
   statSync,
 } from "node:fs";
 import os from "node:os";
@@ -1056,6 +1059,37 @@ describe("parseLastLineVerdict (prompt-injection-resistant fallback)", () => {
     assert.equal(entries.length, 1);
     // No `/`, no `..`, no `.passwd` — every offending char became `_`.
     assert.match(entries[0]!, /^\d+-______etc_passwd\.txt$/);
+  });
+
+  it("spools to the git common dir from inside a worktree (issue #12 sibling)", () => {
+    // Repro: in a worktree `<repoRoot>/.git` is a *file*, so the prior
+    // `path.join(repoRoot, ".git", "stamp", "failed-parses")` mkdir threw
+    // ENOTDIR — exactly the issue #12 trace. Routing through gitCommonDir
+    // sends the spool to the common .git so worktrees and primary checkouts
+    // share one failed-parses directory.
+    const tmpRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "stamp-wt-spool-")));
+    try {
+      const repo = path.join(tmpRoot, "repo");
+      const wt = path.join(tmpRoot, "wt");
+      mkdirSync(repo);
+      execFileSync("git", ["init", "-q", "-b", "main", repo], { cwd: tmpRoot });
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: repo });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: repo });
+      execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: repo });
+      execFileSync("git", ["worktree", "add", "-q", wt], { cwd: repo });
+
+      assert.throws(() => parseLastLineVerdict("no verdict here", "test", wt));
+
+      // Spool must land under the *common* .git, not under the worktree's
+      // `.git` file. Reading either path in a normal checkout is fine; in a
+      // worktree, only the common-dir path is reachable.
+      const commonSpool = path.join(repo, ".git", "stamp", "failed-parses");
+      const entries = readdirSync(commonSpool);
+      assert.equal(entries.length, 1);
+      assert.match(entries[0]!, /^\d+-test\.txt$/);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 
   it("strips the verdict line cleanly when it is the last line", () => {

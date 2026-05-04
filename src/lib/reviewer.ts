@@ -18,6 +18,7 @@ import {
 } from "./retro.js";
 import { checkMcpCommand, loadMcpAllowlist } from "./toolAllowlist.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
+import { gitCommonDir } from "./paths.js";
 
 type McpServerResolved = {
   type: "stdio";
@@ -45,8 +46,12 @@ const VERDICT_LINE_REGEX = /^VERDICT:\s*(approved|changes_requested|denied)\s*$/
  * relative (no leading slash), matched after canonicalisation against the
  * resolved Read input. AGT-035 / audit M3.
  */
-const REVIEWER_INTERNAL_DENY_PATHS = [".git/stamp/state.db"];
-const REVIEWER_INTERNAL_DENY_PREFIXES = [".stamp/trusted-keys/"];
+const REVIEWER_INTERNAL_DENY_PATHS: string[] = [];
+// `.git/stamp/` — review verdict DB (state.db + WAL sidecars), failed-parse
+// spools, llm-notice marker. Internal state for stamp itself; no review task
+// reads any of it. The directory was added as a prefix (not just state.db
+// as a single path) after the failed-parse spool moved here under #12 fix.
+const REVIEWER_INTERNAL_DENY_PREFIXES = [".git/stamp/", ".stamp/trusted-keys/"];
 
 /**
  * Resolve an arbitrary tool-supplied path against repoRoot and reject it if
@@ -106,8 +111,8 @@ function denyIfReviewerInternal(
   for (const prefix of REVIEWER_INTERNAL_DENY_PREFIXES) {
     if (rel === prefix.replace(/\/$/, "") || rel.startsWith(prefix)) {
       return (
-        `Read of "${inputPath}" denied: ${prefix}* holds reviewer trust ` +
-        `anchors and is exfil-attractive.`
+        `Read of "${inputPath}" denied: ${prefix}* is reviewer-internal ` +
+        `(trust anchors / verdict DB / spools) and is exfil-attractive.`
       );
     }
   }
@@ -940,7 +945,10 @@ function writeFailedParseSpool(
   reviewer: string,
   text: string,
 ): { path: string; lineCount: number } {
-  const dir = path.join(repoRoot, ".git", "stamp", "failed-parses");
+  // Spool to the git common dir so worktree checkouts (where `.git` is a
+  // file) write to `<commondir>/stamp/failed-parses/` rather than trying
+  // to mkdir under a `.git` file and hitting ENOTDIR. Sibling of #12.
+  const dir = path.join(gitCommonDir(repoRoot), "stamp", "failed-parses");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const slug = sanitizeReviewerSlug(reviewer);
