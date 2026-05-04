@@ -118,6 +118,8 @@ export function runMerge(opts: MergeOptions): void {
     requireHumanMerge({
       target: opts.into,
       source: opts.branch,
+      base_sha: resolved.base_sha,
+      head_sha: resolved.head_sha,
       branchRule: rule,
       yes: opts.yes ?? false,
     });

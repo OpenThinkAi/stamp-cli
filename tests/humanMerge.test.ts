@@ -25,6 +25,8 @@ const baseRule: BranchRule = { required: ["security", "standards", "product"] };
 const baseArgs = {
   target: "main",
   source: "feature",
+  base_sha: "0".repeat(40),
+  head_sha: "f".repeat(40),
   branchRule: baseRule,
   yes: false,
 };
@@ -57,6 +59,17 @@ describe("requireHumanMerge — opt-outs", () => {
       () => requireHumanMerge(baseArgs),
       /no TTY/,
     );
+  });
+
+  it("throws message uses the 'confirmation required:' discriminator (agent regex contract)", () => {
+    let thrown: Error | null = null;
+    try {
+      requireHumanMerge(baseArgs);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    assert.ok(thrown);
+    assert.match(thrown!.message, /^confirmation required:/);
   });
 
   it("throws message names all three opt-out paths so the operator can pick one", () => {

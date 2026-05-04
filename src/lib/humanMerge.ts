@@ -36,6 +36,12 @@ export interface RequireHumanMergeArgs {
   target: string;
   /** Source branch being merged in. */
   source: string;
+  /** Merge-base SHA of source and target (the diff's base). Shown in the
+   *  prompt so the operator sees what's actually about to be signed. */
+  base_sha: string;
+  /** Tip SHA of the source branch (the diff's head). The most useful
+   *  thing to display — catches a stale or attacker-shifted source. */
+  head_sha: string;
   /** Resolved branch rule from .stamp/config.yml. */
   branchRule: BranchRule;
   /** Whether the operator passed --yes on the command line. */
@@ -43,22 +49,20 @@ export interface RequireHumanMergeArgs {
 }
 
 export function requireHumanMerge(args: RequireHumanMergeArgs): void {
-  // Order matters: per-branch config before per-invocation flag before
-  // per-shell env, so the most specific opt-out wins. All three are
-  // co-equal "the operator has declared intent"; this just keeps the
-  // failure message honest about which one fired.
+  // Any of these three opts out; check order is incidental — all three
+  // are operator-declared intent and return silently.
   if (args.branchRule.require_human_merge === false) return;
   if (args.yes) return;
   if (process.env.STAMP_REQUIRE_HUMAN_MERGE === "0") return;
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error(
-      `stamp merge requires interactive confirmation for protected ` +
-        `branch "${args.target}", but no TTY is attached.\n\n` +
+      `confirmation required: stamp merge needs interactive confirmation ` +
+        `for protected branch "${args.target}", but no TTY is attached.\n\n` +
         `Opt out explicitly — pick one:\n` +
-        `  • per-invocation:  stamp merge ${args.source} --into ${args.target} --yes\n` +
-        `  • per-shell:       STAMP_REQUIRE_HUMAN_MERGE=0 stamp merge ...\n` +
-        `  • per-branch:      add 'require_human_merge: false' under ` +
+        `  - per-invocation:  stamp merge ${args.source} --into ${args.target} --yes\n` +
+        `  - per-shell:       STAMP_REQUIRE_HUMAN_MERGE=0 stamp merge ...\n` +
+        `  - per-branch:      add 'require_human_merge: false' under ` +
         `branches.${args.target} in .stamp/config.yml (and merge that change ` +
         `through the normal review flow)\n\n` +
         `Background: stamp's threat model treats LLM-verdict-as-merge-` +
@@ -68,13 +72,19 @@ export function requireHumanMerge(args: RequireHumanMergeArgs): void {
     );
   }
 
+  // Show base→head SHAs so the operator confirms what's actually about
+  // to be signed. The head_sha is the load-bearing one — a stale or
+  // attacker-shifted source ref shows up here as a SHA the operator
+  // doesn't recognise.
   const prompt =
-    `Sign + merge '${args.source}' → '${args.target}'? [y/N] `;
+    `Sign + merge '${args.source}' (${args.head_sha.slice(0, 8)}) ` +
+    `→ '${args.target}' (base ${args.base_sha.slice(0, 8)})? [y/N] `;
   process.stdout.write(prompt);
   const answer = readLineSync().trim().toLowerCase();
   if (answer !== "y" && answer !== "yes") {
     throw new Error(
-      `merge cancelled by operator (answered '${answer || "<empty>"}')`,
+      `merge cancelled: operator answered '${answer || "<empty>"}' to the ` +
+        `confirmation prompt for ${args.source} → ${args.target}.`,
     );
   }
 }
