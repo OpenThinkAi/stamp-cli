@@ -41,6 +41,24 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
 
+      # The package.json `version` and `name` are *file content*, not
+      # GitHub-managed metadata. Both reach this workflow as whatever
+      # bytes the maintainer (or a reviewer-approved PR) committed. The
+      # file content is gated by stamp's reviewer flow upstream, but the
+      # CI side must still treat them as untrusted strings: bash and
+      # ${{ … }} interpolation will both happily expand a `"; …; "` shape
+      # into shell that this workflow runs with `id-token: write` (npm
+      # OIDC publish) and `contents: write` (git push) — i.e. enough to
+      # ship a malicious release of @openthink/stamp and tag it.
+      #
+      # Two defenses, both shipping here:
+      #   1. The values are written to GITHUB_OUTPUT via heredoc rather
+      #      than `echo "k=$V"`, so a newline-bearing version cannot
+      #      inject extra output keys (output-injection shape).
+      #   2. Downstream steps consume those outputs via `env:` rather
+      #      than ${{ … }} substituted into bash, so a `"`/`;`/`$`
+      #      embedded in the value is shell-quoted by Actions and
+      #      handed to bash as a literal env-var value.
       - name: read target version
         id: version
         run: |
@@ -56,20 +74,38 @@ jobs:
           else
             DIST_TAG="latest"
           fi
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          # Heredoc form so a newline in any value can't terminate the
+          # output-key parser early and inject additional keys. The
+          # delimiter is per-key + has a UUID-shaped suffix to bound
+          # against the (vanishingly unlikely) case where the value
+          # legitimately contains the delimiter.
+          {
+            echo "name<<__EOF_NAME_$$"
+            echo "$NAME"
+            echo "__EOF_NAME_$$"
+            echo "version<<__EOF_VERSION_$$"
+            echo "$VERSION"
+            echo "__EOF_VERSION_$$"
+            echo "dist_tag<<__EOF_DIST_TAG_$$"
+            echo "$DIST_TAG"
+            echo "__EOF_DIST_TAG_$$"
+          } >> "$GITHUB_OUTPUT"
           echo "target: $NAME@$VERSION (dist-tag: $DIST_TAG)"
 
       - name: check npm registry
         id: check
+        env:
+          # Treat package.json values as untrusted; never substitute
+          # ${{ steps.* }} directly into a bash run: block. v4 audit M-SC1.
+          NAME: ${{ steps.version.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }} already on npm — skipping."
+            echo "$NAME@$VERSION already on npm — skipping."
           else
             echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "${{ steps.version.outputs.name }}@${{ steps.version.outputs.version }} not on npm — will publish."
+            echo "$NAME@$VERSION not on npm — will publish."
           fi
 
       - name: install
@@ -99,11 +135,15 @@ jobs:
       # when a newer npm is needed; lower bound is 11.5.1 for OIDC publish.
       - name: publish
         if: steps.check.outputs.published == 'false'
-        run: npx -y npm@11.13.0 publish --access public --provenance --tag "${{ steps.version.outputs.dist_tag }}"
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+        run: npx -y npm@11.13.0 publish --access public --provenance --tag "$DIST_TAG"
 
       - name: tag release
         if: steps.check.outputs.published == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          TAG="v${{ steps.version.outputs.version }}"
+          TAG="v$VERSION"
           git tag "$TAG"
           git push origin "$TAG"
