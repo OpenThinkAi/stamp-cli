@@ -13,7 +13,7 @@ PR dashboard, no human comment threads in core. Just a CLI + a git hook.
 
 Part of the [OpenThink](https://openthink.dev) suite.
 
-**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
+**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [threat model](./docs/threat-model.md) (who attacks, how, what defends) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
 
 ## Install
 

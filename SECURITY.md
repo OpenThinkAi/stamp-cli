@@ -100,6 +100,14 @@ unattended agent loops opt out via `STAMP_REQUIRE_HUMAN_MERGE=0` (per-shell)
 or `branches.<name>.require_human_merge: false` (committed config); the
 stance is stamp's, the posture is the operator's.
 
+**Threat model.** A reader-focused enumeration of attackers, paths, and
+defenses lives at [`docs/threat-model.md`](./docs/threat-model.md). It
+names five attacker positions (external pusher, SSH-pusher with no
+key, author-agent, author-agent with key compromise, operator-as-
+attacker), walks each path, and ties defenses to file/line citations
+where applicable. Useful as the reference for "does stamp's posture
+match my threat expectations?" without reading the full DESIGN.md.
+
 ## Known trade-offs
 
 Some behaviors are intentional trade-offs, not vulnerabilities:
