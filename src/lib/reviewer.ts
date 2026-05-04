@@ -783,7 +783,7 @@ export async function invokeReviewer(params: {
       const list = missing.map((p) => `  - ${p}`).join("\n");
       verdict = "changes_requested";
       prose =
-        `verdict-↔-trace inconsistency: this reviewer is configured ` +
+        `verdict/trace inconsistency: this reviewer is configured ` +
         `with enforce_reads_on_dotstamp=true, the diff modifies the ` +
         `following \`.stamp/*\` paths, and none of them appeared in ` +
         `the reviewer's Read trace before approval:\n\n${list}\n\n` +
@@ -791,7 +791,7 @@ export async function invokeReviewer(params: {
         `inspecting the diff defeats audit H1's defense-in-depth ` +
         `posture. Re-run the review and call \`Read('<path>')\` for ` +
         `each modified \`.stamp/*\` file before submitting an approved ` +
-        `verdict.\n\n${prose ? `Original prose:\n${prose}` : ""}`;
+        `verdict.${prose ? `\n\nOriginal prose:\n${prose}` : ""}`;
     }
   }
 
@@ -820,10 +820,18 @@ export function findMissingDotstampReads(
 ): string[] {
   // `git diff --name-only` is the canonical "files touched" list. Range
   // form `<base>..<head>` matches what the reviewer's user prompt shows
-  // (the diff itself is built from the same range upstream).
+  // (the diff itself is built from the same range upstream). Filter out
+  // deletions (D) — a deleted .stamp/* path can't be Read at HEAD, so
+  // demanding the reviewer Read it would strand the agent in an
+  // unsatisfiable retry loop. Trust-anchor *removal* is still gated by
+  // the operator-confirmation prompt at merge time (audit H1's
+  // load-bearing defense); this check enforces *modification* coverage.
   let raw: string;
   try {
-    raw = runGit(["diff", "--name-only", `${baseSha}..${headSha}`], repoRoot);
+    raw = runGit(
+      ["diff", "--name-only", "--diff-filter=AMR", `${baseSha}..${headSha}`],
+      repoRoot,
+    );
   } catch {
     // If git fails (orphan branch, missing objects, etc.) we can't
     // enforce; fail open rather than blocking the verdict on a git

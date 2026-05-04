@@ -241,7 +241,7 @@ function validateConfig(input: unknown): StampConfig {
     if (d.enforce_reads_on_dotstamp !== undefined) {
       if (typeof d.enforce_reads_on_dotstamp !== "boolean") {
         throw new Error(
-          `config.reviewers.${name}.enforce_reads_on_dotstamp must be a boolean`,
+          `config.reviewers.${name}.enforce_reads_on_dotstamp must be a boolean (got ${JSON.stringify(d.enforce_reads_on_dotstamp)})`,
         );
       }
       enforce_reads_on_dotstamp = d.enforce_reads_on_dotstamp;

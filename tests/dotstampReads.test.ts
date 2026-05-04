@@ -140,6 +140,32 @@ describe("findMissingDotstampReads", () => {
     const missing = findMissingDotstampReads(headSha, newHead, repo, new Set());
     assert.deepEqual(missing, []);
   });
+
+  it("excludes deleted .stamp/* paths from the requirement (unsatisfiable otherwise)", () => {
+    // A deleted file can't be Read at HEAD — demanding the reviewer
+    // Read it would strand the agent in an unsatisfiable retry loop.
+    // Trust-anchor *removal* is gated by the operator-confirmation
+    // prompt at merge time (audit H1's load-bearing defense); this
+    // check is for *modification* coverage. Pin: build a diff that
+    // deletes one .stamp/* file and modifies another, and assert
+    // only the modified one is required.
+    git(["rm", "-q", join(".stamp", "reviewers", "security.md")], repo);
+    writeFileSync(join(repo, ".stamp", "config.yml"), "branches: { main: {} }\n");
+    git(["add", "."], repo);
+    git(["commit", "-q", "-m", "delete one + modify other"], repo);
+    const afterDelete = git(["rev-parse", "HEAD"], repo).trim();
+
+    const readPaths = new Set([".stamp/config.yml"]);
+    const missing = findMissingDotstampReads(
+      headSha,
+      afterDelete,
+      repo,
+      readPaths,
+    );
+    // Only .stamp/config.yml should be required; the deleted file
+    // is filtered out via --diff-filter=AMR.
+    assert.deepEqual(missing, []);
+  });
 });
 
 describe("parseConfigFromYaml — enforce_reads_on_dotstamp", () => {
@@ -169,15 +195,18 @@ reviewers:
     );
   });
 
-  it("rejects non-boolean values", () => {
+  it("rejects non-boolean values and includes the offending value in the error", () => {
+    // The "got <value>" suffix matches the established convention from
+    // serverConfig.ts and helps an operator pasting the YAML find the
+    // bad line without grep-by-eye.
     assert.throws(
       () =>
         parseConfigFromYaml(cfg('\n    enforce_reads_on_dotstamp: "yes"')),
-      /enforce_reads_on_dotstamp must be a boolean/,
+      /enforce_reads_on_dotstamp must be a boolean.*got "yes"/,
     );
     assert.throws(
       () => parseConfigFromYaml(cfg("\n    enforce_reads_on_dotstamp: 1")),
-      /enforce_reads_on_dotstamp must be a boolean/,
+      /enforce_reads_on_dotstamp must be a boolean.*got 1/,
     );
   });
 });
