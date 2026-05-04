@@ -63,10 +63,14 @@ case $# in
         exit 2
         ;;
     esac
-    # Realpath-resolve and re-check: a symlink at /tmp/stamp-migrate-x.tar.gz
-    # whose target is outside /tmp would otherwise let the trap delete the
-    # symlink target. readlink -f is portable across busybox (Alpine) and
-    # GNU coreutils. Empty result on failure → reject.
+    # Realpath-resolve and re-check: the EXIT trap below uses `rm -f` which
+    # removes the symlink ENTRY, not the target. The real exposure is
+    # downstream — setup-repo.sh's `tar -tzf` / `tar -xzf` calls
+    # transparently follow the symlink and read whatever the target points
+    # at. A symlink at /tmp/stamp-migrate-foo.tar.gz pointing at e.g.
+    # /srv/git/<other>.git/HEAD would let us extract its contents as if it
+    # were the operator's own tarball. readlink -f is portable across
+    # busybox (Alpine) and GNU coreutils; empty result on failure → reject.
     CANON_TARBALL=$(readlink -f "$FROM_TARBALL" 2>/dev/null || true)
     case "$CANON_TARBALL" in
       /tmp/*)

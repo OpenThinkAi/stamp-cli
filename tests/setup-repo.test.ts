@@ -24,7 +24,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -175,20 +175,16 @@ describe("new-stamp-repo --from-tarball path constraint (v4 audit M-S2)", () => 
 
   it("rejects --from-tarball when the path is a symlink resolving outside /tmp", () => {
     // Create a symlink at /tmp/stamp-migrate-symlink-test-<pid>.tar.gz
-    // whose target is somewhere outside /tmp, then assert the script
-    // rejects it. Cleanup with finally so a failed assertion doesn't
-    // strand the symlink.
+    // whose target is under the operator's home dir — outside /tmp on
+    // every supported platform (macOS, Linux). Earlier revision used
+    // mkdtempSync(tmpdir()) which lands in /tmp on Linux, so the
+    // canonical path stayed under /tmp and the script accepted it →
+    // false negative on Linux CI. homedir() dodges that.
     const linkPath = `/tmp/stamp-migrate-symlink-test-${process.pid}.tar.gz`;
-    const targetDir = realpathSync(mkdtempSync(join(tmpdir(), "stamp-symtarget-")));
+    const targetDir = realpathSync(mkdtempSync(join(homedir(), ".stamp-symtarget-")));
     const targetFile = join(targetDir, "victim");
     writeFileSync(targetFile, "");
     try {
-      // The symlink lands in /tmp pointing OUT to the mkdtemp dir
-      // (under /var/folders on macOS, /tmp on Linux). On macOS the
-      // canonical path is unambiguously outside /tmp; on Linux mkdtemp
-      // typically uses /tmp directly so the canonical path stays under
-      // /tmp and the script accepts it. We assert below in a way that
-      // handles both.
       try {
         symlinkSync(targetFile, linkPath);
       } catch {
@@ -203,14 +199,12 @@ describe("new-stamp-repo --from-tarball path constraint (v4 audit M-S2)", () => 
 
       const r = run(["foo", "--from-tarball", linkPath]);
       assert.notStrictEqual(r.status, 0);
-      // readlink -f resolves the target to outside /tmp (under the
-      // mkdtempSync dir), which the canonical-path check rejects.
-      // On macOS mkdtemp returns a /var/folders/... path so the canon
-      // is definitely outside /tmp; on Linux mkdtempSync typically uses
-      // /tmp directly, in which case the canon stays under /tmp and
-      // this assertion would NOT fire — skip the message check there
-      // and just assert the script didn't proceed past arg validation.
-      assert.match(r.stderr, /(--from-tarball|outside)/);
+      // The canonical-path check resolves the symlink to under homedir
+      // (outside /tmp) and refuses with the "outside /tmp" message.
+      // Pin the message so a future regression where the readlink
+      // re-check is removed surfaces here, not just by way of a
+      // not-zero exit (which the bare prefix-match would also produce).
+      assert.match(r.stderr, /outside \/tmp/);
     } finally {
       try {
         rmSync(linkPath, { force: true });
