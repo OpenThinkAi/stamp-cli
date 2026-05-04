@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -85,6 +85,88 @@ export function denyIfOutsideRepo(
     );
   }
   return null;
+}
+
+/**
+ * Realpath-aware path-scope check. Walks `resolved` upward to the deepest
+ * existing prefix, calls `realpathSync.native` on it, and re-attaches any
+ * non-existent suffix. The result is the canonical filesystem location the
+ * SDK's `fs.readFileSync(resolved)` would actually read — symlinks
+ * resolved at every level. Then re-tests against the realpath of repoRoot.
+ *
+ * Why this exists: `denyIfOutsideRepo` is purely lexical, but
+ * `Read`/`Grep`/`Glob` ultimately invoke Node's `fs` APIs which follow
+ * symlinks by default. A feature branch can commit `pwn -> /etc/passwd`;
+ * lexical resolution treats `pwn` as an in-repo file but the read pulls
+ * `/etc/passwd`. v4 audit M-S1 / M-LL1.
+ *
+ * Returns a deny-message or null. The caller has already run the lexical
+ * check (`denyIfOutsideRepo`); this fires after, so a deny here means
+ * "lexical scope is fine, but the symlinked target is outside repoRoot."
+ *
+ * Nonexistent paths fall back to lexical behaviour: there's no symlink
+ * to follow, and the eventual `Read` will surface ENOENT to the model
+ * naturally.
+ *
+ * TOCTOU: the path could be re-pointed between this check and the SDK's
+ * read. The audit acknowledges this is proportionate — the alternative
+ * (no check at all) is exploitable without any race window. The operator
+ * still controls the worktree at review time; an attacker re-pointing
+ * a symlink mid-review is a substantially harder attack than committing
+ * a static symlink in a feature branch.
+ */
+function denyIfRealpathOutsideRepo(
+  resolved: string,
+  resolvedRoot: string,
+  inputPath: string,
+  toolName: string,
+): { canon: string | null; canonRoot: string | null; deny: string | null } {
+  // Realpath the root too — the operator may be working under /tmp/repo
+  // where /tmp is itself a symlink (macOS /tmp → /private/tmp), so
+  // comparing a canonicalised file against a non-canonicalised root
+  // would spuriously fail. If the root itself doesn't resolve (e.g. unit
+  // test fixtures using synthetic paths), bail to lexical — the caller
+  // re-uses lexical values for the denylist probe.
+  let canonRoot: string;
+  try {
+    canonRoot = realpathSync.native(resolvedRoot);
+  } catch {
+    return { canon: null, canonRoot: null, deny: null };
+  }
+
+  // Walk up to the deepest existing prefix and realpath it.
+  let probe = resolved;
+  let realPrefix: string | null = null;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      realPrefix = realpathSync.native(probe);
+      break;
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      tail.unshift(path.basename(probe));
+      probe = parent;
+    }
+  }
+  if (realPrefix === null) {
+    // Nothing along the path exists; lexical check is sufficient.
+    return { canon: null, canonRoot: null, deny: null };
+  }
+  const canon = tail.length === 0 ? realPrefix : path.join(realPrefix, ...tail);
+
+  if (canon !== canonRoot && !canon.startsWith(canonRoot + path.sep)) {
+    return {
+      canon,
+      canonRoot,
+      deny:
+        `${toolName} path "${inputPath}" resolves through a symlink to ` +
+        `"${canon}", which is outside repoRoot ("${canonRoot}"). Reviewer ` +
+        `tools are scoped to the repository; symlinks pointing out are ` +
+        `treated the same as a literal escape.`,
+    };
+  }
+  return { canon, canonRoot, deny: null };
 }
 
 /**
@@ -214,14 +296,30 @@ export function checkReviewerTool(args: {
     const filePath = input.file_path;
     const denied = denyIfOutsideRepo(filePath, repoRoot, "Read");
     if (denied) return { allow: false, reason: denied };
-    // After the scope check, also block reviewer-internal targets that
-    // no legitimate review needs but a hostile diff might try to exfil:
-    // attestation DB and trusted-key pubkeys.
+    // After the lexical scope check, walk symlinks and recheck. A
+    // committed `pwn -> /etc/passwd` survives the lexical test (it's
+    // syntactically inside repoRoot) but `Read('pwn')` would follow the
+    // symlink at fs.readFileSync time. v4 audit M-S1 / M-LL1.
     const resolvedRoot = path.resolve(repoRoot);
     const resolved = path.resolve(resolvedRoot, filePath as string);
-    const internal = denyIfReviewerInternal(
+    const realpathCheck = denyIfRealpathOutsideRepo(
       resolved,
       resolvedRoot,
+      filePath as string,
+      "Read",
+    );
+    if (realpathCheck.deny) return { allow: false, reason: realpathCheck.deny };
+    // Reviewer-internal denylist: run against the realpath when we have
+    // one, so a symlink to `.git/stamp/state.db` (or anywhere else inside
+    // a denylisted prefix) gets caught the same way a literal path would.
+    // canon and canonRoot move together — both non-null on real
+    // filesystems, both null on synthetic test paths — so the denylist
+    // probe stays consistent across the two cases.
+    const internalProbe = realpathCheck.canon ?? resolved;
+    const internalRoot = realpathCheck.canonRoot ?? resolvedRoot;
+    const internal = denyIfReviewerInternal(
+      internalProbe,
+      internalRoot,
       filePath as string,
     );
     if (internal) return { allow: false, reason: internal };
@@ -235,6 +333,15 @@ export function checkReviewerTool(args: {
     if (grepPath !== undefined) {
       const denied = denyIfOutsideRepo(grepPath, repoRoot, "Grep");
       if (denied) return { allow: false, reason: denied };
+      const resolvedRoot = path.resolve(repoRoot);
+      const resolved = path.resolve(resolvedRoot, grepPath as string);
+      const realpathCheck = denyIfRealpathOutsideRepo(
+        resolved,
+        resolvedRoot,
+        grepPath as string,
+        "Grep",
+      );
+      if (realpathCheck.deny) return { allow: false, reason: realpathCheck.deny };
     }
     return { allow: true };
   }
@@ -244,6 +351,15 @@ export function checkReviewerTool(args: {
     if (globPath !== undefined) {
       const denied = denyIfOutsideRepo(globPath, repoRoot, "Glob");
       if (denied) return { allow: false, reason: denied };
+      const resolvedRoot = path.resolve(repoRoot);
+      const resolved = path.resolve(resolvedRoot, globPath as string);
+      const realpathCheck = denyIfRealpathOutsideRepo(
+        resolved,
+        resolvedRoot,
+        globPath as string,
+        "Glob",
+      );
+      if (realpathCheck.deny) return { allow: false, reason: realpathCheck.deny };
     }
     // Belt-and-suspenders: reject patterns that look like absolute paths
     // or contain `..` segments. The path-scope check above prevents the
