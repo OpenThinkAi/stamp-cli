@@ -828,6 +828,44 @@ describe("findBranchRule (config.yml branches: glob support, issue #9)", () => {
   });
 });
 
+// ---------- branches.<name>.require_human_merge schema (audit H1) ----------
+
+describe("parseConfigFromYaml — require_human_merge", () => {
+  const cfg = (extra: string) => `
+branches:
+  main:
+    required: [r]${extra}
+reviewers:
+  r: { prompt: ./r.md }
+`;
+
+  it("omits the field when not present (default behavior is the libcall's concern)", () => {
+    const c = parseConfigFromYaml(cfg(""));
+    assert.equal(c.branches.main!.require_human_merge, undefined);
+  });
+
+  it("accepts true", () => {
+    const c = parseConfigFromYaml(cfg("\n    require_human_merge: true"));
+    assert.equal(c.branches.main!.require_human_merge, true);
+  });
+
+  it("accepts false (the per-branch opt-out)", () => {
+    const c = parseConfigFromYaml(cfg("\n    require_human_merge: false"));
+    assert.equal(c.branches.main!.require_human_merge, false);
+  });
+
+  it("rejects non-boolean values with a clear error", () => {
+    assert.throws(
+      () => parseConfigFromYaml(cfg('\n    require_human_merge: "yes"')),
+      /require_human_merge must be a boolean/,
+    );
+    assert.throws(
+      () => parseConfigFromYaml(cfg("\n    require_human_merge: 1")),
+      /require_human_merge must be a boolean/,
+    );
+  });
+});
+
 // ---------- decideMirrorStatus (mirror hook commit-status decision) ----------
 
 describe("decideMirrorStatus", () => {

@@ -414,9 +414,14 @@ program
   .command("merge <branch>")
   .description("merge <branch> into --into <target> if the gate is open")
   .requiredOption("--into <target>", "target branch to merge into")
-  .action((branch: string, opts: { into: string }) => {
+  .option(
+    "-y, --yes",
+    "skip the operator-confirmation prompt for this invocation " +
+      "(equivalent to STAMP_REQUIRE_HUMAN_MERGE=0; see audit H1)",
+  )
+  .action((branch: string, opts: { into: string; yes?: boolean }) => {
     try {
-      runMerge({ branch, into: opts.into });
+      runMerge({ branch, into: opts.into, yes: opts.yes });
     } catch (err) {
       handleCliError(err);
     }

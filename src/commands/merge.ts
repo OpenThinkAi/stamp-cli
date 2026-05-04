@@ -25,10 +25,16 @@ import {
 } from "../lib/reviewerHash.js";
 import { parseToolCalls, redactToolCallsForAttestation } from "../lib/toolCalls.js";
 import { signBytes } from "../lib/signing.js";
+import { requireHumanMerge } from "../lib/humanMerge.js";
 
 export interface MergeOptions {
   branch: string;
   into: string;
+  /**
+   * Skip the human-merge confirmation prompt for this invocation. Equivalent
+   * to STAMP_REQUIRE_HUMAN_MERGE=0 but scoped to one command. Audit H1.
+   */
+  yes?: boolean;
 }
 
 export function runMerge(opts: MergeOptions): void {
@@ -103,6 +109,18 @@ export function runMerge(opts: MergeOptions): void {
           `Run \`stamp status --diff ${revspec}\` to inspect, then \`stamp review --diff ${revspec}\` to review.`,
       );
     }
+
+    // Audit H1 — operator confirmation gate. Runs *after* the reviewer gate
+    // and the dirty-tree pre-flight (no point asking if we'd refuse anyway)
+    // and *before* the signing key is loaded or any git ref moves. Throws
+    // on cancel or no-TTY-without-opt-out; the throw bubbles to the caller
+    // before any state changes, so no rollback is needed.
+    requireHumanMerge({
+      target: opts.into,
+      source: opts.branch,
+      branchRule: rule,
+      yes: opts.yes ?? false,
+    });
 
     // Build the skeletal approvals list from required reviewers (not all
     // reviewers — only those the target branch requires). Hashes for the

@@ -14,6 +14,16 @@ export interface BranchRule {
   required: string[];
   /** Optional pre-merge check commands; all must pass before merge is signed */
   required_checks?: CheckDef[];
+  /**
+   * When undefined or true, `stamp merge` requires explicit operator
+   * confirmation (interactive y/N prompt, --yes flag, or
+   * STAMP_REQUIRE_HUMAN_MERGE=0 env var) before signing. When false, merges
+   * proceed unattended. Closes audit H1 (LLM-verdict-→-signed-merge
+   * residual risk) by making operator awareness the default — the value
+   * lives in committed config so changing it itself goes through stamp
+   * review.
+   */
+  require_human_merge?: boolean;
 }
 
 /**
@@ -178,9 +188,20 @@ function validateConfig(input: unknown): StampConfig {
 
     const required_checks = parseChecks(r.required_checks, name);
 
+    let require_human_merge: boolean | undefined;
+    if (r.require_human_merge !== undefined) {
+      if (typeof r.require_human_merge !== "boolean") {
+        throw new Error(
+          `config.branches.${name}.require_human_merge must be a boolean`,
+        );
+      }
+      require_human_merge = r.require_human_merge;
+    }
+
     branches[name] = {
       required: r.required.map(String),
       ...(required_checks ? { required_checks } : {}),
+      ...(require_human_merge !== undefined ? { require_human_merge } : {}),
     };
   }
 
