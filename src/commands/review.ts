@@ -35,6 +35,25 @@ export interface ReviewOptions {
 const DEFAULT_DIFF_SIZE_CAP_BYTES = 200 * 1024;
 
 export async function runReview(opts: ReviewOptions): Promise<void> {
+  // STAMP_NO_LLM=1 short-circuit. The invokeReviewer guard would catch
+  // each per-reviewer call individually, but the default multi-reviewer
+  // flow runs Promise.allSettled across N reviewers in parallel — with
+  // the per-reviewer guard alone, the operator sees the same throw N
+  // times. Hoisting the check here surfaces the error once before any
+  // reviewer is invoked. The per-invocation guard stays in place as a
+  // safety net for any future caller of invokeReviewer.
+  if (process.env.STAMP_NO_LLM === "1") {
+    throw new Error(
+      `STAMP_NO_LLM=1 is set; refusing to start \`stamp review\` because ` +
+        `it would invoke the Claude Agent SDK. With this env var on, ` +
+        `stamp's LLM-using commands (review / reviewers test / ` +
+        `bootstrap) are disabled — no diff content will leave the host. ` +
+        `The signing, verification, and merge primitives (stamp keys / ` +
+        `stamp merge / stamp verify / stamp log / the pre-receive hook) ` +
+        `all continue to work. Unset STAMP_NO_LLM to re-enable.`,
+    );
+  }
+
   const repoRoot = findRepoRoot();
   const configPath = stampConfigFile(repoRoot);
   if (!existsSync(configPath)) {

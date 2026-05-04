@@ -375,7 +375,15 @@ with concrete fixes.
 
 stamp-cli runs reviewers by sending the diff to Anthropic. Operators
 working with sensitive content should know the data-flow contract before
-running their first `stamp review`.
+running their first `stamp review`. To disable LLM-using stamp surfaces
+entirely on a host (regulated environment, DPA-bound deployment, air-gap),
+set `STAMP_NO_LLM=1` — `stamp review`, `stamp reviewers test`, and
+`stamp bootstrap` will refuse to start with a clear error, and no diff
+content will leave the host. The signing, verification, merge, and log
+primitives (`stamp keys`, `stamp merge`, `stamp verify`, `stamp log`,
+the pre-receive hook) all continue to work; an operator can capture
+manual-review verdicts in `state.db` out-of-band before merge if
+required.
 
 **What gets sent to Anthropic on every `stamp review`:**
 

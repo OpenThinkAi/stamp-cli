@@ -66,6 +66,27 @@ const STARTER_PROMPTS: Record<string, string> = {
 const BOOTSTRAP_BRANCH = "stamp/bootstrap";
 
 export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
+  // STAMP_NO_LLM=1 short-circuit. The invokeReviewer guard alone isn't
+  // enough here: runBootstrap creates the stamp/bootstrap branch, writes
+  // reviewer files + AGENTS.md/CLAUDE.md, and lands a commit BEFORE
+  // calling runReview → invokeReviewer. Without an early check, an
+  // operator with STAMP_NO_LLM=1 set ends up on a half-bootstrap branch
+  // and recoverable only via the catch block. Match the README + the
+  // invokeReviewer error wording so an operator sees the same message
+  // either way.
+  if (process.env.STAMP_NO_LLM === "1") {
+    throw new Error(
+      `STAMP_NO_LLM=1 is set; refusing to start \`stamp bootstrap\` ` +
+        `because it invokes the Claude Agent SDK to install reviewers. ` +
+        `With this env var on, stamp's LLM-using commands (review / ` +
+        `reviewers test / bootstrap) are disabled — no diff content ` +
+        `will leave the host. The signing, verification, and merge ` +
+        `primitives (stamp keys / stamp merge / stamp verify / stamp ` +
+        `log / the pre-receive hook) all continue to work. Unset ` +
+        `STAMP_NO_LLM to re-enable.`,
+    );
+  }
+
   const repoRoot = findRepoRoot();
   const configFile = stampConfigFile(repoRoot);
 
