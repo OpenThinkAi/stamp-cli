@@ -11,6 +11,11 @@ import {
   type ToolSpec,
 } from "./config.js";
 import type { Verdict } from "./db.js";
+import {
+  RETRO_KIND_VALUES,
+  RETRO_MAX_CANDIDATES,
+  type RetroCandidate,
+} from "./retro.js";
 import { checkMcpCommand, loadMcpAllowlist } from "./toolAllowlist.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
 
@@ -272,6 +277,16 @@ export interface ReviewerInvocation {
   /** Tool calls the reviewer's agent made during the review. Audit metadata
    *  only — see lib/toolCalls.ts for threat model. */
   tool_calls: ToolCall[];
+  /**
+   * Codebase retro candidates the reviewer chose to surface via the
+   * `submit_retro` MCP tool. Capped at RETRO_MAX_CANDIDATES; excess calls
+   * past the cap are silently dropped (matching the `submit_verdict`
+   * last-call-wins precedent — keep stdout bounded, don't fail the review).
+   * Always present (possibly empty) so downstream consumers can distinguish
+   * "ran, nothing to say" from a stamp-cli version that pre-dates retros.
+   * AGT-052 / agentic-iterative-learning.
+   */
+  retros: RetroCandidate[];
 }
 
 export async function invokeReviewer(params: {
@@ -322,6 +337,13 @@ export async function invokeReviewer(params: {
   let submittedVerdict: Verdict | null = null;
   let submittedProse: string | null = null;
 
+  // Retro capture: submit_retro is a separate structured channel for
+  // codebase observations the reviewer wants to leave behind. Capped at
+  // RETRO_MAX_CANDIDATES to bound stdout and bound an injection blast
+  // radius — excess calls are silently dropped, matching the verdict
+  // last-call-wins precedent. AGT-052 / agentic-iterative-learning.
+  const submittedRetros: RetroCandidate[] = [];
+
   const verdictServer = createSdkMcpServer({
     name: "stamp-verdict",
     version: "1.0.0",
@@ -352,6 +374,58 @@ export async function invokeReviewer(params: {
           };
         },
       ),
+      tool(
+        "submit_retro",
+        "OPTIONAL. Submit a single codebase retro candidate — a transferable " +
+          "observation the next agent working in this repo would benefit from " +
+          "knowing. Call 0 to " +
+          RETRO_MAX_CANDIDATES +
+          " times during your review. Scope is the CODEBASE only: conventions " +
+          "worth respecting, invariants that aren't obvious from the code, " +
+          "prior decisions worth not relitigating, gotchas a reader would " +
+          "rediscover the hard way. NOT process retrospection. NOT bug reports " +
+          "about this diff (those go in your verdict prose). Skip entirely " +
+          "when you have nothing transferable to say — emitting filler is worse " +
+          "than emitting nothing.",
+        {
+          kind: z.enum(RETRO_KIND_VALUES),
+          observation: z
+            .string()
+            .min(1)
+            .describe(
+              "One short paragraph stating the observation in transferable terms — what holds, not the specific diff line that triggered the thought.",
+            ),
+          evidence: z
+            .string()
+            .optional()
+            .describe(
+              "Optional citation, typically a `path/to/file.ts:line` pointer or short quote.",
+            ),
+        },
+        async (args) => {
+          // Silent-drop past the cap. Mirrors the submit_verdict last-call-
+          // wins behavior: bound the channel, don't crash the review.
+          if (submittedRetros.length >= RETRO_MAX_CANDIDATES) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `retro cap (${RETRO_MAX_CANDIDATES}) reached; further submit_retro calls are dropped this run.`,
+                },
+              ],
+            };
+          }
+          const candidate: RetroCandidate = {
+            kind: args.kind,
+            observation: args.observation,
+            ...(args.evidence !== undefined ? { evidence: args.evidence } : {}),
+          };
+          submittedRetros.push(candidate);
+          return {
+            content: [{ type: "text", text: "retro recorded" }],
+          };
+        },
+      ),
     ],
   });
 
@@ -364,7 +438,10 @@ export async function invokeReviewer(params: {
   // entries with overlapping hosts collapse on the host key — last writer
   // wins, which matches the YAML's reading order.
   const webFetchPolicy = new Map<string, WebFetchHostPolicy>();
-  const allowedTools = ["mcp__stamp-verdict__submit_verdict"];
+  const allowedTools = [
+    "mcp__stamp-verdict__submit_verdict",
+    "mcp__stamp-verdict__submit_retro",
+  ];
   for (const spec of def.tools ?? []) {
     if (typeof spec === "string") {
       allowedTools.push(spec);
@@ -545,7 +622,13 @@ export async function invokeReviewer(params: {
     prose = stripLastLineVerdict(fallbackText);
   }
 
-  return { reviewer: params.reviewer, prose, verdict, tool_calls: toolCalls };
+  return {
+    reviewer: params.reviewer,
+    prose,
+    verdict,
+    tool_calls: toolCalls,
+    retros: submittedRetros,
+  };
 }
 
 function resolveMcpServers(
@@ -731,6 +814,35 @@ function augmentSystemPrompt(reviewerPrompt: string, fenceHex: string): string {
       `response with a single line "VERDICT: <choice>" as the LAST non-empty ` +
       `line of your response. submit_verdict is preferred — its enum schema ` +
       `prevents accidental verdict drift.`,
+    ``,
+    `# Codebase retro candidates (optional)`,
+    ``,
+    `In addition to your verdict, you MAY call the \`submit_retro\` tool 0 to ` +
+      RETRO_MAX_CANDIDATES +
+      ` times to leave behind transferable codebase observations for the next ` +
+      `agent who works in this repo. Each call records one candidate with ` +
+      `\`{kind, observation, evidence?}\`. \`kind\` is one of "convention", ` +
+      `"invariant", "prior_decision", "gotcha".`,
+    ``,
+    `Scope is the CODEBASE only:`,
+    `- "convention": a pattern this repo follows that the next contributor ` +
+      `should mirror (naming, layering, file organisation).`,
+    `- "invariant": a property the code relies on that isn't obvious from ` +
+      `reading any single file (cross-module assumption, ordering rule).`,
+    `- "prior_decision": an approach that was deliberately taken (or rejected) ` +
+      `and shouldn't be relitigated without context.`,
+    `- "gotcha": a hazard a careful reader would still trip over — non-obvious ` +
+      `failure modes, easily-broken implicit contracts.`,
+    ``,
+    `Do NOT use \`submit_retro\` for: process retrospection ("the review took ` +
+      `too long"), bug reports about THIS diff (those go in your verdict prose ` +
+      `via submit_verdict), or generic best-practice advice not grounded in ` +
+      `something concrete in this codebase. If you have nothing transferable ` +
+      `to say, emit zero retros — silence is the correct default.`,
+    ``,
+    `Retros land on stdout in a structured block parsed by an upstream ` +
+      `orchestrator; they do not affect your verdict and are NOT shown to the ` +
+      `diff author as part of the review prose.`,
     ``,
     `# Diff boundary instructions`,
     ``,
