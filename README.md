@@ -164,7 +164,11 @@ stamp bootstrap                            # one-shot: replace placeholder examp
 stamp review --diff <revspec>              # run all configured reviewers in parallel
 stamp review --diff <revspec> --only <name> # run a single reviewer
 stamp status --diff <revspec>              # gate check; exit 0 if open, 1 if closed
-stamp merge <branch> --into <target>       # run required_checks → sign merge commit
+stamp merge <branch> --into <target>       # operator confirmation → merge → required_checks → sign
+                                           #   prompts y/N (with base/head SHAs) before any ref moves.
+                                           #   bypass: --yes flag, STAMP_REQUIRE_HUMAN_MERGE=0,
+                                           #   or branches.<name>.require_human_merge: false in config.
+                                           #   audit H1.
 stamp push <target>                        # plain git push; hook stderr forwarded
 stamp verify <sha>                         # verify a merge commit's attestation locally
 ```
@@ -307,6 +311,10 @@ practice:
 The canonical unattended loop:
 
 ```sh
+# Unattended-loop intent: agent has no TTY, so confirm-on-merge would
+# block forever. Declare the bypass once at shell scope.
+export STAMP_REQUIRE_HUMAN_MERGE=0
+
 while :; do
   stamp review --diff main..$BRANCH
   if stamp status --diff main..$BRANCH; then
@@ -319,13 +327,19 @@ while :; do
 done
 ```
 
+`stamp merge` defaults to interactive confirmation (audit H1: residual
+risk of LLM-verdict-as-merge-authorization). Three opt-out paths:
+`--yes` per-invocation, `STAMP_REQUIRE_HUMAN_MERGE=0` per-shell, or
+`branches.<name>.require_human_merge: false` in `.stamp/config.yml`
+(committed and reviewer-gated like any other config).
+
 **Exit-code cheat sheet:**
 
 | Command | 0 | non-zero (check stderr to disambiguate) |
 |---|---|---|
 | `stamp review` | reviewers ran and recorded | invocation failed (reviewer crash, DB error) — verdict may or may not be approved; always follow with `stamp status` to check the gate |
 | `stamp status` | gate open (all required reviewers approved) | gate closed — at least one required reviewer missing or non-approved |
-| `stamp merge` | merge signed, on main | stderr says which case: `gate CLOSED:` (need reviews), `pre-merge checks failed:` (merge rolled back, need fix), or a git-merge conflict message (working tree needs resolution) |
+| `stamp merge` | merge signed, on main | stderr says which case: `gate CLOSED:` (need reviews), `confirmation required:` (no TTY + no opt-out — set `STAMP_REQUIRE_HUMAN_MERGE=0` or pass `--yes`), `merge cancelled:` (operator answered 'n' at the prompt), `pre-merge checks failed:` (merge rolled back, need fix), or a git-merge conflict message (working tree needs resolution) |
 | `stamp push` | remote accepted | stderr has `remote: stamp-verify: rejecting ...` for hook rejections, or a standard git error for network/auth issues |
 | `stamp verify` | attestation valid | stderr names the specific verification step that failed (signature invalid, untrusted signer, SHA mismatch, missing check, etc.) |
 
