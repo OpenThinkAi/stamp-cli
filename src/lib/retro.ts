@@ -72,7 +72,14 @@ export function formatRetroBlock(
   }
   const open = `<<<STAMP-RETRO v=${STAMP_RETRO_VERSION} reviewer="${reviewer}">>>`;
   const close = `<<<END-STAMP-RETRO>>>`;
-  const body = JSON.stringify({ candidates });
+  // Escape `<` in the JSON body so that an observation discussing the retro
+  // markers themselves can't appear to close the fence early. The parser
+  // round-trips the body through JSON.parse, which decodes < back to
+  // `<`, so this is invisible to consumers. Without this, a reviewer writing
+  // about *this very feature* — a near-certain occurrence in PRs that touch
+  // it — would silently drop their block: the body regex stops at the first
+  // literal `\n<<<END-STAMP-RETRO>>>` it sees.
+  const body = JSON.stringify({ candidates }).replace(/</g, "\\u003c");
   return `${open}\n${body}\n${close}`;
 }
 

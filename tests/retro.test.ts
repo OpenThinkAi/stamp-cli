@@ -124,6 +124,21 @@ describe("parseRetroBlocks", () => {
     assert.deepEqual(parsed[0]!.candidates[0], candidate);
   });
 
+  it("preserves observations that quote the close-marker text verbatim (round-trip without truncation)", () => {
+    // Without `<` → `<` escaping on emit, a reviewer writing about the
+    // retro feature itself would close the fence early in their own block.
+    // The first PR that triggers this is the one that introduces it.
+    const candidate: RetroCandidate = {
+      kind: "convention",
+      observation:
+        "the close marker is the literal string <<<END-STAMP-RETRO>>> and the open marker is <<<STAMP-RETRO v=1 reviewer=\"x\">>>",
+    };
+    const stdout = formatRetroBlock("standards", [candidate]);
+    const parsed = parseRetroBlocks(stdout);
+    assert.equal(parsed.length, 1);
+    assert.deepEqual(parsed[0]!.candidates[0], candidate);
+  });
+
   it("preserves observations containing newlines", () => {
     const candidate: RetroCandidate = {
       kind: "convention",
