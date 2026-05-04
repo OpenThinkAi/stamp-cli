@@ -118,6 +118,22 @@ export interface ReviewerDef {
    * or non-allowlisted names cause `stamp review` to fail fast.
    */
   mcp_servers?: Record<string, McpServerDef>;
+  /**
+   * When true, this reviewer cannot return `approved` for a diff that
+   * touches `.stamp/` paths unless its agent has called `Read` on every
+   * modified `.stamp/*` file during the review. Verdict-↔-trace
+   * consistency check: prevents a prompt-injected reviewer from waving
+   * through a change to its own trust anchors (config.yml, reviewer
+   * prompts, trusted-keys/) without inspecting the diff.
+   *
+   * Defaults to false (back-compat). Recommended on for whichever
+   * reviewer is responsible for trust-anchor scrutiny — typically the
+   * `security` persona, but the field is reviewer-name-agnostic so
+   * operators with custom reviewer sets can opt their own in. Audit-H1
+   * defense-in-depth alongside the default-on operator confirmation
+   * gate.
+   */
+  enforce_reads_on_dotstamp?: boolean;
 }
 
 export interface McpServerDef {
@@ -220,10 +236,24 @@ function validateConfig(input: unknown): StampConfig {
     }
     const tools = parseTools(d.tools, name);
     const mcp_servers = parseMcpServers(d.mcp_servers, name);
+
+    let enforce_reads_on_dotstamp: boolean | undefined;
+    if (d.enforce_reads_on_dotstamp !== undefined) {
+      if (typeof d.enforce_reads_on_dotstamp !== "boolean") {
+        throw new Error(
+          `config.reviewers.${name}.enforce_reads_on_dotstamp must be a boolean (got ${JSON.stringify(d.enforce_reads_on_dotstamp)})`,
+        );
+      }
+      enforce_reads_on_dotstamp = d.enforce_reads_on_dotstamp;
+    }
+
     reviewers[name] = {
       prompt: d.prompt,
       ...(tools ? { tools } : {}),
       ...(mcp_servers ? { mcp_servers } : {}),
+      ...(enforce_reads_on_dotstamp !== undefined
+        ? { enforce_reads_on_dotstamp }
+        : {}),
     };
   }
 
