@@ -670,6 +670,17 @@ go in a smaller footer. Don't restate what the diff already says.
 Target a review a busy author can act on in ~60 seconds. One-sentence
 approvals are fine.
 
+## Codebase retros (optional)
+
+Separate from your verdict, you may call \`submit_retro\` 0–5 times to
+leave behind transferable security observations about *this codebase* —
+trust-boundary conventions worth respecting, invariants the security
+model depends on, prior decisions about secret/credential handling that
+shouldn't be re-litigated. NOT bug reports about this diff (those go in
+your verdict prose). Skip when nothing transferable comes to mind —
+silence is the default. The system prompt appendix has the full
+instructions and \`kind\` enum.
+
 ## Output format (required — do not change)
 
 Prose review, then exactly one final line:
@@ -763,6 +774,18 @@ go in a smaller footer. Don't restate what the diff already says.
 Target a review a busy author can act on in ~60 seconds. One-sentence
 approvals are fine.
 
+## Codebase retros (optional)
+
+Separate from your verdict, you may call \`submit_retro\` 0–5 times to
+leave behind transferable code-quality observations about *this codebase*
+— conventions a new contributor should mirror (module boundaries,
+naming, layering), prior decisions about abstraction shape that
+shouldn't be re-litigated, invariants stated in comments that quietly
+hold across the codebase. NOT a list of code-style nits about this diff
+(those go in your verdict prose). Skip when nothing transferable comes
+to mind. The system prompt appendix has the full instructions and
+\`kind\` enum.
+
 ## Output format (required — do not change)
 
 Prose review, then exactly one final line:
@@ -854,6 +877,17 @@ Lead with the verdict and the 2–3 most important issues. Optional nits
 go in a smaller footer. Don't restate what the diff already says.
 Target a review a busy author can act on in ~60 seconds. One-sentence
 approvals are fine.
+
+## Codebase retros (optional)
+
+Separate from your verdict, you may call \`submit_retro\` 0–5 times to
+leave behind transferable product/UX observations about *this codebase*
+— interface conventions worth respecting, prior decisions about
+naming/shape/exit-codes that shouldn't be re-litigated, invariants the
+external contract depends on. NOT specific UX papercuts in this diff
+(those go in your verdict prose). Skip when nothing transferable comes
+to mind. The system prompt appendix has the full instructions and
+\`kind\` enum.
 
 ## Output format (required — do not change)
 

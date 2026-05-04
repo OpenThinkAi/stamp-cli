@@ -14,6 +14,7 @@ import {
   stampConfigFile,
   stampStateDbPath,
 } from "../lib/paths.js";
+import { formatRetroBlock } from "../lib/retro.js";
 import { serializeToolCalls } from "../lib/toolCalls.js";
 
 export interface ReviewOptions {
@@ -228,6 +229,12 @@ function printReview(
   console.log(bar);
   console.log(`verdict: ${result.verdict}`);
   console.log(bar);
+  // Retro fence is emitted AFTER the verdict bar so existing stdout consumers
+  // — agents grepping for `verdict: ` or the `─` bars — see no change in
+  // their parse window. Always emitted (even when retros is empty) so the
+  // orchestrator can distinguish "ran, nothing to say" from a stamp-cli
+  // version that pre-dates retros. AGT-052 / agentic-iterative-learning.
+  console.log(formatRetroBlock(result.reviewer, result.retros));
   console.log();
 }
 
