@@ -300,19 +300,17 @@ See `docs/personas.md` for the full design discussion (operator-env vs. per-conf
 
 ---
 
-## Hiding internal MCP server names from the public mirror (`STAMP_HASH_MCP_NAMES`)
+## Showing verbatim MCP server names in the public mirror (`STAMP_HASH_MCP_NAMES`)
 
-The `Stamp-Payload` trailer's `tool_calls[]` audit trace records each tool the reviewer's agent invoked. Tool *inputs* are SHA-256 hashed (so file paths, search terms, and MCP arguments stay out of the mirror), but tool *names* are recorded verbatim. Built-in SDK tools (`Read`, `Grep`, `Bash`, …) are not sensitive, but MCP-hosted tools are named `mcp__<server>__<tool>` — so a reviewer that talks to an internal MCP server (e.g. `mcp__acme-billing__lookup_invoice`, `mcp__internal-hr__get_employee`) discloses the existence and naming of that internal service to anyone with read access to the GitHub mirror.
+The `Stamp-Payload` trailer's `tool_calls[]` audit trace records each tool the reviewer's agent invoked. Tool *inputs* are SHA-256 hashed (so file paths, search terms, and MCP arguments stay out of the mirror); tool *names* are **also hashed by default** for MCP-hosted tools — `mcp__<server>__<tool>` becomes `mcp__sha256:<hex8>__sha256:<hex8>`. Built-in SDK tools (`Read`, `Grep`, `Bash`, …) are unaffected. The local `state.db` rows used by `stamp reviewers show` always carry verbatim names regardless of the flag, so operators retain full local visibility — only the mirrored attestation is redacted.
 
-Operators in this position can opt in to hashing:
+The data-minimization stance is the v1.2 default (audit M-PR1). Operators with all-public MCP servers, or who want verbatim names while debugging an attestation by eye, can opt out:
 
 ```sh
-export STAMP_HASH_MCP_NAMES=1
+export STAMP_HASH_MCP_NAMES=0
 ```
 
-on the machine that runs `stamp merge`. The attestation builder then rewrites MCP names to `mcp__sha256:<hex8>__sha256:<hex8>` (truncated SHA-256 of the server and tool segments) before signing. Built-in tool names are unaffected. The local `state.db` rows used by `stamp reviewers show` continue to carry verbatim names, so operators retain full local visibility — only the mirrored attestation is redacted.
-
-Off by default for backwards compatibility. The verifier treats `tool_calls[].tool` as opaque audit data, so flipping the flag does not affect signature verification or any existing stamp repo.
+on the machine that runs `stamp merge`. The verifier treats `tool_calls[].tool` as opaque audit data, so the flag does not affect signature verification — flipping it for one merge and back for the next produces a mixed-shape mirror history and that's fine.
 
 ---
 

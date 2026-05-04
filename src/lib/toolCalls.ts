@@ -82,16 +82,29 @@ export function redactMcpToolName(tool: string): string {
 }
 
 /**
- * Optionally redact MCP tool names in a tool-call list before they're
- * embedded in the signed attestation. Off by default (verbatim names);
- * `STAMP_HASH_MCP_NAMES=1` opts the operator into hashing so the public
- * mirror doesn't disclose the existence of internal MCP servers.
+ * Redact MCP tool names in a tool-call list before they're embedded in
+ * the signed attestation. **On by default** (data-minimization stance):
+ * verbatim MCP names like `mcp__acme-billing__lookup_invoice` would
+ * disclose the existence and naming of internal services to anyone with
+ * read access to the public GitHub mirror. Hashing both halves preserves
+ * the audit invariant ("did the right number of MCP calls happen?")
+ * while keeping the names out of the public mirror. v4 audit M-PR1.
+ *
+ * Opt-OUT via `STAMP_HASH_MCP_NAMES=0` for operators who genuinely want
+ * verbatim names (all-public MCP servers, or debugging an attestation
+ * trace by eye). Built-in SDK tools (Read/Grep/Glob/WebFetch) have no
+ * `mcp__` prefix and pass through `redactMcpToolName` unchanged either
+ * way.
  *
  * Applied at attestation-build time only: in-memory SDK traces and the
  * local `reviews.tool_calls` DB column stay verbatim so operators retain
  * full local visibility into what their reviewers did.
+ *
+ * Backward-compat: existing attestations on already-merged commits stay
+ * valid (the verifier doesn't re-derive `tool` strings; it reads them
+ * from the trailer). Only future merges differ.
  */
 export function redactToolCallsForAttestation(calls: ToolCall[]): ToolCall[] {
-  if (process.env.STAMP_HASH_MCP_NAMES !== "1") return calls;
+  if (process.env.STAMP_HASH_MCP_NAMES === "0") return calls;
   return calls.map((c) => ({ ...c, tool: redactMcpToolName(c.tool) }));
 }
