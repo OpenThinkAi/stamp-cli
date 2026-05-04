@@ -50,6 +50,32 @@ case $# in
       usage
     fi
     FROM_TARBALL="$3"
+    # Constrain FROM_TARBALL to the documented client-side upload prefix
+    # BEFORE any other validation. The EXIT trap below would otherwise
+    # `rm -f` whatever path the caller named — a cross-tenant `rm`
+    # primitive against everything under /srv/git that the `git` user
+    # owns (every other team's repos). v4 audit M-S2.
+    case "$FROM_TARBALL" in
+      /tmp/stamp-migrate-*.tar.gz)
+        ;;
+      *)
+        echo "error: --from-tarball must be at /tmp/stamp-migrate-*.tar.gz (got '$FROM_TARBALL')" >&2
+        exit 2
+        ;;
+    esac
+    # Realpath-resolve and re-check: a symlink at /tmp/stamp-migrate-x.tar.gz
+    # whose target is outside /tmp would otherwise let the trap delete the
+    # symlink target. readlink -f is portable across busybox (Alpine) and
+    # GNU coreutils. Empty result on failure → reject.
+    CANON_TARBALL=$(readlink -f "$FROM_TARBALL" 2>/dev/null || true)
+    case "$CANON_TARBALL" in
+      /tmp/*)
+        ;;
+      *)
+        echo "error: --from-tarball '$FROM_TARBALL' resolves outside /tmp (canonical: '$CANON_TARBALL'); refusing" >&2
+        exit 2
+        ;;
+    esac
     ;;
   *)
     usage
@@ -117,7 +143,10 @@ if [ -n "$FROM_TARBALL" ]; then
   # that set, so a client-side cleanup attempt silently no-ops and
   # the tarball persists. trap EXIT covers both successful extraction
   # and `set -e`-induced failure inside setup-repo.sh, so no stranded
-  # tarballs in either case.
+  # tarballs in either case. The path constraint at arg-parse time
+  # (above, in the case $#==3 branch) bounds the blast radius to the
+  # client's own upload — without it, this trap would be a cross-tenant
+  # `rm` primitive (v4 audit M-S2).
   trap 'rm -f "$FROM_TARBALL"' EXIT
   /usr/local/bin/setup-repo.sh "$REPO" "$HOOK" "$OPERATOR_KEY" --from-tarball "$FROM_TARBALL"
 elif [ -n "$SEED_DIR" ]; then
