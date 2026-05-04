@@ -21,9 +21,10 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -130,5 +131,87 @@ describe("setup-repo.sh --from-tarball entry-name validation", () => {
       !existsSync(repo) || readdirSync(repo).length === 0,
       "REPO_DIR must contain no extraction artifacts after rejection",
     );
+  });
+});
+
+// ---- v4 audit M-S2: new-stamp-repo --from-tarball path constraint ----
+
+describe("new-stamp-repo --from-tarball path constraint (v4 audit M-S2)", () => {
+  // The script lives at server/new-stamp-repo and is the git-shell-commands
+  // entry point that operators invoke via `ssh git@host new-stamp-repo …
+  // --from-tarball /tmp/stamp-migrate-…tar.gz`. The path argument is
+  // operator-controlled and the EXIT trap `rm -f $FROM_TARBALL` would
+  // otherwise be a cross-tenant rm primitive against anything under
+  // /srv/git/* that the `git` user owns. Constrain it to the documented
+  // /tmp/stamp-migrate-*.tar.gz shape and re-check via readlink -f so a
+  // symlink can't redirect the rm.
+  const SCRIPT = resolve(__dirname, "..", "server", "new-stamp-repo");
+
+  const run = (args: string[]) =>
+    spawnSync("bash", [SCRIPT, ...args], { encoding: "utf8" });
+
+  it("rejects --from-tarball pointing at /etc/passwd-shaped paths", () => {
+    const r = run(["foo", "--from-tarball", "/etc/passwd"]);
+    assert.notStrictEqual(r.status, 0);
+    assert.match(r.stderr, /--from-tarball must be at \/tmp\/stamp-migrate-/);
+  });
+
+  it("rejects --from-tarball pointing into /srv/git (cross-tenant rm primitive)", () => {
+    const r = run(["foo", "--from-tarball", "/srv/git/other-repo.git/HEAD"]);
+    assert.notStrictEqual(r.status, 0);
+    assert.match(r.stderr, /--from-tarball must be at \/tmp\/stamp-migrate-/);
+  });
+
+  it("rejects --from-tarball with traversal segments", () => {
+    const r = run([
+      "foo",
+      "--from-tarball",
+      "/tmp/stamp-migrate-../../etc/passwd.tar.gz",
+    ]);
+    // Pattern allows the prefix; readlink -f canonicalises and the result
+    // lands outside /tmp on most systems (or fails to resolve) → reject.
+    assert.notStrictEqual(r.status, 0);
+  });
+
+  it("rejects --from-tarball when the path is a symlink resolving outside /tmp", () => {
+    // Create a symlink at /tmp/stamp-migrate-symlink-test-<pid>.tar.gz
+    // whose target is under the operator's home dir — outside /tmp on
+    // every supported platform (macOS, Linux). Earlier revision used
+    // mkdtempSync(tmpdir()) which lands in /tmp on Linux, so the
+    // canonical path stayed under /tmp and the script accepted it →
+    // false negative on Linux CI. homedir() dodges that.
+    const linkPath = `/tmp/stamp-migrate-symlink-test-${process.pid}.tar.gz`;
+    const targetDir = realpathSync(mkdtempSync(join(homedir(), ".stamp-symtarget-")));
+    const targetFile = join(targetDir, "victim");
+    writeFileSync(targetFile, "");
+    try {
+      try {
+        symlinkSync(targetFile, linkPath);
+      } catch {
+        // EEXIST (left over from a prior failed run) — clean and retry.
+        try {
+          rmSync(linkPath, { force: true });
+        } catch {
+          // ignore
+        }
+        symlinkSync(targetFile, linkPath);
+      }
+
+      const r = run(["foo", "--from-tarball", linkPath]);
+      assert.notStrictEqual(r.status, 0);
+      // The canonical-path check resolves the symlink to under homedir
+      // (outside /tmp) and refuses with the "outside /tmp" message.
+      // Pin the message so a future regression where the readlink
+      // re-check is removed surfaces here, not just by way of a
+      // not-zero exit (which the bare prefix-match would also produce).
+      assert.match(r.stderr, /outside \/tmp/);
+    } finally {
+      try {
+        rmSync(linkPath, { force: true });
+      } catch {
+        // ignore
+      }
+      rmSync(targetDir, { recursive: true, force: true });
+    }
   });
 });
