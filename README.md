@@ -304,7 +304,9 @@ practice:
 - **State is files.** `.stamp/config.yml`, `.git/stamp/state.db` (chmoded
   `0600`; parent `.git/stamp/` chmoded `0700`), git commit trailers. Easy
   to inspect, hard to lose. To bound retention on long-lived repos, run
-  `stamp prune --older-than 30d` (use `--dry-run` first to preview).
+  `stamp prune --older-than 30d` — one invocation cleans both DB rows
+  and any failed-parse spool files under `.git/stamp/failed-parses/`.
+  Use `--dry-run` first to preview.
 - **Operations are idempotent.** `stamp init` is safe to re-run. `stamp
   review` accumulates history; re-invoking doesn't corrupt anything.
 
@@ -380,11 +382,15 @@ running their first `stamp review`.
   `.git/stamp/state.db` (a sqlite file under the repo's git common
   dir; per-machine, not committed, not pushed). The DB is chmoded
   `0600` and its parent directory `0700` on every open so peer users
-  on shared/dev machines can't read review prose. To bound retention
-  — long-lived repos accumulate every review's verbatim model output
-  indefinitely — use `stamp prune --older-than <duration>`
-  (e.g. `stamp prune --older-than 30d`; `--dry-run` previews without
-  deleting).
+  on shared/dev machines can't read review prose. Failed parses
+  additionally write the raw model output to a per-machine file under
+  `.git/stamp/failed-parses/<unix-ms>-<reviewer>.txt` (mode `0600`),
+  also never pushed. To bound retention — long-lived repos accumulate
+  every review's verbatim model output indefinitely — use
+  `stamp prune --older-than <duration>` (e.g. `stamp prune
+  --older-than 30d`; one invocation cleans both DB rows and old spool
+  files under the same threshold; `--dry-run` previews both passes
+  without deleting).
 - Your Ed25519 signing key (`~/.stamp/keys/`) never leaves your machine.
 
 **What gets attached to the merge commit and mirrored to GitHub:**

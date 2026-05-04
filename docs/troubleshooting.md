@@ -316,25 +316,26 @@ on the machine that runs `stamp merge`. The verifier treats `tool_calls[].tool` 
 
 ## `stamp review` fails with "spooled to .git/stamp/failed-parses/…"
 
-When a reviewer doesn't call `submit_verdict` and its response also lacks a parseable `VERDICT:` line as its last non-empty line, `stamp review` writes the full raw model output to a per-machine spool file at `<repoRoot>/.git/stamp/failed-parses/<unix-ms>-<reviewer-slug>.txt` (mode `0600`; parent directory mode `0700`) and surfaces only the path, the reviewer name, and the line count in the thrown Error. The raw output stays out of stderr — and out of any centralised log collector that pipes stderr — because reviewer prose frequently quotes diff lines verbatim. To inspect the spooled output, `cat` the path printed in the error; to clean up old spools, delete files under that directory by hand for now (an automated prune is filed as AGT-044).
+When a reviewer doesn't call `submit_verdict` and its response also lacks a parseable `VERDICT:` line as its last non-empty line, `stamp review` writes the full raw model output to a per-machine spool file at `<repoRoot>/.git/stamp/failed-parses/<unix-ms>-<reviewer-slug>.txt` (mode `0600`; parent directory mode `0700`) and surfaces only the path, the reviewer name, and the line count in the thrown Error. The raw output stays out of stderr — and out of any centralised log collector that pipes stderr — because reviewer prose frequently quotes diff lines verbatim. To inspect the spooled output, `cat` the path printed in the error; to clean up old spools, run `stamp prune --older-than <duration>` (see next section).
 
 ---
 
-## Pruning old reviews from `state.db`
+## Pruning old review prose and failed-parse spools
 
-Every `stamp review` records the reviewer's full prose response (including any diff lines or file content the reviewer's `Read`/`Grep`/`Glob` calls pulled in) into `<repoRoot>/.git/stamp/state.db`. The file is per-machine, never pushed, and chmoded `0600` on every `openDb`, but on long-lived repos the row count and the verbatim prose accumulate indefinitely. Two operator situations call for a prune:
+Every `stamp review` records the reviewer's full prose response (including any diff lines or file content the reviewer's `Read`/`Grep`/`Glob` calls pulled in) into `<repoRoot>/.git/stamp/state.db`. Failed parses additionally write the raw model output to a sibling file under `<repoRoot>/.git/stamp/failed-parses/`. Both are per-machine, never pushed, chmoded `0600` (with parent dir `0700`), but on long-lived repos both grow indefinitely. Three operator situations call for a prune:
 
 - **Long-lived repos.** Months of review history can grow `state.db` to several MB; the bulk is the `issues` column (verbatim prose). A periodic `stamp prune --older-than 90d` keeps the file's size bounded without losing the most recent verdicts that `stamp reviewers show` and `stamp log --reviews` rely on.
-- **Rotating sensitive content out of local prose.** If a recent diff carried a credential or other sensitive string and a reviewer quoted it back in its prose, that text is now in `state.db`. Pruning rows older than the rotation window strips the prose along with them.
+- **Noisy reviewer with spool buildup.** If LLM rate limiting, prompt drift, or malformed responses produce frequent failed parses, the spool directory grows. `stamp prune` walks `.git/stamp/failed-parses/` in the same pass and unlinks files older than the same `--older-than` threshold.
+- **Rotating sensitive content out of local prose.** If a recent diff carried a credential or other sensitive string and a reviewer quoted it back, that text now lives in either `state.db` or a spool file. Pruning rows + spools older than the rotation window strips both along with them.
 
-Use `--dry-run` first to preview what would be deleted (per-reviewer breakdown, total row count, no DB writes):
+`stamp prune --older-than <duration>` runs both passes — DB rows AND spool files — under one threshold and one invocation. Use `--dry-run` first to preview both:
 
 ```sh
 stamp prune --older-than 30d --dry-run
-stamp prune --older-than 30d           # actually delete + VACUUM
+stamp prune --older-than 30d           # actually delete + VACUUM + unlink
 ```
 
-`<duration>` accepts `<n>d` (days), `<n>h` (hours), or `<n>m` (minutes) — e.g. `30d`, `12h`, `90m`. Whitespace, leading `+`, and zero values are rejected. The non-dry-run path runs `VACUUM` after the delete so the file actually shrinks; the output line `<n> rows pruned (...); db size <before> → <after> bytes` is the "did anything happen" feedback signal. **Pruned rows are unrecoverable** — `state.db` is per-machine and never pushed, so there's no upstream copy to restore from. If you want to keep an audit trail of older verdicts, copy `state.db` aside before pruning.
+`<duration>` accepts `<n>d` (days), `<n>h` (hours), or `<n>m` (minutes) — e.g. `30d`, `12h`, `90m`. Whitespace, leading `+`, and zero values are rejected. The non-dry-run path runs `VACUUM` after the DB delete so the file actually shrinks; the output is two blocks separated by a blank line — `<n> review rows pruned (...); db size <before> → <after> bytes` for the DB pass and `<n> failed-parse spool files pruned` for the spool pass. **Pruned data is unrecoverable** — neither `state.db` nor the spool directory has an upstream copy. If you want to keep an audit trail of older verdicts, copy `state.db` and the spool directory aside before pruning.
 
 ---
 

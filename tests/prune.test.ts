@@ -25,6 +25,8 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,14 +144,17 @@ describe("parseRetentionDuration (AGT-044)", () => {
     assert.deepEqual(parseRetentionDuration("30d"), {
       sqliteModifier: "-30 days",
       humanLabel: "30d",
+      durationMs: 30 * 86_400_000,
     });
     assert.deepEqual(parseRetentionDuration("12h"), {
       sqliteModifier: "-12 hours",
       humanLabel: "12h",
+      durationMs: 12 * 3_600_000,
     });
     assert.deepEqual(parseRetentionDuration("90m"), {
       sqliteModifier: "-90 minutes",
       humanLabel: "90m",
+      durationMs: 90 * 60_000,
     });
   });
 
@@ -290,9 +295,12 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
       runPrune({ olderThan: "30d" }),
     );
     // `note: ` prefix is the established convention for advisory no-ops
-    // (matches commands/server.ts:79,98). Pinning the prefix so a future
-    // refactor doesn't drop it.
-    assert.match(stdout, /^note: .*state\.db does not exist/m);
+    // (matches commands/server.ts:79,98). Pin both the prefix and the
+    // path-hint so a refactor can't silently drop either — the absolute
+    // paths help an operator debugging "where does stamp look?".
+    assert.match(stdout, /^note: nothing to prune \(neither/m);
+    assert.match(stdout, /state\.db/);
+    assert.match(stdout, /failed-parses/);
     assert.ok(!existsSync(dbPath));
   });
 
@@ -324,7 +332,7 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     // (matches bootstrap.ts:155 / provision.ts:113,441), not a `[dry-run]`
     // line prefix. Both shapes are agent-parseable, but only one of them
     // is the established convention.
-    assert.match(stdout, /^would prune 3 rows/m);
+    assert.match(stdout, /^would prune 3 review rows/m);
     assert.match(stdout, /\(dry run — no changes made\)/);
     // Per-reviewer breakdown uses padEnd-aligned columns (matches
     // log.ts:165 / reviewers.ts:471). The space between name and count
@@ -355,7 +363,7 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     const stdout = captureStdout(() =>
       runPrune({ olderThan: "7d" }),
     );
-    assert.match(stdout, /^2 rows pruned \(2 reviewers affected\); db size \d+ → \d+ bytes/m);
+    assert.match(stdout, /^2 review rows pruned \(2 reviewers affected\); db size \d+ → \d+ bytes/m);
     // count===1 in the live-path per-reviewer breakdown must use the
     // singular form AND the padEnd-aligned column shape. Pins both the
     // pluralisation fix and the convention alignment.
@@ -386,7 +394,7 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
       runPrune({ olderThan: "7d" }),
     );
     // `note: ` prefix is the established advisory-no-op convention.
-    assert.match(stdout, /^note: nothing to prune \(no rows older than 7d\)/m);
+    assert.match(stdout, /^note: nothing to prune \(no rows or spools older than 7d\)/m);
     // Row still there (no delete, no VACUUM).
     const db = openDb(dbPath);
     try {
@@ -394,6 +402,78 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     } finally {
       db.close();
     }
+  });
+
+  // ---- v4 audit L-PR1: failed-parse spool auto-prune ----
+
+  // Stage a spool file under .git/stamp/failed-parses/ with a controlled
+  // mtime so the prune cutoff comparison is wall-clock-independent.
+  function stageSpool(filename: string, ageMs: number): string {
+    const spoolDir = join(repo, ".git", "stamp", "failed-parses");
+    mkdirSync(spoolDir, { recursive: true });
+    const fp = join(spoolDir, filename);
+    writeFileSync(fp, "fake spool body");
+    const mtimeSec = (Date.now() - ageMs) / 1000;
+    utimesSync(fp, mtimeSec, mtimeSec);
+    return fp;
+  }
+
+  it("runPrune (--dry-run): lists old spool files without deleting", () => {
+    const old = stageSpool("1000-security.txt", 30 * 86_400_000);  // 30 days
+    const fresh = stageSpool("9999-security.txt", 60_000);          // 1 minute
+    process.chdir(repo);
+
+    const stdout = captureStdout(() =>
+      runPrune({ olderThan: "7d", dryRun: true }),
+    );
+    assert.match(stdout, /would prune 1 failed-parse spool file older than 7d/);
+    assert.match(stdout, new RegExp(`  ${old.replace(/[/.]/g, "\\$&")}`));
+    assert.match(stdout, /\(dry run — no changes made\)/);
+
+    // Both files still on disk.
+    assert.ok(existsSync(old));
+    assert.ok(existsSync(fresh));
+  });
+
+  it("runPrune (live): deletes old spool files and reports count", () => {
+    const old1 = stageSpool("1000-security.txt", 30 * 86_400_000);
+    const old2 = stageSpool("1001-standards.txt", 30 * 86_400_000);
+    const fresh = stageSpool("9999-product.txt", 60_000);
+    process.chdir(repo);
+
+    const stdout = captureStdout(() => runPrune({ olderThan: "7d" }));
+    assert.match(stdout, /^2 failed-parse spool files pruned/m);
+
+    assert.ok(!existsSync(old1));
+    assert.ok(!existsSync(old2));
+    assert.ok(existsSync(fresh));
+  });
+
+  it("runPrune: state.db missing but spool exists still prunes spools", () => {
+    // Fresh repo: no review has ever recorded, so state.db doesn't exist.
+    // A failed parse can still produce a spool file. The prune command
+    // must clean spools even without a DB.
+    const old = stageSpool("1000-security.txt", 30 * 86_400_000);
+    process.chdir(repo);
+    assert.ok(!existsSync(dbPath));
+
+    const stdout = captureStdout(() => runPrune({ olderThan: "7d" }));
+    assert.match(stdout, /1 failed-parse spool file pruned/);
+    assert.ok(!existsSync(old));
+  });
+
+  it("runPrune: combined output when both rows AND spools are pruned", () => {
+    // Pin the both-passes-fired output: review rows first, then spool
+    // files, separated by a blank line. Agents that regex on the
+    // discriminator tokens must continue to find both.
+    insertAt(dbPath, "security", "2024-01-01 00:00:00");
+    const oldSpool = stageSpool("1000-security.txt", 30 * 86_400_000);
+    process.chdir(repo);
+
+    const stdout = captureStdout(() => runPrune({ olderThan: "7d" }));
+    assert.match(stdout, /1 review row pruned/);
+    assert.match(stdout, /1 failed-parse spool file pruned/);
+    assert.ok(!existsSync(oldSpool));
   });
 });
 
