@@ -335,6 +335,15 @@ risk of LLM-verdict-as-merge-authorization). Three opt-out paths:
 `branches.<name>.require_human_merge: false` in `.stamp/config.yml`
 (committed and reviewer-gated like any other config).
 
+For trust-anchor changes specifically, set
+`reviewers.<name>.enforce_reads_on_dotstamp: true` on the reviewer
+that verifies them (typically `security`). When that reviewer
+approves a diff that touches `.stamp/*`, every modified path must
+appear in its `Read` trace; otherwise the verdict is overridden to
+`changes_requested` with a diagnostic prose pointing at the missing
+files. Defends against a prompt-injected reviewer waving through
+its own trust anchors. Audit-H1 defense-in-depth.
+
 **Exit-code cheat sheet:**
 
 | Command | 0 | non-zero (check stderr to disambiguate) |

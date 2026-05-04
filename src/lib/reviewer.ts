@@ -19,6 +19,7 @@ import {
 import { checkMcpCommand, loadMcpAllowlist } from "./toolAllowlist.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
 import { gitCommonDir } from "./paths.js";
+import { runGit } from "./git.js";
 
 type McpServerResolved = {
   type: "stdio";
@@ -666,6 +667,11 @@ export async function invokeReviewer(params: {
   let finalText: string | null = null;
   let errorMessage: string | null = null;
   const toolCalls: ToolCall[] = [];
+  // Side-channel of Read input.file_path values normalised to repo-relative
+  // form. Used by the post-verdict enforce_reads_on_dotstamp check; never
+  // persisted (the public ToolCall record stores only the hashed input,
+  // and we don't want to leak file paths into the public mirror).
+  const readPaths = new Set<string>();
 
   try {
   for await (const msg of q) {
@@ -687,6 +693,20 @@ export async function invokeReviewer(params: {
                 tool: b.name,
                 input_sha256: hashToolInput(b.input),
               });
+              // Side-channel: capture Read file_paths for the
+              // enforce_reads_on_dotstamp consistency check below.
+              // We resolve to repo-relative form so the comparison
+              // against `git diff --name-only` output is apples-to-
+              // apples regardless of whether the model passed an
+              // absolute or relative path.
+              if (b.name === "Read" && b.input && typeof b.input === "object") {
+                const fp = (b.input as { file_path?: unknown }).file_path;
+                if (typeof fp === "string" && fp.length > 0) {
+                  const resolved = path.resolve(params.repoRoot, fp);
+                  const rel = path.relative(params.repoRoot, resolved);
+                  if (rel && !rel.startsWith("..")) readPaths.add(rel);
+                }
+              }
             }
           }
         }
@@ -743,6 +763,38 @@ export async function invokeReviewer(params: {
     prose = stripLastLineVerdict(fallbackText);
   }
 
+  // Verdict-↔-trace consistency check (audit H1 defense-in-depth).
+  // When the reviewer is configured with enforce_reads_on_dotstamp AND
+  // it returned `approved` AND the diff touches `.stamp/` paths, every
+  // modified `.stamp/*` path must appear in this reviewer's Read trace.
+  // Without that, a prompt-injected reviewer could wave through changes
+  // to its own trust anchors (config.yml, reviewer prompts, trusted-
+  // keys/) without actually inspecting the diff. Override the verdict
+  // to `changes_requested` with diagnostic prose so the agent loop sees
+  // the discrepancy and retries with proper Reads.
+  if (def.enforce_reads_on_dotstamp && verdict === "approved") {
+    const missing = findMissingDotstampReads(
+      params.base_sha,
+      params.head_sha,
+      params.repoRoot,
+      readPaths,
+    );
+    if (missing.length > 0) {
+      const list = missing.map((p) => `  - ${p}`).join("\n");
+      verdict = "changes_requested";
+      prose =
+        `verdict-↔-trace inconsistency: this reviewer is configured ` +
+        `with enforce_reads_on_dotstamp=true, the diff modifies the ` +
+        `following \`.stamp/*\` paths, and none of them appeared in ` +
+        `the reviewer's Read trace before approval:\n\n${list}\n\n` +
+        `Approving a change to stamp's own trust anchors without ` +
+        `inspecting the diff defeats audit H1's defense-in-depth ` +
+        `posture. Re-run the review and call \`Read('<path>')\` for ` +
+        `each modified \`.stamp/*\` file before submitting an approved ` +
+        `verdict.\n\n${prose ? `Original prose:\n${prose}` : ""}`;
+    }
+  }
+
   return {
     reviewer: params.reviewer,
     prose,
@@ -750,6 +802,45 @@ export async function invokeReviewer(params: {
     tool_calls: toolCalls,
     retros: submittedRetros,
   };
+}
+
+/**
+ * For a given diff, list the `.stamp/*` paths that the reviewer should
+ * have Read but didn't. Returns a sorted array; empty means no
+ * inconsistency.
+ *
+ * Detached from invokeReviewer so it's unit-testable against synthetic
+ * diff sets without needing a live git repo or SDK loop.
+ */
+export function findMissingDotstampReads(
+  baseSha: string,
+  headSha: string,
+  repoRoot: string,
+  readPaths: Set<string>,
+): string[] {
+  // `git diff --name-only` is the canonical "files touched" list. Range
+  // form `<base>..<head>` matches what the reviewer's user prompt shows
+  // (the diff itself is built from the same range upstream).
+  let raw: string;
+  try {
+    raw = runGit(["diff", "--name-only", `${baseSha}..${headSha}`], repoRoot);
+  } catch {
+    // If git fails (orphan branch, missing objects, etc.) we can't
+    // enforce; fail open rather than blocking the verdict on a git
+    // glitch. The diff itself reaching the reviewer would have failed
+    // upstream of here, so reaching this branch means git basically
+    // works — a transient hiccup, not the steady state.
+    return [];
+  }
+  const modified = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && l.startsWith(".stamp/"));
+  const missing: string[] = [];
+  for (const p of modified) {
+    if (!readPaths.has(p)) missing.push(p);
+  }
+  return missing.sort();
 }
 
 function resolveMcpServers(
