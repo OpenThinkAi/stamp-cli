@@ -87,6 +87,26 @@ describe("setup-repo.sh --from-tarball entry-name validation", () => {
     );
   });
 
+  it("sets receive.denyNonFastForwards=true on freshly-created bare repos (issue #20)", () => {
+    // git defaults receive.denyNonFastForwards to false on bare repos, so
+    // without setup-repo.sh setting it explicitly, a buggy or race-blind
+    // pre-receive hook could let a non-FF push land. Pin the config write
+    // here so a refactor of the bare-init block can't silently drop it.
+    const repo = join(tmp, "fresh.git");
+    const res = spawnSync(
+      "bash",
+      [SCRIPT, repo, makeHook(), makePubKey()],
+      { encoding: "utf8" },
+    );
+    assert.strictEqual(res.status, 0, `setup-repo.sh failed: ${res.stderr}`);
+    const value = execFileSync(
+      "git",
+      ["--git-dir", repo, "config", "--get", "receive.denyNonFastForwards"],
+      { encoding: "utf8" },
+    ).trim();
+    assert.strictEqual(value, "true");
+  });
+
   it("rejects a tarball with a `..` traversal entry (e.g. ../sibling)", () => {
     // Stage `inner/good.txt` and a sibling `escape.txt`, then tar from
     // inside `inner/` referencing `../escape.txt` so the entry is

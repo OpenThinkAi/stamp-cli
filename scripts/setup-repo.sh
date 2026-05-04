@@ -178,6 +178,13 @@ else
   echo "→ creating bare repo at $REPO_DIR"
   git init --bare --quiet --initial-branch=main "$REPO_DIR"
 
+  # Belt-and-suspenders to the pre-receive hook's FF check (issue #20).
+  # git defaults `receive.denyNonFastForwards` to false on bare repos, so
+  # without this, a buggy or race-blind hook could let a non-FF push land.
+  # With this set, git itself rejects non-FF before pre-receive even sees
+  # the push — pre-receive's check then becomes the second line of defense.
+  git --git-dir="$REPO_DIR" config receive.denyNonFastForwards true
+
   # Seed BEFORE installing the hook — this is the bootstrap bypass per DESIGN.md.
   # Once the hook is in place, every push is verified.
   echo "→ seeding initial commit (pre-hook, per DESIGN.md bootstrap rule)"

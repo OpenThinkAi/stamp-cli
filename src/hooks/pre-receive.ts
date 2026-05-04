@@ -123,6 +123,27 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
     );
   }
 
+  // Race-safe FF check: pre-receive's stdin oldSha is the ref value when
+  // the push session started. If a concurrent push has advanced the live
+  // tip since then (Agent-1 lands B before Agent-2's pre-receive runs,
+  // both starting from A), the stdin oldSha is stale — issue #20.
+  // Re-read the live tip and require newSha to be a descendant of *that*
+  // too, so the push is FF against actual repo state, not against what
+  // the client-supplied wire protocol claimed was current.
+  const liveTip = readLiveRef(refname);
+  if (liveTip !== null && liveTip !== oldSha) {
+    if (!isAncestor(liveTip, newSha)) {
+      reject(
+        refname,
+        `concurrent push detected: live tip is ${liveTip.slice(0, 8)} ` +
+          `but this push expected ${oldSha.slice(0, 8)}, and new ` +
+          `${newSha.slice(0, 8)} is not a descendant of the live tip. ` +
+          `Fetch the latest main and re-run stamp merge so your work ` +
+          `lands on top of the current tip.`,
+      );
+    }
+  }
+
   const trustedKeys = readTrustedKeysAt(oldSha);
 
   // Verify every new commit introduced by this push.
@@ -557,6 +578,25 @@ function readTrustedKeysAt(sha: string): Map<string, string> {
     }
   }
   return map;
+}
+
+/**
+ * Read the current SHA of `refname` directly from the bare repo, ignoring
+ * the stdin-supplied oldSha. Used to belt-and-suspenders the FF check
+ * against concurrent-push races where a peer's update lands between the
+ * push session opening (which fixed our stdin oldSha) and our pre-receive
+ * actually running. Returns null if the ref doesn't exist (e.g. the push
+ * is creating it — handled separately).
+ */
+function readLiveRef(refname: string): string | null {
+  try {
+    return execFileSync("git", ["rev-parse", "--verify", refname], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 function isAncestor(ancestor: string, descendant: string): boolean {
