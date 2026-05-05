@@ -93,6 +93,20 @@ export function userServerConfigPath(): string {
   return join(homedir(), ".stamp", "server.yml");
 }
 
+/**
+ * Per-user stamp config. Today holds reviewer-model selections; structured
+ * as a top-level object so future per-user knobs (telemetry sinks, default
+ * timeouts, etc.) can land alongside without renaming the file. Lives
+ * separately from per-repo `.stamp/config.yml` because cost/speed is
+ * operator infrastructure rather than committed review policy — different
+ * operators on the same repo are free to pick different models without
+ * a merge-conflict over preference, and this file is intentionally
+ * EXCLUDED from the v3 reviewer attestation hash chain.
+ */
+export function userConfigPath(): string {
+  return join(homedir(), ".stamp", "config.yml");
+}
+
 export function ensureDir(path: string, mode = 0o755): void {
   if (!existsSync(path)) {
     mkdirSync(path, { recursive: true, mode });

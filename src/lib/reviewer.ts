@@ -20,6 +20,7 @@ import { checkMcpCommand, loadMcpAllowlist } from "./toolAllowlist.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
 import { gitCommonDir } from "./paths.js";
 import { runGit } from "./git.js";
+import { resolveReviewerModel } from "./userConfig.js";
 
 type McpServerResolved = {
   type: "stdio";
@@ -638,6 +639,13 @@ export async function invokeReviewer(params: {
   // pathological run gives up in single-digit minutes.
   const maxTurns = parseIntEnv("STAMP_REVIEWER_MAX_TURNS", 8);
   const timeoutMs = parseIntEnv("STAMP_REVIEWER_TIMEOUT_MS", 5 * 60 * 1000);
+  // Per-reviewer model selection from ~/.stamp/config.yml. null falls
+  // through to the agent SDK's own default — preserves prior behaviour
+  // for operators who haven't yet upgraded to a stamp-cli that knows
+  // about per-user config. Each reviewer is resolved independently so the
+  // operator can opt one (e.g. security) into Opus while the rest stay
+  // on Sonnet without ceremony.
+  const modelOverride = resolveReviewerModel(params.reviewer);
   const abortController = new AbortController();
   const timeoutHandle = setTimeout(() => {
     abortController.abort(
@@ -656,6 +664,10 @@ export async function invokeReviewer(params: {
       mcpServers,
       maxTurns,
       abortController,
+      // Spread the model option so a null resolution leaves the SDK to
+      // pick its own default rather than landing as `model: null` (which
+      // some SDK versions treat as a typed override of the default).
+      ...(modelOverride !== null ? { model: modelOverride } : {}),
       // PreToolUse fires for every tool call regardless of `allowedTools`
       // membership, which is what we want for security gating: pre-approving
       // a tool name in `allowedTools` should not bypass per-call validation.

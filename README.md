@@ -258,6 +258,40 @@ matches the committed config.
 Optional: `.stamp/mirror.yml` enables GitHub mirroring via the post-receive
 hook. See [`server/README.md`](./server/README.md).
 
+### Per-user reviewer-model selection
+
+`~/.stamp/config.yml` lets each operator pick which Anthropic model each
+reviewer runs on. Defaults are written by `stamp init` (and lazily on
+first `stamp review` after upgrade) — Sonnet across the three starter
+personas:
+
+```yaml
+reviewers:
+  security: claude-sonnet-4-6
+  standards: claude-sonnet-4-6
+  product: claude-sonnet-4-6
+```
+
+Tune with the CLI rather than hand-editing:
+
+```
+stamp config reviewers show
+stamp config reviewers set security claude-opus-4-7
+stamp config reviewers clear security        # remove one entry
+stamp config reviewers clear --all           # delete the whole file
+```
+
+Reviewers without a pinned model fall back to the agent SDK's default. The
+file is per-user (not committed) and intentionally NOT included in the
+reviewer attestation hash chain — cost/speed is operator infrastructure,
+not committed review policy. Different operators on the same repo can
+pick different models without merge-conflicting over preference.
+
+Note: when two operators run reviews on the same diff with different
+models pinned, each operator records their own verdict in their own
+state.db (same as today's reviewer-prompt model). Stamp does not assume
+verdicts are model-portable.
+
 ## Deployment shapes
 
 Three ways to run stamp-cli in a real setting, trading setup cost for

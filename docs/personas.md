@@ -382,6 +382,23 @@ Our own calibration after dogfooding:
 
 If a reviewer uses `denied` more than once in every ~20 reviews, the prompt is too aggressive; tighten the examples. If it never uses `denied`, it's too permissive; add an explicit "use `denied` when …" clause.
 
+## Per-reviewer model selection (operator knob)
+
+Which Anthropic model each reviewer runs on is **operator infrastructure**, not committed review policy. It lives per-user in `~/.stamp/config.yml` (written by `stamp init` with Sonnet defaults across the three starter personas), separately from the per-repo `.stamp/config.yml` that pins the reviewer's prompt + tools.
+
+Why per-user, not per-repo: cost/speed is a tradeoff each operator legitimately makes differently — one runs Opus on `security` for the lowest-frequency / highest-cost catches; another runs Sonnet across the board. Putting that choice in the per-repo config would force a merge-conflict over operator preference (and pull the model choice into the v3 attestation hash chain, where it doesn't belong). The reviewer prompt is the policy; the model is how a given operator chooses to execute it.
+
+Tune with the CLI:
+
+```sh
+stamp config reviewers show
+stamp config reviewers set security claude-opus-4-7
+stamp config reviewers clear security        # remove one entry
+stamp config reviewers clear --all           # delete the whole file
+```
+
+Reviewers without a pinned model fall back to the agent SDK's default. When two operators run `stamp review` on the same diff with different models pinned, each records their own verdict in their own per-machine `state.db` — same shape as today's reviewer-prompt cycle. Verdicts are not assumed model-portable.
+
 ## Cross-project variants
 
 The `product` reviewer in particular benefits from project-specific variants. A browser app's product reviewer shouldn't check CLI flag naming; a CLI tool's shouldn't check aesthetic coherence. When you add stamp to a new project, fork the template rather than trying to make one product reviewer cover everything.
