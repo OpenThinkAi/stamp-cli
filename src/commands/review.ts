@@ -9,6 +9,7 @@ import {
 } from "../lib/git.js";
 import { invokeReviewer, type ReviewerInvocation } from "../lib/reviewer.js";
 import { maybePrintLlmNotice } from "../lib/llmNotice.js";
+import { loadOrCreateUserConfig } from "../lib/userConfig.js";
 import {
   findRepoRoot,
   stampConfigFile,
@@ -163,6 +164,23 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   // STAMP_SUPPRESS_LLM_NOTICE=1). Fires before invocation so operators
   // can ctrl-c if the diff content is sensitive.
   maybePrintLlmNotice(repoRoot);
+
+  // Per-user reviewer-model config: ensure ~/.stamp/config.yml exists and
+  // surface a one-line notice on the first review after upgrade — prior
+  // versions implicitly ran every reviewer on the agent SDK's default
+  // model (Opus); this version ships Sonnet defaults via this file. The
+  // notice fires exactly once per machine (subsequent reviews see the
+  // file already present and stay quiet) so operators don't get a stealth
+  // quality-of-review change without seeing what's now configured.
+  const userCfg = loadOrCreateUserConfig();
+  if (userCfg.created) {
+    process.stderr.write(
+      `note: per-user reviewer-model config written to ${userCfg.path} (Sonnet defaults).\n` +
+        `      Inspect with \`stamp config reviewers show\`; pin a different model with\n` +
+        `      \`stamp config reviewers set <reviewer> <model-id>\`.\n` +
+        `\n`,
+    );
+  }
 
   console.log(
     `running ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} in parallel: ${reviewerNames.join(", ")}`,

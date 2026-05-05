@@ -34,6 +34,7 @@ import {
   stampStateDbPath,
   stampTrustedKeysDir,
 } from "../lib/paths.js";
+import { loadOrCreateUserConfig } from "../lib/userConfig.js";
 
 export interface InitOptions {
   /**
@@ -150,6 +151,14 @@ export function runInit(opts: InitOptions = {}): void {
 
   const { keypair, created: keyCreated } = ensureUserKeypair();
 
+  // Per-user reviewer-model config (~/.stamp/config.yml). On a fresh
+  // install this writes Sonnet defaults for security/standards/product;
+  // on a re-init it leaves any operator customisation alone (idempotent).
+  // Reviewer-spawning code reads this at review time and threads `model`
+  // through to the agent SDK; absence falls back to the SDK's default,
+  // so older clones continue to work unchanged.
+  const userCfg = loadOrCreateUserConfig();
+
   const pubKeyPath = join(
     trustedKeysDir,
     publicKeyFingerprintFilename(keypair.fingerprint),
@@ -205,6 +214,9 @@ export function runInit(opts: InitOptions = {}): void {
       `  CLAUDE.md:   ${claudeMdAction} at repo root (auto-loaded by Claude Code)`,
     );
   }
+  console.log(
+    `  models:      ${userCfg.path}${userCfg.created ? " (created — Sonnet defaults; tweak with `stamp config reviewers set <name> <model-id>`)" : " (existing)"}`,
+  );
   console.log();
 
   // Bootstrap commit: if .stamp/config.yml isn't tracked yet, this is the

@@ -31,6 +31,11 @@ import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
 import { runServerConfig } from "./commands/server.js";
 import {
+  runConfigReviewersClear,
+  runConfigReviewersSet,
+  runConfigReviewersShow,
+} from "./commands/config.js";
+import {
   reviewersAdd,
   reviewersEdit,
   reviewersFetch,
@@ -296,6 +301,57 @@ server
       }
     },
   );
+
+const config = program
+  .command("config")
+  .description(
+    "manage per-user stamp config at ~/.stamp/config.yml (today: reviewer-model selection). Per-repo policy lives in `.stamp/config.yml`; this is for operator-level knobs that shouldn't be committed.",
+  );
+const configReviewers = config
+  .command("reviewers")
+  .description(
+    "pin which Anthropic model each reviewer (security/standards/product/…) runs on. Defaults to claude-sonnet-4-6 for the three starter personas; opt into Opus on security with `set security claude-opus-4-7`.",
+  );
+configReviewers
+  .command("set <reviewer> <model-id>")
+  .description(
+    "pin <reviewer> to <model-id> (e.g. `set security claude-opus-4-7`). Model id is opaque to stamp — passed straight to the agent SDK, so any string the SDK accepts works.",
+  )
+  .action((reviewer: string, modelId: string) => {
+    try {
+      runConfigReviewersSet({ reviewer, modelId });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+configReviewers
+  .command("clear [reviewer]")
+  .description(
+    "remove a reviewer's model pin (resolver falls back to the SDK default), or pass --all to delete the whole ~/.stamp/config.yml.",
+  )
+  .option(
+    "--all",
+    "remove the entire ~/.stamp/config.yml file (every reviewer falls back to the SDK default)",
+  )
+  .action((reviewer: string | undefined, opts: { all?: boolean }) => {
+    try {
+      runConfigReviewersClear({ reviewer, all: opts.all });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+configReviewers
+  .command("show")
+  .description(
+    "print the resolved per-reviewer model config (or note that no config is set and which defaults will apply).",
+  )
+  .action(() => {
+    try {
+      runConfigReviewersShow();
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
 
 const serverRepo = program
   .command("server-repos")
