@@ -58,7 +58,8 @@ export function runConfigReviewersSet(opts: ReviewersSetOptions): void {
   const id = opts.modelId.trim();
   if (id === "") {
     throw new UsageError(
-      `model id is required and must be a non-empty string`,
+      `model id is required and must be a non-empty string ` +
+        `(e.g. 'claude-sonnet-4-6' or 'claude-opus-4-7')`,
     );
   }
   if (!isValidModelId(id)) {
@@ -114,7 +115,8 @@ export function runConfigReviewersClear(opts: ReviewersClearOptions): void {
   if (!isValidReviewerName(reviewer)) {
     throw new UsageError(
       `invalid reviewer name '${reviewer}'. Names must be alphanumerics + ` +
-        `'_' / '-', max 64 chars, no leading hyphen.`,
+        `'_' / '-', max 64 chars, no leading hyphen — same shape as ` +
+        `\`stamp reviewers add\` accepts.`,
     );
   }
   const existing = loadOrEmpty();

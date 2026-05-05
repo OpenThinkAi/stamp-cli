@@ -256,19 +256,23 @@ describe("deleteUserConfig", () => {
 
 describe("name + model-id validators", () => {
   it("isValidReviewerName accepts the documented shape", () => {
-    for (const name of ["security", "Standards", "team-1", "a", "_hidden_x"]) {
-      // _hidden_x: leading underscore should be rejected (no leading
-      // hyphen/underscore in the regex). Pin the actual regex behaviour.
-      if (name.startsWith("_")) {
-        assert.equal(isValidReviewerName(name), false, name);
-      } else {
-        assert.equal(isValidReviewerName(name), true, name);
-      }
+    for (const name of ["security", "Standards", "team-1", "a", "abc_123"]) {
+      assert.equal(isValidReviewerName(name), true, name);
     }
   });
 
-  it("isValidReviewerName rejects path-traversal shapes", () => {
-    for (const name of ["", "-leading", "../../evil", "name.with.dots", "name with space"]) {
+  it("isValidReviewerName rejects path-traversal and leading-non-alnum shapes", () => {
+    // Includes leading underscore — the regex requires the first char to be
+    // [A-Za-z0-9], so `_hidden` is not a legal reviewer name. Pinned here so
+    // a future regex relaxation is a deliberate test update.
+    for (const name of [
+      "",
+      "-leading",
+      "_hidden_x",
+      "../../evil",
+      "name.with.dots",
+      "name with space",
+    ]) {
       assert.equal(isValidReviewerName(name), false, name);
     }
   });

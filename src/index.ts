@@ -305,7 +305,7 @@ server
 const config = program
   .command("config")
   .description(
-    "manage per-user stamp config at ~/.stamp/config.yml (today: reviewer-model selection). Per-repo policy lives in `.stamp/config.yml`; this is for operator-level knobs that shouldn't be committed.",
+    "manage per-user stamp config at ~/.stamp/config.yml — operator-level knobs that shouldn't be committed. Per-repo policy lives in `.stamp/config.yml`.",
   );
 const configReviewers = config
   .command("reviewers")

@@ -180,13 +180,7 @@ export function parseUserConfig(
  * `yaml` package's defaults (insertion order).
  */
 export function stringifyUserConfig(cfg: UserConfig): string {
-  const body: Record<string, unknown> = {};
-  if (Object.keys(cfg.reviewers).length > 0) {
-    body.reviewers = cfg.reviewers;
-  } else {
-    body.reviewers = {};
-  }
-  return stringifyYaml(body);
+  return stringifyYaml({ reviewers: cfg.reviewers });
 }
 
 /**
