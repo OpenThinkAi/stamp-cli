@@ -189,6 +189,162 @@ Anyone else who wants to push needs:
    (so their signed merges verify). They generate it with `stamp keys
    generate`, then you commit the `.pub` file to the repo.
 
+## Onboarding a new machine (agent-driven walkthrough)
+
+The recipe below is structured for an agent running on the new machine
+to walk the operator through onboarding step-by-step — instruct, run,
+verify, then move on. Each step has a check the agent can run to
+confirm success before continuing to the next.
+
+### What the agent needs upfront
+
+- The stamp server's host and port.
+- Credentials for the server's hosting environment, with permission to
+  read and update `AUTHORIZED_KEYS` and trigger a service restart.
+  Every platform exposes this differently — the recipe says *what* to
+  do, not *how* on a specific platform.
+
+### Step 1 — generate a stamp-specific SSH keypair
+
+Don't reuse `~/.ssh/id_ed25519`. A separate keypair means revoking
+server access later doesn't affect unrelated hosts.
+
+```sh
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/stamp_server -C "stamp-$(hostname)"
+```
+
+**Verify:**
+
+```sh
+test -f ~/.ssh/stamp_server && test -f ~/.ssh/stamp_server.pub && echo OK
+```
+
+Expect `OK`.
+
+### Step 2 — generate the operator's stamp signing keypair
+
+The signing keypair is **separate** from the SSH keypair:
+
+| Keypair         | Question it answers                              |
+|-----------------|--------------------------------------------------|
+| SSH             | "Can I connect to the server?"                   |
+| Stamp signing   | "Are my reviews/merges trusted by a given repo?" |
+
+```sh
+stamp keys generate
+```
+
+**Verify:**
+
+```sh
+test -f ~/.stamp/keys/ed25519 && test -f ~/.stamp/keys/ed25519.pub && echo OK
+```
+
+Expect `OK`.
+
+### Step 3 — tell the local stamp CLI where the server lives
+
+```sh
+mkdir -p ~/.stamp
+cat > ~/.stamp/server.yml <<EOF
+host: <stamp-server-host>
+port: <stamp-server-port>
+EOF
+```
+
+**Verify:**
+
+```sh
+cat ~/.stamp/server.yml
+```
+
+Expect to see the host and port the operator was given.
+
+### Step 4 — pin the SSH key to the server host
+
+So that plain `ssh <stamp-server-host>` and `git clone
+ssh://<stamp-server-host>/...` use the right key on the right port
+without further flags.
+
+```sh
+cat >> ~/.ssh/config <<EOF
+
+Host <stamp-server-host>
+  Port <stamp-server-port>
+  User git
+  IdentityFile ~/.ssh/stamp_server
+  IdentitiesOnly yes
+EOF
+```
+
+**Verify:**
+
+```sh
+ssh -G <stamp-server-host> | grep -E '^(identityfile|port|user) '
+```
+
+Expect to see `stamp_server` in the `identityfile` line, the right
+`port`, and `user git`.
+
+### Step 5 — append the new SSH pubkey to AUTHORIZED_KEYS and restart the server
+
+This is the only step that touches the server's hosting environment.
+Read the current `AUTHORIZED_KEYS` env var, append this machine's SSH
+pubkey on its own line, write it back, and trigger a service restart
+so `entrypoint.sh` re-writes `/home/git/.ssh/authorized_keys` inside
+the container on next boot.
+
+The pubkey to append:
+
+```sh
+cat ~/.ssh/stamp_server.pub
+```
+
+The env-var update and restart use the hosting platform's API or CLI —
+the agent should already have the credentials it needs.
+
+**Verify** (from the new machine, after the restart settles):
+
+```sh
+ssh <stamp-server-host> list-trash
+```
+
+Expect a trash listing (an empty `[]` is fine — the point is that auth
+succeeded). A `Permission denied (publickey)` or hang means the env-var
+update or restart didn't take; recheck both before continuing.
+
+### Step 6 — request trust in each repo this operator will land merges in
+
+For every stamp-gated repo where this operator needs to merge, their
+signing pubkey must live in the repo's `.stamp/trusted-keys/`
+directory. **Adding a trusted signer is itself a stamp-gated change** —
+an existing trusted operator has to land it on a feature branch
+through the standard `stamp review → merge → push` cycle.
+
+This asymmetry is intentional: it means a compromised hosting account
+can't silently add a rogue signer to every repo. The first trusted-key
+for any new operator is always landed by an existing one.
+
+The new operator hands over their pubkey:
+
+```sh
+cat ~/.stamp/keys/ed25519.pub
+```
+
+An existing operator commits it under
+`.stamp/trusted-keys/<short-name>.pub` on a feature branch in each
+target repo and runs the stamp gate.
+
+**Verify** (after the trust-key change has landed in a target repo):
+
+```sh
+diff -q <repo>/.stamp/trusted-keys/<short-name>.pub ~/.stamp/keys/ed25519.pub
+```
+
+Expect silent output (files match). After this, the new operator can
+run the full flow (`stamp init`, branch, review, merge, push) on their
+own.
+
 ## Backup
 
 The entire state is in the Railway volume at `/srv/git/`. Back it up by
