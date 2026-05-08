@@ -310,13 +310,13 @@ the agent should already have the credentials it needs.
 **Verify** (from the new machine, after the restart settles):
 
 ```sh
-ssh <stamp-server-host> list-trash
+stamp server-repos list --trash
 ```
 
-Expect either a per-entry trash listing or `(no trash — /srv/git/.trash
-does not exist)`. The point is that auth succeeded. A `Permission
-denied (publickey)` or hang means the env-var update or restart didn't
-take; recheck both before continuing.
+Expect either a per-entry listing (with `size:` and `deleted-at:`
+fields) or an empty/no-trash message. The point is that auth
+succeeded. A `Permission denied (publickey)` or hang means the env-var
+update or restart didn't take; recheck both before continuing.
 
 ### Step 6 — request trust in each repo this operator will land merges in
 
