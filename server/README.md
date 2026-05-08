@@ -255,10 +255,11 @@ EOF
 **Verify:**
 
 ```sh
+test -s ~/.stamp/server.yml && echo OK
 cat ~/.stamp/server.yml
 ```
 
-Expect to see the host and port the operator was given.
+Expect `OK`, followed by the host and port the operator was given.
 
 ### Step 4 — pin the SSH key to the server host
 
@@ -267,7 +268,7 @@ ssh://<stamp-server-host>/...` use the right key on the right port
 without further flags.
 
 ```sh
-cat >> ~/.ssh/config <<EOF
+grep -q "^Host <stamp-server-host>$" ~/.ssh/config 2>/dev/null || cat >> ~/.ssh/config <<EOF
 
 Host <stamp-server-host>
   Port <stamp-server-port>
@@ -276,6 +277,9 @@ Host <stamp-server-host>
   IdentitiesOnly yes
 EOF
 ```
+
+The `grep` guard makes the step idempotent — re-running it won't
+duplicate the block if the agent retries mid-flow.
 
 **Verify:**
 
@@ -309,9 +313,10 @@ the agent should already have the credentials it needs.
 ssh <stamp-server-host> list-trash
 ```
 
-Expect a trash listing (an empty `[]` is fine — the point is that auth
-succeeded). A `Permission denied (publickey)` or hang means the env-var
-update or restart didn't take; recheck both before continuing.
+Expect either a per-entry trash listing or `(no trash — /srv/git/.trash
+does not exist)`. The point is that auth succeeded. A `Permission
+denied (publickey)` or hang means the env-var update or restart didn't
+take; recheck both before continuing.
 
 ### Step 6 — request trust in each repo this operator will land merges in
 
@@ -338,7 +343,7 @@ target repo and runs the stamp gate.
 **Verify** (after the trust-key change has landed in a target repo):
 
 ```sh
-diff -q <repo>/.stamp/trusted-keys/<short-name>.pub ~/.stamp/keys/ed25519.pub
+diff -q <path-to-cloned-target-repo>/.stamp/trusted-keys/<short-name>.pub ~/.stamp/keys/ed25519.pub
 ```
 
 Expect silent output (files match). After this, the new operator can
