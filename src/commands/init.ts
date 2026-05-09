@@ -76,13 +76,13 @@ export interface InitOptions {
    */
   ghProtect?: boolean;
   /**
-   * When true, skip the oteam-detection prompt that offers to fill
+   * When false, skip the oteam-detection prompt that offers to fill
    * `stamp.host` in ~/.open-team/config.json when a local stamp server is
-   * configured. Default false (offer the prompt when conditions are met).
+   * configured. Default true (offer the prompt when conditions are met).
    * The prompt is also silently skipped in non-TTY contexts regardless of
-   * this flag.
+   * this flag. Corresponds to the `--no-oteam` CLI flag.
    */
-  skipOteam?: boolean;
+  oteam?: boolean;
   /**
    * Deployment shape this repo is being initialized for.
    *
@@ -244,7 +244,7 @@ export function runInit(opts: InitOptions = {}): void {
   // Oteam cross-link: offer to fill stamp.host in ~/.open-team/config.json
   // when oteam is detected and a local stamp server is configured. One-way
   // file read + file patch; no runtime dep on @openthink/team.
-  if (opts.skipOteam !== true) {
+  if (opts.oteam !== false) {
     maybeOfferOteamHostFill();
   }
 
@@ -606,14 +606,16 @@ function maybeOfferOteamHostFill(): void {
   try {
     patchStampHost(host);
     console.log(
-      `  oteam config: stamp.host set to "${host}" in ~/.open-team/config.json`,
+      `oteam config: stamp.host set to "${host}" in ~/.open-team/config.json`,
     );
+    console.log();
   } catch (err) {
     // Patch failure is non-fatal — surface the error as a warning so the
     // user can fix it manually, but don't abort the init.
-    console.error(
+    console.log(
       `warning: could not patch ~/.open-team/config.json: ${err instanceof Error ? err.message : String(err)}`,
     );
+    console.log();
   }
 }
 

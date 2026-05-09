@@ -454,9 +454,11 @@ export function ensureClaudeMd(
   const existing = readFileSync(path, "utf8");
   const updated = injectClaudeSection(existing);
   if (updated === existing) return "unchanged";
-  // "replaced" if any known stamp marker (new or legacy) was already present.
+  // "replaced" if any known stamp marker (new or legacy, either file variant)
+  // was already present — covers AGENTS-style legacy wording too.
   const action =
     existing.includes(STAMP_BEGIN) ||
+    existing.includes(STAMP_BEGIN_LEGACY) ||
     existing.includes(STAMP_CLAUDE_BEGIN_LEGACY)
       ? "replaced"
       : "appended";

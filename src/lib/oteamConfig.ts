@@ -22,7 +22,11 @@ export const OTEAM_CONFIG_PATH = join(homedir(), ".open-team", "config.json");
 export function readOteamConfig(configPath = OTEAM_CONFIG_PATH): unknown | null {
   if (!existsSync(configPath)) return null;
   try {
-    return JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+    if (Array.isArray(parsed)) {
+      throw new Error("config must be a JSON object, not an array");
+    }
+    return parsed;
   } catch (err) {
     throw new Error(
       `${configPath}: ${err instanceof Error ? err.message : String(err)}`,
@@ -43,7 +47,11 @@ export function patchStampHost(host: string, configPath = OTEAM_CONFIG_PATH): vo
   if (existsSync(configPath)) {
     try {
       const parsed = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
-      if (typeof parsed === "object" && parsed !== null) {
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed)
+      ) {
         config = parsed as Record<string, unknown>;
       }
     } catch (err) {
