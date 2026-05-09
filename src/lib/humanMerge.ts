@@ -100,7 +100,7 @@ export function requireHumanMerge(args: RequireHumanMergeArgs): void {
  * line endings on a TTY) so callers see plain "y" / "yes" / "" rather
  * than "y\r" / "yes\r" / "\r".
  */
-function readLineSync(): string {
+export function readLineSync(): string {
   const buf = Buffer.alloc(1);
   let out = "";
   const fd = 0;

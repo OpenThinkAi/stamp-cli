@@ -10,7 +10,10 @@ import {
   parseGithubOriginUrl,
   type BypassActor,
 } from "../lib/ghRuleset.js";
+import { readLineSync } from "../lib/humanMerge.js";
+import { readOteamConfig, patchStampHost } from "../lib/oteamConfig.js";
 import { classifyRemote, describeShape } from "../lib/remote.js";
+import { loadServerConfig } from "../lib/serverConfig.js";
 import {
   DEFAULT_CONFIG,
   DEFAULT_PRODUCT_PROMPT,
@@ -72,6 +75,14 @@ export interface InitOptions {
    * authenticated. Skipped silently for non-github / non-forge origins.
    */
   ghProtect?: boolean;
+  /**
+   * When true, skip the oteam-detection prompt that offers to fill
+   * `stamp.host` in ~/.open-team/config.json when a local stamp server is
+   * configured. Default false (offer the prompt when conditions are met).
+   * The prompt is also silently skipped in non-TTY contexts regardless of
+   * this flag.
+   */
+  skipOteam?: boolean;
   /**
    * Deployment shape this repo is being initialized for.
    *
@@ -228,6 +239,13 @@ export function runInit(opts: InitOptions = {}): void {
   // escape hatch for users who want to squash with other changes.
   if (opts.bootstrapCommit !== false) {
     printBootstrapCommitResult(runBootstrapCommit(repoRoot, scaffoldOrSync));
+  }
+
+  // Oteam cross-link: offer to fill stamp.host in ~/.open-team/config.json
+  // when oteam is detected and a local stamp server is configured. One-way
+  // file read + file patch; no runtime dep on @openthink/team.
+  if (opts.skipOteam !== true) {
+    maybeOfferOteamHostFill();
   }
 
   // GitHub Ruleset: if origin is github.com directly AND `gh` is available,
@@ -543,6 +561,59 @@ function applyGitHubRulesetWithReporting(remoteUrl: string): void {
       );
       console.log();
       break;
+  }
+}
+
+/**
+ * Offer to fill oteam's `stamp.host` config when all three conditions hold:
+ *   1. ~/.open-team/config.json exists and stamp.host is not yet set
+ *   2. ~/.stamp/server.yml is configured with a local stamp host
+ *   3. stdin/stdout are both TTYs (non-interactive runs skip silently)
+ *
+ * On yes, atomically patches ~/.open-team/config.json. On no, or when any
+ * condition is unmet, does nothing — no error, no warning (AC #4).
+ */
+function maybeOfferOteamHostFill(): void {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+
+  let oteamCfg: unknown;
+  try {
+    oteamCfg = readOteamConfig();
+  } catch {
+    return; // malformed oteam config — skip silently
+  }
+  if (oteamCfg === null) return; // oteam not installed/configured
+
+  const cfg = oteamCfg as Record<string, unknown>;
+  const stamp = cfg.stamp as Record<string, unknown> | undefined;
+  if (stamp?.host) return; // stamp.host already set
+
+  let serverCfg: ReturnType<typeof loadServerConfig>;
+  try {
+    serverCfg = loadServerConfig();
+  } catch {
+    return; // malformed server.yml — skip silently
+  }
+  if (!serverCfg) return; // no local stamp server configured
+
+  const host = serverCfg.host;
+  process.stdout.write(
+    `Set oteam's \`stamp.host\` to "${host}"? [y/N] `,
+  );
+  const answer = readLineSync().trim().toLowerCase();
+  if (answer !== "y" && answer !== "yes") return;
+
+  try {
+    patchStampHost(host);
+    console.log(
+      `  oteam config: stamp.host set to "${host}" in ~/.open-team/config.json`,
+    );
+  } catch (err) {
+    // Patch failure is non-fatal — surface the error as a warning so the
+    // user can fix it manually, but don't abort the init.
+    console.error(
+      `warning: could not patch ~/.open-team/config.json: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
