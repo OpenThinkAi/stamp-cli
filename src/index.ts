@@ -93,6 +93,10 @@ program
     "remote name to inspect for deployment-shape detection (default: origin)",
     "origin",
   )
+  .option(
+    "--no-oteam",
+    "bypass the oteam-detection prompt that offers to fill stamp.host in ~/.open-team/config.json",
+  )
   .action(
     (opts: {
       minimal?: boolean;
@@ -102,6 +106,7 @@ program
       ghProtect: boolean;
       mode?: string;
       remote: string;
+      oteam: boolean;
     }) => {
       try {
         let mode: "server-gated" | "local-only" | undefined;
@@ -122,6 +127,7 @@ program
           ghProtect: opts.ghProtect,
           mode,
           remote: opts.remote,
+          oteam: opts.oteam,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

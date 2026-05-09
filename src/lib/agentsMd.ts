@@ -1,26 +1,32 @@
 /**
- * Idempotent injection of stamp-specific guidance into AGENTS.md at the
- * repo root. The stamp section lives between two HTML-comment delimiters
- * so re-running `stamp bootstrap` / `stamp init` replaces the section in
- * place without disturbing any other content the user has added.
+ * Idempotent injection of stamp-specific guidance into AGENTS.md and CLAUDE.md
+ * at the repo root. Stamp sections live between HTML-comment delimiters so
+ * re-running `stamp init` / `stamp bootstrap` replaces the section in place
+ * without disturbing any other content (oteam blocks, think blocks, etc.).
  *
- * Why AGENTS.md and not CLAUDE.md: AGENTS.md is the cross-tool convention
- * the open-source ecosystem is converging on; tools like Claude Code,
- * Cursor, Aider, and others read it. Projects that want Claude-specific
- * guidance can keep a CLAUDE.md alongside that points at AGENTS.md.
+ * Both AGENTS.md and CLAUDE.md use the same `<!-- stamp:begin -->` /
+ * `<!-- stamp:end -->` marker pair (different files, zero collision risk —
+ * each `ensureXxxMd` is path-scoped). Legacy CLAUDE.md files used the
+ * distinct `<!-- stamp:claude:begin -->` / `<!-- stamp:claude:end -->` markers;
+ * the next `stamp init` migrates them to the unified shape automatically.
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const STAMP_BEGIN = "<!-- stamp:begin (managed by stamp-cli — do not edit between markers) -->";
+export const STAMP_BEGIN = "<!-- stamp:begin (managed by `stamp init` — do not edit between markers) -->";
 export const STAMP_END = "<!-- stamp:end -->";
 
-// CLAUDE.md uses distinct markers so the two files can coexist without the
-// "looks for stamp:begin" detection treating CLAUDE.md content as if it were
-// AGENTS.md content (different bodies, different rewrite rules).
-export const STAMP_CLAUDE_BEGIN = "<!-- stamp:claude:begin (managed by stamp-cli — do not edit between markers) -->";
-export const STAMP_CLAUDE_END = "<!-- stamp:claude:end -->";
+// Legacy markers kept for backward-compat detection and sweep.
+// AGENTS.md: old wording used "stamp-cli" instead of "`stamp init`".
+export const STAMP_BEGIN_LEGACY = "<!-- stamp:begin (managed by stamp-cli — do not edit between markers) -->";
+// CLAUDE.md: old files used distinct stamp:claude:begin / stamp:claude:end.
+export const STAMP_CLAUDE_BEGIN_LEGACY = "<!-- stamp:claude:begin (managed by stamp-cli — do not edit between markers) -->";
+export const STAMP_CLAUDE_END_LEGACY = "<!-- stamp:claude:end -->";
+
+// Detection prefixes (cover both old and new marker wordings).
+const STAMP_BEGIN_PREFIX = "<!-- stamp:begin ";
+const STAMP_CLAUDE_BEGIN_PREFIX = "<!-- stamp:claude:begin ";
 
 /**
  * Deployment shape selector for the AGENTS.md content. The two shapes have
@@ -240,10 +246,42 @@ ${REVIEW_LOOP_HEURISTIC}
 
 
 /**
+ * Find a managed block in `text` whose open line starts with `openPrefix` and
+ * whose close is `closeMarker`. Returns the character indices bounding the
+ * block (inclusive of both markers and everything between them), or null if no
+ * such block is found.
+ *
+ * Uses prefix matching so that wording changes inside the opening comment
+ * (e.g. "stamp-cli" → "`stamp init`") are recognised without producing a
+ * duplicate stale block.
+ */
+function findManagedBlock(
+  text: string,
+  openPrefix: string,
+  closeMarker: string,
+): { beginIdx: number; afterEnd: number } | null {
+  let searchStart = 0;
+  while (searchStart < text.length) {
+    const candidateIdx = text.indexOf(openPrefix, searchStart);
+    if (candidateIdx === -1) return null;
+    // Must be at the start of a line (beginning of text, or preceded by \n).
+    if (candidateIdx === 0 || text[candidateIdx - 1] === "\n") {
+      const closeStart = text.indexOf(closeMarker, candidateIdx);
+      if (closeStart === -1) return null;
+      return { beginIdx: candidateIdx, afterEnd: closeStart + closeMarker.length };
+    }
+    searchStart = candidateIdx + 1;
+  }
+  return null;
+}
+
+/**
  * Insert or replace the stamp-managed section in an AGENTS.md body.
  *
- * - If `existing` already contains the delimiters, the content between them
- *   is replaced and everything outside is preserved verbatim.
+ * - If `existing` already contains a line starting with `<!-- stamp:begin `
+ *   (covers both old "stamp-cli" wording and new "`stamp init`" wording),
+ *   the content between the open and close markers is replaced in place and
+ *   everything outside is preserved verbatim.
  * - If `existing` lacks the delimiters but is non-empty, the stamp section
  *   is appended after a blank-line separator.
  * - If `existing` is empty/undefined, a complete AGENTS.md is generated
@@ -276,22 +314,15 @@ ${stampBlock}
 `;
   }
 
-  const beginIdx = existing.indexOf(STAMP_BEGIN);
-  const endIdx = existing.indexOf(STAMP_END);
-
-  if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
-    // Replace the existing block in place. Splice from begin marker through
-    // the end marker (inclusive of the END line itself).
-    const before = existing.slice(0, beginIdx);
-    const afterStart = endIdx + STAMP_END.length;
-    const after = existing.slice(afterStart);
+  // Prefix-based detection catches both the old "stamp-cli" wording and the
+  // new "`stamp init`" wording without requiring a full-string match.
+  const found = findManagedBlock(existing, STAMP_BEGIN_PREFIX, STAMP_END);
+  if (found) {
+    const before = existing.slice(0, found.beginIdx);
+    const after = existing.slice(found.afterEnd);
     return `${before}${stampBlock}${after}`;
   }
 
-  // No markers present — append the block (with markers) after the existing
-  // content. From the *next* run on, the markers will be there and the
-  // replace-in-place branch above takes over, so this path runs at most once
-  // per file.
   return `${existing.trimEnd()}\n\n${stampBlock}\n`;
 }
 
@@ -320,7 +351,11 @@ export function ensureAgentsMd(
   const existing = readFileSync(path, "utf8");
   const updated = injectStampSection(existing, mode);
   if (updated === existing) return "unchanged";
-  const action = existing.includes(STAMP_BEGIN) ? "replaced" : "appended";
+  // "replaced" if either the new or legacy marker was already present.
+  const action =
+    existing.includes(STAMP_BEGIN) || existing.includes(STAMP_BEGIN_LEGACY)
+      ? "replaced"
+      : "appended";
   writeFileSync(path, updated);
   return action;
 }
@@ -333,8 +368,7 @@ export function ensureAgentsMd(
  * agent that never explicitly opens AGENTS.md still sees the rule.
  *
  * Mode-agnostic: the rule "use stamp flow, don't push directly" applies the
- * same way in both server-gated (where the server enforces it) and local-only
- * (where the agent IS the enforcement). Detail lives in AGENTS.md.
+ * same way in both server-gated and local-only deployment shapes.
  */
 export const STAMP_CLAUDE_SECTION = `## Stamp-protected repository — read AGENTS.md before any git operation
 
@@ -353,6 +387,8 @@ stamp merge feature --into main         # signs the merge
 git push origin main                    # OR \`stamp push main\` if origin is a stamp server
 \`\`\`
 
+Key commands: \`stamp provision\` — provision a new repo; \`stamp review\` — run reviewers; \`stamp merge\` — sign a merge; \`stamp push\` — push to a stamp server.
+
 **The full reference is at [\`AGENTS.md\`](./AGENTS.md) at the repo root** —
 read it before any git command. It covers the mode (server-gated vs.
 local-only), what NOT to do, where things live, and how to recover when stamp
@@ -364,12 +400,19 @@ blocks you.
 automatically. Every subsequent change goes through the stamp flow.`;
 
 /**
- * Insert or replace the stamp-managed CLAUDE.md section. Same three-case
- * logic as injectStampSection (replace-in-place, append, generate-fresh) but
- * with CLAUDE.md-specific markers + body.
+ * Insert or replace the stamp-managed CLAUDE.md section. Uses the same
+ * `<!-- stamp:begin -->` / `<!-- stamp:end -->` markers as AGENTS.md (unified
+ * marker convention — no collision risk since each ensureXxxMd is path-scoped).
+ *
+ * Legacy CLAUDE.md files use `<!-- stamp:claude:begin -->` / `<!-- stamp:claude:end -->`.
+ * This function detects the legacy form and migrates it to the new shape on
+ * the next `stamp init`, leaving no duplicate block behind.
+ *
+ * Same three-case logic as injectStampSection:
+ *   replace-in-place (new or legacy markers found) → append → generate-fresh.
  */
 export function injectClaudeSection(existing: string | undefined): string {
-  const stampBlock = `${STAMP_CLAUDE_BEGIN}\n\n${STAMP_CLAUDE_SECTION.trimEnd()}\n\n${STAMP_CLAUDE_END}`;
+  const stampBlock = `${STAMP_BEGIN}\n\n${STAMP_CLAUDE_SECTION.trimEnd()}\n\n${STAMP_END}`;
 
   if (existing === undefined || existing.trim() === "") {
     return `# CLAUDE.md
@@ -380,14 +423,17 @@ ${stampBlock}
 `;
   }
 
-  const beginIdx = existing.indexOf(STAMP_CLAUDE_BEGIN);
-  const endIdx = existing.indexOf(STAMP_CLAUDE_END);
-  if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
-    const before = existing.slice(0, beginIdx);
-    const afterStart = endIdx + STAMP_CLAUDE_END.length;
-    const after = existing.slice(afterStart);
+  // Check for either the new unified marker or the legacy stamp:claude:begin marker.
+  const found =
+    findManagedBlock(existing, STAMP_BEGIN_PREFIX, STAMP_END) ??
+    findManagedBlock(existing, STAMP_CLAUDE_BEGIN_PREFIX, STAMP_CLAUDE_END_LEGACY);
+
+  if (found) {
+    const before = existing.slice(0, found.beginIdx);
+    const after = existing.slice(found.afterEnd);
     return `${before}${stampBlock}${after}`;
   }
+
   return `${existing.trimEnd()}\n\n${stampBlock}\n`;
 }
 
@@ -395,7 +441,7 @@ ${stampBlock}
  * Create or refresh the stamp-managed section of CLAUDE.md at the repo root.
  * Same return shape and semantics as ensureAgentsMd. Default-on when called
  * by stamp init / stamp bootstrap; the operator can opt out with
- * \`--no-claude-md\`.
+ * `--no-claude-md`.
  */
 export function ensureClaudeMd(
   repoRoot: string,
@@ -408,7 +454,14 @@ export function ensureClaudeMd(
   const existing = readFileSync(path, "utf8");
   const updated = injectClaudeSection(existing);
   if (updated === existing) return "unchanged";
-  const action = existing.includes(STAMP_CLAUDE_BEGIN) ? "replaced" : "appended";
+  // "replaced" if any known stamp marker (new or legacy, either file variant)
+  // was already present — covers AGENTS-style legacy wording too.
+  const action =
+    existing.includes(STAMP_BEGIN) ||
+    existing.includes(STAMP_BEGIN_LEGACY) ||
+    existing.includes(STAMP_CLAUDE_BEGIN_LEGACY)
+      ? "replaced"
+      : "appended";
   writeFileSync(path, updated);
   return action;
 }

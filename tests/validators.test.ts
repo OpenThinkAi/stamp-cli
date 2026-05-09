@@ -51,8 +51,9 @@ import {
   injectClaudeSection,
   injectStampSection,
   STAMP_BEGIN,
-  STAMP_CLAUDE_BEGIN,
-  STAMP_CLAUDE_END,
+  STAMP_BEGIN_LEGACY,
+  STAMP_CLAUDE_BEGIN_LEGACY,
+  STAMP_CLAUDE_END_LEGACY,
   STAMP_END,
 } from "../src/lib/agentsMd.ts";
 import {
@@ -435,6 +436,51 @@ describe("injectStampSection (AGENTS.md)", () => {
     const out = injectStampSection(existing, "server-gated");
     assert.match(out, /this is mine/);
     assert.match(out, /trailing user content/);
+  });
+
+  it("migrates a legacy stamp:begin (old 'stamp-cli' wording) block to the new wording", () => {
+    const legacy =
+      "# AGENTS.md\n\n" +
+      `${STAMP_BEGIN_LEGACY}\n\n## old stamp content\n\n${STAMP_END}\n`;
+    const out = injectStampSection(legacy, "server-gated");
+    assert.ok(out.includes(STAMP_BEGIN), "new wording present after migration");
+    assert.equal(
+      out.includes(STAMP_BEGIN_LEGACY),
+      false,
+      "legacy wording gone after migration",
+    );
+    // Exactly one begin marker — no duplicate.
+    const beginCount = (out.match(/<!-- stamp:begin /g) ?? []).length;
+    assert.equal(beginCount, 1, "exactly one begin marker (no duplicate block)");
+    // Idempotent after migration.
+    assert.equal(injectStampSection(out, "server-gated"), out, "idempotent after migration");
+  });
+
+  it("preserves sibling oteam and think blocks across a stamp section rewrite", () => {
+    const oteamBlock =
+      "<!-- oteam:begin (managed by `oteam init` — do not edit between markers) -->\n" +
+      "oteam content\n" +
+      "<!-- oteam:end -->\n";
+    const thinkBlock =
+      "<!-- think:retro:begin (managed by `think init --retro` — do not edit between markers) -->\n" +
+      "think content\n" +
+      "<!-- think:retro:end -->\n";
+    const existing =
+      "# AGENTS.md\n\n" +
+      oteamBlock +
+      "\n" +
+      `${STAMP_BEGIN_LEGACY}\n\n## old stamp content\n\n${STAMP_END}\n` +
+      "\n" +
+      thinkBlock;
+    const out = injectStampSection(existing, "server-gated");
+    assert.ok(out.includes("oteam content"), "oteam block preserved");
+    assert.ok(out.includes("think content"), "think block preserved");
+    assert.ok(out.includes(STAMP_BEGIN), "stamp section updated to new wording");
+    assert.equal(
+      out.includes(STAMP_BEGIN_LEGACY),
+      false,
+      "legacy stamp wording gone",
+    );
   });
 });
 
@@ -1483,17 +1529,76 @@ describe("parseCommitAttestation (trailer size cap)", () => {
 });
 
 describe("injectClaudeSection (CLAUDE.md)", () => {
-  it("uses the CLAUDE-specific markers, not AGENTS markers", () => {
+  it("uses unified STAMP_BEGIN / STAMP_END markers (same as AGENTS.md)", () => {
     const out = injectClaudeSection(undefined);
-    assert.ok(out.includes(STAMP_CLAUDE_BEGIN), "output should contain CLAUDE begin marker");
-    assert.ok(out.includes(STAMP_CLAUDE_END), "output should contain CLAUDE end marker");
-    // CRITICAL: must NOT include the AGENTS.md begin marker, otherwise
-    // a future ensureAgentsMd run on this file would treat the CLAUDE
-    // section as the AGENTS section and clobber it.
+    assert.ok(out.includes(STAMP_BEGIN), "output should contain the unified begin marker");
+    assert.ok(out.includes(STAMP_END), "output should contain the unified end marker");
+    // Must NOT contain the old stamp:claude:begin legacy marker.
     assert.equal(
-      out.includes(STAMP_BEGIN),
+      out.includes(STAMP_CLAUDE_BEGIN_LEGACY),
       false,
-      "CLAUDE.md must not contain the AGENTS.md begin marker",
+      "fresh CLAUDE.md must not contain the legacy stamp:claude:begin marker",
+    );
+  });
+
+  it("is idempotent — calling twice produces no change", () => {
+    const first = injectClaudeSection(undefined);
+    const second = injectClaudeSection(first);
+    assert.equal(first, second, "injectClaudeSection is idempotent");
+  });
+
+  it("migrates a legacy stamp:claude:begin block to the unified marker", () => {
+    const legacy =
+      "# CLAUDE.md\n\n" +
+      `${STAMP_CLAUDE_BEGIN_LEGACY}\n\n## old stamp content\n\n${STAMP_CLAUDE_END_LEGACY}\n`;
+    const out = injectClaudeSection(legacy);
+    assert.ok(out.includes(STAMP_BEGIN), "migrated file should use unified begin marker");
+    assert.ok(out.includes(STAMP_END), "migrated file should use unified end marker");
+    assert.equal(
+      out.includes(STAMP_CLAUDE_BEGIN_LEGACY),
+      false,
+      "legacy marker should be gone after migration",
+    );
+    // Idempotent after migration.
+    assert.equal(injectClaudeSection(out), out, "post-migration output is idempotent");
+  });
+
+  it("migrates a legacy AGENTS.md-style stamp:begin block (old wording) without duplicating", () => {
+    const legacy =
+      "# CLAUDE.md\n\n" +
+      `${STAMP_BEGIN_LEGACY}\n\n## old stamp content\n\n${STAMP_END}\n`;
+    const out = injectClaudeSection(legacy);
+    // The legacy AGENTS.md begin marker starts with "<!-- stamp:begin " so
+    // the prefix scan finds and replaces it in place — no duplicate block.
+    const beginCount = (out.match(/<!-- stamp:begin /g) ?? []).length;
+    assert.equal(beginCount, 1, "exactly one begin marker after migration (no duplicate)");
+    assert.ok(out.includes(STAMP_BEGIN), "block now uses the new wording");
+  });
+
+  it("preserves sibling oteam and think blocks across a stamp block rewrite", () => {
+    const oteamBlock =
+      "<!-- oteam:begin (managed by `oteam init` — do not edit between markers) -->\n" +
+      "oteam content\n" +
+      "<!-- oteam:end -->\n";
+    const thinkBlock =
+      "<!-- think:retro:begin (managed by `think init --retro` — do not edit between markers) -->\n" +
+      "think content\n" +
+      "<!-- think:retro:end -->\n";
+    const existing =
+      "# CLAUDE.md\n\n" +
+      oteamBlock +
+      "\n" +
+      `${STAMP_CLAUDE_BEGIN_LEGACY}\n\n## old stamp content\n\n${STAMP_CLAUDE_END_LEGACY}\n` +
+      "\n" +
+      thinkBlock;
+    const out = injectClaudeSection(existing);
+    assert.ok(out.includes("oteam content"), "oteam block preserved");
+    assert.ok(out.includes("think content"), "think block preserved");
+    assert.ok(out.includes(STAMP_BEGIN), "stamp block updated");
+    assert.equal(
+      out.includes(STAMP_CLAUDE_BEGIN_LEGACY),
+      false,
+      "legacy stamp marker gone",
     );
   });
 });
