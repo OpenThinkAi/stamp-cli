@@ -195,9 +195,9 @@ program
   );
 
 program
-  .command("provision <name>")
+  .command("provision [name]")
   .description(
-    "single-command server-gated repo setup: provision a bare repo on the stamp server (~/.stamp/server.yml or --server), clone it, run bootstrap, optionally create a GitHub mirror + apply the Ruleset",
+    "single-command server-gated repo setup: provision a bare repo on the stamp server (~/.stamp/server.yml or --server), clone it, run bootstrap, optionally create a GitHub mirror + apply the Ruleset. With --migrate-bypass, migrate an existing server-gated repo's Ruleset bypass from OrganizationAdmin to a per-repo DeployKey actor (cwd's .stamp/mirror.yml identifies the target; <name> is ignored).",
   )
   .option(
     "--server <host:port>",
@@ -222,9 +222,17 @@ program
     "--migrate-existing",
     "brownfield: migrate the existing repo at cwd (with .stamp/ committed and origin → github) to server-gated; preserves history, renames origin → github, points new origin at the stamp server",
   )
+  .option(
+    "--migrate-bypass",
+    "migrate an existing server-gated repo's stamp-mirror-only Ruleset bypass actor from OrganizationAdmin to a per-repo DeployKey. Identifies the target via cwd's .stamp/mirror.yml. Additive by default (DeployKey added alongside existing actors); pair with --remove-orgadmin to also strip OrganizationAdmin from the bypass list",
+  )
+  .option(
+    "--remove-orgadmin",
+    "under --migrate-bypass, also remove OrganizationAdmin from the ruleset's bypass list. Verify the DeployKey transport works (one stamp push) before running this — there is no automated push-verification step",
+  )
   .action(
     async (
-      name: string,
+      name: string | undefined,
       opts: {
         server?: string;
         org?: string;
@@ -234,11 +242,18 @@ program
         ruleset: boolean;
         dryRun?: boolean;
         migrateExisting?: boolean;
+        migrateBypass?: boolean;
+        removeOrgadmin?: boolean;
       },
     ) => {
       try {
         await runProvision({
-          name,
+          // ProvisionOptions.name is typed `string` so the rest of the
+          // downstream readers don't have to narrow. Empty placeholder
+          // for --migrate-bypass (which doesn't read it); the validation
+          // block in runProvision requires a non-empty name in all other
+          // modes.
+          name: name ?? "",
           server: opts.server,
           org: opts.org,
           into: opts.into,
@@ -247,6 +262,8 @@ program
           noRuleset: !opts.ruleset,
           dryRun: opts.dryRun,
           migrateExisting: opts.migrateExisting,
+          migrateBypass: opts.migrateBypass,
+          removeOrgadmin: opts.removeOrgadmin,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

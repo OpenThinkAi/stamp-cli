@@ -39,8 +39,11 @@ import { describe, it } from "node:test";
 
 import {
   buildRulesetPayload,
+  bypassActorListsEqual,
+  computeDesiredBypassActors,
   parseGithubOriginUrl,
   type BypassActor,
+  type RulesetBypassActorRaw,
 } from "../src/lib/ghRuleset.ts";
 import {
   bareRepoSshUrl,
@@ -229,6 +232,170 @@ describe("buildRulesetPayload", () => {
       false,
       "stamp produces --no-ff merges; required_linear_history would reject every merge",
     );
+  });
+});
+
+// ---------- bypassActorListsEqual / computeDesiredBypassActors ----------
+//
+// The migration tool (`stamp provision --migrate-bypass`) composes a
+// desired bypass-actor list from the current state + the deploy-key it
+// just registered + a `--remove-orgadmin` flag. The two helpers under
+// test are the pure decision-and-comparison core; the surrounding code
+// is glue over gh-api calls. Pinning their contracts here covers the
+// migration's logic without depending on a live GitHub.
+
+describe("bypassActorListsEqual", () => {
+  const ORG_ADMIN_AS_NULL: RulesetBypassActorRaw = {
+    actor_id: null,
+    actor_type: "OrganizationAdmin",
+    bypass_mode: "always",
+  };
+  const ORG_ADMIN_AS_ONE: RulesetBypassActorRaw = {
+    actor_id: 1,
+    actor_type: "OrganizationAdmin",
+    bypass_mode: "always",
+  };
+  const DEPLOY_KEY: RulesetBypassActorRaw = {
+    actor_id: 151199507,
+    actor_type: "DeployKey",
+    bypass_mode: "always",
+  };
+  const USER: RulesetBypassActorRaw = {
+    actor_id: 3653869,
+    actor_type: "User",
+    bypass_mode: "always",
+  };
+
+  it("treats OrganizationAdmin actor_id 1 and null as equivalent (POST→GET round-trip quirk)", () => {
+    // GitHub accepts `actor_id: 1` on POST for the OrgAdmin sentinel
+    // and returns `actor_id: null` on subsequent GETs. Same actor,
+    // different on-the-wire shapes — the comparison must treat them
+    // as equal so an idempotent re-run doesn't think the list changed.
+    assert.equal(bypassActorListsEqual([ORG_ADMIN_AS_NULL], [ORG_ADMIN_AS_ONE]), true);
+    assert.equal(bypassActorListsEqual([ORG_ADMIN_AS_ONE], [ORG_ADMIN_AS_NULL]), true);
+  });
+
+  it("returns true regardless of order", () => {
+    assert.equal(
+      bypassActorListsEqual([ORG_ADMIN_AS_NULL, DEPLOY_KEY], [DEPLOY_KEY, ORG_ADMIN_AS_NULL]),
+      true,
+    );
+  });
+
+  it("returns false when actor sets differ", () => {
+    assert.equal(bypassActorListsEqual([ORG_ADMIN_AS_NULL], [DEPLOY_KEY]), false);
+    assert.equal(
+      bypassActorListsEqual([ORG_ADMIN_AS_NULL], [ORG_ADMIN_AS_NULL, DEPLOY_KEY]),
+      false,
+    );
+  });
+
+  it("DOES NOT treat actor_id null/1 equivalence outside OrganizationAdmin", () => {
+    // A User or DeployKey with actor_id 1 is a genuine, specific id;
+    // the null-vs-1 normalization is OrgAdmin-only. Defense against an
+    // accidental loosening of the comparison.
+    const userAsOne: RulesetBypassActorRaw = {
+      actor_id: 1,
+      actor_type: "User",
+      bypass_mode: "always",
+    };
+    const userAsNull: RulesetBypassActorRaw = {
+      actor_id: null,
+      actor_type: "User",
+      bypass_mode: "always",
+    };
+    assert.equal(bypassActorListsEqual([userAsOne], [userAsNull]), false);
+  });
+
+  it("differentiates on bypass_mode (always vs. pull_request)", () => {
+    const orgAdminPr: RulesetBypassActorRaw = {
+      ...ORG_ADMIN_AS_NULL,
+      bypass_mode: "pull_request",
+    };
+    assert.equal(bypassActorListsEqual([ORG_ADMIN_AS_NULL], [orgAdminPr]), false);
+  });
+
+  it("preserves the user-actor case unchanged (no normalization quirk)", () => {
+    assert.equal(bypassActorListsEqual([USER], [USER]), true);
+  });
+});
+
+describe("computeDesiredBypassActors", () => {
+  const ORG_ADMIN: RulesetBypassActorRaw = {
+    actor_id: null,
+    actor_type: "OrganizationAdmin",
+    bypass_mode: "always",
+  };
+  const STRAY_USER: RulesetBypassActorRaw = {
+    actor_id: 3653869,
+    actor_type: "User",
+    bypass_mode: "always",
+  };
+
+  it("adds DeployKey when not present (default mode preserves OrgAdmin)", () => {
+    const out = computeDesiredBypassActors([ORG_ADMIN], 151199507, {
+      removeOrgadmin: false,
+    });
+    assert.equal(out.length, 2);
+    const types = out.map((a) => a.actor_type).sort();
+    assert.deepEqual(types, ["DeployKey", "OrganizationAdmin"]);
+    const deploy = out.find((a) => a.actor_type === "DeployKey");
+    assert.equal(deploy?.actor_id, 151199507);
+    assert.equal(deploy?.bypass_mode, "always");
+  });
+
+  it("is idempotent: DeployKey already present produces no duplicate", () => {
+    const deployKey: RulesetBypassActorRaw = {
+      actor_id: 151199507,
+      actor_type: "DeployKey",
+      bypass_mode: "always",
+    };
+    const out = computeDesiredBypassActors([ORG_ADMIN, deployKey], 151199507, {
+      removeOrgadmin: false,
+    });
+    const types = out.map((a) => a.actor_type).sort();
+    assert.deepEqual(types, ["DeployKey", "OrganizationAdmin"]);
+    assert.equal(
+      out.filter((a) => a.actor_type === "DeployKey").length,
+      1,
+      "should not add a second DeployKey when one already exists",
+    );
+  });
+
+  it("drops OrganizationAdmin when removeOrgadmin is true", () => {
+    const out = computeDesiredBypassActors([ORG_ADMIN], 151199507, {
+      removeOrgadmin: true,
+    });
+    const types = out.map((a) => a.actor_type);
+    assert.deepEqual(types, ["DeployKey"]);
+  });
+
+  it("preserves non-Org, non-DeployKey actors (e.g. stray User from open-audit)", () => {
+    // open-audit's ruleset has a stray User(3653869) bypass actor
+    // alongside OrgAdmin. The migration must not strip arbitrary actors
+    // it didn't introduce — that's task-#6's defensive default.
+    const out = computeDesiredBypassActors([ORG_ADMIN, STRAY_USER], 151199507, {
+      removeOrgadmin: false,
+    });
+    const types = out.map((a) => a.actor_type).sort();
+    assert.deepEqual(types, ["DeployKey", "OrganizationAdmin", "User"]);
+  });
+
+  it("preserves stray User actors even when removeOrgadmin is set", () => {
+    const out = computeDesiredBypassActors([ORG_ADMIN, STRAY_USER], 151199507, {
+      removeOrgadmin: true,
+    });
+    const types = out.map((a) => a.actor_type).sort();
+    assert.deepEqual(types, ["DeployKey", "User"]);
+  });
+
+  it("adds DeployKey on a fresh (empty) bypass list", () => {
+    const out = computeDesiredBypassActors([], 151199507, {
+      removeOrgadmin: false,
+    });
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.actor_type, "DeployKey");
+    assert.equal(out[0]!.actor_id, 151199507);
   });
 });
 
