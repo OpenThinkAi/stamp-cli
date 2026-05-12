@@ -364,7 +364,12 @@ function applyMirrorRuleset(
     // earlier OrganizationAdmin (actor_id=1) magic constant.
     let pubkey: string;
     try {
-      pubkey = fetchServerPubkey(server);
+      // Per-repo deploy key — the server lazily generates one keyed by
+      // <owner>/<repo> and returns its public half. Each migrated mirror
+      // ends up with its own key, working around GitHub's "deploy key
+      // already in use" uniqueness constraint that blocked rolling the
+      // legacy shared key across more than one repo.
+      pubkey = fetchServerPubkey(server, mirror);
     } catch (err) {
       console.log(
         `warning: GitHub Ruleset auto-apply skipped — couldn't fetch stamp server pubkey: ` +

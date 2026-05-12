@@ -143,4 +143,32 @@ describe("buildMirrorPushInvocationSsh", () => {
       );
     }
   });
+
+  // Per-repo SSH-key override (5c): when buildMirrorPushInvocationSsh is
+  // given an sshKeyPath, the returned env must carry a GIT_SSH_COMMAND
+  // that points ssh at that key with IdentitiesOnly=yes. Without the
+  // override (legacy shared-key path) the env stays clean. Pinned so
+  // that "the per-repo path was selected" stays observable from the
+  // builder's output without spinning up a real ssh process.
+  it("emits GIT_SSH_COMMAND with -i + IdentitiesOnly=yes when sshKeyPath is set", () => {
+    const KEY = "/srv/git/.ssh-client-keys/OpenThinkAi_example_ed25519";
+    const { env } = buildMirrorPushInvocationSsh(
+      REPO,
+      SHA,
+      REFNAME,
+      { PATH: "/usr/bin" },
+      KEY,
+    );
+    assert.equal(
+      env.GIT_SSH_COMMAND,
+      `ssh -i ${KEY} -o IdentitiesOnly=yes`,
+    );
+  });
+
+  it("does NOT emit GIT_SSH_COMMAND when sshKeyPath is omitted (legacy path)", () => {
+    const { env } = buildMirrorPushInvocationSsh(REPO, SHA, REFNAME, {
+      PATH: "/usr/bin",
+    });
+    assert.equal(env.GIT_SSH_COMMAND, undefined);
+  });
 });

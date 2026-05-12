@@ -1,0 +1,19 @@
+# Sudoers fragment for stamp-server. Lives at /etc/sudoers.d/stamp-server
+# inside the container (root-owned, mode 0440 — required by sudo's own
+# file-perm check).
+#
+# Grants the git user passwordless invocation of stamp-ensure-repo-key,
+# and nothing else. The helper is the only privilege-escalation surface
+# the git user has, and it is hardcoded to:
+#   - validate its <owner>/<repo> argument shape strictly
+#   - refuse to overwrite an existing key file
+#   - chown the resulting file root:git mode 0640
+# so even a git-shell escape can only ADD new keys for never-before-
+# seen repo specs — it cannot substitute or modify an already-registered
+# stamp-mirror deploy key.
+#
+# The trailing '*' in the command rule lets sudoers admit the helper's
+# single positional argument. The helper itself validates the arg; sudoers
+# is the access-control gate (who may invoke this binary at all), not the
+# input filter.
+git ALL=(root) NOPASSWD: /usr/local/sbin/stamp-ensure-repo-key *

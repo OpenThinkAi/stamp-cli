@@ -45,13 +45,27 @@ export function buildMirrorPushInvocation(
  * mirror push, using a deploy key registered on the GitHub repo as the
  * push identity.
  *
- * This path is selected by post-receive when the server-side deploy-key
- * private file exists at the well-known path
- * (`/srv/git/.ssh-client-keys/github_ed25519`); the SSH client config
- * written by `server/entrypoint.sh` points github.com at that key with
- * `IdentitiesOnly yes` + `UserKnownHostsFile /etc/ssh/ssh_known_hosts`,
- * so no per-push GIT_SSH_COMMAND override is needed — the standard
- * `git@github.com:owner/repo.git` URL is sufficient.
+ * Two modes, selected by post-receive based on which key file exists on
+ * the server:
+ *
+ *   - `sshKeyPath` omitted (LEGACY shared key): no per-push override.
+ *     The SSH client config written by `server/entrypoint.sh` points
+ *     github.com at the shared `/srv/git/.ssh-client-keys/github_ed25519`
+ *     with `IdentitiesOnly yes` + `UserKnownHostsFile
+ *     /etc/ssh/ssh_known_hosts`. Kept for back-compat with repos
+ *     provisioned before the per-repo key feature shipped.
+ *
+ *   - `sshKeyPath` provided (PER-REPO key): overrides the SSH command
+ *     via `GIT_SSH_COMMAND="ssh -i <path> -o IdentitiesOnly=yes"` so the
+ *     push authenticates as the specific deploy key registered on this
+ *     repo. `IdentitiesOnly=yes` is required — without it ssh would
+ *     ALSO try the IdentityFile from the static client config, and
+ *     github.com would accept the first key that authenticates,
+ *     potentially picking the legacy shared key (which is a deploy key
+ *     on a DIFFERENT repo and would fail with HTTP 403 from the github
+ *     side). The static config's `UserKnownHostsFile` /
+ *     `StrictHostKeyChecking` directives still apply because ssh
+ *     unconditionally reads `~/.ssh/config` regardless of GIT_SSH_COMMAND.
  *
  * Why SSH at all when HTTPS+PAT also works: a Ruleset bypass-actor of
  * `DeployKey` survives the "no machine-user account, no GitHub App
@@ -69,8 +83,19 @@ export function buildMirrorPushInvocationSsh(
   newSha: string,
   refname: string,
   parentEnv: NodeJS.ProcessEnv = process.env,
+  sshKeyPath?: string,
 ): { args: string[]; env: NodeJS.ProcessEnv } {
   const remoteUrl = `git@github.com:${githubRepo}.git`;
   const args = ["push", remoteUrl, `${newSha}:${refname}`];
-  return { args, env: { ...parentEnv } };
+  const env: NodeJS.ProcessEnv = { ...parentEnv };
+  if (sshKeyPath) {
+    // The path is constructed by computePerRepoKeyPath from a validated
+    // <owner>/<repo> spec, so it's never operator-supplied; injection
+    // surface via this string is bounded to whatever the validator
+    // permits. Still, no manual quoting — keeping the env value as a
+    // literal string and letting git interpret GIT_SSH_COMMAND through
+    // its own argv split is cleaner than embedding shell escapes.
+    env["GIT_SSH_COMMAND"] = `ssh -i ${sshKeyPath} -o IdentitiesOnly=yes`;
+  }
+  return { args, env };
 }

@@ -310,15 +310,19 @@ server
 server
   .command("pubkey")
   .description(
-    "print the stamp server's GitHub mirror-push deploy-key public half — single OpenSSH line, pipe-able into `gh api -X POST /repos/:o/:r/keys --field key=@-` to register as a deploy key. Required for the DeployKey-bypass mirror path on locked-down org repos.",
+    "print a stamp-server-managed GitHub mirror-push deploy-key public half — single OpenSSH line, pipe-able into `gh api -X POST /repos/:o/:r/keys --field key=@-` to register as a deploy key. Without --repo, returns the legacy shared key (back-compat). With --repo <owner/repo>, returns a per-repo key that the server lazily generates on first request — preferred for new migrations because GitHub rejects re-registering the same key on a second repo.",
   )
   .option(
     "--server <host:port>",
     "override ~/.stamp/server.yml for this call",
   )
-  .action((opts: { server?: string }) => {
+  .option(
+    "--repo <owner/repo>",
+    "fetch the per-repo deploy key for this GitHub mirror (lazy-generated server-side on first request)",
+  )
+  .action((opts: { server?: string; repo?: string }) => {
     try {
-      runServerPubkey({ server: opts.server });
+      runServerPubkey({ server: opts.server, repo: opts.repo });
     } catch (err) {
       handleCliError(err);
     }

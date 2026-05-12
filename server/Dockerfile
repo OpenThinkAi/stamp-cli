@@ -58,7 +58,12 @@ FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d650
 # tar at /usr/bin/tar ahead of busybox's applet, so plain `tar` invocations
 # in setup-repo.sh resolve to GNU. Combined with the pre-extraction
 # entry-name check in setup-repo.sh, this is defense in depth.
-RUN apk add --no-cache git openssh-server openssh-client bash nodejs netcat-openbsd tar \
+# sudo is installed so the git user can invoke a single root-owned helper
+# (stamp-ensure-repo-key) for per-repo deploy-key generation, preserving
+# the legacy root:git ownership posture on the key files while still
+# allowing lazy on-demand generation. See server/sudoers.d-stamp for the
+# tightly-scoped policy entry.
+RUN apk add --no-cache git openssh-server openssh-client bash nodejs netcat-openbsd tar sudo \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
  && mkdir -p /srv/git /home/git/.ssh /home/git/git-shell-commands /etc/stamp \
@@ -148,7 +153,22 @@ COPY server/delete-stamp-repo /usr/local/bin/delete-stamp-repo
 COPY server/restore-stamp-repo /usr/local/bin/restore-stamp-repo
 COPY server/list-trash /usr/local/bin/list-trash
 COPY server/stamp-server-pubkey /usr/local/bin/stamp-server-pubkey
+COPY server/stamp-ensure-repo-key /usr/local/sbin/stamp-ensure-repo-key
 COPY server/entrypoint.sh /entrypoint.sh
+
+# Sudoers fragment that grants the unprivileged git user passwordless
+# invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root
+# is required by sudo's own file-perm check — sudo refuses to load a
+# fragment that's group- or world-writable. visudo -c at build time
+# catches a malformed fragment before the image ships; without it, sudo
+# silently ignores the fragment at runtime and the lazy-key-generation
+# path appears to be allowed but actually fails with "git is not in the
+# sudoers file" — surfacing the typo at build time avoids a confusing
+# production debug session.
+COPY server/sudoers.d-stamp /etc/sudoers.d/stamp-server
+RUN chown root:root /etc/sudoers.d/stamp-server \
+ && chmod 0440 /etc/sudoers.d/stamp-server \
+ && visudo -c -f /etc/sudoers.d/stamp-server
 
 RUN chmod +x /etc/stamp/pre-receive.cjs \
              /etc/stamp/post-receive.cjs \
@@ -158,6 +178,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/restore-stamp-repo \
              /usr/local/bin/list-trash \
              /usr/local/bin/stamp-server-pubkey \
+             /usr/local/sbin/stamp-ensure-repo-key \
              /entrypoint.sh
 
 # Symlink the operator-facing wrapper scripts into the directory git-shell

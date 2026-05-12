@@ -30,6 +30,7 @@ import {
   buildMirrorPushInvocation,
   buildMirrorPushInvocationSsh,
 } from "../lib/mirrorPush.js";
+import { computePerRepoKeyPath } from "../lib/perRepoKey.js";
 import {
   matchesAnyPattern,
   matchesAnyTagPattern,
@@ -207,18 +208,56 @@ async function mirrorRef(
 ): Promise<void> {
   const token = process.env["GITHUB_BOT_TOKEN"];
 
-  // Pick the push transport. SSH is preferred when a deploy-key private
-  // file is installed — that path doesn't put the bot token on the wire
-  // or in any process env for the duration of the push, and it lines up
-  // with a `DeployKey` Ruleset bypass-actor on the mirror repo. Falls
-  // back to HTTPS + bot token (legacy/default path) when no deploy key
-  // is installed. Token is still required for postStatuses regardless
-  // of transport, so the missing-token guard runs unconditionally below.
-  const useSsh = existsSync(SSH_DEPLOY_KEY_PATH);
+  // Pick the push transport. Three options, in preference order:
+  //
+  //   1. Per-repo SSH deploy key — file at /srv/git/.ssh-client-keys/
+  //      <owner>_<repo>_ed25519 (computed by perRepoKey.ts). Generated
+  //      lazily on demand by `stamp-server-pubkey <owner>/<repo>` (which
+  //      sudo-invokes stamp-ensure-repo-key). This is the path the
+  //      deploy-key migration is converging on — each repo gets its own
+  //      key so GitHub's "deploy key already in use" uniqueness
+  //      constraint doesn't block multi-repo rollout.
+  //
+  //   2. Legacy shared SSH deploy key — file at SSH_DEPLOY_KEY_PATH.
+  //      The pre-per-repo-keys design. Kept as a fallback so repos
+  //      provisioned before per-repo keys existed (notably stamp-cli
+  //      itself, which owns the only registration of this key) keep
+  //      working until they're migrated by --migrate-bypass.
+  //
+  //   3. HTTPS + GITHUB_BOT_TOKEN — the original transport. Used when
+  //      no SSH key file is installed at all. Still required for the
+  //      postStatuses REST calls below regardless of which push
+  //      transport was selected.
+  let perRepoKeyPath: string | null;
+  try {
+    perRepoKeyPath = computePerRepoKeyPath(githubRepo);
+  } catch (err) {
+    // The mirror.yml `github.repo` field is shape-validated at config
+    // load time, so reaching this branch means the validation rules
+    // there have drifted from the per-repo-key rules here. Treat as
+    // "no per-repo key" and fall through; log so the drift surfaces.
+    warn(
+      `mirror: skipping per-repo SSH path — could not derive key path for ` +
+        `${githubRepo}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    perRepoKeyPath = null;
+  }
+
+  const sshKeyPath =
+    perRepoKeyPath && existsSync(perRepoKeyPath)
+      ? perRepoKeyPath
+      : existsSync(SSH_DEPLOY_KEY_PATH)
+        ? null /* legacy shared key — no per-push override needed */
+        : undefined; /* no SSH transport available */
+  // useSsh: per-repo (path set) OR legacy (null sentinel).
+  // undefined means neither key is on disk → HTTPS path.
+  const useSsh = sshKeyPath !== undefined;
 
   if (!useSsh && !token) {
     warn(
-      `mirror: GITHUB_BOT_TOKEN not set in environment and no deploy key at ${SSH_DEPLOY_KEY_PATH}; skipping mirror of ${label} → ${githubRepo}`,
+      `mirror: GITHUB_BOT_TOKEN not set in environment and no deploy key on disk ` +
+        `(checked per-repo path ${perRepoKeyPath ?? "<derivation failed>"} and ` +
+        `legacy ${SSH_DEPLOY_KEY_PATH}); skipping mirror of ${label} → ${githubRepo}`,
     );
     return;
   }
@@ -237,7 +276,16 @@ async function mirrorRef(
   // fast-forward since stamp is source of truth. Start with FF-only and
   // fall back to documented force-push on the operator's request.
   const { args, env } = useSsh
-    ? buildMirrorPushInvocationSsh(githubRepo, newSha, refname)
+    ? buildMirrorPushInvocationSsh(
+        githubRepo,
+        newSha,
+        refname,
+        process.env,
+        // sshKeyPath is null for legacy (no override) or a string for
+        // per-repo (override via GIT_SSH_COMMAND). The builder ignores
+        // null/undefined and emits no override; passes through strings.
+        sshKeyPath ?? undefined,
+      )
     : buildMirrorPushInvocation(githubRepo, newSha, refname, token!);
   const result = spawnSync("git", args, {
     encoding: "utf8",
@@ -262,10 +310,14 @@ async function mirrorRef(
     );
     if (errOut) warn(`mirror: ${errOut.replace(/\n/g, "\nmirror: ")}`);
     if (useSsh) {
+      const keyHint =
+        sshKeyPath !== null && sshKeyPath !== undefined
+          ? `GIT_SSH_COMMAND="ssh -i ${sshKeyPath} -o IdentitiesOnly=yes" `
+          : "";
       warn(
         `mirror: stamp-server push already accepted; mirror out-of-sync. ` +
           `Retry manually from a host with the deploy key: ` +
-          `git push git@github.com:${githubRepo}.git ${newSha}:${refname}`,
+          `${keyHint}git push git@github.com:${githubRepo}.git ${newSha}:${refname}`,
       );
     } else {
       warn(

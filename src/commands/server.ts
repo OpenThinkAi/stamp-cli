@@ -131,28 +131,54 @@ export interface ServerPubkeyOptions {
  * commonly because the server image predates the deploy-key feature
  * and `stamp-server-pubkey` isn't on PATH there yet.
  *
+ * Two modes:
+ *
+ *   - `mirror` omitted: fetch the LEGACY shared deploy key. Kept for
+ *     back-compat. The server-side wrapper returns the same file the
+ *     pre-per-repo-keys design used.
+ *
+ *   - `mirror` provided: fetch a per-repo key for the named GitHub
+ *     mirror. The server's stamp-server-pubkey wrapper will lazily
+ *     generate the key on first request (via sudo + stamp-ensure-repo-
+ *     key) so the operator never has to ssh in by hand. The returned
+ *     pubkey is what to register on `mirror.owner/mirror.repo` as a
+ *     deploy key.
+ *
  * The trim() is important: the on-the-wire output is "<line>\n" and
  * `gh api --field key=...` would silently encode the trailing newline
  * as part of the key body.
  */
-export function fetchServerPubkey(server: ServerConfig): string {
+export function fetchServerPubkey(
+  server: ServerConfig,
+  mirror?: { owner: string; repo: string },
+): string {
   // `--` after `-p N` terminates ssh's option processing before the
   // destination — matches the pattern in serverRepo.ts wrappers (defense
   // against a malformed server.yml smuggling a flag-shaped host string).
-  const result = spawnSync(
-    "ssh",
-    [
-      "-p",
-      String(server.port),
-      "--",
-      `${server.user}@${server.host}`,
-      "stamp-server-pubkey",
-    ],
-    { stdio: ["ignore", "pipe", "inherit"], encoding: "utf8" },
-  );
+  //
+  // When `mirror` is set, pass <owner>/<repo> as the wrapper's single
+  // positional argument. The server-side wrapper validates the shape;
+  // we still avoid passing anything shaped like a flag here so a
+  // malformed mirror config can't smuggle an option into the ssh
+  // command line via remote-command argv.
+  const sshArgs = [
+    "-p",
+    String(server.port),
+    "--",
+    `${server.user}@${server.host}`,
+    "stamp-server-pubkey",
+  ];
+  if (mirror) {
+    sshArgs.push(`${mirror.owner}/${mirror.repo}`);
+  }
+  const result = spawnSync("ssh", sshArgs, {
+    stdio: ["ignore", "pipe", "inherit"],
+    encoding: "utf8",
+  });
   if (result.status !== 0) {
+    const target = mirror ? ` for ${mirror.owner}/${mirror.repo}` : "";
     throw new Error(
-      `stamp server pubkey failed (exit ${result.status}) against ` +
+      `stamp server pubkey${target} failed (exit ${result.status}) against ` +
         `${server.user}@${server.host}:${server.port}. If you see ` +
         `"command not found", the server image predates the deploy-key ` +
         `feature — redeploy it first.`,
@@ -161,9 +187,31 @@ export function fetchServerPubkey(server: ServerConfig): string {
   return result.stdout.trim();
 }
 
-export function runServerPubkey(opts: ServerPubkeyOptions): void {
+export interface ServerPubkeyCliOptions extends ServerPubkeyOptions {
+  /**
+   * Optional `<owner>/<repo>` to fetch a per-repo key. When unset,
+   * fetches the legacy shared key (back-compat).
+   */
+  repo?: string;
+}
+
+export function runServerPubkey(opts: ServerPubkeyCliOptions): void {
   const server = resolveServer(opts.server);
-  const pubkey = fetchServerPubkey(server);
+  let mirror: { owner: string; repo: string } | undefined;
+  if (opts.repo) {
+    const slashIdx = opts.repo.indexOf("/");
+    const last = opts.repo.lastIndexOf("/");
+    if (slashIdx <= 0 || slashIdx !== last || slashIdx === opts.repo.length - 1) {
+      throw new UsageError(
+        `--repo must be exactly <owner>/<repo> (got "${opts.repo}")`,
+      );
+    }
+    mirror = {
+      owner: opts.repo.slice(0, slashIdx),
+      repo: opts.repo.slice(slashIdx + 1),
+    };
+  }
+  const pubkey = fetchServerPubkey(server, mirror);
   // Preserve the trailing newline on the CLI surface so the output is
   // pipe-safe (`stamp server pubkey | tee ~/.ssh/stamp_mirror.pub`).
   process.stdout.write(`${pubkey}\n`);
