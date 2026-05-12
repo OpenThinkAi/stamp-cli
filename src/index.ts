@@ -317,7 +317,7 @@ server
     "override ~/.stamp/server.yml for this call",
   )
   .option(
-    "--repo <owner/repo>",
+    "--repo <owner>/<repo>",
     "fetch the per-repo deploy key for this GitHub mirror (lazy-generated server-side on first request)",
   )
   .action((opts: { server?: string; repo?: string }) => {

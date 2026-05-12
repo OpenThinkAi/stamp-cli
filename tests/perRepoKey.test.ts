@@ -31,19 +31,39 @@ describe("computePerRepoKeyPath — path shape", () => {
     );
   });
 
-  it("permits dots and hyphens in both halves (real repo names use them)", () => {
-    const path = computePerRepoKeyPath("some.org/repo.with-dots");
+  it("permits hyphens in both halves (GitHub allows hyphens in both)", () => {
+    const path = computePerRepoKeyPath("OpenThinkAi-org/repo-with-dashes");
     assert.equal(
       path,
-      `${SSH_CLIENT_KEY_DIR}/some.org_repo.with-dots_ed25519`,
+      `${SSH_CLIENT_KEY_DIR}/OpenThinkAi-org_repo-with-dashes_ed25519`,
     );
   });
 
-  it("permits underscores in repo names", () => {
-    // GitHub allows underscores in repo names; the path separator stays
-    // unambiguous because the owner half cannot contain '/'.
+  it("permits dots in the repo half (GitHub allows them) but NOT the owner half", () => {
+    const path = computePerRepoKeyPath("foo/repo.with-dots");
+    assert.equal(path, `${SSH_CLIENT_KEY_DIR}/foo_repo.with-dots_ed25519`);
+    // Owner half rejects '.' — GitHub itself disallows '.' in org/user
+    // names, and the strict charset preserves the collision-free
+    // encoding property (see VALID_OWNER docstring).
+    assert.throws(
+      () => computePerRepoKeyPath("some.org/repo"),
+      /owner must match/,
+    );
+  });
+
+  it("permits underscores in repo names but NOT in the owner half", () => {
+    // GitHub allows underscores in repo names. Owner names cannot
+    // contain underscores per GitHub, and the strict-charset rule
+    // here preserves the collision-free filename property: with '_'
+    // as the spec-to-filename separator, allowing '_' in the owner
+    // half would let two distinct specs (foo_bar/baz and foo/bar_baz)
+    // map to the same on-disk filename.
     const path = computePerRepoKeyPath("foo/under_score");
     assert.equal(path, `${SSH_CLIENT_KEY_DIR}/foo_under_score_ed25519`);
+    assert.throws(
+      () => computePerRepoKeyPath("under_score/repo"),
+      /owner must match/,
+    );
   });
 });
 
@@ -97,11 +117,11 @@ describe("computePerRepoKeyPath — input rejection", () => {
   it("rejects whitespace anywhere", () => {
     assert.throws(
       () => computePerRepoKeyPath("owner/has space"),
-      /invalid characters/,
+      /repo must match/,
     );
     assert.throws(
       () => computePerRepoKeyPath("owner /repo"),
-      /invalid characters/,
+      /owner must match/,
     );
   });
 
@@ -114,9 +134,13 @@ describe("computePerRepoKeyPath — input rejection", () => {
       "owner/repo&background",
       "owner/repo*glob",
     ]) {
+      // The owner/repo charsets each reject these; the exact half that
+      // surfaces in the error depends on which side the bad char lands.
+      // Tightening to "must match" covers both arms of the per-half
+      // validation without re-litigating which side the parser hit.
       assert.throws(
         () => computePerRepoKeyPath(bad),
-        /invalid characters/,
+        /must match/,
         `expected rejection for ${bad}`,
       );
     }

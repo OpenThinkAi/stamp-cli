@@ -18,13 +18,21 @@
  * Shape contract enforced here (mirrors stamp-ensure-repo-key's checks):
  *   - exactly one '/' separator
  *   - owner and repo halves both non-empty
- *   - charset [A-Za-z0-9._-] only (no '..', no whitespace, no leading '-')
+ *   - owner charset [A-Za-z0-9-] only (no '_' or '.' — GitHub disallows
+ *     these in owner names anyway, but pinning the constraint here makes
+ *     the spec-to-filename encoding provably collision-free: with '_' as
+ *     the separator and disallowed in the owner half, no two distinct
+ *     <owner>/<repo> specs can map to the same on-disk filename)
+ *   - repo charset [A-Za-z0-9._-]
+ *   - no '..' anywhere (path-traversal defense in depth)
+ *   - no leading '-' on the whole spec (option-injection guard)
  *
  * Throws on invalid input rather than returning a string that might still
  * shape-look plausible — the caller would then check existsSync() on a
  * path that could never legitimately exist, masking a programming error.
  */
-const VALID_SEGMENT = /^[A-Za-z0-9._-]+$/;
+const VALID_OWNER = /^[A-Za-z0-9-]+$/;
+const VALID_REPO = /^[A-Za-z0-9._-]+$/;
 
 /**
  * Root directory of the per-repo deploy-key files on the stamp server.
@@ -59,9 +67,14 @@ export function computePerRepoKeyPath(githubRepo: string): string {
       `computePerRepoKeyPath: owner and repo halves must both be non-empty: ${githubRepo}`,
     );
   }
-  if (!VALID_SEGMENT.test(owner) || !VALID_SEGMENT.test(repo)) {
+  if (!VALID_OWNER.test(owner)) {
     throw new Error(
-      `computePerRepoKeyPath: githubRepo contains invalid characters: ${githubRepo}`,
+      `computePerRepoKeyPath: owner must match [A-Za-z0-9-]+ (got "${owner}" in "${githubRepo}")`,
+    );
+  }
+  if (!VALID_REPO.test(repo)) {
+    throw new Error(
+      `computePerRepoKeyPath: repo must match [A-Za-z0-9._-]+ (got "${repo}" in "${githubRepo}")`,
     );
   }
   return `${SSH_CLIENT_KEY_DIR}/${owner}_${repo}_ed25519`;

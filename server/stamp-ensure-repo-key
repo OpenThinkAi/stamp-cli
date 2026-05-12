@@ -61,12 +61,25 @@ case "$SPEC" in
     echo "stamp-ensure-repo-key: owner and repo halves must both be non-empty: $SPEC" >&2
     exit 2 ;;
 esac
-# Strict charset check — anything not in [A-Za-z0-9./_-] is rejected.
-# Doing this AFTER the structural checks gives more specific error
-# messages for the common shape mistakes.
-case "$SPEC" in
-  *[!A-Za-z0-9./_-]*)
-    echo "stamp-ensure-repo-key: spec contains invalid characters: $SPEC" >&2
+# Per-half charset checks.
+#
+# Owner: [A-Za-z0-9-] only (no '_' or '.'). GitHub disallows these in
+# owner/org names anyway, but pinning the constraint here makes the
+# spec-to-filename encoding provably collision-free — with '_' as the
+# separator and disallowed in the owner half, no two distinct
+# <owner>/<repo> specs can map to the same on-disk filename.
+#
+# Repo: [A-Za-z0-9._-]. Matches what GitHub permits.
+OWNER=${SPEC%%/*}
+REPO=${SPEC#*/}
+case "$OWNER" in
+  *[!A-Za-z0-9-]*|"")
+    echo "stamp-ensure-repo-key: owner must match [A-Za-z0-9-]+ (got '$OWNER' in '$SPEC')" >&2
+    exit 2 ;;
+esac
+case "$REPO" in
+  *[!A-Za-z0-9._-]*|"")
+    echo "stamp-ensure-repo-key: repo must match [A-Za-z0-9._-]+ (got '$REPO' in '$SPEC')" >&2
     exit 2 ;;
 esac
 

@@ -312,7 +312,10 @@ async function mirrorRef(
     if (useSsh) {
       const keyHint =
         sshKeyPath !== null && sshKeyPath !== undefined
-          ? `GIT_SSH_COMMAND="ssh -i ${sshKeyPath} -o IdentitiesOnly=yes" `
+          ? `GIT_SSH_COMMAND="ssh -F /dev/null -i ${sshKeyPath} ` +
+            `-o IdentitiesOnly=yes ` +
+            `-o UserKnownHostsFile=/etc/ssh/ssh_known_hosts ` +
+            `-o StrictHostKeyChecking=yes" `
           : "";
       warn(
         `mirror: stamp-server push already accepted; mirror out-of-sync. ` +
