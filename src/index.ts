@@ -473,7 +473,7 @@ serverRepo
 program
   .command("review")
   .description(
-    "run configured reviewer(s) against a diff. Reviewer config + prompts are sourced from the merge-base tree (security: prevents feature-branch self-review). For lock-file drift checks, use `stamp reviewers verify` (which exits 3 on drift). Reviewer execution budgets are env-tunable: STAMP_REVIEWER_MAX_TURNS (default 8) caps the model/tool round-trip count, STAMP_REVIEWER_TIMEOUT_MS (default 300000) bounds wall-clock time. Raise them when a reviewer with heavy lookup tools (Linear / GitHub MCP, multi-file Read) fails with subtype=error_max_turns or the abort message — see docs/troubleshooting.md.",
+    "run configured reviewer(s) against a diff. Reviewer config + prompts are sourced from the merge-base tree (security: prevents feature-branch self-review). For lock-file drift checks, use `stamp reviewers verify` (which exits 3 on drift). Reviewer execution budgets resolve narrowest-wins: `.stamp/config.yml` per-reviewer fields (`reviewers.<name>.max_turns` / `timeout_ms`, committed, sourced from the merge-base tree), then env overrides (`STAMP_REVIEWER_MAX_TURNS` default 8, `STAMP_REVIEWER_TIMEOUT_MS` default 300000), then defaults. On failure a structured turn trace is written to `.git/stamp/failed-runs/` — see docs/troubleshooting.md.",
   )
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")

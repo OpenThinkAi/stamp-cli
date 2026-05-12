@@ -298,9 +298,10 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     // (matches commands/server.ts:79,98). Pin both the prefix and the
     // path-hint so a refactor can't silently drop either — the absolute
     // paths help an operator debugging "where does stamp look?".
-    assert.match(stdout, /^note: nothing to prune \(neither/m);
+    assert.match(stdout, /^note: nothing to prune \(none of/m);
     assert.match(stdout, /state\.db/);
     assert.match(stdout, /failed-parses/);
+    assert.match(stdout, /failed-runs/);
     assert.ok(!existsSync(dbPath));
   });
 
