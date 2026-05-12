@@ -3,13 +3,21 @@
 # stamp-ensure-repo-key — generate a per-repo deploy-key keypair on the
 # stamp server if one doesn't already exist for the named GitHub repo.
 #
-# Invoked via sudo from the unprivileged pubkey-wrapper context (git user
-# under git-shell) so the resulting key files can be created as root:git
-# mode 0640 — preserving the legacy "git-shell escape cannot replace the
-# deploy key" invariant. The wrapper drops into this helper only when the
-# target file is missing; existing files are NEVER overwritten by this
-# helper, so a post-escape attacker can't substitute a key whose private
-# half they hold.
+# Invoked via sudo from the unprivileged pubkey-wrapper context (the git
+# user under git-shell). Sudo is required because the keys directory
+# /srv/git/.ssh-client-keys/ is `root:git 0750` — the git user can read
+# and traverse it but cannot CREATE new entries. The pubkey wrapper
+# (stamp-server-pubkey) therefore drops into this root-owned helper to
+# do the actual file creation.
+#
+# Refuse-to-overwrite is the load-bearing security property of this
+# helper now that file mode no longer carries it (see the chmod comment
+# block far below). Existing files are NEVER overwritten — the `-f`
+# check + exit 0 short-circuit is the ONLY thing that prevents a
+# post-escape attacker from using this sudo path to regenerate a
+# legitimate repo's key with new material they don't control. If you
+# ever add a "rotate" or "overwrite" mode, you reopen the substitution
+# surface that the previous root:git 0640 file posture used to close.
 #
 # Usage: stamp-ensure-repo-key <owner>/<repo>
 #
@@ -119,10 +127,41 @@ ssh-keygen -t ed25519 -N "" \
   -C "stamp-mirror:${SPEC}@${HOSTNAME_VAL}" \
   -q
 
-# Match the legacy shared-key posture: private key 0640 root:git (group
-# read so the post-receive hook can use it; not writable from any non-
-# root surface so a future git-shell escape can't substitute the key);
-# public key 0644 (operator-readable for sanity-checks).
-chown root:git "$KEY_PATH" "$KEY_PATH.pub"
-chmod 0640 "$KEY_PATH"
+# Ownership / mode for the generated keypair.
+#
+# Private key: 0600 git:git.
+#
+# Why git:git instead of the root:git posture the legacy github_ed25519
+# uses: OpenSSH 9.x's ssh-client strict-perms check rejects any private
+# key file whose mode has group or other bits set, regardless of who
+# owns it. The legacy approach (root:git 0640 — root-owned, group-
+# readable so the unprivileged git user can load it) trips the strict
+# check and gets ignored at push time ("WARNING: UNPROTECTED PRIVATE
+# KEY FILE!"). The standard SSH posture is owner-only readable, so we
+# adopt that: file is owned by the git user (the process that runs
+# post-receive and invokes ssh) at mode 0600.
+#
+# What we lose: under the previous root:git 0640 posture, a git-shell
+# escape couldn't WRITE-overwrite the key file (root owned, git only
+# had read access via the group bit). With git:git 0600, an escapee
+# with git's privileges can read AND write the file — so they can
+# substitute a private key whose public half they hold.
+#
+# Why the lost defense is acceptable: substituting the local key on
+# the server doesn't actually let the attacker push to the GitHub
+# mirror, because the GitHub-side bypass actor is bound to the *public
+# key* that's registered on the mirror repo as a deploy key. To
+# exploit, the attacker would have to ALSO register their public key
+# on GitHub — which requires repo-admin auth they don't get from a
+# git-shell escape. The remaining surface is "if the attacker can
+# both substitute the server key AND get the new public half
+# registered as a deploy key (e.g. by social-engineering the
+# operator into running `stamp provision --migrate-bypass`), they
+# inherit bypass." That's a multi-step chain rather than the
+# single-step substitution the old posture defended against; bounded
+# exploit, not a free one.
+#
+# Public key: 0644 git:git (operator-readable for sanity checks).
+chown git:git "$KEY_PATH" "$KEY_PATH.pub"
+chmod 0600 "$KEY_PATH"
 chmod 0644 "$KEY_PATH.pub"
