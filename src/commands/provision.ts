@@ -27,7 +27,6 @@ import { parse as parseYaml } from "yaml";
 import { runGit } from "../lib/git.js";
 import {
   applyStampRuleset,
-  bypassActorListsEqual,
   checkGhAvailable,
   computeDesiredBypassActors,
   deleteDeployKey,
@@ -134,7 +133,9 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
   if (!opts.migrateBypass) {
     if (!opts.name) {
       throw new Error(
-        `stamp provision requires a <name> argument (the bare repo name on the stamp server).`,
+        `stamp provision requires a <name> argument (the bare repo name on the stamp server). ` +
+          `If you meant to migrate an already-server-gated repo's Ruleset bypass instead, ` +
+          `pass --migrate-bypass (identifies the target via cwd's .stamp/mirror.yml; no <name> needed).`,
       );
     }
     validateRepoName(opts.name);
@@ -971,9 +972,9 @@ async function runMigrateBypass(
 
   // If a key already exists on the GitHub repo under the canonical
   // stamp-mirror title, decide whether it's the one we want.
-  //   - Same public-key body → idempotent, nothing to do.
+  //   - Same public-key body → idempotent, nothing to do (reuse the id).
   //   - Different body (e.g. the legacy shared key registered earlier
-  //     for the same repo, or stale per-repo from a re-keyed server)
+  //     for this repo, or a stale per-repo from a re-keyed server)
   //     → delete it before re-POSTing the new one. GitHub rejects a
   //     re-POST under the same title with a different key body.
   console.log(`Checking existing deploy keys on ${mirror.owner}/${mirror.repo}`);
@@ -982,29 +983,6 @@ async function runMigrateBypass(
     mirror.repo,
     STAMP_MIRROR_DEPLOY_KEY_TITLE,
   );
-  if (existingKeyId !== null) {
-    const existingBody = fetchDeployKeyPublic(
-      mirror.owner,
-      mirror.repo,
-      existingKeyId,
-    );
-    if (existingBody === pubkey) {
-      console.log(
-        `Deploy key: stamp-mirror already matches per-repo pubkey (keyId ${existingKeyId}). No change.`,
-      );
-    } else {
-      console.log(
-        `Deploy key: stamp-mirror is registered but doesn't match the per-repo pubkey ` +
-          `(keyId ${existingKeyId}). Deleting before re-registering.`,
-      );
-      const del = deleteDeployKey(mirror.owner, mirror.repo, existingKeyId);
-      if (del.status === "failed") {
-        throw new Error(`deploy-key cleanup failed: ${del.error}`);
-      }
-    }
-  }
-
-  // Register (no-op if existing key already matched and we didn't delete).
   let deployKeyId: number;
   if (existingKeyId !== null) {
     const existingBody = fetchDeployKeyPublic(
@@ -1013,55 +991,83 @@ async function runMigrateBypass(
       existingKeyId,
     );
     if (existingBody === pubkey) {
+      console.log(
+        `Deploy key: "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" already matches per-repo pubkey (keyId ${existingKeyId}). No change.`,
+      );
       deployKeyId = existingKeyId;
     } else {
-      const reg = registerDeployKey(
-        mirror.owner,
-        mirror.repo,
-        STAMP_MIRROR_DEPLOY_KEY_TITLE,
-        pubkey,
-      );
-      if (reg.status === "failed") {
-        throw new Error(`deploy-key registration failed: ${reg.error}`);
-      }
-      deployKeyId = reg.keyId;
       console.log(
-        `Deploy key: registered "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on ${mirror.owner}/${mirror.repo} (id ${deployKeyId}).`,
+        `Deploy key: "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" is registered but doesn't match the per-repo pubkey ` +
+          `(keyId ${existingKeyId}). Deleting before re-registering.`,
       );
+      const del = deleteDeployKey(mirror.owner, mirror.repo, existingKeyId);
+      if (del.status === "failed") {
+        throw new Error(`deploy-key cleanup failed: ${del.error}`);
+      }
+      deployKeyId = registerStampMirrorKey(mirror, pubkey);
     }
   } else {
-    const reg = registerDeployKey(
-      mirror.owner,
-      mirror.repo,
-      STAMP_MIRROR_DEPLOY_KEY_TITLE,
-      pubkey,
-    );
-    if (reg.status === "failed") {
-      throw new Error(`deploy-key registration failed: ${reg.error}`);
-    }
-    deployKeyId = reg.keyId;
-    console.log(
-      `Deploy key: registered "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on ${mirror.owner}/${mirror.repo} (id ${deployKeyId}).`,
-    );
+    deployKeyId = registerStampMirrorKey(mirror, pubkey);
   }
 
-  // Locate the ruleset. The greenfield path uses the canonical name
-  // `stamp-mirror-only`; existing repos like think-cli (`Protect Main`)
-  // have non-canonical names and need to be migrated by hand for now.
-  // Look up by canonical name first; surface a clear error otherwise.
+  // Locate the ruleset. Three legitimate cases:
+  //
+  //   - Canonical `stamp-mirror-only` Ruleset exists: update its
+  //     bypass list (the main migration path; covers stamp-cli +
+  //     dispatch + open-team + open-audit).
+  //
+  //   - No Ruleset at all: the repo is server-gated only (Railway bare
+  //     repo exists, GitHub side is unprotected). ui-leaf fits this
+  //     shape. The migration's per-repo-deploy-key registration is
+  //     still useful here — it's what unblocks the mirror leg for
+  //     the next push — but there's no bypass list to mutate. Warn
+  //     and exit cleanly after deploy-key registration.
+  //
+  //   - A Ruleset exists under a non-canonical name (think-cli's
+  //     `Protect Main`): findExistingStampRuleset returns null because
+  //     it looks up by exact name. Indistinguishable from "no Ruleset"
+  //     at this layer. The warning text below mentions both
+  //     possibilities so the operator can disambiguate by inspecting
+  //     the repo's settings.
   console.log(`Looking up stamp-mirror-only ruleset on ${mirror.owner}/${mirror.repo}`);
   const rulesetId = findExistingStampRuleset(mirror.owner, mirror.repo);
   if (rulesetId === null) {
-    throw new Error(
-      `no \`stamp-mirror-only\` Ruleset found on ${mirror.owner}/${mirror.repo}. ` +
-        `--migrate-bypass requires the canonical ruleset name. If this repo uses ` +
-        `a non-default ruleset name (e.g. think-cli's \`Protect Main\`), rename ` +
-        `it to \`stamp-mirror-only\` in the GitHub UI first, or migrate by hand.`,
+    console.log(
+      `note: no \`stamp-mirror-only\` Ruleset on ${mirror.owner}/${mirror.repo}. ` +
+        `Deploy key is registered; no bypass list to update.`,
     );
+    console.log(
+      `      If this repo is server-gated only (no GitHub-side enforcement),` +
+        ` that's expected and you're done.`,
+    );
+    console.log(
+      `      If you EXPECTED a Ruleset, it may use a non-canonical name` +
+        ` (e.g. think-cli's \`Protect Main\`) — rename to \`stamp-mirror-only\`` +
+        ` in the GitHub UI and re-run, or migrate by hand.`,
+    );
+    if (opts.removeOrgadmin) {
+      console.log(
+        `      --remove-orgadmin requested but there's no Ruleset bypass list to modify; ignoring.`,
+      );
+    }
+    printMigrateBypassSuccess({
+      mirror,
+      server,
+      opts,
+      rulesetUpdated: false,
+    });
+    return;
   }
 
-  // Read the current bypass list, compute the desired list (add
-  // DeployKey if missing; optionally drop OrganizationAdmin), and PUT.
+  // Compute the desired bypass list and let replaceBypassActors handle
+  // the read + idempotency check itself. The helper already re-reads
+  // GitHub's current state right before PUT and returns `unchanged` if
+  // there's nothing to do, so a caller-side pre-read would just
+  // duplicate the round-trip without offering anything the helper
+  // doesn't. We pass the desired list computed from a SNAPSHOT-READ
+  // (via getRulesetBypassActors) once; the helper's internal pre-check
+  // protects against the TOCTOU race in the gap between snapshot and
+  // PUT.
   console.log(`Reading current bypass_actors on ruleset ${rulesetId}`);
   const current = getRulesetBypassActors(mirror.owner, mirror.repo, rulesetId);
   if (current === null) {
@@ -1072,29 +1078,50 @@ async function runMigrateBypass(
   const desired = computeDesiredBypassActors(current, deployKeyId, {
     removeOrgadmin: opts.removeOrgadmin === true,
   });
-  if (bypassActorListsEqual(current, desired)) {
-    console.log(`Ruleset bypass: already up to date. No change.`);
-  } else {
-    console.log(`Updating ruleset ${rulesetId} bypass_actors`);
-    const result = replaceBypassActors(
-      mirror.owner,
-      mirror.repo,
-      rulesetId,
-      desired,
+  const result = replaceBypassActors(
+    mirror.owner,
+    mirror.repo,
+    rulesetId,
+    desired,
+  );
+  if (result.status === "failed") {
+    throw new Error(`ruleset bypass update failed: ${result.error}`);
+  }
+  if (result.status === "updated") {
+    console.log(
+      `Ruleset bypass: updated to [${desired.map((a) => a.actor_type).join(", ")}].`,
     );
-    if (result.status === "failed") {
-      throw new Error(`ruleset bypass update failed: ${result.error}`);
-    }
-    if (result.status === "updated") {
-      console.log(
-        `Ruleset bypass: updated to [${desired.map((a) => a.actor_type).join(", ")}].`,
-      );
-    } else {
-      console.log(`Ruleset bypass: no change.`);
-    }
+  } else {
+    console.log(`Ruleset bypass: already up to date. No change.`);
   }
 
-  printMigrateBypassSuccess({ mirror, server, opts });
+  printMigrateBypassSuccess({ mirror, server, opts, rulesetUpdated: true });
+}
+
+/**
+ * Wrap registerDeployKey for the migrate-bypass flow: throws on
+ * failure (the migration can't proceed without a key id), logs on
+ * success. Factored out so the "existing key needs replacing" and
+ * "no existing key" branches of runMigrateBypass don't duplicate the
+ * registration prose.
+ */
+function registerStampMirrorKey(
+  mirror: { owner: string; repo: string },
+  pubkey: string,
+): number {
+  const reg = registerDeployKey(
+    mirror.owner,
+    mirror.repo,
+    STAMP_MIRROR_DEPLOY_KEY_TITLE,
+    pubkey,
+  );
+  if (reg.status === "failed") {
+    throw new Error(`deploy-key registration failed: ${reg.error}`);
+  }
+  console.log(
+    `Deploy key: registered "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on ${mirror.owner}/${mirror.repo} (id ${reg.keyId}).`,
+  );
+  return reg.keyId;
 }
 
 function printMigrateBypassPlan(args: {
@@ -1139,22 +1166,46 @@ function printMigrateBypassSuccess(args: {
   mirror: { owner: string; repo: string };
   server: ServerConfig;
   opts: ProvisionOptions;
+  /**
+   * Whether the Ruleset bypass list was actually mutated (or even
+   * exists). False when the repo is server-gated only (no GitHub
+   * Ruleset present) — only the deploy-key registration step ran,
+   * which is enough to unblock the mirror push but doesn't change
+   * any bypass enforcement.
+   */
+  rulesetUpdated: boolean;
 }): void {
   const bar = "─".repeat(72);
   console.log(`\n${bar}`);
   console.log(`✓ bypass migrated`);
   console.log(bar);
   console.log(fmt("mirror", `${args.mirror.owner}/${args.mirror.repo}`));
-  console.log(
-    fmt(
-      "bypass actors",
-      args.opts.removeOrgadmin
-        ? `DeployKey (OrgAdmin removed)`
-        : `OrgAdmin + DeployKey`,
-    ),
-  );
+  if (args.rulesetUpdated) {
+    console.log(
+      fmt(
+        "bypass actors",
+        args.opts.removeOrgadmin
+          ? `DeployKey (OrganizationAdmin removed)`
+          : `OrganizationAdmin + DeployKey`,
+      ),
+    );
+  } else {
+    console.log(
+      fmt(
+        "bypass actors",
+        `n/a (no stamp-mirror-only Ruleset on this repo — server-gated only)`,
+      ),
+    );
+  }
   console.log(bar);
-  if (!args.opts.removeOrgadmin) {
+  if (!args.rulesetUpdated) {
+    console.log(
+      `\nDeploy key is registered; the next stamp push's mirror leg will use it.\n` +
+        `No GitHub Ruleset was found on this repo, so there's no bypass enforcement\n` +
+        `to verify. If you want GitHub-side protection, apply the stamp-mirror-only\n` +
+        `Ruleset separately (see docs/github-ruleset-setup.md).`,
+    );
+  } else if (!args.opts.removeOrgadmin) {
     console.log(
       `\nNext: do a stamp merge + push to verify the DeployKey transport works,\n` +
         `then re-run with --remove-orgadmin to drop the OrganizationAdmin fallback.`,
