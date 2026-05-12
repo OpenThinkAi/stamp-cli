@@ -20,18 +20,26 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { runGit } from "../lib/git.js";
 import {
   applyStampRuleset,
   checkGhAvailable,
+  computeDesiredBypassActors,
+  deleteDeployKey,
+  fetchDeployKeyPublic,
+  findDeployKey,
   findExistingStampRuleset,
+  getRulesetBypassActors,
   lookupAuthenticatedUserId,
   lookupRepoOwnerType,
   parseGithubOriginUrl,
   registerDeployKey,
+  replaceBypassActors,
+  STAMP_MIRROR_DEPLOY_KEY_TITLE,
   type BypassActor,
 } from "../lib/ghRuleset.js";
 import {
@@ -43,19 +51,17 @@ import {
 import { runBootstrap } from "./bootstrap.js";
 import { fetchServerPubkey } from "./server.js";
 
-/**
- * Stable title used for the per-repo deploy key that stamp registers
- * on the GitHub mirror so the stamp server's mirror-push transport
- * can bypass the stamp-mirror-only Ruleset.
- *
- * Kept as a module constant — both `applyMirrorRuleset` (registers it)
- * and the future `--migrate-bypass` command (looks it up) need to
- * agree on the value, and a typo silently produces a duplicate key.
- */
-const STAMP_MIRROR_DEPLOY_KEY_TITLE = "stamp-mirror";
-
 export interface ProvisionOptions {
-  /** Repo name. Used for both the bare repo on the server and (if --org) the GitHub mirror. */
+  /**
+   * Repo name. Required for greenfield (`stamp provision <name>`) and
+   * for `--migrate-existing` (used as the new server-side bare repo
+   * name). Ignored under `--migrate-bypass` — that mode operates on
+   * cwd's existing setup and identifies the GitHub mirror via
+   * .stamp/mirror.yml, not a name argument. The CLI passes `""` for
+   * migrate-bypass invocations that omit the positional arg; the
+   * type stays `string` so the rest of the file's downstream readers
+   * don't have to narrow.
+   */
   name: string;
   /** Override ~/.stamp/server with `<host>:<port>`. */
   server?: string;
@@ -81,10 +87,64 @@ export interface ProvisionOptions {
    * create a new GitHub repo — the existing remote IS the mirror.
    */
   migrateExisting?: boolean;
+  /**
+   * Bypass-actor migration mode: take an existing server-gated repo
+   * (cwd has .stamp/mirror.yml + a github remote) and migrate its
+   * `stamp-mirror-only` Ruleset bypass list from `OrganizationAdmin`
+   * to `DeployKey`. Fetches a per-repo deploy key from the stamp
+   * server, registers it on the GitHub mirror under the canonical
+   * `stamp-mirror` title (deleting any prior key under that title
+   * that doesn't match — e.g. the legacy shared key), then adds
+   * `DeployKey` to the ruleset's bypass actors alongside any
+   * existing entries.
+   *
+   * By default this is purely additive (Phase B in the migration plan).
+   * Pair with `--remove-orgadmin` to also strip `OrganizationAdmin`
+   * from the bypass list in the same invocation (Phase C); operators
+   * are warned to verify the DeployKey path works before doing so,
+   * since there's no automated push-verification step.
+   */
+  migrateBypass?: boolean;
+  /**
+   * Under `--migrate-bypass`, also remove `OrganizationAdmin` from the
+   * ruleset bypass list, leaving only `DeployKey` (and any pre-existing
+   * `User` actors). No-op without `--migrate-bypass`.
+   */
+  removeOrgadmin?: boolean;
 }
 
 export async function runProvision(opts: ProvisionOptions): Promise<void> {
-  validateRepoName(opts.name);
+  if (opts.migrateExisting && opts.migrateBypass) {
+    throw new Error(
+      `--migrate-existing and --migrate-bypass are mutually exclusive: the ` +
+        `first moves a forge-direct repo to server-gated topology, the ` +
+        `second changes the bypass-actor shape on an already-server-gated repo.`,
+    );
+  }
+  if (opts.removeOrgadmin && !opts.migrateBypass) {
+    throw new Error(
+      `--remove-orgadmin is only meaningful with --migrate-bypass`,
+    );
+  }
+  // Name is required for greenfield + migrate-existing, ignored for
+  // migrate-bypass (which identifies the target via .stamp/mirror.yml).
+  // The CLI defaults name to "" for migrate-bypass invocations that
+  // omit the positional arg — see ProvisionOptions.name's JSDoc.
+  if (!opts.migrateBypass) {
+    if (!opts.name) {
+      throw new Error(
+        `stamp provision requires a <name> argument (the bare repo name on the stamp server). ` +
+          `If you meant to migrate an already-server-gated repo's Ruleset bypass instead, ` +
+          `pass --migrate-bypass (identifies the target via cwd's .stamp/mirror.yml; no <name> needed).`,
+      );
+    }
+    validateRepoName(opts.name);
+  } else if (opts.name) {
+    console.log(
+      `note: <name> argument ignored under --migrate-bypass; the target is identified by .stamp/mirror.yml in the cwd.`,
+    );
+    console.log();
+  }
   if (opts.org !== undefined) validateOrgName(opts.org);
 
   // 1. Resolve server connection. --server flag wins over the file.
@@ -100,6 +160,17 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
         `  - or pass --server <host>:<port> on the command line.\n` +
         `\nSee docs/quickstart-server.md for how to deploy a stamp server first.`,
     );
+  }
+
+  // Bypass-actor migration is a separate flow — different inputs
+  // (existing .stamp/mirror.yml in cwd, not a name argument), different
+  // ops (deploy-key swap + ruleset patch, no bare-repo touches), and
+  // doesn't run bootstrap. Branch early so the greenfield code stays
+  // clean and so an operator pass that's just changing the bypass shape
+  // doesn't accidentally re-trigger any of the other provisioning steps.
+  if (opts.migrateBypass) {
+    await runMigrateBypass(opts, server);
+    return;
   }
 
   // Brownfield migration is a separate flow — different inputs (existing
@@ -772,3 +843,391 @@ function printMigrateSuccess(args: {
   }
 }
 
+// ---------- bypass-actor migration ----------
+
+/**
+ * Read .stamp/mirror.yml from the current working directory and return
+ * the parsed `<owner>/<repo>` of the GitHub mirror destination.
+ *
+ * Mirrors the post-receive hook's mirror-config parser shape (the
+ * canonical reader at runtime) but operates on the working tree rather
+ * than a git ref — the operator is running this command in their
+ * checkout, so cwd is what we want. Failure modes surface as Error
+ * with actionable messages; the caller catches at the top level.
+ */
+function readMirrorYmlGithubRepo(repoRoot: string): { owner: string; repo: string } {
+  const path = join(repoRoot, ".stamp", "mirror.yml");
+  if (!existsSync(path)) {
+    throw new Error(
+      `${path} not found — --migrate-bypass operates on an already-server-gated repo, ` +
+        `but this cwd has no .stamp/mirror.yml. If the repo is not yet server-gated, ` +
+        `provision it first with \`stamp provision --migrate-existing\`.`,
+    );
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new Error(
+      `could not read ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (err) {
+    throw new Error(
+      `${path} failed to parse as YAML: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${path} is empty or not a map`);
+  }
+  const obj = parsed as Record<string, unknown>;
+  const gh = obj["github"];
+  if (!gh || typeof gh !== "object" || Array.isArray(gh)) {
+    throw new Error(`${path} has no usable 'github' map`);
+  }
+  const repoStr = (gh as Record<string, unknown>)["repo"];
+  if (typeof repoStr !== "string" || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repoStr)) {
+    throw new Error(
+      `${path} github.repo is missing or not of form 'owner/repo' (got ${JSON.stringify(repoStr)})`,
+    );
+  }
+  const slashIdx = repoStr.indexOf("/");
+  return {
+    owner: repoStr.slice(0, slashIdx),
+    repo: repoStr.slice(slashIdx + 1),
+  };
+}
+
+/**
+ * `stamp provision --migrate-bypass` — change an existing server-gated
+ * repo's GitHub Ruleset bypass actor from `OrganizationAdmin` to
+ * `DeployKey` (a per-repo SSH key the stamp server generates on demand).
+ *
+ * Why: the OrganizationAdmin actor delegates to ANY org admin, which
+ * conflicts with locked-down work-org policies that prohibit machine
+ * users / GitHub App installs. The DeployKey actor is repo-scoped and
+ * survives those constraints. The migration is staged so each repo
+ * can be flipped independently and verified before the previous
+ * bypass actor is removed.
+ *
+ * Two phases, controlled by `--remove-orgadmin`:
+ *
+ *   Phase A → B (default): purely additive. Register the per-repo
+ *   deploy key, add `DeployKey` to the ruleset bypass list alongside
+ *   any existing actors. No path is closed. Re-running this against
+ *   an already-migrated repo is a no-op (idempotent at both the
+ *   deploy-key and the ruleset layer).
+ *
+ *   Phase B → C (`--remove-orgadmin`): strip `OrganizationAdmin` from
+ *   the bypass list. After this, the per-repo deploy key is the only
+ *   bypass identity. Done last because there is no automated push-
+ *   verification step — the operator should land at least one
+ *   `stamp push main` between Phase B and Phase C to confirm the
+ *   DeployKey transport works against this specific repo's mirror.
+ *
+ * The cwd MUST be the local checkout of the server-gated repo —
+ * `.stamp/mirror.yml` is the source of truth for which GitHub mirror
+ * to migrate.
+ */
+async function runMigrateBypass(
+  opts: ProvisionOptions,
+  server: ServerConfig,
+): Promise<void> {
+  const repoRoot = process.cwd();
+  const mirror = readMirrorYmlGithubRepo(repoRoot);
+
+  // Pre-flight checks: gh tooling, then the live server's per-repo
+  // pubkey wrapper. Both are blocking — without gh we can't read or
+  // mutate the ruleset; without the per-repo wrapper there's no
+  // per-repo key to register and the migration has no work to do.
+  const ghCheck = checkGhAvailable();
+  if (!ghCheck.available) {
+    throw new Error(
+      `--migrate-bypass requires gh: ${ghCheck.reason}. ` +
+        `Install/authenticate gh, then re-run.`,
+    );
+  }
+
+  printMigrateBypassPlan({ mirror, server, opts });
+
+  if (opts.dryRun) {
+    console.log("\n(dry run — no changes made)");
+    return;
+  }
+
+  console.log(`\nFetching per-repo deploy key from stamp server`);
+  let pubkey: string;
+  try {
+    pubkey = fetchServerPubkey(server, mirror);
+  } catch (err) {
+    throw new Error(
+      `failed to fetch per-repo pubkey for ${mirror.owner}/${mirror.repo} ` +
+        `from ${server.user}@${server.host}:${server.port}: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // If a key already exists on the GitHub repo under the canonical
+  // stamp-mirror title, decide whether it's the one we want.
+  //   - Same public-key body → idempotent, nothing to do (reuse the id).
+  //   - Different body (e.g. the legacy shared key registered earlier
+  //     for this repo, or a stale per-repo from a re-keyed server)
+  //     → delete it before re-POSTing the new one. GitHub rejects a
+  //     re-POST under the same title with a different key body.
+  console.log(`Checking existing deploy keys on ${mirror.owner}/${mirror.repo}`);
+  const existingKeyId = findDeployKey(
+    mirror.owner,
+    mirror.repo,
+    STAMP_MIRROR_DEPLOY_KEY_TITLE,
+  );
+  let deployKeyId: number;
+  if (existingKeyId !== null) {
+    const existingBody = fetchDeployKeyPublic(
+      mirror.owner,
+      mirror.repo,
+      existingKeyId,
+    );
+    if (existingBody === pubkey) {
+      console.log(
+        `Deploy key: "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" already matches per-repo pubkey (keyId ${existingKeyId}). No change.`,
+      );
+      deployKeyId = existingKeyId;
+    } else {
+      console.log(
+        `Deploy key: "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" is registered but doesn't match the per-repo pubkey ` +
+          `(keyId ${existingKeyId}). Deleting before re-registering.`,
+      );
+      const del = deleteDeployKey(mirror.owner, mirror.repo, existingKeyId);
+      if (del.status === "failed") {
+        throw new Error(`deploy-key cleanup failed: ${del.error}`);
+      }
+      deployKeyId = registerStampMirrorKey(mirror, pubkey);
+    }
+  } else {
+    deployKeyId = registerStampMirrorKey(mirror, pubkey);
+  }
+
+  // Locate the ruleset. Three legitimate cases:
+  //
+  //   - Canonical `stamp-mirror-only` Ruleset exists: update its
+  //     bypass list (the main migration path; covers stamp-cli +
+  //     dispatch + open-team + open-audit).
+  //
+  //   - No Ruleset at all: the repo is server-gated only (Railway bare
+  //     repo exists, GitHub side is unprotected). ui-leaf fits this
+  //     shape. The migration's per-repo-deploy-key registration is
+  //     still useful here — it's what unblocks the mirror leg for
+  //     the next push — but there's no bypass list to mutate. Warn
+  //     and exit cleanly after deploy-key registration.
+  //
+  //   - A Ruleset exists under a non-canonical name (think-cli's
+  //     `Protect Main`): findExistingStampRuleset returns null because
+  //     it looks up by exact name. Indistinguishable from "no Ruleset"
+  //     at this layer. The warning text below mentions both
+  //     possibilities so the operator can disambiguate by inspecting
+  //     the repo's settings.
+  console.log(`Looking up stamp-mirror-only ruleset on ${mirror.owner}/${mirror.repo}`);
+  const rulesetId = findExistingStampRuleset(mirror.owner, mirror.repo);
+  if (rulesetId === null) {
+    console.log(
+      `note: no \`stamp-mirror-only\` Ruleset on ${mirror.owner}/${mirror.repo}. ` +
+        `Deploy key is registered; no bypass list to update.`,
+    );
+    console.log(
+      `      If this repo is server-gated only (no GitHub-side enforcement),` +
+        ` that's expected and you're done.`,
+    );
+    console.log(
+      `      If you EXPECTED a Ruleset, it may use a non-canonical name` +
+        ` (e.g. think-cli's \`Protect Main\`) — rename to \`stamp-mirror-only\`` +
+        ` in the GitHub UI and re-run, or migrate by hand.`,
+    );
+    if (opts.removeOrgadmin) {
+      console.log(
+        `      --remove-orgadmin requested but there's no Ruleset bypass list to modify; ignoring.`,
+      );
+    }
+    printMigrateBypassSuccess({
+      mirror,
+      server,
+      opts,
+      rulesetUpdated: false,
+    });
+    return;
+  }
+
+  // Compute the desired bypass list and let replaceBypassActors handle
+  // the read + idempotency check itself. The helper already re-reads
+  // GitHub's current state right before PUT and returns `unchanged` if
+  // there's nothing to do, so a caller-side pre-read would just
+  // duplicate the round-trip without offering anything the helper
+  // doesn't. The pre-read here is purely so we can DERIVE the desired
+  // list from the current state (preserving any unmanaged actor
+  // types); the helper's internal check is the idempotency gate, not
+  // a TOCTOU guarantee — a concurrent admin edit between the helper's
+  // own pre-read and PUT would still be overwritten by our derived
+  // list, but the worst case is overwriting with the operator's
+  // intended state, which is what they asked for.
+  console.log(`Reading current bypass_actors on ruleset ${rulesetId}`);
+  const current = getRulesetBypassActors(mirror.owner, mirror.repo, rulesetId);
+  if (current === null) {
+    throw new Error(
+      `could not read bypass_actors on ${mirror.owner}/${mirror.repo} ruleset ${rulesetId}`,
+    );
+  }
+  const desired = computeDesiredBypassActors(current, deployKeyId, {
+    removeOrgadmin: opts.removeOrgadmin === true,
+  });
+  const result = replaceBypassActors(
+    mirror.owner,
+    mirror.repo,
+    rulesetId,
+    desired,
+  );
+  if (result.status === "failed") {
+    throw new Error(`ruleset bypass update failed: ${result.error}`);
+  }
+  if (result.status === "updated") {
+    console.log(
+      `Ruleset bypass: updated to [${desired.map((a) => a.actor_type).join(", ")}].`,
+    );
+  } else {
+    console.log(`Ruleset bypass: already up to date. No change.`);
+  }
+
+  printMigrateBypassSuccess({ mirror, server, opts, rulesetUpdated: true });
+}
+
+/**
+ * Wrap registerDeployKey for the migrate-bypass flow: throws on
+ * failure (the migration can't proceed without a key id), logs on
+ * success. Factored out so the "existing key needs replacing" and
+ * "no existing key" branches of runMigrateBypass don't duplicate the
+ * registration prose.
+ */
+function registerStampMirrorKey(
+  mirror: { owner: string; repo: string },
+  pubkey: string,
+): number {
+  const reg = registerDeployKey(
+    mirror.owner,
+    mirror.repo,
+    STAMP_MIRROR_DEPLOY_KEY_TITLE,
+    pubkey,
+  );
+  if (reg.status === "failed") {
+    throw new Error(`deploy-key registration failed: ${reg.error}`);
+  }
+  console.log(
+    `Deploy key: registered "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on ${mirror.owner}/${mirror.repo} (id ${reg.keyId}).`,
+  );
+  return reg.keyId;
+}
+
+function printMigrateBypassPlan(args: {
+  mirror: { owner: string; repo: string };
+  server: ServerConfig;
+  opts: ProvisionOptions;
+}): void {
+  const bar = "─".repeat(72);
+  console.log(bar);
+  console.log("stamp provision --migrate-bypass — plan");
+  console.log(bar);
+  console.log(fmt("mirror", `${args.mirror.owner}/${args.mirror.repo}`));
+  console.log(fmt("stamp server", `${args.server.user}@${args.server.host}:${args.server.port}`));
+  console.log(
+    fmt(
+      "deploy key",
+      `fetch per-repo pubkey from server; register as "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on the mirror (replacing any prior entry under that title)`,
+    ),
+  );
+  console.log(
+    fmt(
+      "ruleset",
+      `add DeployKey actor to stamp-mirror-only bypass list` +
+        (args.opts.removeOrgadmin
+          ? `; remove OrganizationAdmin (--remove-orgadmin)`
+          : `; preserve OrganizationAdmin`),
+    ),
+  );
+  console.log(bar);
+  if (args.opts.removeOrgadmin) {
+    // Emit as a standalone `warning:` advisory rather than a row in
+    // the plan table — operator-actionable cautions stay one shape
+    // across the codebase (matches the warning-prefix convention used
+    // in src/commands/server.ts and elsewhere) and don't compete with
+    // the key:value formatting of plan rows.
+    console.log(
+      `warning: --remove-orgadmin strips the OrganizationAdmin bypass before any push-verification` +
+        ` step runs. Verify the DeployKey transport works (one stamp push) before running this.`,
+    );
+  }
+}
+
+function printMigrateBypassSuccess(args: {
+  mirror: { owner: string; repo: string };
+  server: ServerConfig;
+  opts: ProvisionOptions;
+  /**
+   * Whether the Ruleset bypass list was actually mutated (or even
+   * exists). False when the repo is server-gated only (no GitHub
+   * Ruleset present) — only the deploy-key registration step ran,
+   * which is enough to unblock the mirror push but doesn't change
+   * any bypass enforcement.
+   */
+  rulesetUpdated: boolean;
+}): void {
+  const bar = "─".repeat(72);
+  console.log(`\n${bar}`);
+  // Branch the headline so the success glyph doesn't overclaim. The
+  // no-ruleset path didn't actually mutate any bypass list — only the
+  // deploy-key registration ran — so an agent scanning the headline
+  // alone shouldn't conclude the bypass shape was migrated when it
+  // wasn't. (Product reviewer feedback.)
+  console.log(
+    args.rulesetUpdated
+      ? `✓ bypass migrated`
+      : `✓ deploy key registered (no ruleset to migrate)`,
+  );
+  console.log(bar);
+  console.log(fmt("mirror", `${args.mirror.owner}/${args.mirror.repo}`));
+  if (args.rulesetUpdated) {
+    console.log(
+      fmt(
+        "bypass actors",
+        args.opts.removeOrgadmin
+          ? `DeployKey (OrganizationAdmin removed)`
+          : `OrganizationAdmin + DeployKey`,
+      ),
+    );
+  } else {
+    console.log(
+      fmt(
+        "bypass actors",
+        `n/a (no stamp-mirror-only Ruleset on this repo — server-gated only)`,
+      ),
+    );
+  }
+  console.log(bar);
+  if (!args.rulesetUpdated) {
+    console.log(
+      `\nDeploy key is registered; the next stamp push's mirror leg will use it.\n` +
+        `No GitHub Ruleset was found on this repo, so there's no bypass enforcement\n` +
+        `to verify. If you want GitHub-side protection, apply the stamp-mirror-only\n` +
+        `Ruleset separately (see docs/github-ruleset-setup.md).`,
+    );
+  } else if (!args.opts.removeOrgadmin) {
+    console.log(
+      `\nNext: do a stamp merge + push to verify the DeployKey transport works,\n` +
+        `then re-run with --remove-orgadmin to drop the OrganizationAdmin fallback.`,
+    );
+  } else {
+    console.log(
+      `\nThe stamp-mirror-only Ruleset now bypasses ONLY via the per-repo deploy key.\n` +
+        `Direct \`git push origin main\` from any non-stamp source will be rejected.`,
+    );
+  }
+}

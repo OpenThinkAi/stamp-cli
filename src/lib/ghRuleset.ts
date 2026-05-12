@@ -17,6 +17,16 @@
 
 import { spawnSync } from "node:child_process";
 
+/**
+ * Canonical title of the deploy key stamp registers on each mirror repo
+ * to serve as the `DeployKey` Ruleset bypass actor. Lifted here from
+ * `provision.ts` once the migration tool became the second consumer —
+ * both the greenfield provision flow (`applyMirrorRuleset`) and the
+ * existing-repo migration flow (`--migrate-bypass`) must agree on this
+ * value, and a typo silently produces a duplicate key on GitHub.
+ */
+export const STAMP_MIRROR_DEPLOY_KEY_TITLE = "stamp-mirror";
+
 export interface GhAvailability {
   available: boolean;
   /** Diagnostic if not available (e.g. "gh not on PATH", "gh not authenticated"). */
@@ -401,4 +411,269 @@ export function registerDeployKey(
     };
   }
   return { status: "created", keyId };
+}
+
+/**
+ * Fetch the OpenSSH-format public-key body of a registered deploy key
+ * on the given repo, by id. Returns null on lookup failure.
+ *
+ * Used by `--migrate-bypass` to detect whether a key already registered
+ * under the canonical `stamp-mirror` title is the legacy shared key (in
+ * which case it must be deleted before the per-repo key can replace it,
+ * since GitHub rejects a re-POST with the same title and different key
+ * value).
+ *
+ * The returned string is exactly what `gh api /repos/.../keys/:id`
+ * returns in the `key` field — no decoration, suitable for direct
+ * string-equality comparison against a freshly-fetched server pubkey
+ * (both are produced by the same `cat <file>.pub | trim` pipeline).
+ */
+export function fetchDeployKeyPublic(
+  owner: string,
+  repo: string,
+  keyId: number,
+): string | null {
+  const r = spawnSync(
+    "gh",
+    ["api", `/repos/${owner}/${repo}/keys/${keyId}`, "--jq", ".key"],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  const trimmed = r.stdout.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export type DeleteDeployKeyResult =
+  | { status: "deleted" }
+  | { status: "failed"; error: string };
+
+/**
+ * Delete a deploy key from a repo by id. Used by `--migrate-bypass`
+ * to evict the legacy shared `stamp-mirror` key before re-registering
+ * the per-repo replacement under the same title — GitHub rejects a
+ * second POST under the same title with a different key body, so the
+ * existing one has to go first.
+ *
+ * Idempotency: a 404 (key already gone) is reported as `deleted` since
+ * the post-condition is the same (the key isn't on the repo anymore).
+ * Any other non-zero status surfaces as `failed` with gh's stderr.
+ */
+export function deleteDeployKey(
+  owner: string,
+  repo: string,
+  keyId: number,
+): DeleteDeployKeyResult {
+  const r = spawnSync(
+    "gh",
+    ["api", "-X", "DELETE", `/repos/${owner}/${repo}/keys/${keyId}`],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status === 0) return { status: "deleted" };
+  const stderr = (r.stderr ?? "").trim();
+  if (stderr.includes("HTTP 404") || /Not Found/i.test(stderr)) {
+    return { status: "deleted" };
+  }
+  return {
+    status: "failed",
+    error: `${owner}/${repo} keyId=${keyId}: ${stderr || `gh api exited ${r.status}`}`,
+  };
+}
+
+/**
+ * Bypass-actor entry as it appears in a ruleset's `bypass_actors`
+ * array. Mirrors the raw GitHub representation rather than the internal
+ * `BypassActor` discriminated union — when GitHub round-trips a ruleset
+ * read, special actor types like `OrganizationAdmin` come back with
+ * `actor_id: null` even though they were POST'd as `actor_id: 1`
+ * (the magic-constant input is normalized on the way out). The PUT
+ * payload accepts both shapes; reads must tolerate either.
+ */
+export interface RulesetBypassActorRaw {
+  actor_id: number | null;
+  actor_type: string;
+  bypass_mode: string;
+}
+
+/**
+ * Read the `bypass_actors` array of an existing ruleset, looked up by
+ * id. Returns null on lookup failure (gh error, ruleset gone, malformed
+ * response). Callers must handle null — `--migrate-bypass` treats it as
+ * "can't safely mutate, surface and stop."
+ */
+export function getRulesetBypassActors(
+  owner: string,
+  repo: string,
+  rulesetId: number,
+): RulesetBypassActorRaw[] | null {
+  const r = spawnSync(
+    "gh",
+    [
+      "api",
+      `/repos/${owner}/${repo}/rulesets/${rulesetId}`,
+      "--jq",
+      ".bypass_actors",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(r.stdout) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    // Filter to entries that have the expected shape; an unrecognized
+    // bypass_actor entry from a future GitHub field addition shouldn't
+    // crash the migration. We pass through unknown actor_type strings
+    // since the caller may need to preserve them on a write-back.
+    return parsed.filter((e): e is RulesetBypassActorRaw => {
+      if (typeof e !== "object" || e === null) return false;
+      const o = e as Record<string, unknown>;
+      return (
+        (typeof o["actor_id"] === "number" || o["actor_id"] === null) &&
+        typeof o["actor_type"] === "string" &&
+        typeof o["bypass_mode"] === "string"
+      );
+    });
+  } catch {
+    return null;
+  }
+}
+
+export type ReplaceBypassActorsResult =
+  | { status: "updated" }
+  | { status: "unchanged" }
+  | { status: "failed"; error: string };
+
+/**
+ * Replace the `bypass_actors` of an existing ruleset wholesale (via
+ * the PUT /repos/:o/:r/rulesets/:id endpoint, which accepts a partial
+ * payload covering only the fields to change).
+ *
+ * `desiredActors` is the FULL new list — pass through any actors that
+ * should be preserved, plus/minus the ones being added or removed. The
+ * caller does the diff and the bookkeeping; this function just writes
+ * what it's given. Returns `unchanged` if the live state already equals
+ * the desired list (idempotent — re-runs of `--migrate-bypass` against
+ * an already-migrated repo are no-ops).
+ *
+ * Actor-id comparison uses the round-tripped GitHub form (null for
+ * `OrganizationAdmin` / `DeployKey`, numeric for `User`), since that's
+ * what GET returns; the caller is responsible for normalizing its
+ * input list to the same shape (e.g. emit `actor_id: 1` for an OrgAdmin
+ * write, but expect `null` back on a subsequent read).
+ */
+export function replaceBypassActors(
+  owner: string,
+  repo: string,
+  rulesetId: number,
+  desiredActors: RulesetBypassActorRaw[],
+): ReplaceBypassActorsResult {
+  const current = getRulesetBypassActors(owner, repo, rulesetId);
+  if (current === null) {
+    return {
+      status: "failed",
+      error: `${owner}/${repo} ruleset ${rulesetId}: could not read current bypass_actors`,
+    };
+  }
+  if (bypassActorListsEqual(current, desiredActors)) {
+    return { status: "unchanged" };
+  }
+  const body = { bypass_actors: desiredActors };
+  const r = spawnSync(
+    "gh",
+    [
+      "api",
+      "-X",
+      "PUT",
+      `/repos/${owner}/${repo}/rulesets/${rulesetId}`,
+      "--input",
+      "-",
+    ],
+    {
+      input: JSON.stringify(body),
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf8",
+    },
+  );
+  if (r.status !== 0) {
+    const stderr = (r.stderr ?? "").trim();
+    const stdout = (r.stdout ?? "").trim();
+    return {
+      status: "failed",
+      error: `${owner}/${repo} ruleset ${rulesetId}: ${stderr || stdout || `gh api exited ${r.status}`}`,
+    };
+  }
+  return { status: "updated" };
+}
+
+/**
+ * Compare two bypass-actor lists for equality, ignoring order. Two
+ * entries match if their `actor_type` and `bypass_mode` are equal AND
+ * their `actor_id` values are equal under GitHub's round-trip
+ * normalization (POST `actor_id: 1` for OrgAdmin reads back as `null`).
+ */
+export function bypassActorListsEqual(
+  a: RulesetBypassActorRaw[],
+  b: RulesetBypassActorRaw[],
+): boolean {
+  if (a.length !== b.length) return false;
+  const aSet = new Set(a.map(normalizeBypassActor));
+  return b.every((e) => aSet.has(normalizeBypassActor(e)));
+}
+
+/**
+ * Stable string form of a bypass-actor used for set membership and
+ * equality. OrganizationAdmin is the only actor type with the
+ * magic-constant round-trip quirk (POST 1 → GET null); treat 1 and
+ * null as equivalent for that type and that type only.
+ */
+function normalizeBypassActor(e: RulesetBypassActorRaw): string {
+  const id =
+    e.actor_type === "OrganizationAdmin" &&
+    (e.actor_id === null || e.actor_id === 1)
+      ? "ORGADMIN"
+      : String(e.actor_id);
+  return `${e.actor_type}:${id}:${e.bypass_mode}`;
+}
+
+/**
+ * Compute the bypass-actor list `stamp provision --migrate-bypass`
+ * should PUT, given the current state, the deploy-key id to ensure is
+ * present, and the operator's choice about whether to drop
+ * OrganizationAdmin in the same pass.
+ *
+ * Rules:
+ *   - Preserve actors of any type other than `OrganizationAdmin` and
+ *     `DeployKey` (e.g. a stray `User` entry from a pre-migration state).
+ *     Defensive default — we don't strip actors we didn't add.
+ *   - `DeployKey` is RECONCILED to the freshly-registered key, not
+ *     preserved. Any existing `DeployKey` entries (including stale
+ *     ones whose `actor_id` references a key that no longer exists on
+ *     GitHub — e.g. after a server-side key rotation deleted the old
+ *     key) are dropped during the loop, then exactly one new
+ *     `DeployKey(deployKeyId)` is appended at the end. This keeps the
+ *     ruleset's `DeployKey` actor in sync with the per-repo key stamp
+ *     actually manages; preserving a stale id would silently break
+ *     bypass enforcement (the referenced key no longer exists).
+ *   - Drop `OrganizationAdmin` only when `removeOrgadmin` is set.
+ */
+export function computeDesiredBypassActors(
+  current: RulesetBypassActorRaw[],
+  deployKeyId: number,
+  flags: { removeOrgadmin: boolean },
+): RulesetBypassActorRaw[] {
+  const out: RulesetBypassActorRaw[] = [];
+  for (const a of current) {
+    if (a.actor_type === "OrganizationAdmin" && flags.removeOrgadmin) {
+      continue; // dropped by operator opt-in
+    }
+    if (a.actor_type === "DeployKey") {
+      continue; // reconciled below
+    }
+    out.push(a);
+  }
+  out.push({
+    actor_id: deployKeyId,
+    actor_type: "DeployKey",
+    bypass_mode: "always",
+  });
+  return out;
 }
