@@ -1,6 +1,6 @@
 # stamp-cli
 
-Local, headless pull-request system for agent-to-agent code review workflows.
+Local, headless pull-request system for agent-to-agent code-review workflows.
 
 An author-agent opens a diff, reviewer-agents consume it and return structured
 feedback, the author iterates until merge rules are satisfied, and the merge
