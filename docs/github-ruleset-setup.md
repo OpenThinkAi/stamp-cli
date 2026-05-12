@@ -24,7 +24,7 @@ GitHub's Ruleset evaluator treats `DeployKey` as a repo-scoped *role*, not a key
 
 ## Two preconditions before you start
 
-1. **Your stamp server image must include the deploy-key features** (server-side lazy keypair generation + the sudo-elevated `stamp-ensure-repo-key` helper). If you're on a fresh `stamp init` after 2026-05-12, you have it. If you upgraded a long-running server, *redeploy the container* — the new wrappers only ship in the new image.
+1. **Your stamp server image must include the deploy-key features** (server-side lazy keypair generation + the sudo-elevated `stamp-ensure-repo-key` helper). Verify by running `ssh git@<your-stamp-server> stamp-server-pubkey <owner>/<repo>` against a real repo on the server — if it returns an `ssh-ed25519 …` line, you have it; if it returns "missing argument" or "command not found," redeploy the container against a recent build of this repo.
 2. **Your GitHub org must allow deploy keys.** Some orgs disable them under `Settings → Code, planning, and automation → Repository policies → Deploy keys`. If you're an org admin you can flip the toggle yourself; if it's a managed work org you may need IT to approve. A 422 response with body `"Deploy keys are disabled for this repository"` from any of the steps below means the org-level policy is in the way.
 
 ## Apply via the stamp-cli CLI (recommended)
@@ -98,10 +98,15 @@ This repo ships [`docs/github-ruleset-template.json`](./github-ruleset-template.
 
 ```sh
 # Step 1 — register the per-repo deploy key on the GitHub mirror.
-ssh git@<stamp-server> stamp-server-pubkey <owner>/<repo> \
-  | jq -Rn --arg key "$(cat -)" '{title:"stamp-mirror", key:$key, read_only:false}' \
-  | gh api -X POST /repos/<owner>/<repo>/keys --input -
-# Response includes the new key's numeric "id" — note it.
+KEY=$(ssh git@<stamp-server> stamp-server-pubkey <owner>/<repo>)
+gh api -X POST /repos/<owner>/<repo>/keys \
+  -f title=stamp-mirror \
+  -f key="$KEY" \
+  -F read_only=false
+# Response includes the new key's numeric "id" — note it. The id is
+# required by the POST schema, but GitHub's Ruleset evaluator treats
+# DeployKey as a repo-scoped role and ignores actor_id; you still need
+# to splice SOMETHING numeric in because the POST validator rejects 0.
 
 # Step 2 — splice the id into the ruleset template.
 KEY_ID=<from step 1>
@@ -165,15 +170,13 @@ The authenticating identity doesn't match a bypass actor. Check, in order:
 
 ### Mirror is out of sync after a transport failure
 
-The stamp server's post-receive hook fires once per push and has no retry. If a push hits the stamp server but the mirror leg fails (most commonly: pre-migration, before the deploy key was registered), subsequent pushes don't retroactively re-mirror the stuck commits. Manually catch up:
+The stamp server's post-receive hook fires once per push and has no retry. If a push hits the stamp server but the mirror leg fails (most commonly: pre-migration, before the deploy key was registered), subsequent pushes don't retroactively re-mirror the stuck commits. Manually catch up — preconditions: you have SSH access to the stamp server (to fetch the gap) AND a bypass identity on the GitHub mirror's Ruleset (OrgAdmin if you haven't run `--remove-orgadmin` yet, or a temporary UI-side re-add of an actor you control):
 
 ```sh
 mkdir /tmp/recover && cd /tmp/recover && git init -q --bare
 git fetch ssh://git@<stamp-server>/srv/git/<repo>.git main:refs/heads/stamp-main
 git push git@github.com:<owner>/<repo>.git stamp-main:refs/heads/main
 ```
-
-You'll need write access to the GitHub repo for this catch-up push — either via the existing OrgAdmin bypass (if you haven't run `--remove-orgadmin` yet) or via a temporary re-add through the GitHub UI.
 
 ### "Deploy keys are disabled for this repository"
 
