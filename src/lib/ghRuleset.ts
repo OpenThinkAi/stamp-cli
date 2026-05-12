@@ -313,14 +313,10 @@ export function findDeployKey(
   return Number.isFinite(id) ? id : null;
 }
 
-export interface RegisterDeployKeyResult {
-  /** "created" — newly POSTed; "exists" — already present, no change; "failed" — gh api error. */
-  status: "created" | "exists" | "failed";
-  /** When status === "failed", the error/stderr from gh. */
-  error?: string;
-  /** When status !== "failed", the (created or existing) deploy-key id. */
-  keyId?: number;
-}
+export type RegisterDeployKeyResult =
+  | { status: "created"; keyId: number }
+  | { status: "exists"; keyId: number }
+  | { status: "failed"; error: string };
 
 /**
  * Register a write-enabled SSH deploy key on the given repo. Idempotent:
@@ -336,6 +332,12 @@ export interface RegisterDeployKeyResult {
  * `read_only: false` is required: a deploy key referenced as a Ruleset
  * `DeployKey` bypass actor has to be able to update protected branches,
  * which the read-only flag forbids.
+ *
+ * Success path REQUIRES a numeric keyId — the only caller pipes it into
+ * a Ruleset bypass actor, and a missing id is unrecoverable downstream.
+ * If gh's POST succeeds but we can't parse a numeric id from the
+ * response body, that's treated as a failure rather than silently
+ * returning a result the caller can't use.
  */
 export function registerDeployKey(
   owner: string,
@@ -343,6 +345,7 @@ export function registerDeployKey(
   title: string,
   publicKey: string,
 ): RegisterDeployKeyResult {
+  const ctx = `${owner}/${repo} (deploy key "${title}")`;
   const existing = findDeployKey(owner, repo, title);
   if (existing !== null) {
     return { status: "exists", keyId: existing };
@@ -367,16 +370,35 @@ export function registerDeployKey(
   if (r.status !== 0) {
     const stderr = (r.stderr ?? "").trim();
     const stdout = (r.stdout ?? "").trim();
+    const detail = stderr || stdout || `gh api exited ${r.status}`;
     return {
       status: "failed",
-      error: stderr || stdout || `gh api exited ${r.status}`,
+      error: `${ctx}: ${detail}`,
     };
   }
+  let parsed: { id?: unknown };
   try {
-    const created = JSON.parse(r.stdout) as { id?: number };
-    return { status: "created", keyId: created.id };
-  } catch {
-    // POST succeeded; just couldn't parse the response body. Treat as success.
-    return { status: "created" };
+    parsed = JSON.parse(r.stdout) as { id?: unknown };
+  } catch (err) {
+    return {
+      status: "failed",
+      error:
+        `${ctx}: registered, but couldn't parse keyId from gh response ` +
+        `(${err instanceof Error ? err.message : String(err)}). ` +
+        `A keyId is required to wire the key into a Ruleset bypass actor; ` +
+        `inspect with \`gh api /repos/${owner}/${repo}/keys\`.`,
+    };
   }
+  const keyId = typeof parsed.id === "number" ? parsed.id : NaN;
+  if (!Number.isFinite(keyId)) {
+    return {
+      status: "failed",
+      error:
+        `${ctx}: registered, but gh response did not include a numeric ` +
+        `keyId. A keyId is required to wire the key into a Ruleset ` +
+        `bypass actor; inspect with ` +
+        `\`gh api /repos/${owner}/${repo}/keys\`.`,
+    };
+  }
+  return { status: "created", keyId };
 }

@@ -27,9 +27,11 @@ import { runGit } from "../lib/git.js";
 import {
   applyStampRuleset,
   checkGhAvailable,
+  findExistingStampRuleset,
   lookupAuthenticatedUserId,
   lookupRepoOwnerType,
   parseGithubOriginUrl,
+  registerDeployKey,
   type BypassActor,
 } from "../lib/ghRuleset.js";
 import {
@@ -39,6 +41,18 @@ import {
   type ServerConfig,
 } from "../lib/serverConfig.js";
 import { runBootstrap } from "./bootstrap.js";
+import { fetchServerPubkey } from "./server.js";
+
+/**
+ * Stable title used for the per-repo deploy key that stamp registers
+ * on the GitHub mirror so the stamp server's mirror-push transport
+ * can bypass the stamp-mirror-only Ruleset.
+ *
+ * Kept as a module constant — both `applyMirrorRuleset` (registers it)
+ * and the future `--migrate-bypass` command (looks it up) need to
+ * agree on the value, and a typo silently produces a duplicate key.
+ */
+const STAMP_MIRROR_DEPLOY_KEY_TITLE = "stamp-mirror";
 
 export interface ProvisionOptions {
   /** Repo name. Used for both the bare repo on the server and (if --org) the GitHub mirror. */
@@ -150,7 +164,7 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
 
   // 9. Optional: apply the GitHub Ruleset on the mirror repo.
   if (mirrorRepo && !opts.noRuleset) {
-    applyMirrorRuleset(mirrorRepo);
+    applyMirrorRuleset(mirrorRepo, server);
   }
 
   // 10. Final summary.
@@ -209,6 +223,16 @@ function printPlan(args: {
   }
   if (args.opts.org && !args.opts.noMirror && !args.opts.noRuleset) {
     console.log(fmt("GitHub Ruleset", "apply stamp-mirror-only on the mirror repo"));
+    // The bypass-actor shape is determined by gh-side owner-type lookup at
+    // apply time, so we can't be certain here. Spell out both possibilities
+    // so the operator sees what's actually going to happen in either case.
+    console.log(
+      fmt(
+        "bypass actor",
+        `org repo → stamp-server deploy key "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" (auto-registered); ` +
+          `personal repo → your gh-authed user`,
+      ),
+    );
   } else {
     console.log(fmt("GitHub Ruleset", "skipped"));
   }
@@ -299,15 +323,23 @@ function writeMirrorYml(
   console.log(`Wrote mirror.yml → .stamp/mirror.yml (${mirror.owner}/${mirror.repo})`);
 }
 
-function applyMirrorRuleset(mirror: { owner: string; repo: string }): void {
-  const user = lookupAuthenticatedUserId();
-  if (!user) {
+function applyMirrorRuleset(
+  mirror: { owner: string; repo: string },
+  server: ServerConfig,
+): void {
+  // Short-circuit on re-runs: if a stamp-mirror-only ruleset is already
+  // present we don't touch it (operator may have customized the actor;
+  // we never clobber). Doing this BEFORE deploy-key registration avoids
+  // depositing a stray key on a repo whose ruleset we won't end up
+  // wiring up to it anyway.
+  const existing = findExistingStampRuleset(mirror.owner, mirror.repo);
+  if (existing !== null) {
     console.log(
-      `note: GitHub Ruleset auto-apply skipped — couldn't look up the gh-authenticated user.`,
+      `GitHub Ruleset: stamp-mirror-only already present on ${mirror.owner}/${mirror.repo}. Not modified.`,
     );
-    console.log(`      Try \`gh auth status\` and re-apply manually via docs/github-ruleset-setup.md.`);
     return;
   }
+
   const ownerType = lookupRepoOwnerType(mirror.owner, mirror.repo);
   if (ownerType === null) {
     console.log(
@@ -316,17 +348,59 @@ function applyMirrorRuleset(mirror: { owner: string; repo: string }): void {
     console.log(`      For manual setup, see docs/github-ruleset-setup.md.`);
     return;
   }
-  // Org repos need actor_type="OrganizationAdmin" (actor_type="User"
-  // silently no-ops on org repos — GitHub accepts the entry but the
-  // bypass evaluator ignores it). Personal repos use actor_type="User".
-  const actor: BypassActor =
-    ownerType === "Organization"
-      ? { type: "OrganizationAdmin", id: 1 }
-      : { type: "User", id: user.id };
-  const actorDescription =
-    actor.type === "OrganizationAdmin"
-      ? "any org admin (your gh-authed user must be one to push as bypass)"
-      : `${user.login}, id ${user.id}`;
+
+  let actor: BypassActor;
+  let actorDescription: string;
+  if (ownerType === "Organization") {
+    // Org repos: register the stamp server's mirror-push public key as
+    // a per-repo deploy key, then point the Ruleset bypass at it. This
+    // path survives locked-down orgs that don't permit machine-user
+    // accounts or GitHub App installs — deploy keys are repo-scoped and
+    // bypass org third-party-application policy entirely. Replaces the
+    // earlier OrganizationAdmin (actor_id=1) magic constant.
+    let pubkey: string;
+    try {
+      pubkey = fetchServerPubkey(server);
+    } catch (err) {
+      console.log(
+        `warning: GitHub Ruleset auto-apply skipped — couldn't fetch stamp server pubkey: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      console.log(`         For manual setup, see docs/github-ruleset-setup.md.`);
+      return;
+    }
+    const reg = registerDeployKey(
+      mirror.owner,
+      mirror.repo,
+      STAMP_MIRROR_DEPLOY_KEY_TITLE,
+      pubkey,
+    );
+    if (reg.status === "failed") {
+      console.log(`warning: GitHub Ruleset auto-apply skipped — deploy-key registration failed: ${reg.error}`);
+      console.log(`         For manual setup, see docs/github-ruleset-setup.md.`);
+      return;
+    }
+    const verb = reg.status === "created" ? "registered" : "reused";
+    console.log(
+      `Deploy key: ${verb} "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on ${mirror.owner}/${mirror.repo} (id ${reg.keyId}).`,
+    );
+    actor = { type: "DeployKey", id: reg.keyId };
+    actorDescription = `stamp-server deploy key "${STAMP_MIRROR_DEPLOY_KEY_TITLE}", id ${reg.keyId}`;
+  } else {
+    // Personal repos: User actor on the gh-authed user, same as before
+    // the deploy-key migration. Personal repos don't face the org
+    // third-party-application policy that drove the migration.
+    const user = lookupAuthenticatedUserId();
+    if (!user) {
+      console.log(
+        `note: GitHub Ruleset auto-apply skipped — couldn't look up the gh-authenticated user.`,
+      );
+      console.log(`      Try \`gh auth status\` and re-apply manually via docs/github-ruleset-setup.md.`);
+      return;
+    }
+    actor = { type: "User", id: user.id };
+    actorDescription = `${user.login}, id ${user.id}`;
+  }
 
   const result = applyStampRuleset(mirror.owner, mirror.repo, actor);
   switch (result.status) {
@@ -336,6 +410,10 @@ function applyMirrorRuleset(mirror: { owner: string; repo: string }): void {
       );
       break;
     case "exists":
+      // The findExistingStampRuleset short-circuit above should make
+      // this branch unreachable in practice, but applyStampRuleset's
+      // own idempotency check is the source of truth so keep handling
+      // it rather than drop into the failed branch.
       console.log(
         `GitHub Ruleset: stamp-mirror-only already present on ${mirror.owner}/${mirror.repo}. Not modified.`,
       );
@@ -481,7 +559,7 @@ async function runMigrateExisting(
   // 8. Apply the GitHub Ruleset on the existing GitHub repo. Skipped
   // under --no-ruleset.
   if (!opts.noMirror && !opts.noRuleset) {
-    applyMirrorRuleset(mirrorParse);
+    applyMirrorRuleset(mirrorParse, server);
   }
 
   // 9. Success.
