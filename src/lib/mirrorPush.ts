@@ -45,13 +45,36 @@ export function buildMirrorPushInvocation(
  * mirror push, using a deploy key registered on the GitHub repo as the
  * push identity.
  *
- * This path is selected by post-receive when the server-side deploy-key
- * private file exists at the well-known path
- * (`/srv/git/.ssh-client-keys/github_ed25519`); the SSH client config
- * written by `server/entrypoint.sh` points github.com at that key with
- * `IdentitiesOnly yes` + `UserKnownHostsFile /etc/ssh/ssh_known_hosts`,
- * so no per-push GIT_SSH_COMMAND override is needed — the standard
- * `git@github.com:owner/repo.git` URL is sufficient.
+ * Two modes, selected by post-receive based on which key file exists on
+ * the server:
+ *
+ *   - `sshKeyPath` omitted (LEGACY shared key): no per-push override.
+ *     The SSH client config written by `server/entrypoint.sh` points
+ *     github.com at the shared `/srv/git/.ssh-client-keys/github_ed25519`
+ *     with `IdentitiesOnly yes` + `UserKnownHostsFile
+ *     /etc/ssh/ssh_known_hosts`. Kept for back-compat with repos
+ *     provisioned before the per-repo key feature shipped.
+ *
+ *   - `sshKeyPath` provided (PER-REPO key): overrides the SSH command
+ *     so the push authenticates ONLY as the specific deploy key
+ *     registered on this repo.
+ *
+ *     The override has to bypass `~/.ssh/config` with `-F /dev/null`,
+ *     not merely set `IdentitiesOnly=yes`. The static client config
+ *     installed by `server/entrypoint.sh` carries an `IdentityFile`
+ *     line pointing at the legacy shared key. `IdentitiesOnly=yes`
+ *     only suppresses ssh-agent / PKCS11 / SecurityKey sources — it
+ *     does NOT suppress static-config `IdentityFile` entries (see
+ *     `ssh_config(5)`). With the static config in scope, ssh would
+ *     offer BOTH the legacy IdentityFile and the per-repo `-i` key;
+ *     github auths the first one accepted (the legacy key) and the
+ *     push then fails at the deploy-key→repo authorization layer
+ *     because the legacy key is registered on stamp-cli, not the
+ *     target. `-F /dev/null` makes ssh ignore both system and user
+ *     config; we then re-specify the host-verification directives
+ *     (`UserKnownHostsFile=/etc/ssh/ssh_known_hosts`,
+ *     `StrictHostKeyChecking=yes`) on the command line so the strict
+ *     verification posture of the static config is preserved.
  *
  * Why SSH at all when HTTPS+PAT also works: a Ruleset bypass-actor of
  * `DeployKey` survives the "no machine-user account, no GitHub App
@@ -69,8 +92,25 @@ export function buildMirrorPushInvocationSsh(
   newSha: string,
   refname: string,
   parentEnv: NodeJS.ProcessEnv = process.env,
+  sshKeyPath?: string,
 ): { args: string[]; env: NodeJS.ProcessEnv } {
   const remoteUrl = `git@github.com:${githubRepo}.git`;
   const args = ["push", remoteUrl, `${newSha}:${refname}`];
-  return { args, env: { ...parentEnv } };
+  const env: NodeJS.ProcessEnv = { ...parentEnv };
+  if (sshKeyPath) {
+    // sshKeyPath is constructed by computePerRepoKeyPath from a
+    // validated <owner>/<repo> spec, so it cannot contain whitespace,
+    // shell metacharacters, or anything outside [A-Za-z0-9./_-]. git's
+    // GIT_SSH_COMMAND parser splits on whitespace and interprets the
+    // result as ssh's argv; embedding the path bare is safe under those
+    // rules. The four options form a complete replacement for the
+    // static client config's directives.
+    env["GIT_SSH_COMMAND"] =
+      `ssh -F /dev/null` +
+      ` -i ${sshKeyPath}` +
+      ` -o IdentitiesOnly=yes` +
+      ` -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts` +
+      ` -o StrictHostKeyChecking=yes`;
+  }
+  return { args, env };
 }

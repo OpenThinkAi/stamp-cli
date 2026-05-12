@@ -143,4 +143,47 @@ describe("buildMirrorPushInvocationSsh", () => {
       );
     }
   });
+
+  // Per-repo SSH-key override (5c): when buildMirrorPushInvocationSsh is
+  // given an sshKeyPath, the returned env must carry a GIT_SSH_COMMAND
+  // that points ssh at that key with IdentitiesOnly=yes. Without the
+  // override (legacy shared-key path) the env stays clean. Pinned so
+  // that "the per-repo path was selected" stays observable from the
+  // builder's output without spinning up a real ssh process.
+  it("emits GIT_SSH_COMMAND that fully bypasses ~/.ssh/config when sshKeyPath is set", () => {
+    // The override must use -F /dev/null so the static client config's
+    // IdentityFile (pointing at the legacy shared key) is not ALSO
+    // offered alongside the per-repo -i key — otherwise ssh would auth
+    // as the legacy key and the push would fail at the deploy-key
+    // authorization layer (the legacy key is registered on stamp-cli,
+    // not the target repo). IdentitiesOnly=yes alone does NOT suppress
+    // static-config IdentityFile entries per ssh_config(5); -F /dev/null
+    // is what does. Pinned here so the override can't drift back to a
+    // form that re-introduces the bug.
+    const KEY = "/srv/git/.ssh-client-keys/OpenThinkAi_example_ed25519";
+    const { env } = buildMirrorPushInvocationSsh(
+      REPO,
+      SHA,
+      REFNAME,
+      { PATH: "/usr/bin" },
+      KEY,
+    );
+    const cmd = env.GIT_SSH_COMMAND ?? "";
+    assert.match(cmd, /-F\s+\/dev\/null/, "must pass -F /dev/null");
+    assert.match(
+      cmd,
+      new RegExp(`-i\\s+${KEY.replace(/\//g, "\\/")}\\b`),
+      "must pass -i with the per-repo key path",
+    );
+    assert.match(cmd, /IdentitiesOnly=yes/);
+    assert.match(cmd, /UserKnownHostsFile=\/etc\/ssh\/ssh_known_hosts/);
+    assert.match(cmd, /StrictHostKeyChecking=yes/);
+  });
+
+  it("does NOT emit GIT_SSH_COMMAND when sshKeyPath is omitted (legacy path)", () => {
+    const { env } = buildMirrorPushInvocationSsh(REPO, SHA, REFNAME, {
+      PATH: "/usr/bin",
+    });
+    assert.equal(env.GIT_SSH_COMMAND, undefined);
+  });
 });

@@ -1,0 +1,128 @@
+#!/bin/sh
+#
+# stamp-ensure-repo-key — generate a per-repo deploy-key keypair on the
+# stamp server if one doesn't already exist for the named GitHub repo.
+#
+# Invoked via sudo from the unprivileged pubkey-wrapper context (git user
+# under git-shell) so the resulting key files can be created as root:git
+# mode 0640 — preserving the legacy "git-shell escape cannot replace the
+# deploy key" invariant. The wrapper drops into this helper only when the
+# target file is missing; existing files are NEVER overwritten by this
+# helper, so a post-escape attacker can't substitute a key whose private
+# half they hold.
+#
+# Usage: stamp-ensure-repo-key <owner>/<repo>
+#
+# Sudoers (see server/sudoers.d-stamp): git is permitted NOPASSWD on this
+# one path; any args. Input shape is validated below regardless of what
+# sudoers admits.
+#
+set -e
+
+SPEC="${1:-}"
+
+if [ -z "$SPEC" ]; then
+  echo "stamp-ensure-repo-key: missing <owner>/<repo> argument" >&2
+  exit 2
+fi
+
+# --- Input shape validation ---
+#
+# Allowed char set: [A-Za-z0-9._-] plus exactly one '/' separator.
+# Reject:
+#   - missing or doubled slash
+#   - '..' anywhere (path-traversal defense in depth, even though the
+#     slash-to-underscore conversion below would already prevent escape)
+#   - whitespace or control chars (charset check catches these)
+#   - leading '-' on the whole spec (could parse as a flag if it ever
+#     slipped past the ssh-keygen -C escaping)
+#   - empty owner or repo half (e.g. "/repo" or "owner/")
+case "$SPEC" in
+  -*)
+    echo "stamp-ensure-repo-key: spec must not start with '-': $SPEC" >&2
+    exit 2 ;;
+  *..*)
+    echo "stamp-ensure-repo-key: spec must not contain '..': $SPEC" >&2
+    exit 2 ;;
+esac
+case "$SPEC" in
+  */*) : ;;
+  *)
+    echo "stamp-ensure-repo-key: spec must be <owner>/<repo>: $SPEC" >&2
+    exit 2 ;;
+esac
+case "$SPEC" in
+  */*/*)
+    echo "stamp-ensure-repo-key: spec must contain exactly one '/': $SPEC" >&2
+    exit 2 ;;
+esac
+case "$SPEC" in
+  /*|*/)
+    echo "stamp-ensure-repo-key: owner and repo halves must both be non-empty: $SPEC" >&2
+    exit 2 ;;
+esac
+# Per-half charset checks.
+#
+# Owner: [A-Za-z0-9-] only (no '_' or '.'). GitHub disallows these in
+# owner/org names anyway, but pinning the constraint here makes the
+# spec-to-filename encoding provably collision-free — with '_' as the
+# separator and disallowed in the owner half, no two distinct
+# <owner>/<repo> specs can map to the same on-disk filename.
+#
+# Repo: [A-Za-z0-9._-]. Matches what GitHub permits.
+OWNER=${SPEC%%/*}
+REPO=${SPEC#*/}
+case "$OWNER" in
+  *[!A-Za-z0-9-]*|"")
+    echo "stamp-ensure-repo-key: owner must match [A-Za-z0-9-]+ (got '$OWNER' in '$SPEC')" >&2
+    exit 2 ;;
+esac
+case "$REPO" in
+  *[!A-Za-z0-9._-]*|"")
+    echo "stamp-ensure-repo-key: repo must match [A-Za-z0-9._-]+ (got '$REPO' in '$SPEC')" >&2
+    exit 2 ;;
+esac
+
+# --- Path computation ---
+#
+# Filename: owner_repo_ed25519. We replace the single '/' with '_' rather
+# than nesting under a subdirectory, so the key dir stays flat (matches
+# the legacy github_ed25519 sibling pattern and lets `ls -l` give a
+# one-glance view of registered repos).
+SANITIZED=$(printf '%s' "$SPEC" | tr '/' '_')
+KEY_DIR=/srv/git/.ssh-client-keys
+KEY_PATH="$KEY_DIR/${SANITIZED}_ed25519"
+
+if [ -f "$KEY_PATH" ]; then
+  # Idempotent: already exists, no-op. (Refuse-to-overwrite invariant.)
+  exit 0
+fi
+
+if [ ! -d "$KEY_DIR" ]; then
+  # entrypoint.sh creates this dir at boot; if it's missing the server
+  # is in an unexpected state. Don't try to recover here — the operator
+  # needs to see this loudly.
+  echo "stamp-ensure-repo-key: key dir $KEY_DIR missing — server may be misconfigured" >&2
+  exit 1
+fi
+
+# --- Generation ---
+#
+# -N "" → no passphrase (server-side automation; the file itself is the
+# secret, protected by filesystem perms).
+# -C "<comment>" embeds the repo spec + hostname so an operator with
+# shell can grep ssh-keygen -lf output and tell which file maps to which
+# GitHub repo. GitHub itself ignores the comment on deploy-key POST.
+HOSTNAME_VAL=$(hostname 2>/dev/null || echo "stamp-server")
+ssh-keygen -t ed25519 -N "" \
+  -f "$KEY_PATH" \
+  -C "stamp-mirror:${SPEC}@${HOSTNAME_VAL}" \
+  -q
+
+# Match the legacy shared-key posture: private key 0640 root:git (group
+# read so the post-receive hook can use it; not writable from any non-
+# root surface so a future git-shell escape can't substitute the key);
+# public key 0644 (operator-readable for sanity-checks).
+chown root:git "$KEY_PATH" "$KEY_PATH.pub"
+chmod 0640 "$KEY_PATH"
+chmod 0644 "$KEY_PATH.pub"
