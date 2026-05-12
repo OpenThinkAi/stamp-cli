@@ -147,6 +147,7 @@ COPY server/new-stamp-repo /usr/local/bin/new-stamp-repo
 COPY server/delete-stamp-repo /usr/local/bin/delete-stamp-repo
 COPY server/restore-stamp-repo /usr/local/bin/restore-stamp-repo
 COPY server/list-trash /usr/local/bin/list-trash
+COPY server/stamp-server-pubkey /usr/local/bin/stamp-server-pubkey
 COPY server/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /etc/stamp/pre-receive.cjs \
@@ -156,6 +157,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/delete-stamp-repo \
              /usr/local/bin/restore-stamp-repo \
              /usr/local/bin/list-trash \
+             /usr/local/bin/stamp-server-pubkey \
              /entrypoint.sh
 
 # Symlink the operator-facing wrapper scripts into the directory git-shell
@@ -169,6 +171,7 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/delete-stamp-repo /home/git/git-shell-commands/delete-stamp-repo \
  && ln -s /usr/local/bin/restore-stamp-repo /home/git/git-shell-commands/restore-stamp-repo \
  && ln -s /usr/local/bin/list-trash /home/git/git-shell-commands/list-trash \
+ && ln -s /usr/local/bin/stamp-server-pubkey /home/git/git-shell-commands/stamp-server-pubkey \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands
 
