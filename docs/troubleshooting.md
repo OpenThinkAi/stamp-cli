@@ -274,6 +274,37 @@ stamp merge my-feature --into main
 
 ---
 
+## `stamp review` fails with `subtype=error_max_turns` (or wall-clock abort)
+
+A reviewer subprocess can fail with either of:
+
+```
+reviewer "product" run failed (subtype=error_max_turns)
+reviewer "product" exceeded 300000ms wall-clock budget — raise STAMP_REVIEWER_TIMEOUT_MS to extend it
+```
+
+Both are operator-tunable. The defaults are tight on purpose — a misbehaving reviewer prompt with `WebFetch` + MCP can otherwise iterate for as long as the SDK allows, racking up Anthropic spend per invocation. The two knobs:
+
+- **`STAMP_REVIEWER_MAX_TURNS`** (default `8`): hard cap on model/tool round-trips. A reviewer that needs to (a) scan the diff via `Read`/`Grep`, (b) look up an external ticket via MCP or curl, and (c) emit a verdict can sit at the budget edge on code-heavy diffs.
+- **`STAMP_REVIEWER_TIMEOUT_MS`** (default `300000`): wall-clock budget. Bites when an MCP subprocess hangs or a tool call stalls — independent of turn count.
+
+Before raising either, distinguish the two failure modes:
+
+1. **The reviewer is looping** — runs trip the cap on small diffs too, or the prose (when surfaced) is repetitive. Fix the prompt, not the budget. The most common cause is a prompt that says "look at the commit messages" — `git diff` output does **not** include commit messages, so a reviewer that needs them must run `git log <base>..<head>` itself via `Bash`. State that explicitly in the prompt.
+2. **The reviewer legitimately needs more headroom** — a code-heavy diff plus a real external lookup. Raise the relevant env var on the operator's shell:
+
+```sh
+# Roomier budgets just for this invocation
+STAMP_REVIEWER_MAX_TURNS=20 STAMP_REVIEWER_TIMEOUT_MS=600000 \
+  stamp review --diff main..HEAD
+```
+
+The env vars are operator infrastructure, not committed config — they don't enter the attestation hash chain, and two operators reviewing the same diff can pick different budgets without merge-conflicting over preference. Per-reviewer overrides committed to `.stamp/config.yml` are not yet supported (see [#26](https://github.com/OpenThinkAi/stamp-cli/issues/26)).
+
+If the cap fires but the SDK message stream isn't recoverable for diagnosis, a turn-trace persistence feature is tracked alongside issue #26.
+
+---
+
 ## `stamp review` fails with "not in the env allowlist"
 
 After upgrading, a reviewer config that uses `$VAR` interpolation under `mcp_servers.<server>.env` (e.g. `LINEAR_API_KEY: $LINEAR_API_KEY`) fails fast with a message like:
