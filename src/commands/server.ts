@@ -19,12 +19,13 @@
  * mid-write doesn't leave a half-written config that fails to parse.
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import { userServerConfigPath } from "../lib/paths.js";
 import { loadServerConfig, parseServerFlag } from "../lib/serverConfig.js";
-import { UsageError } from "./serverRepo.js";
+import { resolveServer, UsageError } from "./serverRepo.js";
 
 export interface ServerConfigOptions {
   hostPort?: string;
@@ -100,6 +101,51 @@ function unsetConfig(): void {
   }
   unlinkSync(path);
   console.log(`removed ${path}`);
+}
+
+/**
+ * `stamp server pubkey` — fetch the public half of the stamp server's
+ * GitHub mirror-push deploy key. Run over SSH against the configured
+ * server (~/.stamp/server.yml or `--server <host:port>`).
+ *
+ * Output is exactly the public-key line emitted by the server-side
+ * `stamp-server-pubkey` wrapper — single OpenSSH-format line, no
+ * decoration. That makes it pipe-able directly into deploy-key
+ * registration (`gh api -X POST /repos/:o/:r/keys --field key=@-`) and
+ * keeps the eventual `stamp provision` integration point a thin wrap
+ * around this command's stdout.
+ */
+export interface ServerPubkeyOptions {
+  /** Override ~/.stamp/server.yml with `<host>:<port>`. */
+  server?: string;
+}
+
+export function runServerPubkey(opts: ServerPubkeyOptions): void {
+  const server = resolveServer(opts.server);
+  // `--` after `-p N` terminates ssh's option processing before the
+  // destination — matches the pattern in serverRepo.ts wrappers (defense
+  // against a malformed server.yml smuggling a flag-shaped host string).
+  const result = spawnSync(
+    "ssh",
+    [
+      "-p",
+      String(server.port),
+      "--",
+      `${server.user}@${server.host}`,
+      "stamp-server-pubkey",
+    ],
+    { stdio: ["ignore", "pipe", "inherit"], encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `stamp server pubkey failed (exit ${result.status}). If you see ` +
+        `"command not found", the server image predates the deploy-key ` +
+        `feature — redeploy it first.`,
+    );
+  }
+  // stamp-server-pubkey prints the OpenSSH-format line followed by a
+  // newline; preserve it as-is on stdout so callers can pipe directly.
+  process.stdout.write(result.stdout);
 }
 
 function writeConfig(opts: ServerConfigOptions): void {

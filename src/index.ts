@@ -29,7 +29,7 @@ import { runMerge } from "./commands/merge.js";
 import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
-import { runServerConfig } from "./commands/server.js";
+import { runServerConfig, runServerPubkey } from "./commands/server.js";
 import {
   runConfigReviewersClear,
   runConfigReviewersSet,
@@ -307,6 +307,22 @@ server
       }
     },
   );
+server
+  .command("pubkey")
+  .description(
+    "print the stamp server's GitHub mirror-push deploy-key public half — single OpenSSH line, pipe-able into `gh api -X POST /repos/:o/:r/keys --field key=@-` to register as a deploy key. Required for the DeployKey-bypass mirror path on locked-down org repos.",
+  )
+  .option(
+    "--server <host:port>",
+    "override ~/.stamp/server.yml for this call",
+  )
+  .action((opts: { server?: string }) => {
+    try {
+      runServerPubkey({ server: opts.server });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
 
 const config = program
   .command("config")

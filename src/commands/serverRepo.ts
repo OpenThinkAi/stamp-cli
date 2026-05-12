@@ -205,7 +205,7 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
 
 // ---------- helpers ----------
 
-function resolveServer(serverFlag: string | undefined): ServerConfig {
+export function resolveServer(serverFlag: string | undefined): ServerConfig {
   const server = serverFlag ? parseServerFlag(serverFlag) : loadServerConfig();
   if (!server) {
     throw new Error(
