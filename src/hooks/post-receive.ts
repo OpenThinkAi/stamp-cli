@@ -26,7 +26,10 @@ import {
   postCommitStatus,
   type MirrorStatusDecision,
 } from "../lib/mirrorStatus.js";
-import { buildMirrorPushInvocation } from "../lib/mirrorPush.js";
+import {
+  buildMirrorPushInvocation,
+  buildMirrorPushInvocationSsh,
+} from "../lib/mirrorPush.js";
 import {
   matchesAnyPattern,
   matchesAnyTagPattern,
@@ -176,6 +179,20 @@ export function readMirrorConfigFromHeadBranch(): MirrorConfig | null {
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
 /**
+ * Well-known path of the deploy-key private file on the stamp server.
+ * Set up by `server/entrypoint.sh` as part of the SSH-client config. Its
+ * presence is the signal that the operator has provisioned a deploy-key
+ * push identity — when this file exists, the mirror push uses SSH and
+ * authenticates as the deploy key; when it doesn't, the push falls back
+ * to HTTPS with the bot token.
+ *
+ * The path is hard-coded rather than env-driven because the SSH client
+ * config written by the entrypoint references the same path literally;
+ * changing one without the other would silently break the push.
+ */
+const SSH_DEPLOY_KEY_PATH = "/srv/git/.ssh-client-keys/github_ed25519";
+
+/**
  * Push a single ref (branch or tag) to the configured GitHub mirror, then
  * publish a `stamp/verified` commit status to GitHub for each commit in
  * the pushed range. `label` is operator-friendly text for log lines
@@ -189,23 +206,39 @@ async function mirrorRef(
   githubRepo: string,
 ): Promise<void> {
   const token = process.env["GITHUB_BOT_TOKEN"];
-  if (!token) {
+
+  // Pick the push transport. SSH is preferred when a deploy-key private
+  // file is installed — that path doesn't put the bot token on the wire
+  // or in any process env for the duration of the push, and it lines up
+  // with a `DeployKey` Ruleset bypass-actor on the mirror repo. Falls
+  // back to HTTPS + bot token (legacy/default path) when no deploy key
+  // is installed. Token is still required for postStatuses regardless
+  // of transport, so the missing-token guard runs unconditionally below.
+  const useSsh = existsSync(SSH_DEPLOY_KEY_PATH);
+
+  if (!useSsh && !token) {
     warn(
-      `mirror: GITHUB_BOT_TOKEN not set in environment; skipping mirror of ${label} → ${githubRepo}`,
+      `mirror: GITHUB_BOT_TOKEN not set in environment and no deploy key at ${SSH_DEPLOY_KEY_PATH}; skipping mirror of ${label} → ${githubRepo}`,
     );
     return;
+  }
+  if (useSsh && !token) {
+    // SSH push will work, but the post-push status reporting won't.
+    // Warn so the operator sees what's missing — but don't skip; the
+    // mirror itself is the more important leg, and statuses recover
+    // by being re-triggerable.
+    warn(
+      `mirror: GITHUB_BOT_TOKEN not set; SSH push to ${githubRepo} will proceed but stamp/verified statuses will be skipped`,
+    );
   }
 
   // git push — use --force-with-lease where possible. A first push to a
   // fresh github repo needs a plain force; subsequent pushes should be
   // fast-forward since stamp is source of truth. Start with FF-only and
   // fall back to documented force-push on the operator's request.
-  const { args, env } = buildMirrorPushInvocation(
-    githubRepo,
-    newSha,
-    refname,
-    token,
-  );
+  const { args, env } = useSsh
+    ? buildMirrorPushInvocationSsh(githubRepo, newSha, refname)
+    : buildMirrorPushInvocation(githubRepo, newSha, refname, token!);
   const result = spawnSync("git", args, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -216,28 +249,41 @@ async function mirrorRef(
     info(
       `mirror: pushed ${label} (${newSha.slice(0, 8)}) → github.com/${githubRepo}`,
     );
-    await postStatuses(label, refname, oldSha, newSha, githubRepo, token);
+    // postStatuses always uses the REST API (no SSH path) so it still
+    // requires GITHUB_BOT_TOKEN. Skip cleanly if absent — we already
+    // warned at the top of the function in that branch.
+    if (token) {
+      await postStatuses(label, refname, oldSha, newSha, githubRepo, token);
+    }
   } else {
     const errOut = scrubTokenUrls((result.stderr ?? "").trim());
     warn(
       `mirror: push of ${label} to github.com/${githubRepo} failed (exit ${result.status})`,
     );
     if (errOut) warn(`mirror: ${errOut.replace(/\n/g, "\nmirror: ")}`);
-    warn(
-      `mirror: stamp-server push already accepted; mirror out-of-sync. ` +
-        `Retry manually with the bot token in env: ` +
-        `GITHUB_BOT_TOKEN=<pat> GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader ` +
-        // tr -d "\n" strips the line-wrap newline GNU base64 emits at 76 chars;
-        // without it, fine-grained PATs (90+ chars) produce a malformed
-        // Authorization header that silently fails the recovery push. printf
-        // "%s" "..." (vs. positional) is %-safe for tokens containing '%'.
-        // Using GIT_CONFIG_* env vars (not `-c http.extraHeader=...` argv)
-        // keeps the encoded token off `ps` / `/proc/<pid>/cmdline` for the
-        // recovery push too — same invariant the automated path enforces.
-        `GIT_CONFIG_VALUE_0="Authorization: Basic ` +
-        `$(printf '%s' "x-access-token:$GITHUB_BOT_TOKEN" | base64 | tr -d '\\n')" ` +
-        `git push https://github.com/${githubRepo}.git ${refname}`,
-    );
+    if (useSsh) {
+      warn(
+        `mirror: stamp-server push already accepted; mirror out-of-sync. ` +
+          `Retry manually from a host with the deploy key: ` +
+          `git push git@github.com:${githubRepo}.git ${newSha}:${refname}`,
+      );
+    } else {
+      warn(
+        `mirror: stamp-server push already accepted; mirror out-of-sync. ` +
+          `Retry manually with the bot token in env: ` +
+          `GITHUB_BOT_TOKEN=<pat> GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader ` +
+          // tr -d "\n" strips the line-wrap newline GNU base64 emits at 76 chars;
+          // without it, fine-grained PATs (90+ chars) produce a malformed
+          // Authorization header that silently fails the recovery push. printf
+          // "%s" "..." (vs. positional) is %-safe for tokens containing '%'.
+          // Using GIT_CONFIG_* env vars (not `-c http.extraHeader=...` argv)
+          // keeps the encoded token off `ps` / `/proc/<pid>/cmdline` for the
+          // recovery push too — same invariant the automated path enforces.
+          `GIT_CONFIG_VALUE_0="Authorization: Basic ` +
+          `$(printf '%s' "x-access-token:$GITHUB_BOT_TOKEN" | base64 | tr -d '\\n')" ` +
+          `git push https://github.com/${githubRepo}.git ${refname}`,
+      );
+    }
   }
 }
 

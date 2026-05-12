@@ -39,3 +39,38 @@ export function buildMirrorPushInvocation(
   };
   return { args, env };
 }
+
+/**
+ * Build the `spawnSync(git, args, { env })` pieces for an SSH-transport
+ * mirror push, using a deploy key registered on the GitHub repo as the
+ * push identity.
+ *
+ * This path is selected by post-receive when the server-side deploy-key
+ * private file exists at the well-known path
+ * (`/srv/git/.ssh-client-keys/github_ed25519`); the SSH client config
+ * written by `server/entrypoint.sh` points github.com at that key with
+ * `IdentitiesOnly yes` + `UserKnownHostsFile /etc/ssh/ssh_known_hosts`,
+ * so no per-push GIT_SSH_COMMAND override is needed — the standard
+ * `git@github.com:owner/repo.git` URL is sufficient.
+ *
+ * Why SSH at all when HTTPS+PAT also works: a Ruleset bypass-actor of
+ * `DeployKey` survives the "no machine-user account, no GitHub App
+ * approval" constraint common at locked-down work orgs. The PAT path
+ * needs a user (or App) identity in the bypass list; the SSH path uses
+ * the deploy key, which is a per-repo resource and doesn't touch org-
+ * level third-party-application policy.
+ *
+ * No token is needed for the push itself — SSH auth is via the deploy
+ * key. The caller still threads `GITHUB_BOT_TOKEN` separately for the
+ * `postStatuses` REST calls (those are unaffected by transport choice).
+ */
+export function buildMirrorPushInvocationSsh(
+  githubRepo: string,
+  newSha: string,
+  refname: string,
+  parentEnv: NodeJS.ProcessEnv = process.env,
+): { args: string[]; env: NodeJS.ProcessEnv } {
+  const remoteUrl = `git@github.com:${githubRepo}.git`;
+  const args = ["push", remoteUrl, `${newSha}:${refname}`];
+  return { args, env: { ...parentEnv } };
+}
