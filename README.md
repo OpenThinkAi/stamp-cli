@@ -294,30 +294,50 @@ verdicts are model-portable.
 
 ### Reviewer execution budgets
 
-Each reviewer subprocess runs under two bounds, set on the operator's
-machine via env vars (they are operator infrastructure, not committed
-policy — different operators on the same repo can pick different values):
+Each reviewer subprocess runs under bounds that can be set in three
+places, narrowest-wins: per-reviewer fields in `.stamp/config.yml`
+(committed policy, hashed into the attestation), operator env vars on
+the calling shell (per-shell, not committed), or the built-in default.
 
-| Env var | Default | What it caps |
-|---|---|---|
-| `STAMP_REVIEWER_MAX_TURNS` | `8` | Model/tool round-trips per reviewer call. Hitting it surfaces as `reviewer "<name>" run failed (subtype=error_max_turns)`. |
-| `STAMP_REVIEWER_TIMEOUT_MS` | `300000` (5 min) | Wall-clock budget per reviewer. Hitting it surfaces as `reviewer "<name>" exceeded <N>ms wall-clock budget — raise STAMP_REVIEWER_TIMEOUT_MS to extend it`. |
+| Knob | Env var (default) | `.stamp/config.yml` field | What it caps |
+|---|---|---|---|
+| Turn cap | `STAMP_REVIEWER_MAX_TURNS` (`8`) | `reviewers.<name>.max_turns` | Model/tool round-trips. Hitting it surfaces as `reviewer "<name>" run failed (subtype=error_max_turns) — turn trace at <path>; raise STAMP_REVIEWER_MAX_TURNS or set reviewers.<name>.max_turns to extend it`. |
+| Wall-clock | `STAMP_REVIEWER_TIMEOUT_MS` (`300000`) | `reviewers.<name>.timeout_ms` | Time per reviewer. Hitting it aborts the SDK call and writes a turn trace. |
+| Diff size | `STAMP_REVIEW_DIFF_CAP_BYTES` (`204800`) | — (operator-side only) | Per-reviewer diff size; bypass per-invocation with `--allow-large`. Lives here because diff size is operator-bounded input rather than per-reviewer execution policy. |
 
 The defaults are tight enough that a pathological reviewer gives up in
 single-digit minutes rather than racking up Anthropic spend silently.
-Raise them when a reviewer with legitimately heavy lookup tools (Linear
-MCP, multi-file `Read`, ticket reconciliation) repeatedly trips the cap
-on a non-trivial diff. Example:
+Reach for the committed `.stamp/config.yml` form when one reviewer
+legitimately needs headroom (e.g. a `product` reviewer that does Linear
+ticket reconciliation) but raising the global env would over-budget the
+others; reach for the env vars for ad-hoc operator overrides.
+
+```yaml
+# .stamp/config.yml — example: heavy product reviewer
+reviewers:
+  security:  { prompt: .stamp/reviewers/security.md }
+  standards: { prompt: .stamp/reviewers/standards.md }
+  product:
+    prompt: .stamp/reviewers/product.md
+    max_turns: 20
+    timeout_ms: 600000
+```
 
 ```sh
+# Operator-side global override for a one-off ad-hoc run
 STAMP_REVIEWER_MAX_TURNS=20 STAMP_REVIEWER_TIMEOUT_MS=600000 \
   stamp review --diff main..HEAD
 ```
 
-If a reviewer trips the cap consistently on small diffs too, the prompt
-is probably looping rather than working — diagnose before raising the
-budget. See [`docs/troubleshooting.md`](./docs/troubleshooting.md) for
-the runbook.
+When a reviewer trips the cap, a structured turn trace is written to
+`<repoRoot>/.git/stamp/failed-runs/<unix-ms>-<reviewer>.log` (mode
+`0600`, parent `0700`, JSON; lists the tool-call sequence and input
+hashes that the reviewer made before failure — never raw model prose
+or unhashed inputs). Use it to distinguish a looping prompt from a
+legitimately under-budgeted reviewer. `stamp prune --older-than <dur>`
+walks both `failed-runs/` and `failed-parses/`. See
+[`docs/troubleshooting.md`](./docs/troubleshooting.md) for the full
+runbook.
 
 ## Deployment shapes
 

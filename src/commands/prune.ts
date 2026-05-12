@@ -23,16 +23,19 @@ export interface PruneOptions {
  *    is kept intact for surviving rows — `stamp reviewers show` and
  *    `stamp log --reviews` still depend on it.
  *
- * 2. Walk `<gitCommonDir>/stamp/failed-parses/` and unlink files whose
- *    `mtime` is older than now − duration. v4 audit L-PR1: the spool
- *    directory was never auto-pruned, so on a noisy reviewer (LLM rate
- *    limiting, prompt drift) raw model output accumulates indefinitely
- *    despite the per-file mode-0600 protection.
+ * 2. Walk `<gitCommonDir>/stamp/failed-parses/` and `failed-runs/` and
+ *    unlink files whose `mtime` is older than now − duration. v4 audit
+ *    L-PR1 (failed-parses): the spool directory was never auto-pruned,
+ *    so on a noisy reviewer (LLM rate limiting, prompt drift) raw model
+ *    output accumulates indefinitely despite the per-file mode-0600
+ *    protection. The failed-runs/ sibling carries structured turn traces
+ *    for cap-hit / aborted reviewer subprocesses (issue #26) and follows
+ *    the same retention policy.
  *
  * `--dry-run` peeks both passes and prints what would be removed without
  * deleting anything or running VACUUM.
  *
- * No-ops cleanly when neither state.db nor the spool dir exists.
+ * No-ops cleanly when neither state.db nor either spool dir exists.
  */
 export function runPrune(opts: PruneOptions): void {
   // Parse the duration first — before any short-circuit — so a typo'd
@@ -47,16 +50,17 @@ export function runPrune(opts: PruneOptions): void {
 
   // Spool prune is independent of state.db existence — a fresh repo can
   // have a failed parse without ever recording an approved verdict, so
-  // gate the spool pass on its own existsSync check below.
-  const spoolDir = join(gitCommonDir(repoRoot), "stamp", "failed-parses");
+  // gate each spool pass on its own existsSync check below.
+  const parsesDir = join(gitCommonDir(repoRoot), "stamp", "failed-parses");
+  const runsDir = join(gitCommonDir(repoRoot), "stamp", "failed-runs");
   const spoolCutoffMs = Date.now() - durationMs;
 
-  if (!existsSync(dbPath) && !existsSync(spoolDir)) {
+  if (!existsSync(dbPath) && !existsSync(parsesDir) && !existsSync(runsDir)) {
     // Surface the absolute paths so an operator debugging "where is
     // stamp looking?" doesn't have to grep source. Both dirs route
     // through gitCommonDir so they show the worktree-correct location.
     console.log(
-      `note: nothing to prune (neither ${dbPath} nor ${spoolDir} exists — both are created on first \`stamp review\`)`,
+      `note: nothing to prune (none of ${dbPath}, ${parsesDir}, ${runsDir} exist — all are created on first \`stamp review\`)`,
     );
     return;
   }
@@ -75,14 +79,19 @@ export function runPrune(opts: PruneOptions): void {
           any = true;
         }
       }
-      const spoolPeek = peekFailedParseSpools(spoolDir, spoolCutoffMs);
-      if (spoolPeek.length > 0) {
-        if (any) console.log("");
-        console.log(
-          `would prune ${spoolPeek.length} failed-parse spool file${spoolPeek.length === 1 ? "" : "s"} older than ${humanLabel}:`,
-        );
-        for (const f of spoolPeek) console.log(`  ${f}`);
-        any = true;
+      for (const [label, dir] of [
+        ["failed-parse", parsesDir],
+        ["failed-run", runsDir],
+      ] as const) {
+        const peek = peekSpools(dir, spoolCutoffMs);
+        if (peek.length > 0) {
+          if (any) console.log("");
+          console.log(
+            `would prune ${peek.length} ${label} spool file${peek.length === 1 ? "" : "s"} older than ${humanLabel}:`,
+          );
+          for (const f of peek) console.log(`  ${f}`);
+          any = true;
+        }
       }
       if (!any) {
         console.log(`note: nothing to prune (no rows or spools older than ${humanLabel})`);
@@ -110,13 +119,18 @@ export function runPrune(opts: PruneOptions): void {
         any = true;
       }
     }
-    const spoolDeleted = pruneFailedParseSpools(spoolDir, spoolCutoffMs);
-    if (spoolDeleted > 0) {
-      if (any) console.log("");
-      console.log(
-        `${spoolDeleted} failed-parse spool file${spoolDeleted === 1 ? "" : "s"} pruned`,
-      );
-      any = true;
+    for (const [label, dir] of [
+      ["failed-parse", parsesDir],
+      ["failed-run", runsDir],
+    ] as const) {
+      const deleted = pruneSpools(dir, spoolCutoffMs);
+      if (deleted > 0) {
+        if (any) console.log("");
+        console.log(
+          `${deleted} ${label} spool file${deleted === 1 ? "" : "s"} pruned`,
+        );
+        any = true;
+      }
     }
     if (!any) {
       console.log(`note: nothing to prune (no rows or spools older than ${humanLabel})`);
@@ -127,13 +141,14 @@ export function runPrune(opts: PruneOptions): void {
 }
 
 /**
- * List spool files under `<commondir>/stamp/failed-parses/` whose mtime is
- * older than `cutoffMs` (a Unix-millis cutoff: files with mtime less than
- * this are old enough to prune). Returns absolute paths so the caller can
- * print or unlink without re-joining. No-ops cleanly if the dir doesn't
- * exist.
+ * List spool files under `<commondir>/stamp/<kind>/` whose mtime is older
+ * than `cutoffMs` (a Unix-millis cutoff: files with mtime less than this
+ * are old enough to prune). Used for both `failed-parses/` (raw model
+ * output spools) and `failed-runs/` (structured turn traces). Returns
+ * absolute paths so the caller can print or unlink without re-joining.
+ * No-ops cleanly if the dir doesn't exist.
  */
-function peekFailedParseSpools(spoolDir: string, cutoffMs: number): string[] {
+function peekSpools(spoolDir: string, cutoffMs: number): string[] {
   if (!existsSync(spoolDir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(spoolDir)) {
@@ -152,8 +167,8 @@ function peekFailedParseSpools(spoolDir: string, cutoffMs: number): string[] {
   return out.sort();
 }
 
-function pruneFailedParseSpools(spoolDir: string, cutoffMs: number): number {
-  const targets = peekFailedParseSpools(spoolDir, cutoffMs);
+function pruneSpools(spoolDir: string, cutoffMs: number): number {
+  const targets = peekSpools(spoolDir, cutoffMs);
   let deleted = 0;
   for (const filepath of targets) {
     try {

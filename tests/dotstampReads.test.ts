@@ -210,3 +210,47 @@ reviewers:
     );
   });
 });
+
+describe("parseConfigFromYaml — per-reviewer budget overrides", () => {
+  const cfg = (extra: string) => `
+branches:
+  main: { required: [r] }
+reviewers:
+  r:
+    prompt: ./r.md${extra}
+`;
+
+  it("omits both fields when absent", () => {
+    const c = parseConfigFromYaml(cfg(""));
+    assert.equal(c.reviewers.r!.max_turns, undefined);
+    assert.equal(c.reviewers.r!.timeout_ms, undefined);
+  });
+
+  it("accepts positive integers for max_turns and timeout_ms", () => {
+    const c = parseConfigFromYaml(
+      cfg("\n    max_turns: 20\n    timeout_ms: 600000"),
+    );
+    assert.equal(c.reviewers.r!.max_turns, 20);
+    assert.equal(c.reviewers.r!.timeout_ms, 600000);
+  });
+
+  it("rejects zero, negative, non-integer, and non-numeric values", () => {
+    for (const [bad, label] of [
+      ["0", "zero"],
+      ["-1", "negative"],
+      ["1.5", "fractional"],
+      ['"20"', "string"],
+    ] as const) {
+      assert.throws(
+        () => parseConfigFromYaml(cfg(`\n    max_turns: ${bad}`)),
+        /max_turns must be a positive integer/,
+        `expected ${label} max_turns (${bad}) to be rejected`,
+      );
+      assert.throws(
+        () => parseConfigFromYaml(cfg(`\n    timeout_ms: ${bad}`)),
+        /timeout_ms must be a positive integer/,
+        `expected ${label} timeout_ms (${bad}) to be rejected`,
+      );
+    }
+  });
+});

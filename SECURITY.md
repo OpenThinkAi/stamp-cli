@@ -124,21 +124,34 @@ Some behaviors are intentional trade-offs, not vulnerabilities:
 
 ## Operator-tunable safety bounds
 
-The reviewer subprocess runs under two bounds that are operator-tunable
-on the shell that calls `stamp review` (not committed to the repo): a
-turn cap and a wall-clock timeout. Defaults are deliberately tight so a
-misbehaving reviewer prompt with `WebFetch` + MCP can't iterate
-indefinitely against the operator's Anthropic account. Both are listed
-here because they are security-relevant defenses, not just performance
-knobs — raising them widens the resource budget a malicious reviewer
-prompt can consume per invocation.
+The reviewer subprocess runs under bounds that can be set in three
+places (narrowest-wins): per-reviewer fields in `.stamp/config.yml`
+(committed, hashed into the attestation), operator env vars on the
+calling shell (per-shell, not committed), or the built-in default.
+Defaults are deliberately tight so a misbehaving reviewer prompt with
+`WebFetch` + MCP can't iterate indefinitely against the operator's
+Anthropic account. These bounds are security-relevant defenses, not
+just performance knobs — raising them widens the resource budget a
+malicious reviewer prompt can consume per invocation.
 
-| Env var | Default | Security role |
-|---|---|---|
-| `STAMP_REVIEWER_MAX_TURNS` | `8` | Caps model/tool round-trips so a looping prompt gives up rather than racking up spend. Also referenced as a cluster-B mitigation in the May 2026 audit. |
-| `STAMP_REVIEWER_TIMEOUT_MS` | `300000` | Wall-clock guard against a stuck MCP subprocess holding the review open indefinitely (AbortController-driven). |
-| `STAMP_REVIEW_DIFF_CAP_BYTES` | `204800` | Caps per-reviewer diff size (each required reviewer gets the full diff, so an oversized review is expensive at scale). |
+| Knob | Env var (default) | `.stamp/config.yml` field | Security role |
+|---|---|---|---|
+| Turn cap | `STAMP_REVIEWER_MAX_TURNS` (`8`) | `reviewers.<name>.max_turns` | Caps model/tool round-trips so a looping or prompt-injected reviewer gives up rather than racking up spend. Cluster-B mitigation in the May 2026 audit. |
+| Wall-clock | `STAMP_REVIEWER_TIMEOUT_MS` (`300000`) | `reviewers.<name>.timeout_ms` | AbortController-driven guard against a stuck MCP subprocess holding the review open indefinitely. |
+| Diff size | `STAMP_REVIEW_DIFF_CAP_BYTES` (`204800`) | — | Caps per-reviewer diff size (each required reviewer gets the full diff, so an oversized review is expensive at scale). |
 
-The README's "Reviewer execution budgets" section and
-[`docs/troubleshooting.md`](./docs/troubleshooting.md) cover when and
-how to raise them.
+The per-reviewer committed form is the right knob when one reviewer in
+a repo needs durable headroom (e.g. a `product` reviewer that does
+ticket reconciliation) and raising the global env would over-budget the
+others. Because the field enters the reviewer config hash chain,
+changes go through the reviewer gate like any other policy edit; a
+feature branch cannot unilaterally widen its own review budget (config
+is read from the merge-base tree).
+
+On failure, a structured turn trace (tool-call sequence + input hashes,
+no raw prose) is written to `<repoRoot>/.git/stamp/failed-runs/` — mode
+`0600`, parent `0700`, never pushed. Operators can `cat` the file to
+diagnose loop-vs-headroom before raising the budget. The README's
+"Reviewer execution budgets" section and
+[`docs/troubleshooting.md`](./docs/troubleshooting.md) cover the full
+workflow.

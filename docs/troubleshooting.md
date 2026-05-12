@@ -279,29 +279,44 @@ stamp merge my-feature --into main
 A reviewer subprocess can fail with either of:
 
 ```
-reviewer "product" run failed (subtype=error_max_turns)
-reviewer "product" exceeded 300000ms wall-clock budget — raise STAMP_REVIEWER_TIMEOUT_MS to extend it
+reviewer "product" run failed (subtype=error_max_turns) — turn trace at /repo/.git/stamp/failed-runs/1715520000000-product.log (14 tool calls captured) — raise STAMP_REVIEWER_MAX_TURNS (currently 8) or set reviewers.product.max_turns in .stamp/config.yml to extend it
+reviewer "product" exceeded 300000ms wall-clock budget — turn trace at /repo/.git/stamp/failed-runs/1715520000000-product.log (3 tool calls captured) — raise STAMP_REVIEWER_TIMEOUT_MS (currently 300000ms) or set reviewers.product.timeout_ms in .stamp/config.yml to extend it
 ```
 
-Both are operator-tunable. The defaults are tight on purpose — a misbehaving reviewer prompt with `WebFetch` + MCP can otherwise iterate for as long as the SDK allows, racking up Anthropic spend per invocation. The two knobs:
+Both write a structured turn trace (the tool-call sequence + input hashes the reviewer made before failure) to `<repoRoot>/.git/stamp/failed-runs/<unix-ms>-<reviewer>.log` so an operator can diagnose without re-running. The file is mode `0600`, parent `0700`, JSON-shaped, and contains no raw model prose or unhashed tool inputs.
 
-- **`STAMP_REVIEWER_MAX_TURNS`** (default `8`): hard cap on model/tool round-trips. A reviewer that needs to (a) scan the diff via `Read`/`Grep`, (b) look up an external ticket via MCP or curl, and (c) emit a verdict can sit at the budget edge on code-heavy diffs.
-- **`STAMP_REVIEWER_TIMEOUT_MS`** (default `300000`): wall-clock budget. Bites when an MCP subprocess hangs or a tool call stalls — independent of turn count.
+The defaults are tight on purpose — a misbehaving reviewer prompt with `WebFetch` + MCP can otherwise iterate for as long as the SDK allows, racking up Anthropic spend per invocation. Three knobs (narrowest-wins resolution):
 
-Before raising either, distinguish the two failure modes:
+- **`reviewers.<name>.max_turns`** in `.stamp/config.yml` (committed, hashed) — per-reviewer cap on model/tool round-trips. Use when one reviewer legitimately needs headroom and the others don't.
+- **`reviewers.<name>.timeout_ms`** in `.stamp/config.yml` — per-reviewer wall-clock budget.
+- **`STAMP_REVIEWER_MAX_TURNS`** / **`STAMP_REVIEWER_TIMEOUT_MS`** env vars (defaults `8` / `300000`) — operator-side global overrides; don't enter the attestation hash chain.
 
-1. **The reviewer is looping** — runs trip the cap on small diffs too, or the prose (when surfaced) is repetitive. Fix the prompt, not the budget. The most common cause is a prompt that says "look at the commit messages" — `git diff` output does **not** include commit messages, so a reviewer that needs them must run `git log <base>..<head>` itself via `Bash`. State that explicitly in the prompt.
-2. **The reviewer legitimately needs more headroom** — a code-heavy diff plus a real external lookup. Raise the relevant env var on the operator's shell:
+### Distinguish the two failure modes before raising the budget
+
+Open the spool file and skim the `tool_calls` array:
 
 ```sh
-# Roomier budgets just for this invocation
+cat /repo/.git/stamp/failed-runs/1715520000000-product.log | jq '.tool_calls[] | .tool'
+```
+
+1. **The reviewer is looping** — same tool name repeated, or alternating between two tools with the same input hash. Fix the prompt, not the budget. The most common cause is a prompt that says "look at the commit messages" — `git diff` output does **not** include commit messages, so a reviewer that needs them must run `git log <base>..<head>` itself via `Bash`. State that explicitly in the prompt.
+2. **The reviewer legitimately needs more headroom** — distinct, productive tool calls (Read on relevant files, an MCP call that returned data, then verdict prep), just too many for an 8-turn budget. Raise the cap. For a one-off invocation, use the env vars; for a durable raise on one specific reviewer, edit `.stamp/config.yml`:
+
+```yaml
+reviewers:
+  product:
+    prompt: .stamp/reviewers/product.md
+    max_turns: 20
+    timeout_ms: 600000
+```
+
+```sh
+# Or, ad-hoc operator override
 STAMP_REVIEWER_MAX_TURNS=20 STAMP_REVIEWER_TIMEOUT_MS=600000 \
   stamp review --diff main..HEAD
 ```
 
-The env vars are operator infrastructure, not committed config — they don't enter the attestation hash chain, and two operators reviewing the same diff can pick different budgets without merge-conflicting over preference. Per-reviewer overrides committed to `.stamp/config.yml` are not yet supported (see [#26](https://github.com/OpenThinkAi/stamp-cli/issues/26)).
-
-If the cap fires but the SDK message stream isn't recoverable for diagnosis, a turn-trace persistence feature is tracked alongside issue #26.
+`stamp prune --older-than <duration>` walks both `failed-parses/` and `failed-runs/`, so the spool doesn't grow unbounded on noisy reviewers.
 
 ---
 

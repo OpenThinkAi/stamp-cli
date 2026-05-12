@@ -134,6 +134,25 @@ export interface ReviewerDef {
    * gate.
    */
   enforce_reads_on_dotstamp?: boolean;
+  /**
+   * Per-reviewer cap on model/tool round-trips for this reviewer's
+   * subprocess. Overrides the global `STAMP_REVIEWER_MAX_TURNS` env var
+   * (default 8) when set. Use when one reviewer legitimately needs
+   * headroom (e.g. heavy external lookup tools like a Linear MCP) but
+   * raising the global budget would over-budget reviewers that don't.
+   *
+   * Must be a positive integer. Sourced from the merge-base tree along
+   * with the rest of `.stamp/config.yml`, so a feature branch cannot
+   * unilaterally widen its own review budget — changes go through the
+   * reviewer gate like any other policy edit.
+   */
+  max_turns?: number;
+  /**
+   * Per-reviewer wall-clock budget in milliseconds. Overrides the global
+   * `STAMP_REVIEWER_TIMEOUT_MS` env var (default 300000) when set. Same
+   * shape, rationale, and merge-base-tree sourcing as `max_turns`.
+   */
+  timeout_ms?: number;
 }
 
 export interface McpServerDef {
@@ -247,6 +266,15 @@ function validateConfig(input: unknown): StampConfig {
       enforce_reads_on_dotstamp = d.enforce_reads_on_dotstamp;
     }
 
+    const max_turns = parsePositiveInt(
+      d.max_turns,
+      `config.reviewers.${name}.max_turns`,
+    );
+    const timeout_ms = parsePositiveInt(
+      d.timeout_ms,
+      `config.reviewers.${name}.timeout_ms`,
+    );
+
     reviewers[name] = {
       prompt: d.prompt,
       ...(tools ? { tools } : {}),
@@ -254,10 +282,22 @@ function validateConfig(input: unknown): StampConfig {
       ...(enforce_reads_on_dotstamp !== undefined
         ? { enforce_reads_on_dotstamp }
         : {}),
+      ...(max_turns !== undefined ? { max_turns } : {}),
+      ...(timeout_ms !== undefined ? { timeout_ms } : {}),
     };
   }
 
   return { branches, reviewers };
+}
+
+function parsePositiveInt(input: unknown, path: string): number | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== "number" || !Number.isFinite(input) || !Number.isInteger(input) || input <= 0) {
+    throw new Error(
+      `${path} must be a positive integer (got ${JSON.stringify(input)})`,
+    );
+  }
+  return input;
 }
 
 function parseChecks(input: unknown, branchName: string): CheckDef[] | undefined {

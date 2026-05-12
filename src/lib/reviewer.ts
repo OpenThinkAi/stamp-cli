@@ -633,12 +633,15 @@ export async function invokeReviewer(params: {
   // count (a misbehaving prompt with WebFetch + MCP can otherwise iterate
   // for as long as the SDK lets it, racking up API spend), and a wall-clock
   // timeout via AbortController guards against a stuck MCP subprocess
-  // holding the review open indefinitely. Both defaults are operator-
-  // overridable via env vars for the rare reviewer that legitimately needs
-  // headroom; without overrides the bounds are tight enough that a
+  // holding the review open indefinitely. Resolution order, narrowest first:
+  // per-reviewer field in `.stamp/config.yml` (committed policy, enters the
+  // attestation hash chain), then the operator env override (per-shell, not
+  // committed), then the built-in default. Defaults are tight enough that a
   // pathological run gives up in single-digit minutes.
-  const maxTurns = parseIntEnv("STAMP_REVIEWER_MAX_TURNS", 8);
-  const timeoutMs = parseIntEnv("STAMP_REVIEWER_TIMEOUT_MS", 5 * 60 * 1000);
+  const maxTurns =
+    def.max_turns ?? parseIntEnv("STAMP_REVIEWER_MAX_TURNS", 8);
+  const timeoutMs =
+    def.timeout_ms ?? parseIntEnv("STAMP_REVIEWER_TIMEOUT_MS", 5 * 60 * 1000);
   // Per-reviewer model selection from ~/.stamp/config.yml. null falls
   // through to the agent SDK's own default — preserves prior behaviour
   // for operators who haven't yet upgraded to a stamp-cli that knows
@@ -648,9 +651,14 @@ export async function invokeReviewer(params: {
   const modelOverride = resolveReviewerModel(params.reviewer);
   const abortController = new AbortController();
   const timeoutHandle = setTimeout(() => {
+    // Bare reason — formatAbortMessage assembles the full remediation
+    // string with both knobs (env + per-reviewer config field) and the
+    // trace path. Keeping the raw reason short avoids the double-hint
+    // shape that 1.3.1 had when the abort string already mentioned the
+    // env var and the formatter appended more text after it.
     abortController.abort(
       new Error(
-        `reviewer "${params.reviewer}" exceeded ${timeoutMs}ms wall-clock budget — raise STAMP_REVIEWER_TIMEOUT_MS to extend it`,
+        `reviewer "${params.reviewer}" exceeded ${timeoutMs}ms wall-clock budget`,
       ),
     );
   }, timeoutMs);
@@ -755,7 +763,14 @@ export async function invokeReviewer(params: {
       if (msg.subtype === "success") {
         finalText = msg.result;
       } else {
-        errorMessage = `reviewer "${params.reviewer}" run failed (subtype=${msg.subtype})`;
+        errorMessage = formatRunFailureMessage({
+          reviewer: params.reviewer,
+          subtype: msg.subtype,
+          repoRoot: params.repoRoot,
+          toolCalls,
+          maxTurns,
+          timeoutMs,
+        });
       }
       break;
     }
@@ -769,7 +784,16 @@ export async function invokeReviewer(params: {
         abortController.signal.reason instanceof Error
           ? abortController.signal.reason.message
           : String(abortController.signal.reason ?? "aborted");
-      throw new Error(reason);
+      throw new Error(
+        formatAbortMessage({
+          reviewer: params.reviewer,
+          reason,
+          repoRoot: params.repoRoot,
+          toolCalls,
+          maxTurns,
+          timeoutMs,
+        }),
+      );
     }
     throw err;
   } finally {
@@ -1211,6 +1235,125 @@ function writeFailedParseSpool(
   chmodSync(filepath, 0o600);
   const lineCount = text === "" ? 0 : text.split("\n").length;
   return { path: filepath, lineCount };
+}
+
+/**
+ * Persist a structured turn trace when a reviewer subprocess fails (cap
+ * hit, abort, or any non-success SDK result subtype). The trace contains
+ * the sequence of tool calls (name + already-hashed input — never the raw
+ * input) the reviewer made before failure, alongside the budget context.
+ * That's enough to distinguish "the prompt was looping on the same lookup"
+ * from "the diff legitimately needed more turns" without surfacing any
+ * model prose (which may quote diff content). Same conventions as
+ * writeFailedParseSpool: 0700 dir, 0600 file, exclusive create.
+ */
+function writeFailedRunSpool(args: {
+  repoRoot: string;
+  reviewer: string;
+  failure: string;
+  toolCalls: ToolCall[];
+  maxTurns: number;
+  timeoutMs: number;
+}): string {
+  const dir = path.join(gitCommonDir(args.repoRoot), "stamp", "failed-runs");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const slug = sanitizeReviewerSlug(args.reviewer);
+  const filename = `${Date.now()}-${slug}.log`;
+  const filepath = path.join(dir, filename);
+  const payload = {
+    reviewer: args.reviewer,
+    failure: args.failure,
+    max_turns: args.maxTurns,
+    timeout_ms: args.timeoutMs,
+    tool_call_count: args.toolCalls.length,
+    tool_calls: args.toolCalls,
+    captured_at: new Date().toISOString(),
+  };
+  writeFileSync(filepath, JSON.stringify(payload, null, 2) + "\n", {
+    flag: "wx",
+    mode: 0o600,
+  });
+  chmodSync(filepath, 0o600);
+  return filepath;
+}
+
+function formatRunFailureMessage(args: {
+  reviewer: string;
+  subtype: string;
+  repoRoot: string;
+  toolCalls: ToolCall[];
+  maxTurns: number;
+  timeoutMs: number;
+}): string {
+  const spool = trySpool({
+    repoRoot: args.repoRoot,
+    reviewer: args.reviewer,
+    failure: `subtype=${args.subtype}`,
+    toolCalls: args.toolCalls,
+    maxTurns: args.maxTurns,
+    timeoutMs: args.timeoutMs,
+  });
+  const tracePart = formatTracePart(spool, args.toolCalls.length);
+  const hintPart =
+    args.subtype === "error_max_turns"
+      ? ` — raise STAMP_REVIEWER_MAX_TURNS (currently ${args.maxTurns}) or set reviewers.${args.reviewer}.max_turns in .stamp/config.yml to extend it`
+      : "";
+  return `reviewer "${args.reviewer}" run failed (subtype=${args.subtype})${tracePart}${hintPart}`;
+}
+
+function formatAbortMessage(args: {
+  reviewer: string;
+  reason: string;
+  repoRoot: string;
+  toolCalls: ToolCall[];
+  maxTurns: number;
+  timeoutMs: number;
+}): string {
+  const spool = trySpool({
+    repoRoot: args.repoRoot,
+    reviewer: args.reviewer,
+    failure: `abort: ${args.reason}`,
+    toolCalls: args.toolCalls,
+    maxTurns: args.maxTurns,
+    timeoutMs: args.timeoutMs,
+  });
+  const tracePart = formatTracePart(spool, args.toolCalls.length);
+  // Symmetric with the max_turns path: name the env var, its current
+  // value, and the per-reviewer `.stamp/config.yml` field. An agent
+  // parsing this line should not need to consult the README to learn
+  // the per-reviewer knob exists.
+  const hintPart = ` — raise STAMP_REVIEWER_TIMEOUT_MS (currently ${args.timeoutMs}ms) or set reviewers.${args.reviewer}.timeout_ms in .stamp/config.yml to extend it`;
+  return `${args.reason}${tracePart}${hintPart}`;
+}
+
+/**
+ * Write the failed-run spool, returning either the path or `null` if the
+ * write itself fails. The caller's primary obligation is to surface the
+ * original failure (cap hit / abort); a secondary spool-write failure
+ * (disk full, exclusive-create collision on a same-ms double failure,
+ * EPERM on a hardened parent) must NOT replace it. Falling back to a
+ * trace-less message preserves the root cause while still being honest
+ * about the missing trace.
+ */
+function trySpool(args: {
+  repoRoot: string;
+  reviewer: string;
+  failure: string;
+  toolCalls: ToolCall[];
+  maxTurns: number;
+  timeoutMs: number;
+}): string | null {
+  try {
+    return writeFailedRunSpool(args);
+  } catch {
+    return null;
+  }
+}
+
+function formatTracePart(spool: string | null, toolCallCount: number): string {
+  if (spool === null) return "";
+  return ` — turn trace at ${spool} (${toolCallCount} tool call${toolCallCount === 1 ? "" : "s"} captured)`;
 }
 
 /**
