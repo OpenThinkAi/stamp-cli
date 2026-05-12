@@ -24,6 +24,7 @@ import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "no
 import { dirname } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import { userServerConfigPath } from "../lib/paths.js";
+import { computePerRepoKeyPath } from "../lib/perRepoKey.js";
 import {
   loadServerConfig,
   parseServerFlag,
@@ -199,13 +200,20 @@ export function runServerPubkey(opts: ServerPubkeyCliOptions): void {
   const server = resolveServer(opts.server);
   let mirror: { owner: string; repo: string } | undefined;
   if (opts.repo) {
-    const slashIdx = opts.repo.indexOf("/");
-    const last = opts.repo.lastIndexOf("/");
-    if (slashIdx <= 0 || slashIdx !== last || slashIdx === opts.repo.length - 1) {
+    // Reuse the canonical spec validator from perRepoKey rather than
+    // re-implementing a looser subset here — single source of truth for
+    // the shape contract, and the operator gets the same charset/`..`/
+    // leading-`-` rejection messages they'd get from any other code
+    // path. Re-throwing as UsageError surfaces it at the CLI exit-code
+    // layer rather than as an internal error.
+    try {
+      computePerRepoKeyPath(opts.repo);
+    } catch (err) {
       throw new UsageError(
-        `--repo must be exactly <owner>/<repo> (got "${opts.repo}")`,
+        `--repo ${err instanceof Error ? err.message.replace(/^computePerRepoKeyPath:\s*/, "") : String(err)}`,
       );
     }
+    const slashIdx = opts.repo.indexOf("/");
     mirror = {
       owner: opts.repo.slice(0, slashIdx),
       repo: opts.repo.slice(slashIdx + 1),
