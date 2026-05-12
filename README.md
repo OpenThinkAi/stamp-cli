@@ -292,6 +292,33 @@ models pinned, each operator records their own verdict in their own
 state.db (same as today's reviewer-prompt model). Stamp does not assume
 verdicts are model-portable.
 
+### Reviewer execution budgets
+
+Each reviewer subprocess runs under two bounds, set on the operator's
+machine via env vars (they are operator infrastructure, not committed
+policy — different operators on the same repo can pick different values):
+
+| Env var | Default | What it caps |
+|---|---|---|
+| `STAMP_REVIEWER_MAX_TURNS` | `8` | Model/tool round-trips per reviewer call. Hitting it surfaces as `reviewer "<name>" run failed (subtype=error_max_turns)`. |
+| `STAMP_REVIEWER_TIMEOUT_MS` | `300000` (5 min) | Wall-clock budget per reviewer. Hitting it surfaces as `reviewer "<name>" exceeded <N>ms wall-clock budget — raise STAMP_REVIEWER_TIMEOUT_MS to extend it`. |
+
+The defaults are tight enough that a pathological reviewer gives up in
+single-digit minutes rather than racking up Anthropic spend silently.
+Raise them when a reviewer with legitimately heavy lookup tools (Linear
+MCP, multi-file `Read`, ticket reconciliation) repeatedly trips the cap
+on a non-trivial diff. Example:
+
+```sh
+STAMP_REVIEWER_MAX_TURNS=20 STAMP_REVIEWER_TIMEOUT_MS=600000 \
+  stamp review --diff main..HEAD
+```
+
+If a reviewer trips the cap consistently on small diffs too, the prompt
+is probably looping rather than working — diagnose before raising the
+budget. See [`docs/troubleshooting.md`](./docs/troubleshooting.md) for
+the runbook.
+
 ## Deployment shapes
 
 Three ways to run stamp-cli in a real setting, trading setup cost for

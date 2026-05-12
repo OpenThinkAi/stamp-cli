@@ -121,3 +121,24 @@ Some behaviors are intentional trade-offs, not vulnerabilities:
 - **The signing key holder can produce valid signed merges for arbitrary
   content.** Non-repudiation, not authorization — inherent to local-first
   signing. Documented in the README security-model section.
+
+## Operator-tunable safety bounds
+
+The reviewer subprocess runs under two bounds that are operator-tunable
+on the shell that calls `stamp review` (not committed to the repo): a
+turn cap and a wall-clock timeout. Defaults are deliberately tight so a
+misbehaving reviewer prompt with `WebFetch` + MCP can't iterate
+indefinitely against the operator's Anthropic account. Both are listed
+here because they are security-relevant defenses, not just performance
+knobs — raising them widens the resource budget a malicious reviewer
+prompt can consume per invocation.
+
+| Env var | Default | Security role |
+|---|---|---|
+| `STAMP_REVIEWER_MAX_TURNS` | `8` | Caps model/tool round-trips so a looping prompt gives up rather than racking up spend. Also referenced as a cluster-B mitigation in the May 2026 audit. |
+| `STAMP_REVIEWER_TIMEOUT_MS` | `300000` | Wall-clock guard against a stuck MCP subprocess holding the review open indefinitely (AbortController-driven). |
+| `STAMP_REVIEW_DIFF_CAP_BYTES` | `204800` | Caps per-reviewer diff size (each required reviewer gets the full diff, so an oversized review is expensive at scale). |
+
+The README's "Reviewer execution budgets" section and
+[`docs/troubleshooting.md`](./docs/troubleshooting.md) cover when and
+how to raise them.
