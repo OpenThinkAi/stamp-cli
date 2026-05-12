@@ -119,10 +119,41 @@ ssh-keygen -t ed25519 -N "" \
   -C "stamp-mirror:${SPEC}@${HOSTNAME_VAL}" \
   -q
 
-# Match the legacy shared-key posture: private key 0640 root:git (group
-# read so the post-receive hook can use it; not writable from any non-
-# root surface so a future git-shell escape can't substitute the key);
-# public key 0644 (operator-readable for sanity-checks).
-chown root:git "$KEY_PATH" "$KEY_PATH.pub"
-chmod 0640 "$KEY_PATH"
+# Ownership / mode for the generated keypair.
+#
+# Private key: 0600 git:git.
+#
+# Why git:git instead of the root:git posture the legacy github_ed25519
+# uses: OpenSSH 9.x's ssh-client strict-perms check rejects any private
+# key file whose mode has group or other bits set, regardless of who
+# owns it. The legacy approach (root:git 0640 — root-owned, group-
+# readable so the unprivileged git user can load it) trips the strict
+# check and gets ignored at push time ("WARNING: UNPROTECTED PRIVATE
+# KEY FILE!"). The standard SSH posture is owner-only readable, so we
+# adopt that: file is owned by the git user (the process that runs
+# post-receive and invokes ssh) at mode 0600.
+#
+# What we lose: under the previous root:git 0640 posture, a git-shell
+# escape couldn't WRITE-overwrite the key file (root owned, git only
+# had read access via the group bit). With git:git 0600, an escapee
+# with git's privileges can read AND write the file — so they can
+# substitute a private key whose public half they hold.
+#
+# Why the lost defense is acceptable: substituting the local key on
+# the server doesn't actually let the attacker push to the GitHub
+# mirror, because the GitHub-side bypass actor is bound to the *public
+# key* that's registered on the mirror repo as a deploy key. To
+# exploit, the attacker would have to ALSO register their public key
+# on GitHub — which requires repo-admin auth they don't get from a
+# git-shell escape. The remaining surface is "if the attacker can
+# both substitute the server key AND get the new public half
+# registered as a deploy key (e.g. by social-engineering the
+# operator into running `stamp provision --migrate-bypass`), they
+# inherit bypass." That's a multi-step chain rather than the
+# single-step substitution the old posture defended against; bounded
+# exploit, not a free one.
+#
+# Public key: 0644 git:git (operator-readable for sanity checks).
+chown git:git "$KEY_PATH" "$KEY_PATH.pub"
+chmod 0600 "$KEY_PATH"
 chmod 0644 "$KEY_PATH.pub"

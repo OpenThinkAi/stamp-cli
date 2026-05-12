@@ -72,6 +72,18 @@ The fix is to re-run `stamp provision --migrate-bypass` against each affected re
 
 (The legacy shared `github_ed25519` key persists across restarts because the entrypoint script re-creates it if missing — but per-repo files have no equivalent boot-time regeneration. A future change may add a per-mirror.yml scan in the entrypoint to fix this; the current model relies on the migration tool's recovery path.)
 
+### Key-file ownership and the lost "git-shell escape can't substitute" defense
+
+The stamp-server's per-repo deploy-key files (and the legacy shared key) are owned `git:git` mode `0600`. This is the standard SSH posture — the file is readable only by the user running the SSH client, and OpenSSH's strict-perms check accepts it.
+
+An earlier design used `root:git 0640` (root-owned, group-readable so the unprivileged git user could load the key without write access). That posture was meant to prevent a git-shell escape from substituting a key whose public half the attacker holds. It was abandoned because OpenSSH 9.x's client-side strict-perms check rejects any private key with group or other read bits — the legacy posture broke the SSH transport with "WARNING: UNPROTECTED PRIVATE KEY FILE!".
+
+What this means for the threat model:
+
+- A git-shell escape on the stamp server can now read AND overwrite the per-repo key file content — substituting a private key whose public half the attacker holds.
+- But to actually exploit the substitution, the attacker has to ALSO register their public key on the GitHub mirror's deploy-keys list, which requires repo-admin auth they don't get from a server-side escape.
+- The remaining exposure: if the attacker can also socially-engineer the operator into running `stamp provision --migrate-bypass` after substituting the local key, the migration's "register the server's current pubkey on GitHub" step would register the attacker's key as the new `stamp-mirror` deploy key. Bounded exploit chain (multi-step + requires operator action) rather than the single-step substitution the old posture defended against.
+
 ## Apply via the GitHub UI
 
 If you prefer clicking, or are setting up a one-off without the stamp CLI:
@@ -181,3 +193,25 @@ git push git@github.com:<owner>/<repo>.git stamp-main:refs/heads/main
 ### "Deploy keys are disabled for this repository"
 
 The org-level "Allow deploy keys" toggle is off. Flip it under `Settings → Code, planning, and automation → Repository policies → Deploy keys` at the **org** level (not the repo level), or have an org admin do it. After flipping, re-run the registration step.
+
+### `WARNING: UNPROTECTED PRIVATE KEY FILE! Permissions 0640 for '/srv/git/.ssh-client-keys/...' are too open`
+
+A per-repo key file on the stamp server has too-permissive file permissions and OpenSSH's strict-perms check refused to load it. The server's post-receive output looks like:
+
+```
+remote: mirror: WARNING: UNPROTECTED PRIVATE KEY FILE!
+remote: mirror: Permissions 0640 for '/srv/git/.ssh-client-keys/<owner>_<repo>_ed25519' are too open.
+remote: mirror: This private key will be ignored.
+remote: mirror: Load key "/srv/git/.ssh-client-keys/...": bad permissions
+remote: mirror: git@github.com: Permission denied (publickey).
+```
+
+Cause: an earlier stamp-cli helper version generated per-repo key files at `0640 root:git`, which the modern entrypoint script auto-repairs on boot. If you see this, your server image predates the perms-repair entrypoint block. Two ways to fix:
+
+1. **Redeploy the stamp server image** against a recent build of this repo (anything past the perms-repair commit). The entrypoint's boot-scan iterates `/srv/git/.ssh-client-keys/*_ed25519` and reapplies `chown git:git` + `chmod 0600` to each, fixing the existing broken files in place. Then any subsequent stamp push uses the per-repo SSH path successfully.
+2. **One-shot manual fix** (if you can't redeploy right now): shell into the server (`railway shell` or equivalent) and run:
+   ```sh
+   chmod 0600 /srv/git/.ssh-client-keys/*_ed25519
+   chown git:git /srv/git/.ssh-client-keys/*_ed25519
+   ```
+   This is what the entrypoint boot-scan does. Has the same effect, just without redeploying.
