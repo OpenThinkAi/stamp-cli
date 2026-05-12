@@ -179,12 +179,6 @@ export function readMirrorConfigFromHeadBranch(): MirrorConfig | null {
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
 /**
- * Push a single ref (branch or tag) to the configured GitHub mirror, then
- * publish a `stamp/verified` commit status to GitHub for each commit in
- * the pushed range. `label` is operator-friendly text for log lines
- * ("branch main", "tag v1.0.0").
- */
-/**
  * Well-known path of the deploy-key private file on the stamp server.
  * Set up by `server/entrypoint.sh` as part of the SSH-client config. Its
  * presence is the signal that the operator has provisioned a deploy-key
@@ -198,6 +192,12 @@ const ZERO_SHA = "0000000000000000000000000000000000000000";
  */
 const SSH_DEPLOY_KEY_PATH = "/srv/git/.ssh-client-keys/github_ed25519";
 
+/**
+ * Push a single ref (branch or tag) to the configured GitHub mirror, then
+ * publish a `stamp/verified` commit status to GitHub for each commit in
+ * the pushed range. `label` is operator-friendly text for log lines
+ * ("branch main", "tag v1.0.0").
+ */
 async function mirrorRef(
   label: string,
   refname: string,
