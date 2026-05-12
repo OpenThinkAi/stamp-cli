@@ -58,7 +58,7 @@ FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d650
 # tar at /usr/bin/tar ahead of busybox's applet, so plain `tar` invocations
 # in setup-repo.sh resolve to GNU. Combined with the pre-extraction
 # entry-name check in setup-repo.sh, this is defense in depth.
-RUN apk add --no-cache git openssh-server bash nodejs netcat-openbsd tar \
+RUN apk add --no-cache git openssh-server openssh-client bash nodejs netcat-openbsd tar \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
  && mkdir -p /srv/git /home/git/.ssh /home/git/git-shell-commands /etc/stamp \
@@ -122,6 +122,23 @@ RUN { \
     } > /etc/ssh/sshd_config.new \
  && mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config \
  && chmod 0644 /etc/ssh/sshd_config
+
+# Bake GitHub.com's SSH host keys into the system-wide known_hosts so the
+# post-receive mirror-push leg can verify the destination without TOFU when
+# pushing as a deploy-key (SSH transport). Without this, the first SSH push
+# from a fresh container would either prompt (hangs the hook) or, with
+# StrictHostKeyChecking=accept-new, accept whatever responds on github.com:22
+# — turning a DNS or routing compromise into a key-disclosure path.
+#
+# Three key types pinned (ed25519, ecdsa-sha2-nistp256, rsa) covering every
+# advertised GitHub host key. The ed25519 key has been stable since 2022;
+# the RSA key was rotated in March 2023 after a key disclosure. A future
+# rotation requires rebuilding this image with the new key value — that's
+# a manual operator step, but rotation is rare (years between events) and
+# the alternative (looser StrictHostKeyChecking) would silently accept an
+# attacker-controlled host key during the rotation window.
+COPY server/github-known-hosts /etc/ssh/ssh_known_hosts
+RUN chmod 0644 /etc/ssh/ssh_known_hosts
 
 COPY --from=builder /build/dist/hooks/pre-receive.cjs /etc/stamp/pre-receive.cjs
 COPY --from=builder /build/dist/hooks/post-receive.cjs /etc/stamp/post-receive.cjs

@@ -69,6 +69,64 @@ if [ -n "$AUTHORIZED_KEYS" ]; then
   chown git:git /home/git/.ssh/authorized_keys
 fi
 
+# SSH client setup for the post-receive mirror push.
+#
+# The post-receive hook can push to the GitHub mirror via either:
+#   (a) HTTPS with $GITHUB_BOT_TOKEN as an Authorization: Basic header
+#       (the legacy/default path; identity is the PAT's owning user), or
+#   (b) SSH using a deploy key registered on the GitHub repo
+#       (the locked-down path; identity is the deploy key, which lets
+#        org-owned repos use DeployKey bypass on their Rulesets without
+#        needing a machine-user account or a GitHub App install).
+#
+# The selection is made per-push by post-receive.cjs based on whether
+# the deploy-key private file exists at SSH_CLIENT_KEY_PATH below. This
+# entrypoint sets up the SSH client config unconditionally — pointing
+# at the key path even before the key exists is harmless; ssh only
+# touches the file when an SSH push is actually attempted.
+#
+# Permissions model:
+#   - /srv/git/.ssh-client-keys/ — root-owned, mode 0750 root:git. The
+#     git user can READ files inside (needed by the post-receive hook,
+#     which runs as the git user) but cannot WRITE — defense in depth
+#     against a pusher who somehow escapes git-shell. Provisioning of
+#     the key is an explicit operator step (stamp CLI helper, lands in
+#     a follow-up change) that runs with root via the entrypoint, not
+#     in the git user's surface.
+#   - /home/git/.ssh/config — git-owned, mode 0644. Standard SSH client
+#     config location; sshd does not read this file for inbound auth,
+#     it's strictly for outbound git push from the hook.
+SSH_CLIENT_KEY_DIR=/srv/git/.ssh-client-keys
+SSH_CLIENT_KEY_PATH="$SSH_CLIENT_KEY_DIR/github_ed25519"
+mkdir -p "$SSH_CLIENT_KEY_DIR"
+chown root:git "$SSH_CLIENT_KEY_DIR"
+chmod 0750 "$SSH_CLIENT_KEY_DIR"
+
+cat > /home/git/.ssh/config <<EOF
+Host github.com
+  Hostname github.com
+  User git
+  IdentityFile $SSH_CLIENT_KEY_PATH
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile /etc/ssh/ssh_known_hosts
+EOF
+chown git:git /home/git/.ssh/config
+chmod 0644 /home/git/.ssh/config
+
+# Print the deploy-key public-key fingerprint at boot if the key exists,
+# mirroring the host-key fingerprint block above. Lets the operator
+# eyeball-confirm that the in-container key matches what's registered as
+# a deploy key on the GitHub repo without having to SSH in and read the
+# .pub file. If the key isn't installed yet, say so explicitly — silence
+# would look indistinguishable from a misconfiguration.
+if [ -f "$SSH_CLIENT_KEY_PATH.pub" ]; then
+  echo "GitHub mirror-push key (deploy-key bypass mode):" >&2
+  ssh-keygen -lf "$SSH_CLIENT_KEY_PATH.pub" 2>&1 | sed 's/^/  /' >&2
+else
+  echo "GitHub mirror-push key not installed at $SSH_CLIENT_KEY_PATH — mirror will fall back to HTTPS + GITHUB_BOT_TOKEN." >&2
+fi
+
 if [ -n "$OPERATOR_PUB_KEY" ]; then
   printf '%s\n' "$OPERATOR_PUB_KEY" > /etc/stamp/operator.pub
   # Root-owned, world-readable. The git user (which runs new-stamp-repo
