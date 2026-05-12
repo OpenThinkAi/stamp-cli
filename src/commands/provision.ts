@@ -856,7 +856,7 @@ function printMigrateSuccess(args: {
  * with actionable messages; the caller catches at the top level.
  */
 function readMirrorYmlGithubRepo(repoRoot: string): { owner: string; repo: string } {
-  const path = `${repoRoot}/.stamp/mirror.yml`;
+  const path = join(repoRoot, ".stamp", "mirror.yml");
   if (!existsSync(path)) {
     throw new Error(
       `${path} not found — --migrate-bypass operates on an already-server-gated repo, ` +
@@ -1064,10 +1064,13 @@ async function runMigrateBypass(
   // GitHub's current state right before PUT and returns `unchanged` if
   // there's nothing to do, so a caller-side pre-read would just
   // duplicate the round-trip without offering anything the helper
-  // doesn't. We pass the desired list computed from a SNAPSHOT-READ
-  // (via getRulesetBypassActors) once; the helper's internal pre-check
-  // protects against the TOCTOU race in the gap between snapshot and
-  // PUT.
+  // doesn't. The pre-read here is purely so we can DERIVE the desired
+  // list from the current state (preserving any unmanaged actor
+  // types); the helper's internal check is the idempotency gate, not
+  // a TOCTOU guarantee — a concurrent admin edit between the helper's
+  // own pre-read and PUT would still be overwritten by our derived
+  // list, but the worst case is overwriting with the operator's
+  // intended state, which is what they asked for.
   console.log(`Reading current bypass_actors on ruleset ${rulesetId}`);
   const current = getRulesetBypassActors(mirror.owner, mirror.repo, rulesetId);
   if (current === null) {
@@ -1150,16 +1153,18 @@ function printMigrateBypassPlan(args: {
           : `; preserve OrganizationAdmin`),
     ),
   );
+  console.log(bar);
   if (args.opts.removeOrgadmin) {
+    // Emit as a standalone `warning:` advisory rather than a row in
+    // the plan table — operator-actionable cautions stay one shape
+    // across the codebase (matches the warning-prefix convention used
+    // in src/commands/server.ts and elsewhere) and don't compete with
+    // the key:value formatting of plan rows.
     console.log(
-      fmt(
-        "warning",
-        `--remove-orgadmin strips the OrgAdmin bypass before any push-verification step runs. ` +
-          `Verify the DeployKey transport works (one stamp push) before running this.`,
-      ),
+      `warning: --remove-orgadmin strips the OrganizationAdmin bypass before any push-verification` +
+        ` step runs. Verify the DeployKey transport works (one stamp push) before running this.`,
     );
   }
-  console.log(bar);
 }
 
 function printMigrateBypassSuccess(args: {
@@ -1177,7 +1182,16 @@ function printMigrateBypassSuccess(args: {
 }): void {
   const bar = "─".repeat(72);
   console.log(`\n${bar}`);
-  console.log(`✓ bypass migrated`);
+  // Branch the headline so the success glyph doesn't overclaim. The
+  // no-ruleset path didn't actually mutate any bypass list — only the
+  // deploy-key registration ran — so an agent scanning the headline
+  // alone shouldn't conclude the bypass shape was migrated when it
+  // wasn't. (Product reviewer feedback.)
+  console.log(
+    args.rulesetUpdated
+      ? `✓ bypass migrated`
+      : `✓ deploy key registered (no ruleset to migrate)`,
+  );
   console.log(bar);
   console.log(fmt("mirror", `${args.mirror.owner}/${args.mirror.repo}`));
   if (args.rulesetUpdated) {

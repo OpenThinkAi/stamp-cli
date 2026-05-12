@@ -641,14 +641,19 @@ function normalizeBypassActor(e: RulesetBypassActorRaw): string {
  * OrganizationAdmin in the same pass.
  *
  * Rules:
- *   - Preserve actors of any other type than `OrganizationAdmin` and
+ *   - Preserve actors of any type other than `OrganizationAdmin` and
  *     `DeployKey` (e.g. a stray `User` entry from a pre-migration state).
  *     Defensive default — we don't strip actors we didn't add.
- *   - Add a `DeployKey` entry if not present. The id is serialized as
- *     the integer the caller passes in; GitHub's read-back normalizes
- *     this to `null` per the round-trip quirk, which the equality
- *     comparison in `bypassActorListsEqual` handles.
- *   - Drop OrganizationAdmin only when `removeOrgadmin` is set.
+ *   - `DeployKey` is RECONCILED to the freshly-registered key, not
+ *     preserved. Any existing `DeployKey` entries (including stale
+ *     ones whose `actor_id` references a key that no longer exists on
+ *     GitHub — e.g. after a server-side key rotation deleted the old
+ *     key) are dropped during the loop, then exactly one new
+ *     `DeployKey(deployKeyId)` is appended at the end. This keeps the
+ *     ruleset's `DeployKey` actor in sync with the per-repo key stamp
+ *     actually manages; preserving a stale id would silently break
+ *     bypass enforcement (the referenced key no longer exists).
+ *   - Drop `OrganizationAdmin` only when `removeOrgadmin` is set.
  */
 export function computeDesiredBypassActors(
   current: RulesetBypassActorRaw[],
@@ -656,22 +661,19 @@ export function computeDesiredBypassActors(
   flags: { removeOrgadmin: boolean },
 ): RulesetBypassActorRaw[] {
   const out: RulesetBypassActorRaw[] = [];
-  let sawDeployKey = false;
   for (const a of current) {
     if (a.actor_type === "OrganizationAdmin" && flags.removeOrgadmin) {
-      continue; // dropped
+      continue; // dropped by operator opt-in
     }
     if (a.actor_type === "DeployKey") {
-      sawDeployKey = true;
+      continue; // reconciled below
     }
     out.push(a);
   }
-  if (!sawDeployKey) {
-    out.push({
-      actor_id: deployKeyId,
-      actor_type: "DeployKey",
-      bypass_mode: "always",
-    });
-  }
+  out.push({
+    actor_id: deployKeyId,
+    actor_type: "DeployKey",
+    bypass_mode: "always",
+  });
   return out;
 }

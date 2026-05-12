@@ -362,6 +362,33 @@ describe("computeDesiredBypassActors", () => {
     );
   });
 
+  it("reconciles a stale DeployKey actor_id to the freshly-registered key id", () => {
+    // The scenario this guards: ruleset already references a DeployKey
+    // with actor_id OLD_ID from a prior migration. The operator rotates
+    // the server-side key (deleteDeployKey + register) → NEW_ID. The
+    // ruleset's actor_id is now dangling. If computeDesiredBypassActors
+    // preserved the stale entry, replaceBypassActors would PUT back
+    // OLD_ID and the bypass would reference a deleted key — silently
+    // breaking the next stamp push's enforcement. The reconciliation
+    // contract is "DeployKey entries are dropped during the loop and
+    // exactly one new DeployKey(deployKeyId) is appended."
+    const staleDeployKey: RulesetBypassActorRaw = {
+      actor_id: 999,
+      actor_type: "DeployKey",
+      bypass_mode: "always",
+    };
+    const out = computeDesiredBypassActors([ORG_ADMIN, staleDeployKey], 151199507, {
+      removeOrgadmin: false,
+    });
+    const deployEntries = out.filter((a) => a.actor_type === "DeployKey");
+    assert.equal(deployEntries.length, 1, "exactly one DeployKey entry");
+    assert.equal(
+      deployEntries[0]!.actor_id,
+      151199507,
+      "DeployKey entry references the freshly-registered key, not the stale one",
+    );
+  });
+
   it("drops OrganizationAdmin when removeOrgadmin is true", () => {
     const out = computeDesiredBypassActors([ORG_ADMIN], 151199507, {
       removeOrgadmin: true,
