@@ -229,7 +229,7 @@ function printPlan(args: {
     console.log(
       fmt(
         "bypass actor",
-        `org repo → stamp-server deploy key "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" (auto-registered); ` +
+        `org repo → stamp-server deploy key "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" (auto-registered or reused); ` +
           `personal repo → your gh-authed user`,
       ),
     );
@@ -342,10 +342,14 @@ function applyMirrorRuleset(
 
   const ownerType = lookupRepoOwnerType(mirror.owner, mirror.repo);
   if (ownerType === null) {
+    // All "auto-apply skipped" lines in this function use the `warning:`
+    // prefix — operator-actionable follow-up signals stay one shape so
+    // agents grepping for failure conditions don't have to match `note:`
+    // AND `warning:` AND no-prefix variants.
     console.log(
-      `note: GitHub Ruleset auto-apply skipped — couldn't determine whether ${mirror.owner}/${mirror.repo} is a personal or org repo.`,
+      `warning: GitHub Ruleset auto-apply skipped — couldn't determine whether ${mirror.owner}/${mirror.repo} is a personal or org repo.`,
     );
-    console.log(`      For manual setup, see docs/github-ruleset-setup.md.`);
+    console.log(`         For manual setup, see docs/github-ruleset-setup.md.`);
     return;
   }
 
@@ -393,9 +397,9 @@ function applyMirrorRuleset(
     const user = lookupAuthenticatedUserId();
     if (!user) {
       console.log(
-        `note: GitHub Ruleset auto-apply skipped — couldn't look up the gh-authenticated user.`,
+        `warning: GitHub Ruleset auto-apply skipped — couldn't look up the gh-authenticated user.`,
       );
-      console.log(`      Try \`gh auth status\` and re-apply manually via docs/github-ruleset-setup.md.`);
+      console.log(`         Try \`gh auth status\` and re-apply manually via docs/github-ruleset-setup.md.`);
       return;
     }
     actor = { type: "User", id: user.id };
