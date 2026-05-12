@@ -3,13 +3,21 @@
 # stamp-ensure-repo-key — generate a per-repo deploy-key keypair on the
 # stamp server if one doesn't already exist for the named GitHub repo.
 #
-# Invoked via sudo from the unprivileged pubkey-wrapper context (git user
-# under git-shell) so the resulting key files can be created as root:git
-# mode 0640 — preserving the legacy "git-shell escape cannot replace the
-# deploy key" invariant. The wrapper drops into this helper only when the
-# target file is missing; existing files are NEVER overwritten by this
-# helper, so a post-escape attacker can't substitute a key whose private
-# half they hold.
+# Invoked via sudo from the unprivileged pubkey-wrapper context (the git
+# user under git-shell). Sudo is required because the keys directory
+# /srv/git/.ssh-client-keys/ is `root:git 0750` — the git user can read
+# and traverse it but cannot CREATE new entries. The pubkey wrapper
+# (stamp-server-pubkey) therefore drops into this root-owned helper to
+# do the actual file creation.
+#
+# Refuse-to-overwrite is the load-bearing security property of this
+# helper now that file mode no longer carries it (see the chmod comment
+# block far below). Existing files are NEVER overwritten — the `-f`
+# check + exit 0 short-circuit is the ONLY thing that prevents a
+# post-escape attacker from using this sudo path to regenerate a
+# legitimate repo's key with new material they don't control. If you
+# ever add a "rotate" or "overwrite" mode, you reopen the substitution
+# surface that the previous root:git 0640 file posture used to close.
 #
 # Usage: stamp-ensure-repo-key <owner>/<repo>
 #
