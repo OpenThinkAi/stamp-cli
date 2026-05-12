@@ -24,7 +24,11 @@ import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "no
 import { dirname } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import { userServerConfigPath } from "../lib/paths.js";
-import { loadServerConfig, parseServerFlag } from "../lib/serverConfig.js";
+import {
+  loadServerConfig,
+  parseServerFlag,
+  type ServerConfig,
+} from "../lib/serverConfig.js";
 import { resolveServer, UsageError } from "./serverRepo.js";
 
 export interface ServerConfigOptions {
@@ -112,16 +116,26 @@ function unsetConfig(): void {
  * `stamp-server-pubkey` wrapper — single OpenSSH-format line, no
  * decoration. That makes it pipe-able directly into deploy-key
  * registration (`gh api -X POST /repos/:o/:r/keys --field key=@-`) and
- * keeps the eventual `stamp provision` integration point a thin wrap
- * around this command's stdout.
+ * lets `stamp provision` reuse fetchServerPubkey() to register the key
+ * itself.
  */
 export interface ServerPubkeyOptions {
   /** Override ~/.stamp/server.yml with `<host>:<port>`. */
   server?: string;
 }
 
-export function runServerPubkey(opts: ServerPubkeyOptions): void {
-  const server = resolveServer(opts.server);
+/**
+ * Programmatic counterpart to `stamp server pubkey`. Returns the
+ * server's mirror-push public-key line (no surrounding whitespace).
+ * Throws with an actionable message if the SSH call fails — most
+ * commonly because the server image predates the deploy-key feature
+ * and `stamp-server-pubkey` isn't on PATH there yet.
+ *
+ * The trim() is important: the on-the-wire output is "<line>\n" and
+ * `gh api --field key=...` would silently encode the trailing newline
+ * as part of the key body.
+ */
+export function fetchServerPubkey(server: ServerConfig): string {
   // `--` after `-p N` terminates ssh's option processing before the
   // destination — matches the pattern in serverRepo.ts wrappers (defense
   // against a malformed server.yml smuggling a flag-shaped host string).
@@ -138,14 +152,21 @@ export function runServerPubkey(opts: ServerPubkeyOptions): void {
   );
   if (result.status !== 0) {
     throw new Error(
-      `stamp server pubkey failed (exit ${result.status}). If you see ` +
+      `stamp server pubkey failed (exit ${result.status}) against ` +
+        `${server.user}@${server.host}:${server.port}. If you see ` +
         `"command not found", the server image predates the deploy-key ` +
         `feature — redeploy it first.`,
     );
   }
-  // stamp-server-pubkey prints the OpenSSH-format line followed by a
-  // newline; preserve it as-is on stdout so callers can pipe directly.
-  process.stdout.write(result.stdout);
+  return result.stdout.trim();
+}
+
+export function runServerPubkey(opts: ServerPubkeyOptions): void {
+  const server = resolveServer(opts.server);
+  const pubkey = fetchServerPubkey(server);
+  // Preserve the trailing newline on the CLI surface so the output is
+  // pipe-safe (`stamp server pubkey | tee ~/.ssh/stamp_mirror.pub`).
+  process.stdout.write(`${pubkey}\n`);
 }
 
 function writeConfig(opts: ServerConfigOptions): void {
