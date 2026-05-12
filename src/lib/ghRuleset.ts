@@ -275,3 +275,108 @@ export function applyStampRuleset(
     return { status: "created" };
   }
 }
+
+/**
+ * Find the numeric id of a deploy key on the given repo, matched by
+ * title. Used for idempotent deploy-key registration: stamp picks a
+ * stable title (e.g. "stamp-mirror") and re-uses any existing key
+ * rather than creating duplicates on re-runs.
+ *
+ * Returns the key's id, or null if no key with that title exists or the
+ * gh call fails. Caller decides whether absence vs. failure matters —
+ * the typical caller (registerDeployKey) treats them the same and falls
+ * through to POST.
+ */
+export function findDeployKey(
+  owner: string,
+  repo: string,
+  title: string,
+): number | null {
+  const r = spawnSync(
+    "gh",
+    [
+      "api",
+      `/repos/${owner}/${repo}/keys`,
+      "--jq",
+      // JSON.stringify produces a valid jq string literal (double-quoted,
+      // with backslash/quote escapes), so a title containing quotes or
+      // backslashes can't break the jq filter or smuggle a different
+      // selector.
+      `[.[] | select(.title == ${JSON.stringify(title)})][0].id // empty`,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  const trimmed = r.stdout.trim();
+  if (!trimmed) return null;
+  const id = Number(trimmed);
+  return Number.isFinite(id) ? id : null;
+}
+
+export interface RegisterDeployKeyResult {
+  /** "created" — newly POSTed; "exists" — already present, no change; "failed" — gh api error. */
+  status: "created" | "exists" | "failed";
+  /** When status === "failed", the error/stderr from gh. */
+  error?: string;
+  /** When status !== "failed", the (created or existing) deploy-key id. */
+  keyId?: number;
+}
+
+/**
+ * Register a write-enabled SSH deploy key on the given repo. Idempotent:
+ * if a deploy key with the same `title` already exists, returns "exists"
+ * without re-posting (operator may have customized the underlying key
+ * but kept the title; we don't clobber).
+ *
+ * `publicKey` must be a full OpenSSH-format public-key line (e.g.
+ * "ssh-ed25519 AAAA... stamp@<server>"). GitHub rejects malformed keys
+ * with HTTP 422; the rejection surfaces via `status: "failed"` and the
+ * `error` field carries gh's stderr.
+ *
+ * `read_only: false` is required: a deploy key referenced as a Ruleset
+ * `DeployKey` bypass actor has to be able to update protected branches,
+ * which the read-only flag forbids.
+ */
+export function registerDeployKey(
+  owner: string,
+  repo: string,
+  title: string,
+  publicKey: string,
+): RegisterDeployKeyResult {
+  const existing = findDeployKey(owner, repo, title);
+  if (existing !== null) {
+    return { status: "exists", keyId: existing };
+  }
+  const body = { title, key: publicKey, read_only: false };
+  const r = spawnSync(
+    "gh",
+    [
+      "api",
+      "-X",
+      "POST",
+      `/repos/${owner}/${repo}/keys`,
+      "--input",
+      "-",
+    ],
+    {
+      input: JSON.stringify(body),
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf8",
+    },
+  );
+  if (r.status !== 0) {
+    const stderr = (r.stderr ?? "").trim();
+    const stdout = (r.stdout ?? "").trim();
+    return {
+      status: "failed",
+      error: stderr || stdout || `gh api exited ${r.status}`,
+    };
+  }
+  try {
+    const created = JSON.parse(r.stdout) as { id?: number };
+    return { status: "created", keyId: created.id };
+  } catch {
+    // POST succeeded; just couldn't parse the response body. Treat as success.
+    return { status: "created" };
+  }
+}
