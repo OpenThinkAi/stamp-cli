@@ -90,19 +90,27 @@ export function lookupRepoOwnerType(
 
 /**
  * Bypass actor descriptor — the part of the Ruleset that says "this
- * principal is allowed past the rules." Two shapes for now:
+ * principal is allowed past the rules." Three shapes:
  *
  *   - { type: "User", id: <numeric> } — works on personal repos. The
  *     gh-authenticated user is the typical id.
  *   - { type: "OrganizationAdmin", id: 1 } — magic constant 1 means "any
  *     org admin." Works on org-owned repos; "User" doesn't.
+ *   - { type: "DeployKey", id: <numeric> } — a write-enabled SSH deploy
+ *     key registered on the repo. Survives the "no machine-user account,
+ *     no GitHub App approval" constraint common at locked-down orgs:
+ *     deploy keys are per-repo resources and don't touch org-level
+ *     third-party-application policy. The id is the numeric key id from
+ *     GET /repos/:o/:r/keys, NOT the user/app id.
  *
- * Future shapes (Integration / Team / DeployKey) can be added without
- * changing call sites.
+ * Future shapes (Integration / Team) can be added without changing call
+ * sites — buildRulesetPayload passes actor.type / actor.id through
+ * generically.
  */
 export type BypassActor =
   | { type: "User"; id: number }
-  | { type: "OrganizationAdmin"; id: 1 };
+  | { type: "OrganizationAdmin"; id: 1 }
+  | { type: "DeployKey"; id: number };
 
 /**
  * Parse a github.com origin URL into { owner, repo }. Two distinct shapes

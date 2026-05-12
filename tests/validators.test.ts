@@ -206,6 +206,19 @@ describe("buildRulesetPayload", () => {
     assert.equal(payload.bypass_actors[0]!.actor_id, 1);
   });
 
+  it("encodes a DeployKey actor verbatim", () => {
+    // DeployKey is the org-repo bypass that doesn't require a separate
+    // user account or App install approval — the load-bearing variant
+    // for locked-down work orgs. id is the numeric key id from
+    // GET /repos/:o/:r/keys.
+    const actor: BypassActor = { type: "DeployKey", id: 9876543 };
+    const payload = buildRulesetPayload(actor) as {
+      bypass_actors: Array<{ actor_id: number; actor_type: string }>;
+    };
+    assert.equal(payload.bypass_actors[0]!.actor_type, "DeployKey");
+    assert.equal(payload.bypass_actors[0]!.actor_id, 9876543);
+  });
+
   it("does NOT include required_linear_history rule (incompatible with --no-ff merges)", () => {
     const payload = buildRulesetPayload({ type: "User", id: 1 }) as {
       rules: Array<{ type: string }>;
