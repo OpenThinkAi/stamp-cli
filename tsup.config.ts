@@ -32,6 +32,8 @@ export default defineConfig([
       // .js files there as CommonJS and reject ESM import syntax.
       "server/authorized-keys": "src/server/authorized-keys.ts",
       "server/seed-users": "src/server/seed-users.ts",
+      "server/mint-invite": "src/server/mint-invite.ts",
+      "server/start-http-server": "src/server/start-http-server.ts",
     },
     format: ["cjs"],
     target: "node22",

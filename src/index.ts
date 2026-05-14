@@ -12,6 +12,11 @@ process.on("warning", (warn) => {
 import { Command } from "commander";
 import { runBootstrap } from "./commands/bootstrap.js";
 import { runInit } from "./commands/init.js";
+import {
+  runInvitesAccept,
+  runInvitesMint,
+  type InviteRole,
+} from "./commands/invites.js";
 import { runProvision } from "./commands/provision.js";
 import {
   runServerRepoDelete,
@@ -662,6 +667,61 @@ function wrap(fn: () => void): void {
     process.exit(1);
   }
 }
+
+const invites = program
+  .command("invites")
+  .description("mint and accept single-use invite tokens for teammate onboarding");
+
+invites
+  .command("mint <short-name>")
+  .description("mint an invite for a teammate (15-min TTL, admin/owner only)")
+  .option("--role <admin|member>", "role to grant on accept", "member")
+  .action((shortName: string, opts: { role: string }) => {
+    try {
+      if (opts.role !== "admin" && opts.role !== "member") {
+        throw new Error(
+          `--role must be 'admin' or 'member' (got ${JSON.stringify(opts.role)})`,
+        );
+      }
+      runInvitesMint({ shortName, role: opts.role as InviteRole });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+invites
+  .command("accept <share-url-or-token>")
+  .description("redeem an invite token; auto-detects local keys, prompts to confirm")
+  .option("--server <host:port>", "server endpoint when passing a bare token (no URL)")
+  .option("--ssh-pubkey <path>", "override SSH pubkey path (default ~/.ssh/id_ed25519.pub)")
+  .option("--stamp-pubkey <path>", "override stamp signing pubkey path (default ~/.stamp/keys/ed25519.pub)")
+  .option("--short-name <name>", "override the short_name (default derived from user@host)")
+  .option("--yes", "skip the confirmation prompt (required for non-TTY stdin)")
+  .action(
+    async (
+      urlOrToken: string,
+      opts: {
+        server?: string;
+        sshPubkey?: string;
+        stampPubkey?: string;
+        shortName?: string;
+        yes?: boolean;
+      },
+    ) => {
+      try {
+        await runInvitesAccept({
+          urlOrToken,
+          server: opts.server,
+          sshPubkeyPath: opts.sshPubkey,
+          stampPubkeyPath: opts.stampPubkey,
+          shortName: opts.shortName,
+          yes: opts.yes,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 
 const reviewers = program
   .command("reviewers")

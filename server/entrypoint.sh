@@ -71,10 +71,18 @@ fi
 
 # Membership sqlite — back-end for the AuthorizedKeysCommand resolver
 # (sshd consults this on every connection before falling back to
-# AuthorizedKeysFile). The DB lives on the persistent volume so it
-# survives container redeploys; the directory is root:git 0750 so the
-# git user (which runs sshd's resolver) can READ via group but cannot
-# RENAME or DELETE the DB file itself. The file ends up root:git 0640.
+# AuthorizedKeysFile) AND the HTTP server's invite-accept endpoint
+# (which writes new user rows). The DB lives on the persistent volume
+# so it survives container redeploys; the directory is root:git 0750
+# so the git user can READ via group but cannot RENAME or DELETE the
+# DB file itself.
+#
+# File ownership/mode: root:git 0660. The HTTP server runs as the git
+# user and needs WRITE access for invite/accept (new user rows). The
+# AuthorizedKeysCommand resolver also runs as git but opens the DB
+# `readOnly: true` in code, so it can't mutate state even with the
+# write bit set. Phase 1 was 0640 (read-only for git); phase 2 widens
+# to 0660 to enable the HTTP write path.
 #
 # stamp-seed-users walks AUTHORIZED_KEYS and INSERT-OR-NO-OPs each entry
 # into the users table as role=admin source=env. This runs on EVERY boot
@@ -89,13 +97,32 @@ chmod 0750 "$STAMP_STATE_DIR"
 if /usr/local/sbin/stamp-seed-users; then
   if [ -f "$STAMP_STATE_DIR/users.db" ]; then
     chown root:git "$STAMP_STATE_DIR/users.db"
-    chmod 0640 "$STAMP_STATE_DIR/users.db"
+    chmod 0660 "$STAMP_STATE_DIR/users.db"
   fi
 else
   # Don't abort the boot — sshd's AuthorizedKeysFile fallback still
   # services connections from AUTHORIZED_KEYS during transition.
   echo "WARNING: stamp-seed-users failed; AuthorizedKeysCommand path may be empty until next boot" >&2
 fi
+
+# Launch the HTTP server in the background as the git user, BEFORE
+# sshd's exec replaces this shell. Once exec runs, sshd inherits PID 1
+# and the HTTP server becomes its child via re-parenting. Stdout/stderr
+# go to the container's log stream so operators see invite-accept
+# traffic alongside ssh logs.
+#
+# `su -s /bin/sh -p git` is the runuser-equivalent that works against
+# Alpine's busybox su (Alpine doesn't ship util-linux by default, and
+# the git user's login shell is /usr/bin/git-shell which would reject
+# `-c <cmd>`; -s overrides that). -p preserves the environment so
+# STAMP_HTTP_PORT (and any STAMP_SERVER_DB_PATH test override) flow
+# through.
+#
+# If the HTTP server dies mid-container-life, invite-accept stops
+# working until the operator redeploys. Phase 5 may add a supervisor
+# (s6/tini) for crash-restart; for now the simpler shape ships.
+su -s /bin/sh -p git -c "/usr/local/sbin/stamp-http-server" &
+echo "stamp-http-server: launched as git user (pid $!)" >&2
 
 # SSH client setup for the post-receive mirror push.
 #

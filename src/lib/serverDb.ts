@@ -89,6 +89,9 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
     const dir = dirname(path);
     ensureDir(dir, 0o750);
     if (!opts.skipChmod) {
+      // ensureDir no-ops on an existing directory, so this explicit
+      // chmod is what tightens perms on a redeploy where the dir was
+      // created at a looser mode by an earlier image version.
       chmodSync(dir, 0o750);
     }
   }
@@ -99,11 +102,17 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
     db.exec("PRAGMA foreign_keys = ON");
     initSchema(db);
     if (!opts.skipChmod && existsSync(path)) {
-      // root:git 0640 — root (the entrypoint) writes; the git user that
-      // runs sshd's AuthorizedKeysCommand reads via group. chown is the
-      // operator's responsibility (Dockerfile/entrypoint); we only set
-      // mode bits.
-      chmodSync(path, 0o640);
+      // root:git 0660. The HTTP server (git user) writes new user rows
+      // on invite-accept; the AuthorizedKeysCommand resolver also runs
+      // as git but opens readOnly:true so the write bit is dormant on
+      // its path. Chown is the operator's responsibility (entrypoint.sh
+      // sets root:git after each boot); we only set the mode bits.
+      //
+      // Callers running as the git user (mint-invite, http-server) must
+      // pass skipChmod:true — only the file owner can chmod on Linux,
+      // and entrypoint.sh has already tightened perms by the time those
+      // callers run.
+      chmodSync(path, 0o660);
     }
   }
 
