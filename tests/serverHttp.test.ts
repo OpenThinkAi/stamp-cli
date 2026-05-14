@@ -463,6 +463,26 @@ describe("HTTP server: POST /invite/accept — errors", () => {
     }
   });
 
+  it("returns 413 when the body exceeds the 16 KiB cap", async () => {
+    const h = await start();
+    try {
+      // Build a body big enough to trip the cap. JSON-shaped on purpose so
+      // a mis-routed code path (e.g. accepting the body and then 400-ing
+      // on JSON parse) would not coincidentally match the 413 contract.
+      const padding = "a".repeat(20_000);
+      const r = await post(h.port, "/invite/accept", {
+        token: "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+        ssh_pubkey: INVITEE_SSH_LINE,
+        short_name: "padded",
+        padding,
+      });
+      assert.equal(r.status, 413);
+      assert.equal(r.body.error, "body_too_large");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
   it("returns 404 for any unmapped path", async () => {
     const h = await start();
     try {

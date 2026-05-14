@@ -33,11 +33,11 @@ import { parseSshPubkey } from "../lib/sshKeys.js";
 const DEFAULT_PORT = 8080;
 const MAX_BODY_BYTES = 16 * 1024;
 const SHORT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
-// Stamp signing pubkeys are PEM-wrapped SPKI. Loose shape check here;
-// the real validation happens at trust-grant time in phase 4 when the
-// key is consumed.
+// Stamp signing pubkeys are PEM-wrapped SPKI. Loose shape check here
+// (anchored so trailing/leading garbage doesn't slip in); the real
+// validation happens at trust-grant time when the key is consumed.
 const STAMP_PUBKEY_PEM_RE =
-  /-----BEGIN PUBLIC KEY-----[A-Za-z0-9+/=\s]+-----END PUBLIC KEY-----/;
+  /^\s*-----BEGIN PUBLIC KEY-----[A-Za-z0-9+/=\s]+-----END PUBLIC KEY-----\s*$/;
 
 interface AcceptBody {
   token?: unknown;
@@ -68,23 +68,31 @@ function sendJson(
   res.end(payload);
 }
 
-async function readBody(req: IncomingMessage): Promise<Buffer> {
+interface ReadBodyResult {
+  buf: Buffer;
+  tooLarge: boolean;
+}
+
+async function readBody(req: IncomingMessage): Promise<ReadBodyResult> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let tooLarge = false;
     req.on("data", (chunk: Buffer) => {
+      if (tooLarge) return;
       total += chunk.length;
       if (total > MAX_BODY_BYTES) {
-        // Stop reading; the listening side will see the resolved buffer
-        // and produce a 413. We don't destroy the connection here so the
-        // status code lands; the size check below returns early.
+        // Stop accumulating; the caller produces a 413 keyed on
+        // `tooLarge` so the status-code contract is preserved. We don't
+        // destroy the connection here — the response body still needs
+        // to land.
+        tooLarge = true;
         chunks.length = 0;
-        total = MAX_BODY_BYTES + 1;
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("end", () => resolve({ buf: Buffer.concat(chunks), tooLarge }));
     req.on("error", reject);
   });
 }
@@ -222,48 +230,46 @@ function acceptInvite(data: ValidatedAccept): AcceptOutcome {
   }
 }
 
-function handlePost(req: IncomingMessage, res: ServerResponse): void {
-  void (async () => {
-    if (req.headers["content-type"]?.split(";")[0]?.trim() !== "application/json") {
-      sendJson(res, 415, { ok: false, error: "content_type_must_be_application_json" });
-      return;
-    }
-    let raw: Buffer;
-    try {
-      raw = await readBody(req);
-    } catch (e) {
-      logLine("warn", `read body failed: ${(e as Error).message}`);
-      sendJson(res, 400, { ok: false, error: "body_read_failed" });
-      return;
-    }
-    if (raw.length > MAX_BODY_BYTES) {
-      sendJson(res, 413, { ok: false, error: "body_too_large" });
-      return;
-    }
-    let body: AcceptBody;
-    try {
-      body = JSON.parse(raw.toString("utf8")) as AcceptBody;
-    } catch {
-      sendJson(res, 400, { ok: false, error: "body_not_json" });
-      return;
-    }
-    const v = validateAcceptBody(body);
-    if (!v.ok) {
-      sendJson(res, v.status, { ok: false, error: v.error });
-      return;
-    }
-    try {
-      const outcome = acceptInvite(v.data);
-      logLine(
-        outcome.status === 200 ? "info" : "warn",
-        `invite/accept short_name=${v.data.short_name} status=${outcome.status}`,
-      );
-      sendJson(res, outcome.status, outcome.body);
-    } catch (e) {
-      logLine("error", `invite/accept internal error: ${(e as Error).message}`);
-      sendJson(res, 500, { ok: false, error: "internal_error" });
-    }
-  })();
+async function handlePost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.headers["content-type"]?.split(";")[0]?.trim() !== "application/json") {
+    sendJson(res, 415, { ok: false, error: "content_type_must_be_application_json" });
+    return;
+  }
+  let read: ReadBodyResult;
+  try {
+    read = await readBody(req);
+  } catch (e) {
+    logLine("warn", `read body failed: ${(e as Error).message}`);
+    sendJson(res, 400, { ok: false, error: "body_read_failed" });
+    return;
+  }
+  if (read.tooLarge) {
+    sendJson(res, 413, { ok: false, error: "body_too_large" });
+    return;
+  }
+  let body: AcceptBody;
+  try {
+    body = JSON.parse(read.buf.toString("utf8")) as AcceptBody;
+  } catch {
+    sendJson(res, 400, { ok: false, error: "body_not_json" });
+    return;
+  }
+  const v = validateAcceptBody(body);
+  if (!v.ok) {
+    sendJson(res, v.status, { ok: false, error: v.error });
+    return;
+  }
+  try {
+    const outcome = acceptInvite(v.data);
+    logLine(
+      outcome.status === 200 ? "info" : "warn",
+      `invite/accept short_name=${v.data.short_name} status=${outcome.status}`,
+    );
+    sendJson(res, outcome.status, outcome.body);
+  } catch (e) {
+    logLine("error", `invite/accept internal error: ${(e as Error).message}`);
+    sendJson(res, 500, { ok: false, error: "internal_error" });
+  }
 }
 
 export const HTTP_DEFAULT_PORT = DEFAULT_PORT;
@@ -276,7 +282,7 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
       return;
     }
     if (req.method === "POST" && url === "/invite/accept") {
-      handlePost(req, res);
+      void handlePost(req, res);
       return;
     }
     sendJson(res, 404, { ok: false, error: "not_found" });

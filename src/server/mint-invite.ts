@@ -19,9 +19,21 @@
  *
  *   stamp+invite://<public-host>/<token>
  *
- * The CLI side (`stamp invite`) captures that stdout and prints it
- * verbatim along with the server's stderr (which carries the
- * human-readable role/expiry diagnostic).
+ * The CLI side (`stamp invites mint`) captures that stdout and prints
+ * it verbatim along with the server's stderr (which carries the
+ * `note:`-prefixed diagnostic prose). Because this stderr crosses the
+ * SSH boundary and lands in the operator's terminal as CLI output, it
+ * follows the lowercase `error:` / `note:` prefix convention rather
+ * than the unix-style program-name prefix used by daemon logs.
+ *
+ * Exit codes (consumed by the CLI to produce specific operator prose):
+ *
+ *   0 — success; share URL on stdout
+ *   1 — server-side config error (STAMP_PUBLIC_URL unset, ExposeAuthInfo
+ *       missing, etc.)
+ *   2 — usage error (missing/bad argv)
+ *   3 — caller's role doesn't permit minting (not admin/owner)
+ *   4 — short_name already taken in users table
  */
 
 import { mintInvite } from "../lib/invites.js";
@@ -41,7 +53,9 @@ interface ParsedArgs {
 }
 
 function fail(message: string, exitCode: number): never {
-  console.error(`stamp-mint-invite: ${message}`);
+  // Lowercase prose prefix matches the CLI convention: this stderr
+  // crosses the SSH boundary and lands in the operator's terminal.
+  console.error(`error: ${message}`);
   process.exit(exitCode);
 }
 
@@ -163,11 +177,11 @@ function main(): void {
     // stderr = human-readable diagnostic, surfaced inline by the CLI.
     const expiresInMin = Math.round((minted.expires_at - Math.floor(Date.now() / 1000)) / 60);
     process.stderr.write(
-      `stamp-mint-invite: minted invite for short_name=${args.short_name} role=${args.role} ` +
+      `note: minted invite for short_name=${args.short_name} role=${args.role} ` +
         `(expires in ~${expiresInMin}m, invited_by=${callerRow.short_name})\n`,
     );
     process.stderr.write(
-      `stamp-mint-invite: invitee runs:  stamp accept-invite "${shareUrl}"\n`,
+      `note: invitee runs:  stamp invites accept "${shareUrl}"\n`,
     );
   } finally {
     db.close();

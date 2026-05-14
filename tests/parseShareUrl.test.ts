@@ -8,7 +8,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { parseShareUrl } from "../src/commands/acceptInvite.ts";
+import { parseShareUrl } from "../src/lib/inviteUrl.ts";
 
 const VALID_TOKEN = "abc123_def456-ghiJKLmnopqrstuvwxyz0123456789AB";
 
