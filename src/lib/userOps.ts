@@ -198,18 +198,13 @@ export type ListUsersResult =
  */
 export function listUsersForCaller(
   db: DatabaseSync,
-  caller: UserRow,
+  // Argument kept for API symmetry with setUserRole/removeUser (and so
+  // future role-gated read tiers like "guest" have an obvious place to
+  // land), but every current `Role` value is permitted to list — the
+  // exposed columns are coordination-data (who else has access) not
+  // secrets. See doc comment above.
+  _caller: UserRow,
 ): ListUsersResult {
-  // The schema-level CHECK on role already ensures caller has a valid
-  // role; this branch is here so a future "guest" or "read-only" tier
-  // can be added without forgetting to gate the list path.
-  if (
-    caller.role !== "owner" &&
-    caller.role !== "admin" &&
-    caller.role !== "member"
-  ) {
-    return { ok: false, reason: "caller_lacks_authority" };
-  }
   const rows = db
     .prepare(
       `SELECT id, short_name, ssh_pubkey, ssh_fp, stamp_pubkey, role, source,

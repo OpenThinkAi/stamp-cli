@@ -19,7 +19,6 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -85,7 +84,6 @@ function writeFakeSsh(
   }
   const p = path.join(dir, "ssh");
   writeFileSync(p, script, { mode: 0o755 });
-  chmodSync(p, 0o755);
 }
 
 function buildHarness(): Harness {

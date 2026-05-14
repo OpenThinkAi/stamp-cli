@@ -154,7 +154,7 @@ function findExistingTrustedKey(
   return null;
 }
 
-function runGit(args: string[], cwd: string): { stdout: string; status: number | null } {
+function runGit(args: string[], cwd: string): string {
   const result = spawnSync("git", args, {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
@@ -165,7 +165,7 @@ function runGit(args: string[], cwd: string): { stdout: string; status: number |
       `git ${args.join(" ")} failed (exit ${result.status}):\n${result.stderr ?? ""}`.trim(),
     );
   }
-  return { stdout: result.stdout ?? "", status: result.status };
+  return result.stdout ?? "";
 }
 
 function workingTreeClean(repoRoot: string): boolean {
@@ -188,8 +188,7 @@ function branchExists(repoRoot: string, branch: string): boolean {
 }
 
 function currentBranch(repoRoot: string): string {
-  const { stdout } = runGit(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot);
-  return stdout.trim();
+  return runGit(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot).trim();
 }
 
 export function runTrustGrant(opts: TrustGrantOptions): void {
@@ -224,6 +223,17 @@ export function runTrustGrant(opts: TrustGrantOptions): void {
     );
   }
 
+  // Branch-exists check before the SSH round-trip — a pre-existing branch
+  // collision is a synchronous local op that doesn't need a network call
+  // to surface.
+  const branch = `stamp-trust/${opts.shortName}`;
+  if (branchExists(repoRoot, branch)) {
+    throw new UsageError(
+      `branch ${branch} already exists. Delete it (\`git branch -D ${branch}\`) ` +
+        `or finish the in-flight grant by switching to it and pushing/merging.`,
+    );
+  }
+
   const server = resolveServer();
   const pemRaw = fetchStampPubkey(server, opts.shortName);
   const pem = pemRaw.trim() + "\n"; // normalize trailing newline
@@ -234,7 +244,10 @@ export function runTrustGrant(opts: TrustGrantOptions): void {
     fingerprint = fingerprintFromPem(pem);
   } catch (e) {
     throw new Error(
-      `server returned an invalid PEM for ${opts.shortName}: ${(e as Error).message}`,
+      `server returned an invalid PEM for ${opts.shortName}: ${(e as Error).message}. ` +
+        `This is almost always a server-side issue (corrupted membership DB, ` +
+        `or a future server version emitting a key format this client can't ` +
+        `parse). Contact the server admin with the PEM body.`,
     );
   }
 
@@ -248,14 +261,6 @@ export function runTrustGrant(opts: TrustGrantOptions): void {
         `(matching .stamp/trusted-keys/${existingFile}). No changes.\n`,
     );
     return;
-  }
-
-  const branch = `stamp-trust/${opts.shortName}`;
-  if (branchExists(repoRoot, branch)) {
-    throw new UsageError(
-      `branch ${branch} already exists. Delete it (\`git branch -D ${branch}\`) ` +
-        `or finish the in-flight grant by switching to it and pushing/merging.`,
-    );
   }
 
   const startingBranch = currentBranch(repoRoot);
