@@ -127,11 +127,17 @@ RUN { \
         '# as %f (SHA256:<base64>); the resolver prints the matching' \
         '# authorized_keys line on a hit, exits empty on a miss. The legacy' \
         '# /home/git/.ssh/authorized_keys path stays in play during the' \
-        '# env-var → sqlite transition (phase 1 of the multi-user onboarding)' \
-        '# so an operator who hasnt rolled phase-3 CLI tooling yet still has' \
+        "# env-var → sqlite transition (phase 1 of the multi-user onboarding)" \
+        "# so an operator who hasn't rolled phase-3 CLI tooling yet still has" \
         '# the env var as an escape hatch.' \
         'AuthorizedKeysCommand /usr/local/sbin/stamp-authorized-keys %u %f' \
         'AuthorizedKeysCommandUser git' \
+        '# Expose successful auth info (pubkey wire blob) to user sessions' \
+        '# via SSH_USER_AUTH. The phase-2 stamp-mint-invite wrapper reads' \
+        '# this file to bind the connection to a user row in the membership' \
+        '# DB by fingerprint — without it, the wrapper has no reliable way' \
+        '# to know which sshd-authenticated key just connected.' \
+        'ExposeAuthInfo yes' \
         ''; \
       cat /etc/ssh/sshd_config; \
     } > /etc/ssh/sshd_config.new \
@@ -167,6 +173,14 @@ COPY --from=builder /build/dist/server/authorized-keys.cjs /usr/local/sbin/stamp
 # membership sqlite. Invoked by entrypoint.sh as root on every container
 # start, before sshd exec.
 COPY --from=builder /build/dist/server/seed-users.cjs /usr/local/sbin/stamp-seed-users
+# Invite-mint SSH command. Invoked as `git@server stamp-mint-invite <name>`
+# via git-shell command dispatch (symlinked below). Binds to the
+# authenticated SSH key via SSH_USER_AUTH (ExposeAuthInfo).
+COPY --from=builder /build/dist/server/mint-invite.cjs /usr/local/bin/stamp-mint-invite
+# HTTP listener for invite/accept. Started by entrypoint.sh as the git
+# user, runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
+# the hosting platform's job (Railway terminates at its edge proxy).
+COPY --from=builder /build/dist/server/start-http-server.cjs /usr/local/sbin/stamp-http-server
 COPY scripts/setup-repo.sh /usr/local/bin/setup-repo.sh
 COPY server/new-stamp-repo /usr/local/bin/new-stamp-repo
 COPY server/delete-stamp-repo /usr/local/bin/delete-stamp-repo
@@ -198,12 +212,21 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/restore-stamp-repo \
              /usr/local/bin/list-trash \
              /usr/local/bin/stamp-server-pubkey \
+             /usr/local/bin/stamp-mint-invite \
              /usr/local/sbin/stamp-ensure-repo-key \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
+             /usr/local/sbin/stamp-http-server \
              /entrypoint.sh \
  && chown root:root /usr/local/sbin/stamp-authorized-keys \
  && chmod 0755     /usr/local/sbin/stamp-authorized-keys
+# Only stamp-authorized-keys needs the extra chown root:root + 0755:
+# sshd's AuthorizedKeysCommand validation refuses to load the script if
+# the file or any parent directory is group/other-writable. The other
+# server-side scripts (stamp-seed-users, stamp-http-server,
+# stamp-mint-invite) are invoked by entrypoint.sh as root, by sshd
+# via git-shell-commands, or by the operator's CLI — none go through
+# sshd's strict-perms check.
 
 # Symlink the operator-facing wrapper scripts into the directory git-shell
 # scans for allowed commands. With these in place, `ssh git@<host> new-
@@ -217,10 +240,19 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/restore-stamp-repo /home/git/git-shell-commands/restore-stamp-repo \
  && ln -s /usr/local/bin/list-trash /home/git/git-shell-commands/list-trash \
  && ln -s /usr/local/bin/stamp-server-pubkey /home/git/git-shell-commands/stamp-server-pubkey \
+ && ln -s /usr/local/bin/stamp-mint-invite /home/git/git-shell-commands/stamp-mint-invite \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands
 
 EXPOSE 22
+# HTTP listener for the invite-accept endpoint (POST /invite/accept).
+# Plain HTTP inside the container; TLS termination is the hosting
+# platform's job (Railway terminates at its edge proxy and forwards
+# decrypted traffic to this port). Override via STAMP_HTTP_PORT at run
+# time. Operators who want to expose this externally must point
+# STAMP_PUBLIC_URL at the platform-facing URL so stamp-mint-invite can
+# bake it into the share URLs it prints.
+EXPOSE 8080
 
 # HEALTHCHECK lets the orchestrator (Railway/Fly/Docker) distinguish a
 # running container from one whose sshd has crashed or hung while PID 1

@@ -68,18 +68,15 @@ export function parseSshPubkey(line: string): SshPubkey {
     throw new Error(`unsupported ssh pubkey algorithm: ${algorithm}`);
   }
 
-  let keyBlob: Buffer;
-  try {
-    keyBlob = Buffer.from(b64, "base64");
-  } catch {
-    throw new Error("ssh pubkey base64 blob is malformed");
-  }
+  // Buffer.from(string, "base64") does NOT throw on invalid input — it
+  // silently strips non-base64 characters. So a try/catch around this
+  // call is dead code; the real validation is the re-encode comparison
+  // below, which catches a paste with a stray quote/character that
+  // would otherwise produce a key blob mismatched against sshd's view.
+  const keyBlob = Buffer.from(b64, "base64");
   if (keyBlob.length === 0) {
     throw new Error("ssh pubkey base64 blob is empty");
   }
-  // Sanity check: re-encode and compare. Buffer.from(b64, "base64") silently
-  // strips any non-base64 chars, so a paste with a stray quote/character
-  // would parse but produce a key bytes-mismatched against sshd's view.
   if (keyBlob.toString("base64").replace(/=+$/, "") !== b64.replace(/=+$/, "")) {
     throw new Error("ssh pubkey base64 blob has trailing junk");
   }

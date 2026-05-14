@@ -89,6 +89,9 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
     const dir = dirname(path);
     ensureDir(dir, 0o750);
     if (!opts.skipChmod) {
+      // ensureDir no-ops on an existing directory, so this explicit
+      // chmod is what tightens perms on a redeploy where the dir was
+      // created at a looser mode by an earlier image version.
       chmodSync(dir, 0o750);
     }
   }

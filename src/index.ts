@@ -10,8 +10,10 @@ process.on("warning", (warn) => {
 });
 
 import { Command } from "commander";
+import { runAcceptInvite } from "./commands/acceptInvite.js";
 import { runBootstrap } from "./commands/bootstrap.js";
 import { runInit } from "./commands/init.js";
+import { runInvite, type InviteRole } from "./commands/invite.js";
 import { runProvision } from "./commands/provision.js";
 import {
   runServerRepoDelete,
@@ -662,6 +664,70 @@ function wrap(fn: () => void): void {
     process.exit(1);
   }
 }
+
+program
+  .command("invite <short-name>")
+  .description(
+    "ask the configured stamp server to mint a single-use invite token for " +
+      "a teammate; prints the share URL to relay via whatever channel you trust " +
+      "(15-minute TTL, single-use). Requires admin or owner role.",
+  )
+  .option(
+    "--role <admin|member>",
+    "role to grant the invitee on accept (default: member)",
+    "member",
+  )
+  .action((shortName: string, opts: { role: string }) => {
+    try {
+      if (opts.role !== "admin" && opts.role !== "member") {
+        throw new Error(
+          `--role must be 'admin' or 'member' (got ${JSON.stringify(opts.role)})`,
+        );
+      }
+      runInvite({ shortName, role: opts.role as InviteRole });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+program
+  .command("accept-invite <share-url-or-token>")
+  .description(
+    "redeem an invite token against the stamp server; auto-detects your SSH " +
+      "and stamp signing pubkeys, confirms each, then enrolls you as the role " +
+      "the inviting admin chose. Accepts either a stamp+invite:// URL or a " +
+      "bare token (the bare-token form requires --server <host>:<port>).",
+  )
+  .option("--server <host:port>", "server endpoint when passing a bare token (no URL)")
+  .option("--ssh-pubkey <path>", "override the SSH pubkey path (default ~/.ssh/id_ed25519.pub)")
+  .option("--stamp-pubkey <path>", "override the stamp signing pubkey path (default ~/.stamp/keys/ed25519.pub)")
+  .option("--short-name <name>", "override the short_name (default derived from user@host)")
+  .option("--yes", "skip the confirmation prompt (required when stdin is non-TTY)")
+  .action(
+    async (
+      urlOrToken: string,
+      opts: {
+        server?: string;
+        sshPubkey?: string;
+        stampPubkey?: string;
+        shortName?: string;
+        yes?: boolean;
+      },
+    ) => {
+      try {
+        await runAcceptInvite({
+          urlOrToken,
+          server: opts.server,
+          sshPubkeyPath: opts.sshPubkey,
+          stampPubkeyPath: opts.stampPubkey,
+          shortName: opts.shortName,
+          yes: opts.yes,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 
 const reviewers = program
   .command("reviewers")
