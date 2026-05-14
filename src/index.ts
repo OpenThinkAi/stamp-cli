@@ -18,6 +18,7 @@ import {
   type InviteRole,
 } from "./commands/invites.js";
 import { runProvision } from "./commands/provision.js";
+import { runTrustGrant } from "./commands/trust.js";
 import {
   runUsersDemote,
   runUsersList,
@@ -789,6 +790,29 @@ users
       handleCliError(err);
     }
   });
+
+const trust = program
+  .command("trust")
+  .description("manage per-repo stamp signing trust (committed under .stamp/trusted-keys/)");
+
+trust
+  .command("grant <short-name>")
+  .description("stage a trust-grant for an enrolled user on a new branch; review + merge through the usual gate")
+  .option("--repo <path>", "repo root to operate on (default: cwd)")
+  .option("--force-dirty", "stage the grant even if the working tree has uncommitted changes")
+  .action(
+    (shortName: string, opts: { repo?: string; forceDirty?: boolean }) => {
+      try {
+        runTrustGrant({
+          shortName,
+          repoPath: opts.repo,
+          forceDirty: opts.forceDirty,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 
 const reviewers = program
   .command("reviewers")

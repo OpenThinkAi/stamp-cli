@@ -285,6 +285,87 @@ describe("stamp-users — remove", () => {
   });
 });
 
+describe("stamp-users — get-stamp-pubkey", () => {
+  it("prints the stored PEM on stdout when the user has one", () => {
+    const h = setup("admin");
+    try {
+      // Manually attach a stamp_pubkey to `other` since fixture seeders
+      // leave it null.
+      const db = openServerDb({ path: h.dbPath, skipChmod: true });
+      const STAMP_PEM =
+        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAFakeBase64BodyEXAMPLEvalidShape//AA=\n-----END PUBLIC KEY-----\n";
+      try {
+        db.prepare("UPDATE users SET stamp_pubkey = ? WHERE short_name = ?").run(
+          STAMP_PEM,
+          "other",
+        );
+      } finally {
+        db.close();
+      }
+      const r = run(h, ["get-stamp-pubkey", "other"]);
+      assert.equal(r.status, EXIT.OK, `stderr=${r.stderr}`);
+      assert.equal(r.stdout, STAMP_PEM);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("returns NOT_FOUND when the user has no stamp_pubkey on file", () => {
+    const h = setup("admin");
+    try {
+      // `other` is seeded by setup() with stamp_pubkey=null.
+      const r = run(h, ["get-stamp-pubkey", "other"]);
+      assert.equal(r.status, EXIT.NOT_FOUND);
+      assert.match(r.stderr, /no stamp signing pubkey on file/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("returns NOT_FOUND for an unknown short_name", () => {
+    const h = setup("admin");
+    try {
+      const r = run(h, ["get-stamp-pubkey", "nobody"]);
+      assert.equal(r.status, EXIT.NOT_FOUND);
+      assert.match(r.stderr, /not found/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("USAGE: rejects missing argument", () => {
+    const h = setup("admin");
+    try {
+      const r = run(h, ["get-stamp-pubkey"]);
+      assert.equal(r.status, EXIT.USAGE);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("member callers may also fetch (no authority check beyond authentication)", () => {
+    // The trust-grant flow goes through the standard stamp gate, so
+    // exposing the pubkey to any authenticated user is safe — they
+    // can't unilaterally widen anyone's trust by knowing the PEM.
+    const h = setup("member");
+    try {
+      const db = openServerDb({ path: h.dbPath, skipChmod: true });
+      try {
+        db.prepare("UPDATE users SET stamp_pubkey = ? WHERE short_name = ?").run(
+          "-----BEGIN PUBLIC KEY-----\nXYZ\n-----END PUBLIC KEY-----\n",
+          "other",
+        );
+      } finally {
+        db.close();
+      }
+      const r = run(h, ["get-stamp-pubkey", "other"]);
+      assert.equal(r.status, EXIT.OK);
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
 describe("stamp-users — identity binding", () => {
   it("CONFIG: refuses when caller is not in the DB", () => {
     const h = setup("none");
