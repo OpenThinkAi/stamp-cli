@@ -79,17 +79,13 @@ interface RemoteResult {
   stdout: string;
 }
 
-function callRemote(
-  server: ServerConfig,
-  remoteArgs: string[],
-  proseShouldPassthrough: boolean,
-): RemoteResult {
+function callRemote(server: ServerConfig, remoteArgs: string[]): RemoteResult {
   const result = spawnSync("ssh", sshArgs(server, remoteArgs), {
-    // Capture stdout for list (JSON parsing) or relay-through for writes;
-    // proseShouldPassthrough flips that.
-    stdio: proseShouldPassthrough
-      ? ["ignore", "pipe", "inherit"]
-      : ["ignore", "pipe", "inherit"],
+    // Stdout is always piped: `list` needs it for JSON parsing; write
+    // ops don't emit on stdout so an empty pipe is harmless. Stderr is
+    // always inherited so server-side `note:` confirmations and
+    // `error:` prose land in the operator's terminal verbatim.
+    stdio: ["ignore", "pipe", "inherit"],
     encoding: "utf8",
   });
   return { status: result.status, stdout: result.stdout ?? "" };
@@ -205,7 +201,7 @@ function formatUsersTable(rows: RemoteUserRow[]): string {
 
 export function runUsersList(opts: ListUsersOptions): void {
   const server = resolveServer();
-  const result = callRemote(server, ["list"], false);
+  const result = callRemote(server, ["list"]);
   if (result.status !== 0) {
     throw explainExit(result.status, "stamp users list", { server });
   }
@@ -230,11 +226,12 @@ export function runUsersList(opts: ListUsersOptions): void {
 
 export function runUsersPromote(opts: PromoteUserOptions): void {
   const server = resolveServer();
-  const result = callRemote(
-    server,
-    ["promote", opts.shortName, "--to", opts.to],
-    true,
-  );
+  const result = callRemote(server, [
+    "promote",
+    opts.shortName,
+    "--to",
+    opts.to,
+  ]);
   if (result.status !== 0) {
     throw explainExit(result.status, `stamp users promote ${opts.shortName}`, {
       server,
@@ -248,11 +245,12 @@ export function runUsersPromote(opts: PromoteUserOptions): void {
 
 export function runUsersDemote(opts: DemoteUserOptions): void {
   const server = resolveServer();
-  const result = callRemote(
-    server,
-    ["demote", opts.shortName, "--to", opts.to],
-    true,
-  );
+  const result = callRemote(server, [
+    "demote",
+    opts.shortName,
+    "--to",
+    opts.to,
+  ]);
   if (result.status !== 0) {
     throw explainExit(result.status, `stamp users demote ${opts.shortName}`, {
       server,
@@ -266,7 +264,7 @@ export function runUsersDemote(opts: DemoteUserOptions): void {
 
 export function runUsersRemove(opts: RemoveUserOptions): void {
   const server = resolveServer();
-  const result = callRemote(server, ["remove", opts.shortName], true);
+  const result = callRemote(server, ["remove", opts.shortName]);
   if (result.status !== 0) {
     throw explainExit(result.status, `stamp users remove ${opts.shortName}`, {
       server,
