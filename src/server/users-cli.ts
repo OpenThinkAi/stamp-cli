@@ -37,6 +37,7 @@ import {
   type SetRoleDenial,
 } from "../lib/userOps.js";
 import {
+  findUserByShortName,
   findUserBySshFingerprint,
   openServerDb,
   type Role,
@@ -63,9 +64,10 @@ function usage(): never {
   process.stderr.write(
     "usage:\n" +
       "  stamp-users list\n" +
-      "  stamp-users promote <short_name> --to <admin|owner>\n" +
-      "  stamp-users demote  <short_name> --to <admin|member>\n" +
-      "  stamp-users remove  <short_name>\n",
+      "  stamp-users promote          <short_name> --to <admin|owner>\n" +
+      "  stamp-users demote           <short_name> --to <admin|member>\n" +
+      "  stamp-users remove           <short_name>\n" +
+      "  stamp-users get-stamp-pubkey <short_name>\n",
   );
   process.exit(EXIT.USAGE);
 }
@@ -85,7 +87,16 @@ interface ParsedList {
   subcommand: "list";
 }
 
-type Parsed = ParsedSetRole | ParsedRemove | ParsedList;
+interface ParsedGetStampPubkey {
+  subcommand: "get-stamp-pubkey";
+  short_name: string;
+}
+
+type Parsed =
+  | ParsedSetRole
+  | ParsedRemove
+  | ParsedList
+  | ParsedGetStampPubkey;
 
 const VALID_PROMOTE_TARGETS: ReadonlySet<Role> = new Set(["admin", "owner"]);
 const VALID_DEMOTE_TARGETS: ReadonlySet<Role> = new Set(["admin", "member"]);
@@ -132,6 +143,11 @@ function parseArgs(argv: string[]): Parsed {
     if (rest.length === 0) fail(`missing <short_name>`, EXIT.USAGE);
     if (rest.length > 1) fail(`unexpected positional argument: ${rest[1]}`, EXIT.USAGE);
     return { subcommand: "remove", short_name: rest[0]! };
+  }
+  if (sub === "get-stamp-pubkey") {
+    if (rest.length === 0) fail(`missing <short_name>`, EXIT.USAGE);
+    if (rest.length > 1) fail(`unexpected positional argument: ${rest[1]}`, EXIT.USAGE);
+    return { subcommand: "get-stamp-pubkey", short_name: rest[0]! };
   }
   fail(`unknown subcommand: ${sub}`, EXIT.USAGE);
 }
@@ -265,6 +281,39 @@ function runRemove(parsed: ParsedRemove): void {
   }
 }
 
+function runGetStampPubkey(parsed: ParsedGetStampPubkey): void {
+  // Identity binding still required (so this surface stays consistent
+  // with the rest of stamp-users — only authenticated users can read
+  // the membership DB) but no role check beyond "you're enrolled".
+  // The phase-4 trust-grant flow goes through the standard stamp gate
+  // anyway, so an enrolled member who fetches a peer's stamp_pubkey
+  // can't unilaterally widen anyone's trust.
+  resolveCaller();
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const target = findUserByShortName(db, parsed.short_name);
+    if (!target) {
+      fail(`user ${JSON.stringify(parsed.short_name)} not found`, EXIT.NOT_FOUND);
+    }
+    if (target.stamp_pubkey === null) {
+      fail(
+        `user ${JSON.stringify(parsed.short_name)} has no stamp signing pubkey on file ` +
+          `— ask them to re-enroll via stamp invites accept with --stamp-pubkey`,
+        EXIT.NOT_FOUND,
+      );
+    }
+    // PEM goes to stdout exactly as stored. The receiving CLI pipes
+    // this verbatim into the repo's .stamp/trusted-keys/<name>.pub
+    // file, so any drift here is observable in the next diff review.
+    process.stdout.write(target.stamp_pubkey);
+    if (!target.stamp_pubkey.endsWith("\n")) {
+      process.stdout.write("\n");
+    }
+  } finally {
+    db.close();
+  }
+}
+
 function main(): void {
   const parsed = parseArgs(process.argv.slice(2));
   switch (parsed.subcommand) {
@@ -277,6 +326,9 @@ function main(): void {
       break;
     case "remove":
       runRemove(parsed);
+      break;
+    case "get-stamp-pubkey":
+      runGetStampPubkey(parsed);
       break;
   }
 }
