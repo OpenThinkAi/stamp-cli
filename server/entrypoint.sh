@@ -69,6 +69,34 @@ if [ -n "$AUTHORIZED_KEYS" ]; then
   chown git:git /home/git/.ssh/authorized_keys
 fi
 
+# Membership sqlite — back-end for the AuthorizedKeysCommand resolver
+# (sshd consults this on every connection before falling back to
+# AuthorizedKeysFile). The DB lives on the persistent volume so it
+# survives container redeploys; the directory is root:git 0750 so the
+# git user (which runs sshd's resolver) can READ via group but cannot
+# RENAME or DELETE the DB file itself. The file ends up root:git 0640.
+#
+# stamp-seed-users walks AUTHORIZED_KEYS and INSERT-OR-NO-OPs each entry
+# into the users table as role=admin source=env. This runs on EVERY boot
+# (not just the first one) because operators may add or remove keys
+# between deploys; the script is idempotent on the import side. Removal
+# of an env-var line does NOT cascade to a DB delete here — that's a
+# phase-3 operator action.
+STAMP_STATE_DIR=/srv/git/.stamp-state
+mkdir -p "$STAMP_STATE_DIR"
+chown root:git "$STAMP_STATE_DIR"
+chmod 0750 "$STAMP_STATE_DIR"
+if /usr/local/sbin/stamp-seed-users; then
+  if [ -f "$STAMP_STATE_DIR/users.db" ]; then
+    chown root:git "$STAMP_STATE_DIR/users.db"
+    chmod 0640 "$STAMP_STATE_DIR/users.db"
+  fi
+else
+  # Don't abort the boot — sshd's AuthorizedKeysFile fallback still
+  # services connections from AUTHORIZED_KEYS during transition.
+  echo "WARNING: stamp-seed-users failed; AuthorizedKeysCommand path may be empty until next boot" >&2
+fi
+
 # SSH client setup for the post-receive mirror push.
 #
 # The post-receive hook can push to the GitHub mirror via either:
