@@ -137,7 +137,11 @@ function main(): void {
     );
   }
 
-  const db = openServerDb();
+  // skipChmod: this wrapper runs as the git user via git-shell, but the
+  // DB file is root-owned (chmod fails with EPERM unless caller is owner).
+  // entrypoint.sh already tightened perms at boot; the in-process chmod
+  // would be redundant even if it could succeed.
+  const db = openServerDb({ skipChmod: true });
   try {
     const callerRow = findUserBySshFingerprint(db, caller.fingerprint);
     if (!callerRow) {

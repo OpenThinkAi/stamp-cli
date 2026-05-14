@@ -163,7 +163,11 @@ interface AcceptOutcome {
 }
 
 function acceptInvite(data: ValidatedAccept): AcceptOutcome {
-  const db = openServerDb();
+  // skipChmod: HTTP server runs as the git user, but the DB file is
+  // root-owned (chmod fails with EPERM unless caller is owner).
+  // entrypoint.sh handles boot-time perm tightening as root; the
+  // in-process chmod would be redundant even if it could succeed.
+  const db = openServerDb({ skipChmod: true });
   try {
     const consumed = consumeInviteToken(db, data.token);
     if (!consumed.ok) {
