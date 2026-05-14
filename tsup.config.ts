@@ -26,6 +26,12 @@ export default defineConfig([
     entry: {
       "hooks/pre-receive": "src/hooks/pre-receive.ts",
       "hooks/post-receive": "src/hooks/post-receive.ts",
+      // Server-side standalone scripts. Same CJS shape as the hooks for
+      // the same reason: they run in /usr/local/{bin,sbin} on the server
+      // image with no package.json nearby, so Node would otherwise treat
+      // .js files there as CommonJS and reject ESM import syntax.
+      "server/authorized-keys": "src/server/authorized-keys.ts",
+      "server/seed-users": "src/server/seed-users.ts",
     },
     format: ["cjs"],
     target: "node22",

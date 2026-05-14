@@ -122,6 +122,16 @@ RUN { \
         'LoginGraceTime 30' \
         'MaxStartups 10:50:50' \
         'MaxSessions 5' \
+        '# Membership resolver: consult the stamp users DB before falling' \
+        '# back to AuthorizedKeysFile. sshd passes the offered key fingerprint' \
+        '# as %f (SHA256:<base64>); the resolver prints the matching' \
+        '# authorized_keys line on a hit, exits empty on a miss. The legacy' \
+        '# /home/git/.ssh/authorized_keys path stays in play during the' \
+        '# env-var → sqlite transition (phase 1 of the multi-user onboarding)' \
+        '# so an operator who hasnt rolled phase-3 CLI tooling yet still has' \
+        '# the env var as an escape hatch.' \
+        'AuthorizedKeysCommand /usr/local/sbin/stamp-authorized-keys %u %f' \
+        'AuthorizedKeysCommandUser git' \
         ''; \
       cat /etc/ssh/sshd_config; \
     } > /etc/ssh/sshd_config.new \
@@ -147,6 +157,16 @@ RUN chmod 0644 /etc/ssh/ssh_known_hosts
 
 COPY --from=builder /build/dist/hooks/pre-receive.cjs /etc/stamp/pre-receive.cjs
 COPY --from=builder /build/dist/hooks/post-receive.cjs /etc/stamp/post-receive.cjs
+# AuthorizedKeysCommand resolver — bundled CJS, ships at /usr/local/sbin/.
+# sshd refuses to load the command if the file or any parent directory is
+# group/other-writable, so the chmod at the end of this stage pins both
+# the file (0755) and we rely on the image's stock /usr/local/sbin (root:root
+# 0755) for the parent.
+COPY --from=builder /build/dist/server/authorized-keys.cjs /usr/local/sbin/stamp-authorized-keys
+# Boot-time seeder — synchronizes AUTHORIZED_KEYS env var into the
+# membership sqlite. Invoked by entrypoint.sh as root on every container
+# start, before sshd exec.
+COPY --from=builder /build/dist/server/seed-users.cjs /usr/local/sbin/stamp-seed-users
 COPY scripts/setup-repo.sh /usr/local/bin/setup-repo.sh
 COPY server/new-stamp-repo /usr/local/bin/new-stamp-repo
 COPY server/delete-stamp-repo /usr/local/bin/delete-stamp-repo
@@ -179,7 +199,11 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/list-trash \
              /usr/local/bin/stamp-server-pubkey \
              /usr/local/sbin/stamp-ensure-repo-key \
-             /entrypoint.sh
+             /usr/local/sbin/stamp-authorized-keys \
+             /usr/local/sbin/stamp-seed-users \
+             /entrypoint.sh \
+ && chown root:root /usr/local/sbin/stamp-authorized-keys \
+ && chmod 0755     /usr/local/sbin/stamp-authorized-keys
 
 # Symlink the operator-facing wrapper scripts into the directory git-shell
 # scans for allowed commands. With these in place, `ssh git@<host> new-
