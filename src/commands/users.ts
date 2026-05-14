@@ -94,7 +94,7 @@ function callRemote(server: ServerConfig, remoteArgs: string[]): RemoteResult {
 function explainExit(
   status: number | null,
   context: string,
-  details: { shortName?: string; to?: string; server: ServerConfig },
+  details: { shortName?: string; server: ServerConfig },
 ): Error {
   switch (status) {
     case EXIT.AUTHORITY:
@@ -236,7 +236,6 @@ export function runUsersPromote(opts: PromoteUserOptions): void {
     throw explainExit(result.status, `stamp users promote ${opts.shortName}`, {
       server,
       shortName: opts.shortName,
-      to: opts.to,
     });
   }
   // Success prose lands on the operator's terminal via the SSH stderr
@@ -255,7 +254,6 @@ export function runUsersDemote(opts: DemoteUserOptions): void {
     throw explainExit(result.status, `stamp users demote ${opts.shortName}`, {
       server,
       shortName: opts.shortName,
-      to: opts.to,
     });
   }
 }

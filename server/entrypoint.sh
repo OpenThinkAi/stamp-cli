@@ -67,6 +67,14 @@ if [ -n "$AUTHORIZED_KEYS" ]; then
   printf '%s\n' "$AUTHORIZED_KEYS" > /home/git/.ssh/authorized_keys
   chmod 600 /home/git/.ssh/authorized_keys
   chown git:git /home/git/.ssh/authorized_keys
+  # AUTHORIZED_KEYS is deprecated as the ongoing membership source — its
+  # entries get imported into the sqlite users table by stamp-seed-users
+  # below, after which the CLI surface (stamp invites, stamp users) is
+  # authoritative. The env-var path remains supported for first-boot
+  # bootstrap so operators don't lose the existing way to seed an empty
+  # server, but new operators should be onboarded via `stamp invites
+  # mint`.
+  echo "note: AUTHORIZED_KEYS is supported for bootstrap; ongoing user management goes through 'stamp invites mint' and 'stamp users …'. See server/README.md." >&2
 fi
 
 # Membership sqlite — back-end for the AuthorizedKeysCommand resolver

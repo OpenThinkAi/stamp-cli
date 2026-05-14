@@ -52,9 +52,19 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      across deployments.
 5. **Configure environment variables** (Settings → Variables):
    - `AUTHORIZED_KEYS` — newline-delimited list of SSH public keys allowed
-     to connect. Start with your own: `cat ~/.ssh/id_ed25519.pub`.
+     to connect. Start with your own: `cat ~/.ssh/id_ed25519.pub`. **First-boot
+     bootstrap only:** these get imported into the membership sqlite as
+     `role=admin`; after that, the CLI surface (`stamp invites`, `stamp users`)
+     is authoritative. Adding/removing keys via this env var after the first
+     boot is supported but discouraged — see "Onboarding teammates" below.
    - `OPERATOR_PUB_KEY` — the stamp-cli public key that will be seeded as
      the initial trusted signer in each new repo: `cat ~/.stamp/keys/ed25519.pub`.
+   - `STAMP_PUBLIC_URL` — required for the invite flow. Set to the
+     externally-reachable HTTPS URL of the HTTP listener that Railway
+     assigns (Settings → Networking → Public Networking → HTTP, pointing
+     at container port `8080`). Example: `https://stamp-cli-production.up.railway.app`.
+     `stamp invites mint` bakes this into share URLs; without it, mint
+     refuses with a clear error.
    - `GITHUB_BOT_TOKEN` — **optional**, only needed if you want to mirror
      verified commits to a GitHub repo (see "GitHub mirror" below). A
      fine-scoped GitHub PAT with `contents: write` on the target repo(s).
@@ -62,28 +72,42 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
    - Settings → Networking → Public Networking → TCP Proxy → create one
      pointing at container port 22. Railway gives you a public host +
      high-numbered port (e.g. `ssh.railway.app:12345`).
-7. **Point a domain at it (optional)**:
+7. **Expose port 8080** via Railway's HTTP service:
+   - Settings → Networking → Public Networking → HTTP → create one
+     pointing at container port 8080. Railway terminates TLS at its edge
+     and gives you an `https://*.up.railway.app` URL. Plug that into
+     `STAMP_PUBLIC_URL`. This is where invitees POST their pubkeys when
+     they run `stamp invites accept`.
+8. **Point a domain at it (optional)**:
    - CNAME your domain at Railway's TCP proxy host. Note you'll still
      connect on the assigned high port; SSH doesn't do the Host header
      trick HTTP does.
 
 ### Connecting from your laptop
 
+Point the `stamp` CLI at your server (writes `~/.stamp/server.yml`):
+
 ```sh
-# Add a host entry for convenience (optional)
+stamp server config ssh.railway.app:12345
+```
+
+Optionally also pin the SSH host in `~/.ssh/config` so plain
+`ssh ssh.railway.app` and `git clone ssh://ssh.railway.app/...` use
+the right key:
+
+```sh
 cat >> ~/.ssh/config <<EOF
-Host stamp
-  HostName ssh.railway.app
+Host ssh.railway.app
   Port 12345
   User git
   IdentityFile ~/.ssh/id_ed25519
 EOF
 
 # Provision a new repo
-ssh stamp new-stamp-repo myproject
+ssh ssh.railway.app new-stamp-repo myproject
 
 # Clone it
-git clone ssh://stamp/srv/git/myproject.git
+git clone ssh://ssh.railway.app/srv/git/myproject.git
 ```
 
 ## Daily workflow
@@ -180,175 +204,128 @@ import via `gh api -X POST /repos/<owner>/<repo>/rulesets --input ...`.
 - First push to a fresh GitHub repo requires the GitHub repo to already
   exist (create it empty on github.com first).
 
-## Adding more pushers
+## Onboarding teammates
 
-Anyone else who wants to push needs:
+The server tracks membership in a sqlite database (`/srv/git/.stamp-state/users.db`)
+that's populated and managed entirely through the `stamp` CLI. Three roles:
 
-1. Their SSH public key added to `AUTHORIZED_KEYS` (so they can connect).
-2. Their **stamp** public key added to `.stamp/trusted-keys/` **in the repo**
-   (so their signed merges verify). They generate it with `stamp keys
-   generate`, then you commit the `.pub` file to the repo.
+| Role     | What it can do                                                       |
+|----------|----------------------------------------------------------------------|
+| `owner`  | Full control — invite anyone, promote/demote/remove anyone           |
+| `admin`  | Invite members, manage members. Cannot create or modify admins/owners |
+| `member` | Push/pull/merge (subject to per-repo trust). No user management      |
 
-## Onboarding a new machine (agent-driven walkthrough)
+**SSH access** is gated by membership in this DB (via sshd's
+`AuthorizedKeysCommand`). **Signing trust** for a stamp-gated repo is
+separate: each repo's `.stamp/trusted-keys/` directory lists whose
+stamp-signed merges that repo accepts. The two planes are decoupled —
+`stamp users …` covers server access; `stamp trust grant …` covers
+per-repo signing trust.
 
-The recipe below is structured for an agent running on the new machine
-to walk the operator through onboarding step-by-step — instruct, run,
-verify, then move on. Each step has a check the agent can run to
-confirm success before continuing to the next.
+### First-boot bootstrap (admin → owner)
 
-### What the agent needs upfront
-
-- The stamp server's host and port.
-- Credentials for the server's hosting environment, with permission to
-  read and update `AUTHORIZED_KEYS` and trigger a service restart.
-  Every platform exposes this differently — the recipe says *what* to
-  do, not *how* on a specific platform.
-
-### Step 1 — generate a stamp-specific SSH keypair
-
-Don't reuse `~/.ssh/id_ed25519`. A separate keypair means revoking
-server access later doesn't affect unrelated hosts.
+`AUTHORIZED_KEYS` entries are imported on first boot as `role=admin`. To
+get a real `owner` you self-promote once, while no owners exist yet:
 
 ```sh
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/stamp_server -C "stamp-$(hostname)"
+# As the operator whose SSH key is in AUTHORIZED_KEYS:
+stamp users promote <your-short-name> --to owner
 ```
 
-**Verify:**
+This works exactly once — the server allows admin self-promotion to
+owner only when the owner count is zero. After that, owner promotion is
+owner-gated like everything else. `<your-short-name>` is the slug
+derived from your SSH key's comment (`stamp users list` shows it).
+
+### Invite a teammate
+
+**Admin/owner side** — mint a single-use invite (15-minute TTL):
 
 ```sh
-test -f ~/.ssh/stamp_server && test -f ~/.ssh/stamp_server.pub && echo OK
+stamp invites mint alice --role member        # or --role admin (owner only)
 ```
 
-Expect `OK`.
-
-### Step 2 — generate the operator's stamp signing keypair
-
-The signing keypair is **separate** from the SSH keypair:
-
-| Keypair         | Question it answers                              |
-|-----------------|--------------------------------------------------|
-| SSH             | "Can I connect to the server?"                   |
-| Stamp signing   | "Are my reviews/merges trusted by a given repo?" |
+Output is a `stamp+invite://<host>/<token>` URL. Share it via whatever
+secure channel you and your teammate trust. The README's recommendation
+is [`magic-wormhole`](https://github.com/magic-wormhole/magic-wormhole),
+which lets you transport the URL one-shot via a short, easily-spoken
+code:
 
 ```sh
-stamp keys generate
+wormhole send --text "stamp+invite://stamp.example.com/<token>"
+# tells you the code, e.g. "7-crossover-clockwork"
+# the teammate runs: wormhole receive 7-crossover-clockwork
 ```
 
-**Verify:**
+Any other one-shot secure channel works equally well — Signal DM,
+1Password share, in-person paste from a laptop. Don't use Slack/email
+without considering whether persistent logs are acceptable in your
+threat model.
+
+**Teammate side** — redeem the invite:
 
 ```sh
-test -f ~/.stamp/keys/ed25519 && test -f ~/.stamp/keys/ed25519.pub && echo OK
+# Generate keys if you don't already have them.
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -C "<your-handle>@<your-host>"
+stamp keys generate                            # generates ~/.stamp/keys/ed25519
+
+# Redeem.
+stamp invites accept "stamp+invite://stamp.example.com/<token>"
 ```
 
-Expect `OK`.
+The TUI auto-detects `~/.ssh/id_ed25519.pub` and `~/.stamp/keys/ed25519.pub`,
+shows the fingerprints, and asks for confirmation before POSTing to the
+server. Result: an enrolled `member` row in the membership DB. Your
+teammate can now `git clone`, push, pull from the server.
 
-### Step 3 — tell the local stamp CLI where the server lives
+If they don't have a stamp signing keypair yet, the accept TUI tells
+them — they can re-run later with `--stamp-pubkey <path>` once
+generated, and the trust-grant step below will pick it up.
+
+**Sanity check:**
 
 ```sh
-mkdir -p ~/.stamp
-cat > ~/.stamp/server.yml <<EOF
-host: <stamp-server-host>
-port: <stamp-server-port>
-EOF
+stamp users list
 ```
 
-**Verify:**
+Should show the new teammate alongside everyone else.
+
+### Grant signing trust per-repo
+
+SSH access doesn't grant merge authority — that requires the new
+operator's stamp signing pubkey to live in each target repo's
+`.stamp/trusted-keys/`. Adding a trusted signer is itself stamp-gated,
+so the change goes through the usual review cycle.
 
 ```sh
-test -s ~/.stamp/server.yml && echo OK
-cat ~/.stamp/server.yml
+cd <stamp-gated-repo>
+stamp trust grant alice
+# Creates a `stamp-trust/alice` branch + commit with alice's signing
+# pubkey under .stamp/trusted-keys/alice.pub. The command prints
+# copy-pasteable next steps:
+stamp review --diff main..stamp-trust/alice
+git checkout main
+stamp merge stamp-trust/alice --into main
+stamp push main
 ```
 
-Expect `OK`, followed by the host and port the operator was given.
+This asymmetry is deliberate: a compromised admin account can enroll a
+new member at the server level, but cannot widen any repo's signing
+trust without going through the gate. The first trusted-key for any new
+operator is always landed by an existing one.
 
-### Step 4 — pin the SSH key to the server host
-
-So that plain `ssh <stamp-server-host>` and `git clone
-ssh://<stamp-server-host>/...` use the right key on the right port
-without further flags.
+### Manage members
 
 ```sh
-grep -q "^Host <stamp-server-host>$" ~/.ssh/config 2>/dev/null || cat >> ~/.ssh/config <<EOF
-
-Host <stamp-server-host>
-  Port <stamp-server-port>
-  User git
-  IdentityFile ~/.ssh/stamp_server
-  IdentitiesOnly yes
-EOF
+stamp users list                          # everyone enrolled, sorted by role
+stamp users promote <name> --to admin     # owner only
+stamp users promote <name> --to owner     # owner only
+stamp users demote <name> --to member     # owner only; refuses if it'd zero out ownership
+stamp users remove <name>                 # admin removes members; owner removes anyone
 ```
 
-The `grep` guard makes the step idempotent — re-running it won't
-duplicate the block if the agent retries mid-flow.
-
-**Verify:**
-
-```sh
-ssh -G <stamp-server-host> | grep -E '^(identityfile|port|user) '
-```
-
-Expect to see `stamp_server` in the `identityfile` line, the right
-`port`, and `user git`.
-
-### Step 5 — append the new SSH pubkey to AUTHORIZED_KEYS and restart the server
-
-This is the only step that touches the server's hosting environment.
-Read the current `AUTHORIZED_KEYS` env var, append this machine's SSH
-pubkey on its own line, write it back, and trigger a service restart
-so `entrypoint.sh` re-writes `/home/git/.ssh/authorized_keys` inside
-the container on next boot.
-
-The pubkey to append:
-
-```sh
-cat ~/.ssh/stamp_server.pub
-```
-
-The env-var update and restart use the hosting platform's API or CLI —
-the agent should already have the credentials it needs.
-
-**Verify** (from the new machine, after the restart settles):
-
-```sh
-stamp server-repos list --trash
-```
-
-Expect either a per-entry listing (with `size:` and `deleted-at:`
-fields) or an empty/no-trash message. The point is that auth
-succeeded. A `Permission denied (publickey)` or hang means the env-var
-update or restart didn't take; recheck both before continuing.
-
-### Step 6 — request trust in each repo this operator will land merges in
-
-For every stamp-gated repo where this operator needs to merge, their
-signing pubkey must live in the repo's `.stamp/trusted-keys/`
-directory. **Adding a trusted signer is itself a stamp-gated change** —
-an existing trusted operator has to land it on a feature branch
-through the standard `stamp review → merge → push` cycle.
-
-This asymmetry is intentional: it means a compromised hosting account
-can't silently add a rogue signer to every repo. The first trusted-key
-for any new operator is always landed by an existing one.
-
-The new operator hands over their pubkey:
-
-```sh
-cat ~/.stamp/keys/ed25519.pub
-```
-
-An existing operator commits it under
-`.stamp/trusted-keys/<short-name>.pub` on a feature branch in each
-target repo and runs the stamp gate.
-
-**Verify** (after the trust-key change has landed in a target repo):
-
-```sh
-diff -q <path-to-cloned-target-repo>/.stamp/trusted-keys/<short-name>.pub ~/.stamp/keys/ed25519.pub
-```
-
-Expect silent output (files match). After this, the new operator can
-run the full flow (`stamp init`, branch, review, merge, push) on their
-own.
+`stamp users` reads/writes the sqlite directly via SSH; no env-var
+shuffle, no service restart.
 
 ## Backup
 
