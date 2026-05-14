@@ -172,6 +172,21 @@ describe("stamp-mint-invite — authorization", () => {
     }
   });
 
+  it("refuses admin minting --role admin (only owners may invite admins)", () => {
+    // Strict authority matrix: admins can invite members only; inviting
+    // admins is the same authority class as promoting members to admin,
+    // which is owner-only. Was permissive in the original phase-2 cut
+    // and tightened here.
+    const h = setup("admin");
+    try {
+      const r = runMintInvite(h, ["nancy", "--role", "admin"]);
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /admins may only mint --role member/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it("refuses when caller's SSH key isn't in the DB at all", () => {
     const h = setup("none");
     try {

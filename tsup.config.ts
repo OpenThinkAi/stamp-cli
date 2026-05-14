@@ -34,6 +34,7 @@ export default defineConfig([
       "server/seed-users": "src/server/seed-users.ts",
       "server/mint-invite": "src/server/mint-invite.ts",
       "server/start-http-server": "src/server/start-http-server.ts",
+      "server/users-cli": "src/server/users-cli.ts",
     },
     format: ["cjs"],
     target: "node22",

@@ -181,6 +181,9 @@ COPY --from=builder /build/dist/server/mint-invite.cjs /usr/local/bin/stamp-mint
 # user, runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
 # the hosting platform's job (Railway terminates at its edge proxy).
 COPY --from=builder /build/dist/server/start-http-server.cjs /usr/local/sbin/stamp-http-server
+# User-management SSH command. One bundle dispatches list / promote /
+# demote / remove via argv. Symlinked below so git-shell finds it.
+COPY --from=builder /build/dist/server/users-cli.cjs /usr/local/bin/stamp-users
 COPY scripts/setup-repo.sh /usr/local/bin/setup-repo.sh
 COPY server/new-stamp-repo /usr/local/bin/new-stamp-repo
 COPY server/delete-stamp-repo /usr/local/bin/delete-stamp-repo
@@ -213,6 +216,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/list-trash \
              /usr/local/bin/stamp-server-pubkey \
              /usr/local/bin/stamp-mint-invite \
+             /usr/local/bin/stamp-users \
              /usr/local/sbin/stamp-ensure-repo-key \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
@@ -241,6 +245,7 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/list-trash /home/git/git-shell-commands/list-trash \
  && ln -s /usr/local/bin/stamp-server-pubkey /home/git/git-shell-commands/stamp-server-pubkey \
  && ln -s /usr/local/bin/stamp-mint-invite /home/git/git-shell-commands/stamp-mint-invite \
+ && ln -s /usr/local/bin/stamp-users /home/git/git-shell-commands/stamp-users \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands
 

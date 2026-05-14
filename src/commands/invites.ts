@@ -372,8 +372,10 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
     user_id?: number;
   };
   if (response.status === 200 && body.ok) {
+    // ✓ for a primary success outcome — `note:` would read like a
+    // footnote on the headline of the whole command.
     process.stdout.write(
-      `note: enrolled as ${body.role} (user_id=${body.user_id}). You can now ` +
+      `✓ enrolled as ${body.role} (user_id=${body.user_id}). You can now ` +
         `\`git push\` and \`stamp\` against ${target.host}.\n`,
     );
     return;

@@ -158,6 +158,16 @@ function main(): void {
         3,
       );
     }
+    // Strict authority matrix: admins may invite members only. Inviting
+    // an admin is "creating a peer with equal authority" — that's
+    // owner-only by design, so a compromised admin's blast radius
+    // stays member-level. Owners can mint any invite role.
+    if (callerRow.role === "admin" && args.role === "admin") {
+      fail(
+        "admins may only mint --role member invites; only owners may mint admin invites",
+        3,
+      );
+    }
 
     const existing = findUserByShortName(db, args.short_name);
     if (existing) {

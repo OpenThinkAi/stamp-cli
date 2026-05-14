@@ -19,6 +19,12 @@ import {
 } from "./commands/invites.js";
 import { runProvision } from "./commands/provision.js";
 import {
+  runUsersDemote,
+  runUsersList,
+  runUsersPromote,
+  runUsersRemove,
+} from "./commands/users.js";
+import {
   runServerRepoDelete,
   runServerRepoList,
   runServerRepoRestore,
@@ -722,6 +728,67 @@ invites
       }
     },
   );
+
+const users = program
+  .command("users")
+  .description("list, promote, demote, and remove enrolled users on the stamp server");
+
+users
+  .command("list")
+  .description("list enrolled users (everyone authenticated may run this)")
+  .option("--json", "emit the raw server JSON instead of the formatted table")
+  .action((opts: { json?: boolean }) => {
+    try {
+      runUsersList({ json: opts.json });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("promote <short-name>")
+  .description("promote a user; admins may not promote to admin/owner except for the no-owners bootstrap path")
+  .requiredOption("--to <admin|owner>", "target role")
+  .action((shortName: string, opts: { to: string }) => {
+    try {
+      if (opts.to !== "admin" && opts.to !== "owner") {
+        throw new Error(
+          `promote --to must be 'admin' or 'owner' (got ${JSON.stringify(opts.to)})`,
+        );
+      }
+      runUsersPromote({ shortName, to: opts.to });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("demote <short-name>")
+  .description("demote a user (admin/owner only; last-owner guard prevents zeroing out ownership)")
+  .requiredOption("--to <admin|member>", "target role")
+  .action((shortName: string, opts: { to: string }) => {
+    try {
+      if (opts.to !== "admin" && opts.to !== "member") {
+        throw new Error(
+          `demote --to must be 'admin' or 'member' (got ${JSON.stringify(opts.to)})`,
+        );
+      }
+      runUsersDemote({ shortName, to: opts.to });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("remove <short-name>")
+  .description("remove a user from the membership DB (admins may remove members only; cannot remove self)")
+  .action((shortName: string) => {
+    try {
+      runUsersRemove({ shortName });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
 
 const reviewers = program
   .command("reviewers")
