@@ -545,13 +545,33 @@ program
     "PR-check mode counterpart to `stamp merge` — sign an attestation envelope and write it to refs/stamp/attestations/<patch-id> for a GitHub Action to verify on the PR (no actual git merge happens here)",
   )
   .requiredOption("--into <target>", "target branch whose rule the gate is checked against")
-  .action((branch: string | undefined, opts: { into: string }) => {
-    try {
-      runAttest({ branch, into: opts.into });
-    } catch (err) {
-      handleCliError(err);
-    }
-  });
+  .option(
+    "--push [remote]",
+    "after attesting locally, push the current branch + the attestation ref to <remote> in one atomic git push (default remote: origin)",
+  )
+  .action(
+    (
+      branch: string | undefined,
+      opts: { into: string; push?: string | boolean },
+    ) => {
+      try {
+        // commander gives us:
+        //   undefined when --push isn't passed
+        //   true      when --push is passed alone
+        //   "<name>"  when --push <name> is passed
+        // Normalize to a remote string or undefined.
+        const pushTo =
+          opts.push === true
+            ? "origin"
+            : typeof opts.push === "string"
+              ? opts.push
+              : undefined;
+        runAttest({ branch, into: opts.into, pushTo });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 
 program
   .command("push <target>")

@@ -29,6 +29,7 @@
  * boundary.
  */
 
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { type Approval } from "../lib/attestation.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
@@ -65,6 +66,14 @@ export interface AttestOptions {
   /** Target branch — provides the branch rule and is recorded in the
    *  attestation so the verifier knows which rule to evaluate against. */
   into: string;
+  /**
+   * If set, after writing the attestation ref locally, push the current
+   * branch + the attestation ref to this remote in a single atomic
+   * `git push`. Spares the operator from typing the patch-id-bearing
+   * ref name themselves. Set to `null`/undefined to skip the push and
+   * leave the operator to do it manually.
+   */
+  pushTo?: string;
 }
 
 export function runAttest(opts: AttestOptions): void {
@@ -201,10 +210,60 @@ export function runAttest(opts: AttestOptions): void {
   console.log(`  ref:        ${ref}`);
   console.log(`  blob:       ${blob_sha.slice(0, 12)}`);
   console.log(bar);
-  console.log(
-    `\nNext: push the branch + attestation ref to your remote, open a PR, and ` +
-      `let stamp/verify-attestation@v1 (the GH Action) confirm it.`,
+
+  if (opts.pushTo) {
+    pushBranchAndAttestation(opts.pushTo, ref, repoRoot);
+    console.log(
+      `\n✓ pushed branch + attestation ref to ${opts.pushTo}. Open the PR; ` +
+        `stamp/verify-attestation@v1 will look up refs/stamp/attestations/<patch-id> ` +
+        `from your head SHA's diff against the base.`,
+    );
+  } else {
+    console.log(
+      `\nNext: push the branch + attestation ref to your remote, open a PR, and ` +
+        `let stamp/verify-attestation@v1 (the GH Action) confirm it. To do both ` +
+        `pushes in one shot:\n\n` +
+        `    git push <remote> HEAD ${ref}\n\n` +
+        `Or re-run with --push <remote> next time.`,
+    );
+  }
+}
+
+/**
+ * Push the current branch + the attestation ref to `remote` in a single
+ * `git push` invocation. Atomic by git semantics — if either ref's
+ * remote-side update is rejected (force-push protection on the branch,
+ * pre-receive hook, etc.), neither ref lands. That's the right shape:
+ * a half-pushed state where the branch advanced but the attestation
+ * didn't would silently break PR-check verification on the next CI run.
+ *
+ * `--atomic` is passed explicitly for that property; without it, git
+ * 2.x falls back to per-ref behavior on some transports (file:// in
+ * particular). Passing it is a no-op on transports that already imply
+ * atomicity (https/ssh to most servers).
+ *
+ * Stdio inherits so the operator sees git's normal push prose
+ * (counting objects, writing, hook output) live, matching what `git
+ * push` directly would look like — minus the ref names, which we
+ * already printed in the summary block above.
+ */
+function pushBranchAndAttestation(
+  remote: string,
+  attestationRef: string,
+  repoRoot: string,
+): void {
+  const result = spawnSync(
+    "git",
+    ["push", "--atomic", remote, "HEAD", attestationRef],
+    { cwd: repoRoot, stdio: "inherit" },
   );
+  if (result.status !== 0) {
+    throw new Error(
+      `git push --atomic ${remote} HEAD ${attestationRef} failed (exit ${result.status}). ` +
+        `The attestation ref is still in the local repo at ${attestationRef} — ` +
+        `re-run with --push ${remote} after fixing the cause, or push manually.`,
+    );
+  }
 }
 
 function hashHex(s: string): string {
