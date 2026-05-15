@@ -41,6 +41,11 @@ import { verifyBytes } from "../src/lib/signing.ts";
 interface Harness {
   repo: string;
   home: string;
+  /** Path to a `git init --bare` remote — only set when the test
+   *  uses setupHarnessWithRemote(). Unset on plain setupHarness().
+   *  Tests that need a remote should narrow with `assert.ok(h.bareRemote)`
+   *  rather than treating an empty string as "no remote." */
+  bareRemote?: string;
   prevHome: string | undefined;
   cleanup: () => void;
 }
@@ -115,6 +120,25 @@ function setupHarness(): Harness {
       rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * Same as setupHarness, but also creates a bare git remote in the
+ * sibling temp dir and registers it as `origin` on the working repo.
+ * Lets push-side tests use a real `git push origin` without any
+ * network or fixture-server involvement.
+ */
+function setupHarnessWithRemote(): Harness {
+  const h = setupHarness();
+  const bareRemote = path.join(path.dirname(h.repo), "remote.git");
+  mkdirSync(bareRemote, { recursive: true });
+  git(bareRemote, ["init", "-q", "--bare", "-b", "main"]);
+  // Register origin pointing at the bare remote (file:// URL form so
+  // git's pushers don't try to use ssh).
+  git(h.repo, ["remote", "add", "origin", bareRemote]);
+  // bareRemote is intentionally NOT seeded — first push will create
+  // the remote `feature` branch and the attestation ref.
+  return { ...h, bareRemote };
 }
 
 function seedReview(
@@ -251,6 +275,111 @@ describe("runAttest — happy path", () => {
         allRefs.includes(patchId1),
         `pre-squash patch-id ${patchId1} should still be reachable post-squash; got ${allRefs.join(",")}`,
       );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+describe("runAttest — pushTo: branch + attestation ref pushed atomically", () => {
+  it("pushes both refs to the remote when pushTo is set", () => {
+    const h = setupHarnessWithRemote();
+    try {
+      assert.ok(h.bareRemote);
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "HEAD");
+      seedReview(h.repo, base, head, "security", "approved");
+
+      runFromRepo(h.repo, () =>
+        runAttest({ into: "main", pushTo: "origin" }),
+      );
+
+      // Branch landed on the bare remote.
+      const remoteBranchSha = git(h.bareRemote, [
+        "rev-parse",
+        "refs/heads/feature",
+      ]).trim();
+      assert.equal(remoteBranchSha, head);
+
+      // Attestation ref landed on the bare remote.
+      const localPatchIds = listAttestationPatchIds(h.repo);
+      assert.equal(localPatchIds.length, 1);
+      const remoteRefs = git(h.bareRemote, [
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/stamp/attestations",
+      ])
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      assert.deepEqual(
+        remoteRefs,
+        [`refs/stamp/attestations/${localPatchIds[0]}`],
+        "attestation ref should be present on the remote",
+      );
+
+      // Re-running --push is idempotent at the wire level (same blob,
+      // same ref → "Everything up-to-date").
+      runFromRepo(h.repo, () =>
+        runAttest({ into: "main", pushTo: "origin" }),
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("does NOT push when pushTo is undefined", () => {
+    const h = setupHarnessWithRemote();
+    try {
+      assert.ok(h.bareRemote);
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "HEAD");
+      seedReview(h.repo, base, head, "security", "approved");
+
+      runFromRepo(h.repo, () => runAttest({ into: "main" }));
+
+      // Bare remote should still be empty (no refs other than the
+      // initial HEAD pointer that `git init --bare` creates).
+      const remoteRefs = git(h.bareRemote, [
+        "for-each-ref",
+        "--format=%(refname)",
+      ])
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      assert.deepEqual(
+        remoteRefs,
+        [],
+        `expected empty remote when pushTo undefined; got ${JSON.stringify(remoteRefs)}`,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("surfaces a clean error when the remote rejects the push", () => {
+    const h = setupHarnessWithRemote();
+    try {
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "HEAD");
+      seedReview(h.repo, base, head, "security", "approved");
+
+      // Make the bare remote unwritable so the push fails with a real
+      // git rejection (vs. a network error or missing-remote). Restore
+      // before cleanup so rm -rf can proceed.
+      assert.ok(h.bareRemote);
+      execFileSync("chmod", ["-R", "u-w", h.bareRemote]);
+      try {
+        assert.throws(
+          () =>
+            runFromRepo(h.repo, () =>
+              runAttest({ into: "main", pushTo: "origin" }),
+            ),
+          /git push --atomic origin .* failed/,
+        );
+      } finally {
+        execFileSync("chmod", ["-R", "u+w", h.bareRemote]);
+      }
     } finally {
       h.cleanup();
     }
