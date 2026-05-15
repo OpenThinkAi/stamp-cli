@@ -37,6 +37,7 @@ import {
   keysTrust,
 } from "./commands/keys.js";
 import { runLog } from "./commands/log.js";
+import { runAttest } from "./commands/attest.js";
 import { runMerge } from "./commands/merge.js";
 import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
@@ -533,6 +534,20 @@ program
   .action((branch: string, opts: { into: string; yes?: boolean }) => {
     try {
       runMerge({ branch, into: opts.into, yes: opts.yes });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+program
+  .command("attest [branch]")
+  .description(
+    "PR-check mode counterpart to `stamp merge` — sign an attestation envelope and write it to refs/stamp/attestations/<patch-id> for a GitHub Action to verify on the PR (no actual git merge happens here)",
+  )
+  .requiredOption("--into <target>", "target branch whose rule the gate is checked against")
+  .action((branch: string | undefined, opts: { into: string }) => {
+    try {
+      runAttest({ branch, into: opts.into });
     } catch (err) {
       handleCliError(err);
     }
