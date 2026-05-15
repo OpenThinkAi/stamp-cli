@@ -215,6 +215,17 @@ function readReviewerSource(
   reviewerName: string,
   repoRoot: string,
 ): { source: string; ref: string } | null {
+  // Deliberate exception to "everything reviewer-related sources from
+  // resolved.base_sha". reviewer_source is informational metadata
+  // (where this reviewer was fetched from + at what version) and is
+  // NOT covered by any cryptographic hash in the attestation —
+  // prompt_sha256 / tools_sha256 / mcp_sha256 are the trust-bearing
+  // fields and they ALL come from base_sha. Reading the lock file
+  // from HEAD here matches what stamp merge does (audit trail
+  // reflects the merged tree's lock state) and is safe because no
+  // verifier should derive trust from this field. If a future change
+  // promotes reviewer_source to a trust input, switch this read to
+  // resolved.base_sha first.
   const path = `.stamp/reviewers/${reviewerName}.lock.json`;
   if (!pathExistsAtRef("HEAD", path, repoRoot)) return null;
   const raw = runGit(["show", `HEAD:${path}`], repoRoot);

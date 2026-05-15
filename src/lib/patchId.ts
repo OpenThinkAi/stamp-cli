@@ -63,6 +63,17 @@ export function patchIdForSpan(
   // Pipe `git diff` → `git patch-id --stable` in-process via spawnSync
   // input. Avoids `sh -c` (no shell-injection surface even though
   // base_sha/head_sha came from `git rev-parse` and are 40-char hex).
+  //
+  // git patch-id is technically documented for `git diff-tree` /
+  // `git format-patch` output (which include "From <sha>" / "commit
+  // <sha>" headers). Bare `git diff A..B` has no headers; git treats
+  // the whole diff as one virtual commit and emits a single
+  // `<patch-id> 0000...` line. Works in practice and is what we
+  // depend on — DO NOT switch to format-patch piping without re-running
+  // the squash/rebase stability tests in tests/patchId.test.ts, since
+  // format-patch produces per-commit diffs whose cumulative patch-id
+  // is computed differently and would silently change the keying
+  // behavior for any branch with multiple commits.
   const diff = spawnSync("git", ["diff", `${base_sha}..${head_sha}`], {
     cwd: repoRoot,
     // Buffer because diffs can be large and stable across encodings;

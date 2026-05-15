@@ -542,7 +542,7 @@ program
 program
   .command("attest [branch]")
   .description(
-    "PR-check mode: validate the gate for [branch] (default: HEAD) against --into <target>, sign a content-addressed attestation envelope with your stamp key, and write it to refs/stamp/attestations/<patch-id>. Push the branch + that ref to your remote, then let stamp/verify-attestation@v1 (the GH Action) confirm it on the PR. Patch-id keys the attestation so squash/rebase/merge-commit on GitHub all preserve it.",
+    "PR-check mode counterpart to `stamp merge` — sign an attestation envelope and write it to refs/stamp/attestations/<patch-id> for a GitHub Action to verify on the PR (no actual git merge happens here)",
   )
   .requiredOption("--into <target>", "target branch whose rule the gate is checked against")
   .action((branch: string | undefined, opts: { into: string }) => {
