@@ -206,6 +206,10 @@ export function runUsersList(opts: ListUsersOptions): void {
     throw explainExit(result.status, "stamp users list", { server });
   }
   if (opts.json) {
+    // --json is the agent escape hatch: deliberately suppress the
+    // ownerless warning so machine-parseable output isn't mixed with
+    // human prose. Agents that care about ownership status can read
+    // it from the parsed JSON directly.
     process.stdout.write(result.stdout);
     return;
   }
@@ -219,7 +223,41 @@ export function runUsersList(opts: ListUsersOptions): void {
     );
   }
   const rows = payload.users ?? [];
+  const warning = ownerlessWarning(rows);
+  if (warning) process.stderr.write(warning);
   process.stdout.write(formatUsersTable(rows));
+}
+
+/**
+ * Compose the loud reminder to claim ownership when a server has
+ * enrolled users but no owner. Returns the warning text (multi-line,
+ * `warning:`-prefixed) or null when no warning applies.
+ *
+ * Without an owner the server can't promote anyone to admin or
+ * appoint other owners, and any admin (yours or someone else's) can
+ * race to claim ownership via the one-shot bootstrap path. Operators
+ * who skip this step silently end up with a degraded server.
+ *
+ * Returns null on an empty users table — no admin has been imported
+ * yet so there's nothing to bootstrap from. Exported for unit tests
+ * that pin the wording so a future polish pass doesn't accidentally
+ * weaken the message.
+ */
+export function ownerlessWarning(rows: RemoteUserRow[]): string | null {
+  if (rows.length === 0) return null;
+  const hasOwner = rows.some((r) => r.role === "owner");
+  if (hasOwner) return null;
+  return (
+    "warning: this stamp server has NO OWNER configured.\n" +
+    "warning: an admin can self-promote to owner ONCE, but only while no\n" +
+    "warning: owner exists — and any admin (yours or someone else's) can\n" +
+    "warning: race to claim it. Until you do, the server can't promote\n" +
+    "warning: anyone to admin or appoint other owners.\n" +
+    "warning:\n" +
+    "warning: claim ownership now from THIS machine before anyone beats you:\n" +
+    "warning:   stamp users promote <your-short-name> --to owner\n" +
+    "warning:\n"
+  );
 }
 
 // ─── promote / demote ─────────────────────────────────────────────────
