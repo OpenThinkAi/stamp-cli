@@ -8,15 +8,18 @@
  *   - CHECK-constraint rejection on bad role / source values
  *   - suggestUniqueShortName collision-avoidance numbering
  *   - read-only open mode: read-side works, writes throw
+ *   - parent-dir mode is wide enough that sqlite can create its
+ *     `-journal` sidecar (regression: 0o750 silently demoted writes
+ *     to "attempt to write a readonly database")
  *
- * Filesystem perms (root:git 0640 / parent 0750) are NOT exercised here —
- * they require running as root with the `git` group available, which the
- * test harness isn't. Those are validated end-to-end by the Docker image
- * tests instead.
+ * Cross-user filesystem perms (root:git ownership) are NOT exercised
+ * here — they require running as root with the `git` group available,
+ * which the test harness isn't. Those are validated end-to-end by the
+ * Docker image tests instead.
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, before, after } from "node:test";
@@ -83,6 +86,96 @@ describe("openServerDb", () => {
       // Writes throw.
       assert.throws(() => insertUser(reader, fixturePk(2)));
       reader.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("sets parent dir to 0o1770 — sticky+0o770 (0o750 silently demotes writes)", () => {
+    // Pinned regression: phase 1 set the dir to 0o750. The git user
+    // (HTTP server, mint-invite, users-cli) couldn't create sqlite's
+    // -journal sidecar in that dir, so every UPDATE threw "attempt to
+    // write a readonly database". Found end-to-end by `stamp users
+    // promote` blowing up the first time it was tried in production.
+    //
+    // 0o1770 = sticky bit + rwxrwx---. The 0o770 portion gives the
+    // git-group process file-create access (sqlite -journal); the
+    // sticky bit protects future root-owned files in this dir from
+    // being touched by group-writable processes. Mask 0o7777 to
+    // preserve sticky in the assertion — masking only 0o777 would
+    // silently allow a regression that drops the sticky bit.
+    const t = tmpDbPath();
+    try {
+      openServerDb({ path: t.path }).close();
+      const dirMode = statSync(path.dirname(t.path)).mode & 0o7777;
+      assert.equal(
+        dirMode,
+        0o1770,
+        `parent dir should be 0o1770 (sticky + 0o770) to allow sqlite -journal creation while protecting root-owned files, got 0o${dirMode.toString(8)}`,
+      );
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("can write through a connection when the dir is 0o770 (positive control)", () => {
+    // Counterpart to the regression test above: prove that the dir
+    // mode openServerDb chose actually sustains a write transaction.
+    // If sqlite ever changed its journal-creation contract (e.g. went
+    // to WAL by default and demanded different perms), this would be
+    // the canary.
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path });
+      try {
+        // Force a write that requires journal creation.
+        insertUser(db, fixturePk(1));
+        db.prepare("UPDATE users SET role = 'member' WHERE short_name = ?").run(
+          "user-1",
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("a 0o500 parent dir reproduces the original 'readonly' failure mode", () => {
+    // Direct reproduction of the production bug, in-process: when the
+    // parent dir doesn't allow the test user to create new files,
+    // sqlite refuses writes on subsequent connections. Pins the
+    // failure mode so a future regression in openServerDb that
+    // accidentally narrows the dir mode produces a recognizable
+    // exception, not a silent demotion.
+    const t = tmpDbPath();
+    try {
+      // Create + populate the DB while the dir is still writable.
+      const db1 = openServerDb({ path: t.path });
+      insertUser(db1, fixturePk(1));
+      db1.close();
+
+      // Lock down the dir so the test process can no longer create
+      // files in it (mimics the git user against a 0o750 root:git dir).
+      chmodSync(path.dirname(t.path), 0o500);
+
+      try {
+        const db2 = openServerDb({ path: t.path, skipChmod: true });
+        try {
+          assert.throws(
+            () =>
+              db2
+                .prepare("UPDATE users SET role = 'member' WHERE short_name = ?")
+                .run("user-1"),
+            /readonly/,
+          );
+        } finally {
+          db2.close();
+        }
+      } finally {
+        // Restore so cleanup can rm.
+        chmodSync(path.dirname(t.path), 0o700);
+      }
     } finally {
       t.cleanup();
     }

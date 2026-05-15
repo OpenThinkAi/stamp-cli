@@ -81,16 +81,24 @@ fi
 # (sshd consults this on every connection before falling back to
 # AuthorizedKeysFile) AND the HTTP server's invite-accept endpoint
 # (which writes new user rows). The DB lives on the persistent volume
-# so it survives container redeploys; the directory is root:git 0750
-# so the git user can READ via group but cannot RENAME or DELETE the
-# DB file itself.
+# so it survives container redeploys.
 #
-# File ownership/mode: root:git 0660. The HTTP server runs as the git
-# user and needs WRITE access for invite/accept (new user rows). The
+# Directory mode: root:git 1770. The 0770 bits give the git user
+# write+create access in the directory, which sqlite needs to write
+# its `-journal` sidecar files on every transaction (without it,
+# sqlite silently demotes to read-only and every UPDATE throws
+# "attempt to write a readonly database"). The leading sticky bit (1)
+# means git can rename/delete files it owns but NOT files owned by
+# root — so any future root-owned state file in this dir is protected
+# from a git-shell-escapee, even though the dir itself is git-writable.
+# Phase 1 had 0750 here, which broke the write path; we found this
+# the first time someone tried `stamp users promote` end-to-end.
+#
+# File mode: root:git 0660. The HTTP server runs as the git user and
+# needs WRITE access for invite/accept (new user rows). The
 # AuthorizedKeysCommand resolver also runs as git but opens the DB
 # `readOnly: true` in code, so it can't mutate state even with the
-# write bit set. Phase 1 was 0640 (read-only for git); phase 2 widens
-# to 0660 to enable the HTTP write path.
+# write bit set.
 #
 # stamp-seed-users walks AUTHORIZED_KEYS and INSERT-OR-NO-OPs each entry
 # into the users table as role=admin source=env. This runs on EVERY boot
@@ -101,7 +109,7 @@ fi
 STAMP_STATE_DIR=/srv/git/.stamp-state
 mkdir -p "$STAMP_STATE_DIR"
 chown root:git "$STAMP_STATE_DIR"
-chmod 0750 "$STAMP_STATE_DIR"
+chmod 1770 "$STAMP_STATE_DIR"
 if /usr/local/sbin/stamp-seed-users; then
   if [ -f "$STAMP_STATE_DIR/users.db" ]; then
     chown root:git "$STAMP_STATE_DIR/users.db"
