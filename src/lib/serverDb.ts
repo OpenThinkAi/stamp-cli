@@ -87,18 +87,29 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
 
   if (!readOnly) {
     const dir = dirname(path);
-    ensureDir(dir, 0o770);
+    ensureDir(dir, 0o1770);
     if (!opts.skipChmod) {
-      // 0o770 (not 0o750): the git user that runs the HTTP server and
-      // SSH wrappers needs to CREATE files in this directory — sqlite's
-      // default DELETE journal mode writes a `<dbfile>-journal` sidecar
-      // on every transaction, and without write+create access on the
-      // parent dir sqlite silently demotes the connection to read-only
-      // and every UPDATE throws "attempt to write a readonly database".
+      // 0o1770 = sticky bit (1) + rwx for owner + rwx for group + nothing
+      // for other. Matches the chmod entrypoint.sh sets, intentionally:
+      //   - The 0o770 portion is required for sqlite to write its
+      //     `-journal` sidecar in this dir on every transaction (the
+      //     git user that runs the HTTP server and SSH wrappers needs
+      //     CREATE access). At 0o750 sqlite silently demotes the
+      //     connection to read-only and every UPDATE throws "attempt
+      //     to write a readonly database".
+      //   - The sticky bit prevents the git-group from renaming or
+      //     deleting files in this dir that ARE NOT owned by git —
+      //     so any future root-owned state file landing here is
+      //     protected from a git-shell-escapee even though the dir
+      //     is otherwise group-writable.
+      // We must mirror the sticky bit here (not just rely on
+      // entrypoint.sh) because seed-users.ts opens the DB writable
+      // (no skipChmod) as root at boot, and a chmod 0o770 here
+      // would silently STRIP the sticky bit entrypoint just set.
       // ensureDir no-ops on an existing directory, so this explicit
-      // chmod is what re-widens perms on a redeploy where the dir was
-      // created at the old 0o750 mode by an earlier image version.
-      chmodSync(dir, 0o770);
+      // chmod is what re-applies sticky+770 on a redeploy where the
+      // dir was created at an earlier looser mode.
+      chmodSync(dir, 0o1770);
     }
   }
 
