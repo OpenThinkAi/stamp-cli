@@ -87,12 +87,18 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
 
   if (!readOnly) {
     const dir = dirname(path);
-    ensureDir(dir, 0o750);
+    ensureDir(dir, 0o770);
     if (!opts.skipChmod) {
+      // 0o770 (not 0o750): the git user that runs the HTTP server and
+      // SSH wrappers needs to CREATE files in this directory — sqlite's
+      // default DELETE journal mode writes a `<dbfile>-journal` sidecar
+      // on every transaction, and without write+create access on the
+      // parent dir sqlite silently demotes the connection to read-only
+      // and every UPDATE throws "attempt to write a readonly database".
       // ensureDir no-ops on an existing directory, so this explicit
-      // chmod is what tightens perms on a redeploy where the dir was
-      // created at a looser mode by an earlier image version.
-      chmodSync(dir, 0o750);
+      // chmod is what re-widens perms on a redeploy where the dir was
+      // created at the old 0o750 mode by an earlier image version.
+      chmodSync(dir, 0o770);
     }
   }
 
