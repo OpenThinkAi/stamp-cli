@@ -257,9 +257,16 @@ function pushBranchAndAttestation(
     ["push", "--atomic", remote, "HEAD", attestationRef],
     { cwd: repoRoot, stdio: "inherit" },
   );
+  // Spawn-level error (git binary not found, EACCES on the cwd, etc.)
+  // surfaces with the underlying message rather than "exit null" — the
+  // null status case is genuinely "we never got an exit code from git."
+  if (result.error) throw result.error;
   if (result.status !== 0) {
+    // result.status is null when git is killed by a signal; preserve
+    // that distinction in the prose so it's debuggable.
+    const exit = result.status === null ? "(killed by signal)" : `exit ${result.status}`;
     throw new Error(
-      `git push --atomic ${remote} HEAD ${attestationRef} failed (exit ${result.status}). ` +
+      `git push --atomic ${remote} HEAD ${attestationRef} failed (${exit}). ` +
         `The attestation ref is still in the local repo at ${attestationRef} — ` +
         `re-run with --push ${remote} after fixing the cause, or push manually.`,
     );

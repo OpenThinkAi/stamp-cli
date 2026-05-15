@@ -41,9 +41,11 @@ import { verifyBytes } from "../src/lib/signing.ts";
 interface Harness {
   repo: string;
   home: string;
-  /** Path to a `git init --bare` remote, when the test calls
-   *  setupHarnessWithRemote (otherwise unset). */
-  bareRemote: string;
+  /** Path to a `git init --bare` remote — only set when the test
+   *  uses setupHarnessWithRemote(). Unset on plain setupHarness().
+   *  Tests that need a remote should narrow with `assert.ok(h.bareRemote)`
+   *  rather than treating an empty string as "no remote." */
+  bareRemote?: string;
   prevHome: string | undefined;
   cleanup: () => void;
 }
@@ -112,7 +114,6 @@ function setupHarness(): Harness {
   return {
     repo,
     home,
-    bareRemote: "",
     prevHome,
     cleanup: () => {
       process.env["HOME"] = prevHome;
@@ -284,6 +285,7 @@ describe("runAttest — pushTo: branch + attestation ref pushed atomically", () 
   it("pushes both refs to the remote when pushTo is set", () => {
     const h = setupHarnessWithRemote();
     try {
+      assert.ok(h.bareRemote);
       const base = shaOf(h.repo, "main");
       const head = shaOf(h.repo, "HEAD");
       seedReview(h.repo, base, head, "security", "approved");
@@ -329,6 +331,7 @@ describe("runAttest — pushTo: branch + attestation ref pushed atomically", () 
   it("does NOT push when pushTo is undefined", () => {
     const h = setupHarnessWithRemote();
     try {
+      assert.ok(h.bareRemote);
       const base = shaOf(h.repo, "main");
       const head = shaOf(h.repo, "HEAD");
       seedReview(h.repo, base, head, "security", "approved");
@@ -362,10 +365,9 @@ describe("runAttest — pushTo: branch + attestation ref pushed atomically", () 
       seedReview(h.repo, base, head, "security", "approved");
 
       // Make the bare remote unwritable so the push fails with a real
-      // git rejection (vs. a network error or missing-remote).
-      // chmod 0500 the bare remote dir → git can read but not write
-      // refs/objects.
-      const oldMode = 0o755;
+      // git rejection (vs. a network error or missing-remote). Restore
+      // before cleanup so rm -rf can proceed.
+      assert.ok(h.bareRemote);
       execFileSync("chmod", ["-R", "u-w", h.bareRemote]);
       try {
         assert.throws(
@@ -376,9 +378,7 @@ describe("runAttest — pushTo: branch + attestation ref pushed atomically", () 
           /git push --atomic origin .* failed/,
         );
       } finally {
-        execFileSync("chmod", ["-R", `u+w`, h.bareRemote]);
-        // Restore so cleanup's rm -rf can proceed.
-        void oldMode;
+        execFileSync("chmod", ["-R", "u+w", h.bareRemote]);
       }
     } finally {
       h.cleanup();
