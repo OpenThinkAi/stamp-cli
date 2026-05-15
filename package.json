@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.114",
-    "commander": "^13.1.0",
+    "commander": "^14.0.3",
     "ink": "^7.0.1",
     "react": "^19.2.5",
     "yaml": "^2.7.0",
