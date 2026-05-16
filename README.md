@@ -110,8 +110,10 @@ advances.
 
 ### Local-only path
 
-If you want stamp's review + signed-attestation flow without the GitHub
-Action gate, opt out with `--no-pr-check`:
+`--mode local-only` and `--no-pr-check` are independent flags — local-only
+controls what `AGENTS.md` says about enforcement; `--no-pr-check` controls
+whether the workflow file is scaffolded. To get the pre-1.6.0 behavior
+(`.stamp/` + `AGENTS.md` only, no GitHub Action), pass BOTH:
 
 ```sh
 cd myproject
@@ -119,6 +121,11 @@ stamp init --mode local-only --no-pr-check   # scaffolds .stamp/ + AGENTS.md onl
 git add .stamp AGENTS.md && git commit -m "stamp: advisory config"
 git push origin main
 ```
+
+`--mode local-only` alone (without `--no-pr-check`) still drops the workflow
+— operators using local-only often mirror to GitHub for visibility, and the
+PR check makes that mirror useful as a gate. Skip the workflow only when you
+explicitly don't want it.
 
 You can still run `stamp review` / `stamp merge` / `stamp verify` against this
 repo — the merge commits carry signed attestations and `stamp verify <sha>`
@@ -221,10 +228,11 @@ stamp verify <sha>                         # verify a merge commit's attestation
 **PR-check mode (alternative to `stamp merge` for GitHub PR workflows):**
 
 ```
-stamp attest [<branch>] --into <target>    # validate the gate, sign an attestation envelope,
-                                           #   write to refs/stamp/attestations/<patch-id>
-                                           #   --push <remote>: also pushes branch + attestation
-                                           #   ref to <remote> in one atomic git push
+stamp attest [<branch>] --into <target> [--push <remote>]
+                                           # validate the gate, sign an attestation envelope,
+                                           #   write to refs/stamp/attestations/<patch-id>;
+                                           #   with --push, also git push --atomic branch +
+                                           #   attestation ref to <remote> in one transaction
 stamp verify-pr <head> --base <ref> --into <branch>
                                            # consumer side; used by stamp/verify-attestation@v1
                                            # action and runnable locally for debugging
@@ -235,9 +243,11 @@ stamp verify-pr <head> --base <ref> --into <branch>
 ```
 stamp invites mint <name> --role <admin|member>     # mint a single-use invite token
 stamp invites accept <share-url>                    # redeem an invite token
-stamp users list                                     # enumerate enrolled users
-stamp users {promote,demote,remove} <name>           # role/membership management
-stamp trust grant <name>                             # stage a per-repo signing-trust PR
+stamp users list                                    # enumerate enrolled users
+stamp users promote <name> --to <admin|owner>       # owner-only
+stamp users demote <name> --to <admin|member>       # owner-only
+stamp users remove <name>                           # owner / admin-removes-member
+stamp trust grant <name>                            # stage a per-repo signing-trust PR
 ```
 
 **Browsing history:**
