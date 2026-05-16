@@ -39,12 +39,20 @@ what guarantees you actually get:
 
 | Shape | Origin is… | Enforcement | Command to run |
 |---|---|---|---|
-| **Server-gated** (recommended) | A stamp server you deployed | The server's pre-receive hook rejects any push without a valid stamped merge | `stamp bootstrap` on a clone of a server-provisioned repo |
-| **Local-only** (advisory) | GitHub / GitLab / etc. directly | None — direct `git push origin main` succeeds; the stamp config is documentation + a discipline aid | `stamp init --mode local-only` |
+| **Server-gated** | A stamp server you deployed | The server's pre-receive hook rejects any push without a valid stamped merge | `stamp bootstrap` on a clone of a server-provisioned repo |
+| **PR-check** (recommended for GitHub teams) | GitHub directly | A GitHub Action (`stamp/verify-attestation@v1.6.0`) runs on every PR; branch protection requires the green check before the GitHub merge button works | `stamp init` (defaults to PR-check on a github.com origin) |
+| **Local-only** (advisory) | GitHub / GitLab / etc. directly | None — direct `git push origin main` succeeds; the stamp config is documentation + a discipline aid | `stamp init --mode local-only --no-pr-check` |
 
-These are not interchangeable. Server-gated is the only shape where the gate
-is actually enforced; local-only signs your merges with a verifiable
-attestation but the remote does not reject anything. Pick deliberately.
+These are not interchangeable. Server-gated and PR-check both enforce the
+gate; local-only signs your merges with a verifiable attestation but the
+remote does not reject anything. Pick deliberately.
+
+PR-check mode is the natural fit for teams that already merge through GitHub
+PRs. The reviewer flow stays local (`stamp review` runs your AI personas on
+your machine, full speed and full control), the resulting attestation is
+content-addressed (survives squash + rebase + merge-commit), and the PR's
+green-check requirement keeps the human in the merge loop. No server to
+host, no on-call, no separate trust root.
 
 ### Server-gated path
 
@@ -62,15 +70,52 @@ the three starter reviewers (security, standards, product), and lands them on
 `main` via a single signed merge that the server hook accepts. From there it's
 the normal review/merge cycle.
 
-### Local-only path
+### PR-check path
 
-When origin is a public forge directly (GitHub etc.), `stamp init` defaults to
-local-only and prints a prominent warning that the gate is unenforced. Pass
-`--mode local-only` to acknowledge explicitly and silence the warning:
+For teams that merge through GitHub PRs, `stamp init` (with no `--mode`
+flag against a github.com origin) drops a `.github/workflows/stamp-verify.yml`
+that runs the verifier on every PR. Wire it into branch protection and the
+gate is real:
 
 ```sh
 cd myproject
-stamp init --mode local-only             # scaffolds .stamp/ + AGENTS.md (advisory mode)
+stamp init                               # scaffolds .stamp/ + workflow file
+git add .stamp .github && git commit -m "stamp: scaffold + PR-check workflow"
+git push origin main
+# In GitHub: Settings → Branches → main → Require status checks →
+# add `stamp verify` (the workflow's job name) as required
+```
+
+Per-PR developer flow:
+
+```sh
+git checkout -b feature
+# ...make changes, commit...
+stamp review --diff main..HEAD           # local AI reviewers run + verdicts land in DB
+stamp attest --into main --push origin   # signs the attestation + atomically pushes
+                                          # branch + refs/stamp/attestations/<patch-id>
+# Open the PR; the workflow runs stamp/verify-attestation against your branch
+# Reviewer's check goes green → human clicks merge in the GitHub UI
+```
+
+The attestation is keyed on the **content** of the diff (`git patch-id`), so
+it survives every GitHub merge strategy: squash, rebase, and merge-commit
+all preserve the same patch-id and the same attestation.
+
+By default the gate is **loose on base advancement** (matches GitHub's
+"approval persists when main moves" semantic) — the patch-id-equivalence is
+sufficient. Set `strict_base: true` under your branch rule in
+`.stamp/config.yml` to require re-attest whenever the target branch's tip
+advances.
+
+### Local-only path
+
+If you want stamp's review + signed-attestation flow without the GitHub
+Action gate, opt out with `--no-pr-check`:
+
+```sh
+cd myproject
+stamp init --mode local-only --no-pr-check   # scaffolds .stamp/ + AGENTS.md only
 git add .stamp AGENTS.md && git commit -m "stamp: advisory config"
 git push origin main
 ```
@@ -171,6 +216,28 @@ stamp merge <branch> --into <target>       # operator confirmation → merge →
                                            #   audit H1.
 stamp push <target>                        # plain git push; hook stderr forwarded
 stamp verify <sha>                         # verify a merge commit's attestation locally
+```
+
+**PR-check mode (alternative to `stamp merge` for GitHub PR workflows):**
+
+```
+stamp attest [<branch>] --into <target>    # validate the gate, sign an attestation envelope,
+                                           #   write to refs/stamp/attestations/<patch-id>
+                                           #   --push <remote>: also pushes branch + attestation
+                                           #   ref to <remote> in one atomic git push
+stamp verify-pr <head> --base <ref> --into <branch>
+                                           # consumer side; used by stamp/verify-attestation@v1
+                                           # action and runnable locally for debugging
+```
+
+**User & invite management (server-gated mode only):**
+
+```
+stamp invites mint <name> --role <admin|member>     # mint a single-use invite token
+stamp invites accept <share-url>                    # redeem an invite token
+stamp users list                                     # enumerate enrolled users
+stamp users {promote,demote,remove} <name>           # role/membership management
+stamp trust grant <name>                             # stage a per-repo signing-trust PR
 ```
 
 **Browsing history:**

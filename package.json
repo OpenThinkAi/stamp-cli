@@ -1,6 +1,6 @@
 {
   "name": "@openthink/stamp",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "type": "module",
   "description": "Local, headless pull-request system for agent-to-agent code review workflows",
   "bin": {
