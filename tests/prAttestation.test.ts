@@ -34,6 +34,7 @@ function makePayload(overrides: Partial<PrAttestationPayload> = {}): PrAttestati
     base_sha: "b".repeat(40),
     head_sha: "c".repeat(40),
     target_branch: "main",
+    target_branch_tip_sha: "f".repeat(40),
     approvals: [
       {
         reviewer: "security",

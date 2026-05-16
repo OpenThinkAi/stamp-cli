@@ -48,9 +48,22 @@ export const MAX_PR_ATTESTATION_BYTES = 64 * 1024;
 export interface PrAttestationPayload {
   schema_version: number;
   patch_id: string;
+  /** Merge-base of (target_branch, head) at attest time. Same value
+   *  the patch-id was computed against. Used by loose-mode verifiers
+   *  for the structural sanity log; strict mode uses
+   *  `target_branch_tip_sha` instead because base advancement that
+   *  doesn't touch the feature's territory leaves merge-base unchanged. */
   base_sha: string;
   head_sha: string;
   target_branch: string;
+  /** TIP of `target_branch` at attest time (i.e. `git rev-parse <target>`),
+   *  distinct from `base_sha` (the merge-base). When `strict_base` is
+   *  set on the branch rule, the verifier requires this to equal the
+   *  current tip — any advancement of main since attest time
+   *  invalidates the attestation, even when the cumulative diff content
+   *  (and therefore patch-id) is unchanged. Operators that want
+   *  GitHub's loose semantic ignore this field. */
+  target_branch_tip_sha: string;
   approvals: Approval[];
   checks: CheckAttestation[];
   signer_key_id: string;
@@ -104,6 +117,7 @@ export function parseEnvelope(bytes: Buffer): PrAttestationEnvelope | null {
     typeof p.base_sha !== "string" ||
     typeof p.head_sha !== "string" ||
     typeof p.target_branch !== "string" ||
+    typeof p.target_branch_tip_sha !== "string" ||
     !Array.isArray(p.approvals) ||
     !Array.isArray(p.checks) ||
     typeof p.signer_key_id !== "string"

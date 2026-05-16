@@ -24,6 +24,23 @@ export interface BranchRule {
    * review.
    */
   require_human_merge?: boolean;
+  /**
+   * PR-check mode only. When true, `stamp verify-pr` requires the
+   * attestation's recorded `base_sha` to equal the verifier's current
+   * base SHA — re-attestation is needed every time the base advances
+   * (rebase, fast-forward of main, etc.).
+   *
+   * Default (undefined) is loose: attestation remains valid as long as
+   * the patch-id matches, regardless of where main has moved since the
+   * reviewer signed. This matches GitHub's "approval persists across
+   * base advancement" semantic — operators using PR-check mode expect
+   * the same shape.
+   *
+   * Server-gated mode (`stamp merge` → trailer-on-merge-commit) ignores
+   * this field; its attestations are pinned to (base_sha, head_sha)
+   * by construction and always strict.
+   */
+  strict_base?: boolean;
 }
 
 /**
@@ -233,10 +250,21 @@ function validateConfig(input: unknown): StampConfig {
       require_human_merge = r.require_human_merge;
     }
 
+    let strict_base: boolean | undefined;
+    if (r.strict_base !== undefined) {
+      if (typeof r.strict_base !== "boolean") {
+        throw new Error(
+          `config.branches.${name}.strict_base must be a boolean`,
+        );
+      }
+      strict_base = r.strict_base;
+    }
+
     branches[name] = {
       required: r.required.map(String),
       ...(required_checks ? { required_checks } : {}),
       ...(require_human_merge !== undefined ? { require_human_merge } : {}),
+      ...(strict_base !== undefined ? { strict_base } : {}),
     };
   }
 

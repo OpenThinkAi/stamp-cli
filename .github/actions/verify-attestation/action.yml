@@ -1,0 +1,92 @@
+name: stamp/verify-attestation
+description: >
+  Verify a stamp PR attestation on the current pull request. Computes the
+  patch-id of the PR's base..head diff, fetches the corresponding
+  refs/stamp/attestations/<patch-id> from origin, validates signature
+  against .stamp/trusted-keys/ (sourced from the BASE ref) and checks
+  the gate against .stamp/config.yml branch rules. Exit 0 if the
+  attestation is valid for the PR's target branch; non-zero otherwise.
+  GitHub branch protection consumes the exit code as the check status.
+
+inputs:
+  stamp-version:
+    description: >
+      Pin a specific @openthink/stamp release. Defaults to "latest".
+      Pin in production so a future stamp release can't silently change
+      verification semantics on your live PRs.
+    required: false
+    default: latest
+  node-version:
+    description: Node.js version to install. stamp-cli requires >= 22.5.0.
+    required: false
+    default: "22"
+  target-branch:
+    description: >
+      Override the target branch the verifier checks against. Defaults
+      to the PR's base ref (github.event.pull_request.base.ref).
+      Useful when the verifier runs on push to a non-main branch and
+      you want to enforce main's rule explicitly.
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve PR head + base SHAs
+      id: refs
+      shell: bash
+      env:
+        TARGET_BRANCH_OVERRIDE: ${{ inputs.target-branch }}
+      run: |
+        set -euo pipefail
+        # PR events expose head + base SHAs directly. For non-PR events
+        # (workflow_dispatch testing, etc.), GitHub doesn't fill these
+        # in — fail loudly so the operator sees the misconfig rather
+        # than verifying against the wrong refs.
+        HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+        BASE_SHA="${{ github.event.pull_request.base.sha }}"
+        BASE_REF="${{ github.event.pull_request.base.ref }}"
+        if [ -z "$HEAD_SHA" ] || [ -z "$BASE_SHA" ] || [ -z "$BASE_REF" ]; then
+          echo "::error::stamp/verify-attestation requires a pull_request event (got '${{ github.event_name }}'). Add 'on: pull_request' to the workflow."
+          exit 2
+        fi
+        TARGET="${TARGET_BRANCH_OVERRIDE:-$BASE_REF}"
+        echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+        echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+        echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+    - name: Setup Node.js
+      uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install stamp-cli
+      shell: bash
+      env:
+        STAMP_VERSION: ${{ inputs.stamp-version }}
+      run: npm install -g "@openthink/stamp@${STAMP_VERSION}"
+
+    - name: Fetch base + head + attestation refs
+      shell: bash
+      env:
+        HEAD_SHA: ${{ steps.refs.outputs.head }}
+        BASE_SHA: ${{ steps.refs.outputs.base }}
+      run: |
+        set -euo pipefail
+        # actions/checkout fetches a single commit by default. Re-fetch
+        # both endpoints + the entire attestations namespace so:
+        #   - patch-id can compute base..head (needs both endpoints)
+        #   - reading .stamp/{config,trusted-keys}/ at base via git show works
+        #   - refs/stamp/attestations/<patch-id> resolves
+        # Depth 1 on the base + head fetches; --depth=1 keeps the network
+        # cost bounded. The attestations namespace ref is a blob (not a
+        # commit) so depth doesn't apply.
+        git fetch --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
+        git fetch origin "+refs/stamp/attestations/*:refs/stamp/attestations/*"
+
+    - name: Verify attestation
+      shell: bash
+      env:
+        HEAD_SHA: ${{ steps.refs.outputs.head }}
+        BASE_SHA: ${{ steps.refs.outputs.base }}
+        TARGET: ${{ steps.refs.outputs.target }}
+      run: stamp verify-pr "$HEAD_SHA" --base "$BASE_SHA" --target "$TARGET"
