@@ -24,6 +24,27 @@ export interface BranchRule {
    * review.
    */
   require_human_merge?: boolean;
+  /**
+   * PR-check mode only. When true, `stamp verify-pr` requires that the
+   * tip of the target branch is the SAME as it was when the reviewer
+   * signed — i.e. `attestation.target_branch_tip_sha` must equal
+   * `git rev-parse <target>` at verify time. Any advancement of the
+   * target branch since attest invalidates, INCLUDING unrelated
+   * commits that don't touch the merge-base. (This is why the check
+   * is on the tip and not on `base_sha` / merge-base — those don't
+   * change when main moves with unrelated commits, but the tip does.)
+   *
+   * Default (undefined) is loose: attestation remains valid as long as
+   * the patch-id matches, regardless of where main has moved since the
+   * reviewer signed. This matches GitHub's "approval persists across
+   * base advancement" semantic — operators using PR-check mode expect
+   * the same shape.
+   *
+   * Server-gated mode (`stamp merge` → trailer-on-merge-commit) ignores
+   * this field; its attestations are pinned to (base_sha, head_sha)
+   * by construction and always strict.
+   */
+  strict_base?: boolean;
 }
 
 /**
@@ -233,10 +254,21 @@ function validateConfig(input: unknown): StampConfig {
       require_human_merge = r.require_human_merge;
     }
 
+    let strict_base: boolean | undefined;
+    if (r.strict_base !== undefined) {
+      if (typeof r.strict_base !== "boolean") {
+        throw new Error(
+          `config.branches.${name}.strict_base must be a boolean`,
+        );
+      }
+      strict_base = r.strict_base;
+    }
+
     branches[name] = {
       required: r.required.map(String),
       ...(required_checks ? { required_checks } : {}),
       ...(require_human_merge !== undefined ? { require_human_merge } : {}),
+      ...(strict_base !== undefined ? { strict_base } : {}),
     };
   }
 

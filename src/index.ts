@@ -61,6 +61,7 @@ import {
 import { runStatus } from "./commands/status.js";
 import { runUpdate } from "./commands/update.js";
 import { runVerify } from "./commands/verify.js";
+import { runVerifyPr } from "./commands/verifyPr.js";
 import { readPackageVersion } from "./lib/version.js";
 
 const program = new Command();
@@ -591,6 +592,24 @@ program
   .action((sha: string) => {
     try {
       runVerify(sha);
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+program
+  .command("verify-pr <head>")
+  .description(
+    "verify a PR attestation at refs/stamp/attestations/<patch-id> for the diff <base>..<head> against the --into branch's rule (used by stamp/verify-attestation@v1; also runnable locally for debugging)",
+  )
+  .requiredOption("--base <ref>", "PR base ref (commit SHA, branch, or any rev-parse-able value)")
+  .requiredOption(
+    "--into <branch>",
+    "branch the PR is merging into; must equal the attestation's target_branch",
+  )
+  .action((head: string, opts: { base: string; into: string }) => {
+    try {
+      runVerifyPr({ head, base: opts.base, into: opts.into });
     } catch (err) {
       handleCliError(err);
     }

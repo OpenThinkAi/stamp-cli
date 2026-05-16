@@ -175,6 +175,18 @@ export function runAttest(opts: AttestOptions): void {
   // on the GitHub side, so the attestation survives all three.
   const patch_id = patchIdForSpan(resolved.base_sha, resolved.head_sha, repoRoot);
 
+  // Also record the TIP of the target branch at attest time, distinct
+  // from resolved.base_sha (which is the merge-base). Verifiers with
+  // strict_base:true compare this against the current tip — any
+  // advancement of main since attest time fails verification, even
+  // when the cumulative diff content is unchanged. resolveDiff above
+  // already validated opts.into resolves, so rev-parse here can't fail
+  // on the same machine for the same name.
+  const target_branch_tip_sha = runGit(
+    ["rev-parse", `${opts.into}^{commit}`],
+    repoRoot,
+  ).trim();
+
   // Sign + build envelope. Schema version is independent of the
   // server-gated trailer schema (PR_ATTESTATION_SCHEMA_VERSION = 1
   // here) but the per-Approval fields below mirror
@@ -187,6 +199,7 @@ export function runAttest(opts: AttestOptions): void {
     base_sha: resolved.base_sha,
     head_sha: resolved.head_sha,
     target_branch: opts.into,
+    target_branch_tip_sha,
     approvals,
     checks: [], // Phase-1 deliberate omission — see file-level comment.
     signer_key_id: keypair.fingerprint,
