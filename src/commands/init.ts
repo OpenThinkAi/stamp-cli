@@ -759,7 +759,7 @@ function resolveMode(
  * that doesn't exist (or worse, that semantically differs from the
  * stamp version they have installed locally).
  */
-export const VERIFY_ACTION_REF = "v1.6.0";
+export const VERIFY_ACTION_REF = "v1.6.1";
 
 /**
  * Drop the `.github/workflows/stamp-verify.yml` workflow file when
