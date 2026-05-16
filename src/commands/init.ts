@@ -254,7 +254,7 @@ export function runInit(opts: InitOptions = {}): void {
       `  CLAUDE.md:   ${claudeMdAction} at repo root (auto-loaded by Claude Code)`,
     );
   }
-  if (prCheckResult.action !== "skipped" && prCheckResult.action !== "unchanged") {
+  if (prCheckResult.action !== "skipped") {
     console.log(
       `  PR check:    ${prCheckResult.action} ${prCheckResult.path} ` +
         `(stamp/verify-attestation@${VERIFY_ACTION_REF})`,
@@ -771,7 +771,7 @@ export function maybeWriteVerifyWorkflow(
   repoRoot: string,
   prCheckOpt: boolean | undefined,
   effectiveMode: AgentsMdMode,
-): { action: "wrote" | "exists" | "unchanged" | "skipped"; path: string } {
+): { action: "wrote" | "exists" | "skipped"; path: string } {
   const path = ".github/workflows/stamp-verify.yml";
   const fullPath = join(repoRoot, path);
 
