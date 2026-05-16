@@ -111,6 +111,10 @@ program
     "--no-oteam",
     "bypass the oteam-detection prompt that offers to fill stamp.host in ~/.open-team/config.json",
   )
+  .option(
+    "--no-pr-check",
+    "skip dropping .github/workflows/stamp-verify.yml (PR-check mode workflow). Default behaviour: write the workflow for forge-direct + local-only modes, skip for server-gated.",
+  )
   .action(
     (opts: {
       minimal?: boolean;
@@ -121,6 +125,7 @@ program
       mode?: string;
       remote: string;
       oteam: boolean;
+      prCheck: boolean;
     }) => {
       try {
         let mode: "server-gated" | "local-only" | undefined;
@@ -142,6 +147,11 @@ program
           mode,
           remote: opts.remote,
           oteam: opts.oteam,
+          // commander's --no-pr-check yields opts.prCheck === false; no
+          // flag yields true (the default-true sentinel). We only want
+          // to forward an explicit `false` to runInit so its mode-aware
+          // default fires when the operator hasn't opted out.
+          prCheck: opts.prCheck === false ? false : undefined,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
