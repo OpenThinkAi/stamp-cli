@@ -80,22 +80,28 @@ runs:
         fi
         npm install -g "@openthink/stamp@${STAMP_VERSION}"
 
-    - name: Fetch base + head + attestation refs
+    - name: Fetch attestation refs
       shell: bash
-      env:
-        HEAD_SHA: ${{ steps.refs.outputs.head }}
-        BASE_SHA: ${{ steps.refs.outputs.base }}
       run: |
         set -euo pipefail
-        # actions/checkout fetches a single commit by default. Re-fetch
-        # both endpoints + the entire attestations namespace so:
-        #   - patch-id can compute base..head (needs both endpoints)
-        #   - reading .stamp/{config,trusted-keys}/ at base via git show works
-        #   - refs/stamp/attestations/<patch-id> resolves
-        # Depth 1 on the base + head fetches; --depth=1 keeps the network
-        # cost bounded. The attestations namespace ref is a blob (not a
-        # commit) so depth doesn't apply.
-        git fetch --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
+        # The caller workflow MUST use actions/checkout@v4 with
+        # fetch-depth: 0 (the renderVerifyWorkflow template does this
+        # by default). That single-step checkout fetches base + head +
+        # full ancestry, which is what `git merge-base` needs to
+        # compute patch-id of base..head inside `stamp verify-pr`.
+        #
+        # The attestation refs (refs/stamp/attestations/*) aren't part
+        # of git's default refspec, so the operator's actions/checkout
+        # doesn't pull them — they need an explicit second fetch.
+        # That's the ONLY thing this step does.
+        #
+        # We deliberately do NOT re-fetch the BASE_SHA / HEAD_SHA
+        # commits here. An earlier iteration of this action did, with
+        # `git fetch --depth=1 origin <base> <head>` — that flag
+        # converts the previously-deep repo into a shallow clone for
+        # those refs, severs the ancestry, and breaks merge-base. The
+        # symptom was a confusing "git merge-base failed" exit from
+        # the verifier even though both commits were present locally.
         git fetch origin "+refs/stamp/attestations/*:refs/stamp/attestations/*"
 
     - name: Verify attestation
