@@ -89,4 +89,4 @@ runs:
         HEAD_SHA: ${{ steps.refs.outputs.head }}
         BASE_SHA: ${{ steps.refs.outputs.base }}
         TARGET: ${{ steps.refs.outputs.target }}
-      run: stamp verify-pr "$HEAD_SHA" --base "$BASE_SHA" --target "$TARGET"
+      run: stamp verify-pr "$HEAD_SHA" --base "$BASE_SHA" --into "$TARGET"

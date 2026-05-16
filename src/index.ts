@@ -600,16 +600,16 @@ program
 program
   .command("verify-pr <head>")
   .description(
-    "PR-check mode counterpart to `stamp verify <sha>` — verify a PR attestation at refs/stamp/attestations/<patch-id> for the diff <base>..<head> against the target branch's rule. Used by stamp/verify-attestation@v1; also runnable locally for debugging.",
+    "verify a PR attestation at refs/stamp/attestations/<patch-id> for the diff <base>..<head> against the --into branch's rule (used by stamp/verify-attestation@v1; also runnable locally for debugging)",
   )
   .requiredOption("--base <ref>", "PR base ref (commit SHA, branch, or any rev-parse-able value)")
   .requiredOption(
-    "--target <branch>",
+    "--into <branch>",
     "branch the PR is merging into; must equal the attestation's target_branch",
   )
-  .action((head: string, opts: { base: string; target: string }) => {
+  .action((head: string, opts: { base: string; into: string }) => {
     try {
-      runVerifyPr({ head, base: opts.base, target: opts.target });
+      runVerifyPr({ head, base: opts.base, into: opts.into });
     } catch (err) {
       handleCliError(err);
     }

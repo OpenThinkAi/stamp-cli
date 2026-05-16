@@ -198,7 +198,7 @@ describe("runVerifyPr — happy path", () => {
 
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base, target: "main" }),
+          runVerifyPr({ head, base, into: "main" }),
         ),
       );
       // Verifier didn't call process.exit (success).
@@ -236,7 +236,7 @@ describe("runVerifyPr — happy path", () => {
       // mode (default) accepts the existing signature.
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head: headAfter, base, target: "main" }),
+          runVerifyPr({ head: headAfter, base, into: "main" }),
         ),
       );
       assert.equal(result.error, null);
@@ -257,7 +257,7 @@ describe("runVerifyPr — failure paths", () => {
 
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base, target: "main" }),
+          runVerifyPr({ head, base, into: "main" }),
         ),
       );
       assert.equal(result.exitCode, 1);
@@ -299,7 +299,7 @@ describe("runVerifyPr — failure paths", () => {
 
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base, target: "main" }),
+          runVerifyPr({ head, base, into: "main" }),
         ),
       );
       assert.equal(result.exitCode, 1);
@@ -318,7 +318,7 @@ describe("runVerifyPr — failure paths", () => {
 
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base, target: "release" }),
+          runVerifyPr({ head, base, into: "release" }),
         ),
       );
       // Note: runVerifyPr's first failure mode here is actually "no
@@ -355,7 +355,7 @@ describe("runVerifyPr — failure paths", () => {
         // legitimate attestation but signs with the rogue key and
         // claims the rogue's fingerprint as signer_key_id).
         const payload = {
-          schema_version: 1,
+          schema_version: 2,
           patch_id,
           base_sha: base,
           head_sha: head,
@@ -379,7 +379,7 @@ describe("runVerifyPr — failure paths", () => {
 
         const result = trapExit(() =>
           runFromRepo(h.repo, () =>
-            runVerifyPr({ head, base, target: "main" }),
+            runVerifyPr({ head, base, into: "main" }),
           ),
         );
         assert.equal(result.exitCode, 1);
@@ -428,7 +428,7 @@ describe("runVerifyPr — failure paths", () => {
       // doesn't sneak through."
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base, target: "main" }),
+          runVerifyPr({ head, base, into: "main" }),
         ),
       );
       assert.equal(result.exitCode, 1);
@@ -461,7 +461,7 @@ describe("runVerifyPr — strict_base", () => {
 
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base: newBase, target: "main" }),
+          runVerifyPr({ head, base: newBase, into: "main" }),
         ),
       );
       assert.equal(result.error, null);
@@ -488,7 +488,7 @@ describe("runVerifyPr — strict_base", () => {
 
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base: newBase, target: "main" }),
+          runVerifyPr({ head, base: newBase, into: "main" }),
         ),
       );
       assert.equal(result.exitCode, 1);
@@ -509,7 +509,7 @@ describe("runVerifyPr — strict_base", () => {
 
       const result = trapExit(() =>
         runFromRepo(h.repo, () =>
-          runVerifyPr({ head, base, target: "main" }),
+          runVerifyPr({ head, base, into: "main" }),
         ),
       );
       assert.equal(result.error, null);

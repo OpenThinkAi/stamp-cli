@@ -1,5 +1,5 @@
 /**
- * `stamp verify-pr <head> --base <base> --target <branch>`
+ * `stamp verify-pr <head> --base <base> --into <branch>`
  *
  * Consumer side of PR-check mode. Verifies that the diff `base..head` has
  * a valid stamp attestation under `refs/stamp/attestations/<patch-id>`.
@@ -48,11 +48,12 @@ export interface VerifyPrOptions {
   head: string;
   /** Base ref. Same shape as head. */
   base: string;
-  /** Target branch the PR will merge into. The attestation's recorded
+  /** Branch the PR will merge into. The attestation's recorded
    *  `target_branch` must equal this — guards against an attestation
    *  signed for a relaxed branch rule being verified against a stricter
-   *  branch's rules. */
-  target: string;
+   *  branch's rules. Named `into` to match `stamp merge --into` and
+   *  `stamp attest --into`. */
+  into: string;
   /** Repo root override; defaults to cwd. */
   repoPath?: string;
 }
@@ -69,7 +70,7 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
     fail(
       `no attestation found at refs/stamp/attestations/${patch_id} ` +
         `(diff ${resolved.base_sha.slice(0, 8)}..${resolved.head_sha.slice(0, 8)}). ` +
-        `Operator must run \`stamp attest --into ${opts.target}\` and push the ` +
+        `Operator must run \`stamp attest --into ${opts.into}\` and push the ` +
         `attestation ref to this remote.`,
       patch_id,
       resolved.base_sha,
@@ -83,11 +84,11 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
   // asked about. Without this check, an operator could attest with
   // target=feature-branch (whose rule has no required reviewers) and
   // then have it verify cleanly when merging into target=main.
-  if (payload.target_branch !== opts.target) {
+  if (payload.target_branch !== opts.into) {
     fail(
       `attestation target_branch="${payload.target_branch}" does not match ` +
-        `verifier --target="${opts.target}". The reviewer signed an attestation ` +
-        `for a different merge destination — re-attest with --into ${opts.target}.`,
+        `verifier --into="${opts.into}". The reviewer signed an attestation ` +
+        `for a different merge destination — re-attest with --into ${opts.into}.`,
       patch_id,
       resolved.base_sha,
       resolved.head_sha,
@@ -144,10 +145,10 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
     );
   }
   const config = parseConfigFromYaml(configYaml);
-  const rule = findBranchRule(config.branches, opts.target);
+  const rule = findBranchRule(config.branches, opts.into);
   if (!rule) {
     fail(
-      `no branch rule for "${opts.target}" in .stamp/config.yml at base ` +
+      `no branch rule for "${opts.into}" in .stamp/config.yml at base ` +
         `${resolved.base_sha.slice(0, 8)}. Configured branches: ` +
         `${Object.keys(config.branches).join(", ") || "(none)"}.`,
       patch_id,
@@ -184,14 +185,29 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
   // merge-bases (`base_sha`) — is what catches "main moved with
   // unrelated commits."
   if (rule.strict_base) {
+    if (!payload.target_branch_tip_sha) {
+      // v1 envelope: doesn't carry the tip SHA, can't verify strict_base.
+      // Don't silently accept (would be a strict-mode bypass); don't
+      // silently fail with "no attestation found" prose (confusing).
+      // Refuse with a specific schema-error so the operator knows to
+      // re-attest with a newer stamp release.
+      fail(
+        `strict_base check failed: attestation schema v${payload.schema_version} ` +
+          `predates target_branch_tip_sha (v2+). Re-attest with stamp ≥ 1.6.0 ` +
+          `to verify under strict_base; or relax the branch rule.`,
+        patch_id,
+        resolved.base_sha,
+        resolved.head_sha,
+      );
+    }
     const currentTip = runGit(
       ["rev-parse", `${opts.base}^{commit}`],
       repoRoot,
     ).trim();
     if (payload.target_branch_tip_sha !== currentTip) {
       fail(
-        `strict_base check failed: attestation was signed when ${opts.target} ` +
-          `was at ${payload.target_branch_tip_sha.slice(0, 8)}, but ${opts.target} ` +
+        `strict_base check failed: attestation was signed when ${opts.into} ` +
+          `was at ${payload.target_branch_tip_sha.slice(0, 8)}, but ${opts.into} ` +
           `is now at ${currentTip.slice(0, 8)}. Re-attest with the current tip.`,
         patch_id,
         resolved.base_sha,
@@ -204,7 +220,7 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
     patch_id,
     base_sha: resolved.base_sha,
     head_sha: resolved.head_sha,
-    target_branch: opts.target,
+    target_branch: opts.into,
     signer_key_id: payload.signer_key_id,
     trusted_key_filename: trustedKey.filename,
     approvals: payload.approvals.map((a) => ({
@@ -308,16 +324,12 @@ function printSuccess(s: SuccessSummary): void {
   console.log(bar);
 }
 
-interface FailureContext {
-  patch_id: string;
-  base_sha: string;
-  head_sha: string;
-}
-
 /**
  * Print a structured failure summary and exit 1. CI consumers can rely
  * on the exit code; the prose is for the operator looking at the
- * action's logs.
+ * action's logs. The `error:` prefix on the cause line matches the
+ * stderr-prefix convention used elsewhere in the CLI; agents that
+ * grep stderr for `^error:` get the failure cause cleanly.
  */
 function fail(
   reason: string,
@@ -325,13 +337,13 @@ function fail(
   base_sha: string,
   head_sha: string,
 ): never {
-  const ctx: FailureContext = { patch_id, base_sha, head_sha };
   const bar = "─".repeat(72);
   console.error(bar);
-  console.error(`base: ${ctx.base_sha.slice(0, 8)} → head: ${ctx.head_sha.slice(0, 8)}`);
-  console.error(`patch-id: ${ctx.patch_id}`);
+  console.error(`base: ${base_sha.slice(0, 8)} → head: ${head_sha.slice(0, 8)}`);
+  console.error(`patch-id: ${patch_id}`);
   console.error(bar);
-  console.error(`result: FAILED — ${reason}`);
+  console.error(`error: ${reason}`);
+  console.error("result: FAILED");
   console.error(bar);
   process.exit(1);
 }

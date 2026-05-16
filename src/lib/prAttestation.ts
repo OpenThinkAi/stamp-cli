@@ -35,7 +35,26 @@
 import { spawnSync } from "node:child_process";
 import type { Approval, CheckAttestation } from "./attestation.js";
 
-export const PR_ATTESTATION_SCHEMA_VERSION = 1;
+/**
+ * Current PR attestation schema version. Bump when fields are added,
+ * removed, or get tighter validation. Verifiers gate any version-
+ * specific field check on the version number so an older attestation
+ * (missing a newer required field) doesn't get silently rejected as
+ * "no attestation found" — they get a clear "schema_version too old,
+ * re-attest with stamp ≥ X" error instead.
+ *
+ * Version history:
+ *   v1 — initial shape: patch_id, base_sha, head_sha, target_branch,
+ *        approvals, checks, signer_key_id. Released only as in-flight
+ *        development; never on npm.
+ *   v2 — adds `target_branch_tip_sha` so strict_base mode can detect
+ *        "main advanced with unrelated commits" (which leaves merge-base
+ *        unchanged and would otherwise pass loose-mode verification).
+ *        v1 attestations CANNOT verify under strict_base; they verify
+ *        under loose mode unchanged.
+ */
+export const PR_ATTESTATION_SCHEMA_VERSION = 2;
+export const MIN_ACCEPTED_PR_ATTESTATION_VERSION = 1;
 
 /** Hard cap on the JSON blob's size — same DoS reasoning as
  *  MAX_TRAILER_BYTES in attestation.ts. The verifier reads the blob
@@ -62,8 +81,13 @@ export interface PrAttestationPayload {
    *  current tip — any advancement of main since attest time
    *  invalidates the attestation, even when the cumulative diff content
    *  (and therefore patch-id) is unchanged. Operators that want
-   *  GitHub's loose semantic ignore this field. */
-  target_branch_tip_sha: string;
+   *  GitHub's loose semantic ignore this field.
+   *
+   *  Schema v2+ writes this field; v1 envelopes don't have it. The
+   *  parser keeps it optional in the type so v1 records still parse,
+   *  and the strict-base verifier surfaces a clear "re-attest with
+   *  stamp ≥ v2" error rather than silently accepting/rejecting. */
+  target_branch_tip_sha?: string;
   approvals: Approval[];
   checks: CheckAttestation[];
   signer_key_id: string;
@@ -117,11 +141,19 @@ export function parseEnvelope(bytes: Buffer): PrAttestationEnvelope | null {
     typeof p.base_sha !== "string" ||
     typeof p.head_sha !== "string" ||
     typeof p.target_branch !== "string" ||
-    typeof p.target_branch_tip_sha !== "string" ||
     !Array.isArray(p.approvals) ||
     !Array.isArray(p.checks) ||
     typeof p.signer_key_id !== "string"
   ) {
+    return null;
+  }
+  // schema_version-gated fields: rejected at parse time only if the
+  // attestation CLAIMS to be at the version that requires them. An
+  // older v1 envelope without target_branch_tip_sha parses fine; the
+  // verifier separately refuses it for strict_base. A v2-or-newer
+  // envelope MUST carry the field — its absence is a real shape error,
+  // not just a forward-compat-allowed absence.
+  if (p.schema_version >= 2 && typeof p.target_branch_tip_sha !== "string") {
     return null;
   }
   return env as PrAttestationEnvelope;
