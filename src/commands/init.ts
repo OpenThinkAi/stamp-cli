@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ensureAgentsMd, ensureClaudeMd, type AgentsMdMode } from "../lib/agentsMd.js";
 import { isPathTracked, runGit } from "../lib/git.js";
 import {
@@ -99,6 +99,24 @@ export interface InitOptions {
   mode?: AgentsMdMode;
   /** Remote name to inspect for deployment-shape detection. Default "origin". */
   remote?: string;
+  /**
+   * When false, skip dropping `.github/workflows/stamp-verify.yml` (the
+   * workflow that runs `stamp/verify-attestation@v1` on every PR).
+   *
+   * Default behavior, opt-in by mode:
+   *   - forge-direct: drop the workflow (PR-check mode is the natural fit)
+   *   - server-gated: SKIP — the stamp server enforces at the receive
+   *     hook; a duplicate PR-side check would be redundant
+   *   - local-only: drop the workflow (operators using local-only often
+   *     mirror to GitHub for visibility; the check makes that mirror
+   *     useful as a gate too)
+   *
+   * Setting `prCheck: false` opts out for any mode. Setting it to `true`
+   * forces the drop even in server-gated mode (rare; only useful if the
+   * operator wants belt-and-suspenders enforcement on a github.com
+   * mirror of their server-gated repo).
+   */
+  prCheck?: boolean;
 }
 
 export function runInit(opts: InitOptions = {}): void {
@@ -183,6 +201,17 @@ export function runInit(opts: InitOptions = {}): void {
   const db = openDb(stateDbPath);
   db.close();
 
+  // PR-check mode workflow drop. Defaults to "yes for forge-direct +
+  // local-only, no for server-gated" — see InitOptions.prCheck JSDoc
+  // for the rationale. Operator overrides any default with explicit
+  // true/false. Result is reported in the summary block below so the
+  // operator sees what landed on disk.
+  const prCheckResult = maybeWriteVerifyWorkflow(
+    repoRoot,
+    opts.prCheck,
+    effectiveMode,
+  );
+
   // Ensure AGENTS.md carries the stamp guidance section unless the operator
   // opted out with --no-agents-md. The content branches on effectiveMode —
   // server-gated promises rejection, local-only is honest that pushes are
@@ -223,6 +252,12 @@ export function runInit(opts: InitOptions = {}): void {
   if (claudeMdAction !== "unchanged" && claudeMdAction !== "skipped") {
     console.log(
       `  CLAUDE.md:   ${claudeMdAction} at repo root (auto-loaded by Claude Code)`,
+    );
+  }
+  if (prCheckResult.action !== "skipped") {
+    console.log(
+      `  PR check:    ${prCheckResult.action} ${prCheckResult.path} ` +
+        `(stamp/verify-attestation@${VERIFY_ACTION_REF})`,
     );
   }
   console.log(
@@ -269,6 +304,24 @@ export function runInit(opts: InitOptions = {}): void {
   for (const warning of warnings) {
     console.error(warning);
     console.error();
+  }
+
+  // PR-check setup hint. Only fires when we just dropped (or already
+  // had) the workflow file AND the operator hasn't done the
+  // branch-protection wiring yet. We can't detect the latter without
+  // hitting the GitHub API, so the hint always prints when a workflow
+  // is in play; it's idempotent reading material on re-init.
+  if (prCheckResult.action !== "skipped") {
+    console.log(
+      "PR-check mode notes:\n" +
+        "  - The workflow runs the verifier on every PR but does NOT block\n" +
+        "    merge by itself. Wire it into branch protection so green-check\n" +
+        "    is required before merge:\n" +
+        "      Settings → Branches → main → Protect → Require status checks →\n" +
+        "      add `stamp verify` (the workflow's job name) as required.\n" +
+        "  - Operator workflow per PR: stamp review → stamp attest --into main\n" +
+        "    --push origin → open PR → check goes green → human merges.\n",
+    );
   }
 
   if (scaffoldOrSync === "scaffold") {
@@ -695,4 +748,95 @@ function resolveMode(
       );
       return { effectiveMode: "local-only", warnings };
   }
+}
+
+
+/**
+ * stamp/verify-attestation Action ref pinned by stamp-cli releases.
+ * Operators who care about action stability bump this in lockstep with
+ * the stamp-cli release that contains the matching action.yml. Bumping
+ * stamp-cli without bumping this ref would point users at an Action
+ * that doesn't exist (or worse, that semantically differs from the
+ * stamp version they have installed locally).
+ */
+export const VERIFY_ACTION_REF = "v1.6.0";
+
+/**
+ * Drop the `.github/workflows/stamp-verify.yml` workflow file when
+ * appropriate for the resolved deployment mode. Returns a small
+ * { action, path } object so the init summary block can report what
+ * happened without re-deriving the answer.
+ */
+export function maybeWriteVerifyWorkflow(
+  repoRoot: string,
+  prCheckOpt: boolean | undefined,
+  effectiveMode: AgentsMdMode,
+): { action: "wrote" | "exists" | "skipped"; path: string } {
+  const path = ".github/workflows/stamp-verify.yml";
+  const fullPath = join(repoRoot, path);
+
+  // Mode-aware default: forge-direct + local-only get the workflow;
+  // server-gated doesn't (server enforces at the receive hook). The
+  // operator's explicit prCheckOpt overrides the default in either
+  // direction.
+  const defaultForMode = effectiveMode !== "server-gated";
+  const shouldWrite = prCheckOpt ?? defaultForMode;
+  if (!shouldWrite) return { action: "skipped", path };
+
+  if (existsSync(fullPath)) {
+    // Idempotent re-init: don't clobber operator edits to a workflow
+    // they may have customized (added concurrency, fork-PR conditions,
+    // etc.). The summary line distinguishes "exists" from "wrote" so
+    // a re-init is honest about not touching the file.
+    return { action: "exists", path };
+  }
+
+  ensureDir(dirname(fullPath));
+  writeFileSync(fullPath, renderVerifyWorkflow());
+  return { action: "wrote", path };
+}
+
+/**
+ * Build the workflow file body. Pulled into its own function so a test
+ * can verify the action reference, the trigger, and the permissions
+ * shape without re-rendering or string-grepping. Inline rather than
+ * file-loaded because the template is short and version-bound to this
+ * release.
+ */
+export function renderVerifyWorkflow(): string {
+  return [
+    "name: stamp verify",
+    "",
+    `# Runs stamp/verify-attestation@${VERIFY_ACTION_REF} on every PR.`,
+    "# Wire `stamp verify` (this job's name) into branch protection",
+    "# Required Status Checks to make a green attestation a merge",
+    "# precondition.",
+    "",
+    "on:",
+    "  pull_request:",
+    "    branches: [main]",
+    "",
+    "permissions:",
+    "  # checkout + read .stamp/{config,trusted-keys}/ from the base ref",
+    "  contents: read",
+    "  # for the workflow's check-run summary on the PR",
+    "  checks: write",
+    "",
+    "jobs:",
+    "  stamp-verify:",
+    "    name: stamp verify",
+    "    runs-on: ubuntu-latest",
+    "    timeout-minutes: 5",
+    "    steps:",
+    "      - name: checkout",
+    "        uses: actions/checkout@v4",
+    "        with:",
+    "          # Full history so the action can fetch the base ref's tree",
+    "          # and resolve refs/stamp/attestations/*. Shallow clones",
+    "          # would force per-step refetches.",
+    "          fetch-depth: 0",
+    "      - name: stamp/verify-attestation",
+    `        uses: OpenThinkAi/stamp-cli/.github/actions/verify-attestation@${VERIFY_ACTION_REF}`,
+    "",
+  ].join("\n");
 }
