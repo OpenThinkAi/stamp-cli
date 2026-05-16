@@ -27,7 +27,8 @@
  *   9. Check every rule.required reviewer has an "approved" entry in
  *      attestation.approvals.
  *  10. If rule.strict_base is true: attestation.target_branch_tip_sha
- *      must equal the current tip of --base. Default (undefined/false)
+ *      must equal the current tip of --into (resolved live via
+ *      `git rev-parse <branch>`, NOT --base). Default (undefined/false)
  *      is loose — patch-id match alone is sufficient regardless of how
  *      far main has advanced since the reviewer signed.
  *

@@ -25,10 +25,14 @@ export interface BranchRule {
    */
   require_human_merge?: boolean;
   /**
-   * PR-check mode only. When true, `stamp verify-pr` requires the
-   * attestation's recorded `base_sha` to equal the verifier's current
-   * base SHA — re-attestation is needed every time the base advances
-   * (rebase, fast-forward of main, etc.).
+   * PR-check mode only. When true, `stamp verify-pr` requires that the
+   * tip of the target branch is the SAME as it was when the reviewer
+   * signed — i.e. `attestation.target_branch_tip_sha` must equal
+   * `git rev-parse <target>` at verify time. Any advancement of the
+   * target branch since attest invalidates, INCLUDING unrelated
+   * commits that don't touch the merge-base. (This is why the check
+   * is on the tip and not on `base_sha` / merge-base — those don't
+   * change when main moves with unrelated commits, but the tip does.)
    *
    * Default (undefined) is loose: attestation remains valid as long as
    * the patch-id matches, regardless of where main has moved since the
