@@ -212,8 +212,14 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
         resolved.head_sha,
       );
     }
+    // Resolve the LIVE tip of the target branch (opts.into), not
+    // opts.base. They coincide in the GH Action where opts.base ==
+    // current tip of opts.into at event-fire time, but diverge when
+    // a local caller passes a non-tip SHA as --base. Using opts.into
+    // makes the "did main advance since attest?" check semantically
+    // correct in both contexts.
     const currentTip = runGit(
-      ["rev-parse", `${opts.base}^{commit}`],
+      ["rev-parse", `${opts.into}^{commit}`],
       repoRoot,
     ).trim();
     if (payload.target_branch_tip_sha !== currentTip) {

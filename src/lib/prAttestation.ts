@@ -137,6 +137,7 @@ export function parseEnvelope(bytes: Buffer): PrAttestationEnvelope | null {
   const p = env.payload as Partial<PrAttestationPayload>;
   if (
     typeof p.schema_version !== "number" ||
+    p.schema_version < MIN_ACCEPTED_PR_ATTESTATION_VERSION ||
     typeof p.patch_id !== "string" ||
     typeof p.base_sha !== "string" ||
     typeof p.head_sha !== "string" ||
