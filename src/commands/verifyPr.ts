@@ -7,24 +7,29 @@
  * Action) calls into, so operators can run the exact verification path
  * locally as `stamp/verify-attestation` would on a PR.
  *
- * Verification steps:
+ * Verification steps (in this order — signature first so payload
+ * fields are only acted on after the crypto says "trust this"):
  *   1. Resolve <head> + <base> to SHAs.
  *   2. Compute patch-id of base..head.
  *   3. Read refs/stamp/attestations/<patch-id> — fail if missing.
  *   4. Validate envelope shape (parser already bounded by 64 KiB cap).
  *   5. Read .stamp/trusted-keys/ at base; find the .pub whose
  *      fingerprint matches attestation.signer_key_id.
- *   6. Verify Ed25519 signature over serializePayload(payload).
- *   7. Read .stamp/config.yml at base; find branch rule for
- *      attestation.target_branch (which must equal the operator-supplied
- *      --target — defends against signing with a relaxed branch rule
- *      then merging into a strict one).
- *   8. Check every rule.required reviewer has an "approved" entry in
+ *   6. Verify Ed25519 signature over serializePayload(payload). After
+ *      this point all payload fields are trusted (signature covers
+ *      the canonical JSON, including target_branch and approvals).
+ *   7. Check attestation.target_branch equals the operator-supplied
+ *      --into. The signature already guarantees the field wasn't
+ *      tampered with; this check defends against re-using an
+ *      attestation signed for a relaxed branch rule against a
+ *      stricter branch.
+ *   8. Read .stamp/config.yml at base; find branch rule for --into.
+ *   9. Check every rule.required reviewer has an "approved" entry in
  *      attestation.approvals.
- *   9. If rule.strict_base is true: attestation.base_sha must equal
- *      the resolved base SHA exactly. Default (undefined/false) is
- *      loose — patch-id match is sufficient regardless of how far
- *      main has advanced since the reviewer signed.
+ *  10. If rule.strict_base is true: attestation.target_branch_tip_sha
+ *      must equal the current tip of --base. Default (undefined/false)
+ *      is loose — patch-id match alone is sufficient regardless of how
+ *      far main has advanced since the reviewer signed.
  *
  * Exits 0 on success, 1 on any verification failure. Prints a
  * structured summary either way; a CI consumer can fail the check
@@ -80,24 +85,13 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
 
   const { payload, signature } = envelope;
 
-  // The attestation must claim the same target branch the verifier was
-  // asked about. Without this check, an operator could attest with
-  // target=feature-branch (whose rule has no required reviewers) and
-  // then have it verify cleanly when merging into target=main.
-  if (payload.target_branch !== opts.into) {
-    fail(
-      `attestation target_branch="${payload.target_branch}" does not match ` +
-        `verifier --into="${opts.into}". The reviewer signed an attestation ` +
-        `for a different merge destination — re-attest with --into ${opts.into}.`,
-      patch_id,
-      resolved.base_sha,
-      resolved.head_sha,
-    );
-  }
-
-  // Source the trust set + branch rule from the BASE tree, never HEAD.
-  // Same v3 boundary as stamp merge / stamp attest: a feature branch
-  // cannot edit its own trusted-keys or relax its own branch rule.
+  // Source the trust set from the BASE tree, never HEAD. Same v3
+  // boundary as stamp merge / stamp attest: a feature branch cannot
+  // edit its own trusted-keys and have those edits affect its own
+  // verification. The signer_key_id field is used as a hint to pick
+  // which trusted key to try; even if forged, a wrong-key attempt
+  // fails the signature step below — the field is not load-bearing
+  // for trust, just for routing.
   const trustedKey = findTrustedKeyAtBase(
     resolved.base_sha,
     payload.signer_key_id,
@@ -115,6 +109,10 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
     );
   }
 
+  // Verify the signature BEFORE acting on any payload field. Crypto
+  // first, then trust the contents. The signature covers the canonical
+  // JSON of payload (which includes target_branch and approvals), so
+  // any tampering with those fields after signing fails this check.
   const sigOk = verifyBytes(
     trustedKey.pem,
     serializePayload(payload),
@@ -126,6 +124,20 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
         `(${payload.signer_key_id}). Either the attestation has been tampered ` +
         `with after signing, or the trusted-keys entry doesn't match the key ` +
         `that signed.`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // From here on the payload is trusted. Check target_branch matches
+  // the verifier's --into so an attestation signed for a relaxed
+  // branch rule can't be used to merge into a stricter branch.
+  if (payload.target_branch !== opts.into) {
+    fail(
+      `attestation target_branch="${payload.target_branch}" does not match ` +
+        `verifier --into="${opts.into}". The reviewer signed an attestation ` +
+        `for a different merge destination — re-attest with --into ${opts.into}.`,
       patch_id,
       resolved.base_sha,
       resolved.head_sha,

@@ -11,11 +11,16 @@ description: >
 inputs:
   stamp-version:
     description: >
-      Pin a specific @openthink/stamp release. Defaults to "latest".
-      Pin in production so a future stamp release can't silently change
-      verification semantics on your live PRs.
+      Pin a specific @openthink/stamp release. Defaults to the version
+      this Action ships with (the verifier is the trust anchor for the
+      whole gate, so `latest` is intentionally NOT the default — a
+      compromised future publish would silently affect every workflow
+      using this Action). Override only when you've audited the
+      replacement version. Setting to "latest" emits a
+      ::warning::-prefixed line in the Action log so operators see
+      the floating-version state in their CI run.
     required: false
-    default: latest
+    default: "1.6.0"
   node-version:
     description: Node.js version to install. stamp-cli requires >= 22.5.0.
     required: false
@@ -63,7 +68,17 @@ runs:
       shell: bash
       env:
         STAMP_VERSION: ${{ inputs.stamp-version }}
-      run: npm install -g "@openthink/stamp@${STAMP_VERSION}"
+      run: |
+        set -euo pipefail
+        if [ "$STAMP_VERSION" = "latest" ]; then
+          # `latest` floats to whatever was published most recently.
+          # The verifier IS the trust anchor for the gate, so a
+          # compromised publish on `latest` would silently affect every
+          # workflow using this Action. Surface the floating-version
+          # choice in CI logs so operators see it.
+          echo "::warning::stamp/verify-attestation is installing stamp@latest. Pin stamp-version in production."
+        fi
+        npm install -g "@openthink/stamp@${STAMP_VERSION}"
 
     - name: Fetch base + head + attestation refs
       shell: bash
