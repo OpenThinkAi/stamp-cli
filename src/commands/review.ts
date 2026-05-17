@@ -218,9 +218,11 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       if (!prior) continue;
       // Ancestor-only carry-forward: a parallel feature branch sharing the
       // same base_sha would otherwise inherit verdicts from a sibling. If
-      // the ancestor probe itself errors (orphan/missing object), fail open
-      // — surfacing the prior is best-effort iteration aid, not a security
-      // property.
+      // the ancestor probe itself errors (orphan/missing object), fail
+      // closed — withhold the prior context rather than carrying it forward
+      // under uncertainty. Surfacing the prior is a best-effort iteration
+      // aid, not a security property, so a transient git glitch should
+      // never cause us to inject the wrong branch's verdict.
       let ancestor = false;
       try {
         ancestor = isAncestor(prior.head_sha, resolved.head_sha, repoRoot);
@@ -238,7 +240,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     if (priorByReviewer.size > 0) {
       const names = [...priorByReviewer.keys()].sort().join(", ");
       console.log(
-        `  prior-review context: surfacing earlier verdicts for ${names} (ratchet rule active)`,
+        `note: surfacing earlier verdicts for ${names} (ratchet rule active)`,
       );
       console.log();
     }

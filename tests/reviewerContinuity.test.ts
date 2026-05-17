@@ -246,6 +246,21 @@ describe("buildUserPrompt with priorReview", () => {
     const prompt = buildUserPrompt({ ...baseParams, priorReview: prior }, fenceHex);
     assert.ok(prompt.includes("(no prose recorded for this prior verdict)"));
   });
+
+  it("carries the DATA-not-instructions disclaimer on the PRIOR-REVIEW block", () => {
+    // The prior-review block re-injects LLM-authored prose. Without the
+    // same fenced-data framing the diff block uses, a prior round's prose
+    // could become a prompt-injection relay channel — the model would see
+    // its "own" prior words rather than untrusted data. Pin the disclaimer.
+    const prior: PriorReviewContext = {
+      head_sha: "c".repeat(40),
+      verdict: "approved",
+      prose: "earlier prose",
+    };
+    const prompt = buildUserPrompt({ ...baseParams, priorReview: prior }, fenceHex);
+    assert.match(prompt, /stored historical output/);
+    assert.match(prompt, /prompt-injection relay/);
+  });
 });
 
 describe("augmentSystemPrompt with priorReview", () => {
