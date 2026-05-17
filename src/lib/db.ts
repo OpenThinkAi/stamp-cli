@@ -160,6 +160,59 @@ export function latestReviews(
   return stmt.all(base_sha, head_sha) as unknown as LatestReview[];
 }
 
+export interface PriorReviewRow {
+  /** Reviewer name (echoed for symmetry with the query input). */
+  reviewer: string;
+  /** Head SHA the prior verdict was recorded against. */
+  head_sha: string;
+  verdict: Verdict;
+  /** Prose body the reviewer submitted on the prior run; may be null on
+   *  pre-prose rows. */
+  issues: string | null;
+  /** ISO datetime when this row was inserted; surfaced so callers can show
+   *  age in operator-visible messaging if useful. */
+  created_at: string;
+}
+
+/**
+ * Find the most recent prior review row by `reviewer` against the same
+ * `base_sha`, excluding any row whose `head_sha` equals `excludeHeadSha`.
+ * Returns null if no prior review exists.
+ *
+ * Used by `stamp review` to surface a reviewer's earlier verdict + prose
+ * back into the prompt on subsequent runs of the same branch, so iterations
+ * can ratchet toward approval instead of randomly re-flipping. The
+ * `excludeHeadSha` argument is intended to be the current head_sha — we
+ * want what came *before* the current attempt, not the row this very run
+ * is about to write.
+ *
+ * Same ordering as latestVerdicts (created_at DESC, id DESC) so same-second
+ * inserts tiebreak on insertion order.
+ */
+export function priorReviewByReviewer(
+  db: DatabaseSync,
+  reviewer: string,
+  base_sha: string,
+  excludeHeadSha?: string,
+): PriorReviewRow | null {
+  const stmt = db.prepare(`
+    SELECT reviewer, head_sha, verdict, issues, created_at
+    FROM reviews
+    WHERE reviewer = ?
+      AND base_sha = ?
+      AND (? IS NULL OR head_sha != ?)
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `);
+  const row = stmt.get(
+    reviewer,
+    base_sha,
+    excludeHeadSha ?? null,
+    excludeHeadSha ?? null,
+  ) as PriorReviewRow | undefined;
+  return row ?? null;
+}
+
 export function reviewHistory(
   db: DatabaseSync,
   opts: { limit?: number } = {},

@@ -148,6 +148,34 @@ export function repoHasAnyCommit(cwd: string): boolean {
   }
 }
 
+/**
+ * True when `maybeAncestor` is an ancestor of (or equal to) `descendant`.
+ * Wraps `git merge-base --is-ancestor`: exit 0 = ancestor, 1 = not, anything
+ * else = git error (rethrown).
+ *
+ * Used by `stamp review` to decide whether a previously-recorded verdict
+ * applies to the current branch: a prior head_sha is "on this branch" iff
+ * it's an ancestor of the current head, which rules out sibling branches
+ * that happen to share a base_sha (parallel feature branches off main).
+ */
+export function isAncestor(
+  maybeAncestor: string,
+  descendant: string,
+  cwd: string,
+): boolean {
+  const result = spawnSync(
+    "git",
+    ["merge-base", "--is-ancestor", maybeAncestor, descendant],
+    { cwd, stdio: ["ignore", "ignore", "pipe"] },
+  );
+  if (result.status === 0) return true;
+  if (result.status === 1) return false;
+  const stderr = result.stderr?.toString("utf8").trim() ?? "";
+  throw new Error(
+    `git merge-base --is-ancestor ${maybeAncestor} ${descendant} failed (status ${result.status}): ${stderr || "(no stderr)"}`,
+  );
+}
+
 export function commitSummary(sha: string, cwd: string): CommitSummary {
   const commits = firstParentCommits(sha, 1, cwd);
   if (commits.length === 0) {
