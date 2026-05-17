@@ -9,6 +9,7 @@ import {
   type CachedVerdict,
 } from "../lib/db.js";
 import {
+  deltaDiff,
   isAncestor,
   repoHasAnyCommit,
   resolveDiff,
@@ -292,10 +293,41 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       });
     }
 
+    // Delta-since-prior-review: when a prior verdict exists, feed the LLM
+    // ONLY the diff between the prior head and the current head, not the
+    // full base..head diff. The model literally cannot re-flag unchanged
+    // code because it cannot see code outside the delta. This is the
+    // structural fix for the cross-round zigzag — 1.8.0's hash cache only
+    // helped on byte-identical re-runs; this addresses the actual
+    // treadmill where iteration moves forward and the reviewer flips on
+    // unchanged neighbors. Escape hatch: STAMP_NO_DELTA_REVIEW=1 falls
+    // back to full-diff with the 1.7.0 prompt-only ratchet.
+    const deltaEnabled = process.env["STAMP_NO_DELTA_REVIEW"] !== "1";
+    const deltaDiffs = new Map<string, string>();
+    if (deltaEnabled) {
+      for (const [name, prior] of priorByReviewer) {
+        try {
+          deltaDiffs.set(
+            name,
+            deltaDiff(prior.head_sha, resolved.head_sha, repoRoot),
+          );
+        } catch {
+          // Fall back to full diff if the git command itself errors.
+          // Better to do a full review than to abort the whole run on a
+          // transient git glitch.
+        }
+      }
+    }
+
     if (priorByReviewer.size > 0) {
       const names = [...priorByReviewer.keys()].sort().join(", ");
+      const deltaCount = deltaDiffs.size;
+      const scopeNote =
+        deltaCount > 0
+          ? `delta-since-prior-review scope for ${deltaCount} reviewer${deltaCount === 1 ? "" : "s"}`
+          : `full-diff scope (delta computation failed or STAMP_NO_DELTA_REVIEW=1)`;
       console.log(
-        `note: surfacing earlier verdicts for ${names} (ratchet rule active)`,
+        `note: surfacing earlier verdicts for ${names} (ratchet rule active; ${scopeNote})`,
       );
       console.log();
     }
@@ -318,11 +350,17 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           });
         }
         const prior = priorByReviewer.get(name);
+        // Per-reviewer diff scoping: when a prior verdict is in scope and
+        // we have a delta computed, the reviewer sees only the delta. The
+        // base_sha + head_sha args still describe the full range (used for
+        // attestation / display); only the bytes the model evaluates are
+        // narrowed.
+        const diffForReviewer = deltaDiffs.get(name) ?? resolved.diff;
         return invokeReviewer({
           reviewer: name,
           config,
           repoRoot,
-          diff: resolved.diff,
+          diff: diffForReviewer,
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
           systemPrompt: promptBytesByReviewer.get(name)!,

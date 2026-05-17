@@ -193,6 +193,29 @@ export function commitSummary(sha: string, cwd: string): CommitSummary {
  *
  * Throws on invalid revspecs or on git failures.
  */
+/**
+ * Diff between two commits (`<priorHead>..<currentHead>`) with enlarged
+ * unified-context lines. Used by `stamp review` to feed the LLM ONLY the
+ * code that has changed since a prior approved/rejected review on the same
+ * branch — the structural fix for "reviewer flips verdict on unchanged
+ * lines across rounds." The 20-line default context is wider than git's
+ * default 3 so the reviewer has enough surrounding code to judge the
+ * delta, but still narrow enough that the model cannot see (and therefore
+ * cannot re-flag) code far from the changed hunks. Throws if either ref
+ * doesn't resolve.
+ */
+export function deltaDiff(
+  priorHead: string,
+  currentHead: string,
+  cwd: string,
+  contextLines = 20,
+): string {
+  return git(
+    ["diff", `-U${contextLines}`, `${priorHead}..${currentHead}`],
+    cwd,
+  );
+}
+
 export function resolveDiff(revspec: string, cwd: string): ResolvedDiff {
   const parts = revspec.split("..");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {

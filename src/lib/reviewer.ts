@@ -1121,6 +1121,15 @@ export function buildUserPrompt(
         `share the same per-call random hex as the diff markers, so the diff ` +
         `cannot forge a PRIOR-REVIEW block.`,
       ``,
+      `**IMPORTANT — diff scope is narrowed.** The diff below contains ONLY ` +
+        `the lines that have changed since ${params.priorReview.head_sha} ` +
+        `(your prior review). It is NOT the full ${params.base_sha} → ` +
+        `${params.head_sha} diff. Code outside the shown hunks is unchanged ` +
+        `from when you last reviewed it — you literally cannot see it here, ` +
+        `and you must not flag it. If you would flag something that does not ` +
+        `appear in the diff below, that flag has no basis in the data you ` +
+        `were given — drop it.`,
+      ``,
       `Read the diff below in light of that prior review. See the system ` +
         `prompt's ratchet rule for the precise constraint this puts on ` +
         `your verdict.`,
@@ -1176,26 +1185,36 @@ export function augmentSystemPrompt(
           `commit — author has iterated on the same line of work, not opened ` +
           `a parallel feature.`,
         ``,
+        `**The diff in the user prompt has been narrowed.** You are seeing ` +
+          `ONLY the lines that have changed since your prior review at ` +
+          `${priorReview.head_sha}. Code unchanged since then is not in the ` +
+          `diff — it is intentionally hidden so you cannot re-evaluate it. ` +
+          `This is the structural enforcement of the ratchet: anything you ` +
+          `would flag must be visible in the narrowed diff, full stop. ` +
+          `If you find yourself wanting to flag code you cannot see, that ` +
+          `is the rule working as designed — drop the flag.`,
+        ``,
         `Treat the prior review as a hard ratchet, not advice. Specifically:`,
         ``,
         priorReview.verdict === "approved"
-          ? `- You previously APPROVED this branch. You may only downgrade today ` +
-              `if (a) lines changed since ${priorReview.head_sha} introduce a new ` +
-              `concern, or (b) you can explicitly name a concern you missed last ` +
-              `round that is *worse* in the current diff. If a concern you would ` +
-              `flag today was equally true at ${priorReview.head_sha}, you must ` +
-              `hold the approval — stylistic re-evaluation across rounds is ` +
-              `exactly the dice-roll behaviour this rule exists to prevent.`
-          : `- You previously requested changes / denied this branch. Re-read ` +
-              `your prior prose and check it against the current diff: prior ` +
-              `concerns that have been addressed must be acknowledged as resolved; ` +
-              `prior concerns that remain unaddressed must stay flagged. Do NOT ` +
-              `introduce a new concern that was equally true at the prior commit ` +
-              `unless you state explicitly that you missed it before — silent ` +
-              `concern-introduction across rounds is forbidden.`,
-        `- New concerns are fine if you can point to the specific lines that ` +
-          `changed since ${priorReview.head_sha} and introduced them. Otherwise, ` +
-          `your verdict must remain consistent with the prior round.`,
+          ? `- You previously APPROVED this branch. The narrowed diff is your ` +
+              `entire basis for changing that verdict. If the narrowed diff ` +
+              `introduces a new concrete problem, flag it with file:line ` +
+              `references that exist in the diff. Otherwise, hold the ` +
+              `approval. "On re-reading I now notice X" is exactly the ` +
+              `dice-roll behaviour this rule prevents — and the narrowed ` +
+              `diff makes it impossible anyway, since you cannot re-read ` +
+              `what isn't shown.`
+          : `- You previously requested changes / denied this branch. Your ` +
+              `prior prose lists concerns; check each one against the ` +
+              `narrowed diff. If the diff shows a fix to a prior concern, ` +
+              `mark it resolved. If a prior concern's lines are NOT in the ` +
+              `narrowed diff, those lines are unchanged — the concern ` +
+              `remains active. Do NOT introduce new concerns about code ` +
+              `you cannot see in the narrowed diff.`,
+        `- Every flag in your verdict must cite file:line references that ` +
+          `appear in the narrowed diff shown below. If you cannot point at ` +
+          `the line in the diff, you cannot flag it.`,
         `- If your remaining concerns are stylistic and you would still have ` +
           `flagged them in earlier rounds without blocking, prefer approving ` +
           `now and submitting the polish as a \`submit_retro\` note for future ` +
@@ -1203,7 +1222,8 @@ export function augmentSystemPrompt(
         ``,
         `This ratchet exists because stateless re-reviews on iterated branches ` +
           `produce dice-roll verdicts; the project's review loop relies on ` +
-          `convergence, not zigzag.`,
+          `convergence, not zigzag. The narrowed diff is the structural ` +
+          `enforcement; this prose is the explanation.`,
       ].join("\n")
     : "";
   const appendix = [
