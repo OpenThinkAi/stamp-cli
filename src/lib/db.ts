@@ -69,6 +69,12 @@ export function openDb(path: string): DatabaseSync {
 }
 
 function initSchema(db: DatabaseSync): void {
+  // Base CREATE only — indexes that reference newly-added columns must wait
+  // until after the migration ALTERs below. Putting `idx_reviews_cache`
+  // here would crash on upgrade from ≤1.7.x: the CREATE TABLE no-ops
+  // (table exists with the old shape), then CREATE INDEX fails on the
+  // missing column, then the whole exec() throws and the ALTERs never
+  // run — leaving the DB stuck at the old schema forever.
   db.exec(`
     CREATE TABLE IF NOT EXISTS reviews (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,9 +91,6 @@ function initSchema(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_reviews_shas
       ON reviews(base_sha, head_sha, reviewer);
-
-    CREATE INDEX IF NOT EXISTS idx_reviews_cache
-      ON reviews(reviewer, diff_hash, prompt_hash, created_at);
   `);
 
   // Forward migrations: each column was added in a later release than the
@@ -104,9 +107,8 @@ function initSchema(db: DatabaseSync): void {
   if (!have.has("prompt_hash")) {
     db.exec("ALTER TABLE reviews ADD COLUMN prompt_hash TEXT");
   }
-  // Cache index needs to exist on DBs that were created before the cache
-  // shipped — CREATE INDEX IF NOT EXISTS above only fires on a fresh
-  // CREATE TABLE path. Repeat-safe.
+  // Cache index created here (after the migration ALTERs above) so it works
+  // on both fresh installs and upgrades. Repeat-safe.
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_reviews_cache
       ON reviews(reviewer, diff_hash, prompt_hash, created_at)
