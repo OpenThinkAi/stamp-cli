@@ -1,13 +1,18 @@
 import { existsSync } from "node:fs";
 import { parseConfigFromYaml, type StampConfig } from "../lib/config.js";
-import { openDb, recordReview } from "../lib/db.js";
+import { openDb, priorReviewByReviewer, recordReview } from "../lib/db.js";
 import {
+  isAncestor,
   repoHasAnyCommit,
   resolveDiff,
   showAtRef,
   type ResolvedDiff,
 } from "../lib/git.js";
-import { invokeReviewer, type ReviewerInvocation } from "../lib/reviewer.js";
+import {
+  invokeReviewer,
+  type PriorReviewContext,
+  type ReviewerInvocation,
+} from "../lib/reviewer.js";
 import { maybePrintLlmNotice } from "../lib/llmNotice.js";
 import { loadOrCreateUserConfig } from "../lib/userConfig.js";
 import {
@@ -195,9 +200,55 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
 
   const db = openDb(stampStateDbPath(repoRoot));
   try {
+    // Per-reviewer prior-review lookup: surface the most recent verdict +
+    // prose this reviewer recorded against the same base_sha, gated on the
+    // prior head being an ancestor of the current head. This is the
+    // anti-dice-roll mechanism — without it, every fresh HEAD strands all
+    // prior approvals at the old (base, head) pair and the reviewer
+    // re-evaluates from scratch with no memory of what it already approved.
+    // See `PriorReviewContext` in lib/reviewer.ts for the prompt-side use.
+    const priorByReviewer = new Map<string, PriorReviewContext>();
+    for (const name of reviewerNames) {
+      const prior = priorReviewByReviewer(
+        db,
+        name,
+        resolved.base_sha,
+        resolved.head_sha,
+      );
+      if (!prior) continue;
+      // Ancestor-only carry-forward: a parallel feature branch sharing the
+      // same base_sha would otherwise inherit verdicts from a sibling. If
+      // the ancestor probe itself errors (orphan/missing object), fail
+      // closed — withhold the prior context rather than carrying it forward
+      // under uncertainty. Surfacing the prior is a best-effort iteration
+      // aid, not a security property, so a transient git glitch should
+      // never cause us to inject the wrong branch's verdict.
+      let ancestor = false;
+      try {
+        ancestor = isAncestor(prior.head_sha, resolved.head_sha, repoRoot);
+      } catch {
+        ancestor = false;
+      }
+      if (!ancestor) continue;
+      priorByReviewer.set(name, {
+        head_sha: prior.head_sha,
+        verdict: prior.verdict,
+        prose: prior.issues,
+      });
+    }
+
+    if (priorByReviewer.size > 0) {
+      const names = [...priorByReviewer.keys()].sort().join(", ");
+      console.log(
+        `note: surfacing earlier verdicts for ${names} (ratchet rule active)`,
+      );
+      console.log();
+    }
+
     const results = await Promise.allSettled(
-      reviewerNames.map((name) =>
-        invokeReviewer({
+      reviewerNames.map((name) => {
+        const prior = priorByReviewer.get(name);
+        return invokeReviewer({
           reviewer: name,
           config,
           repoRoot,
@@ -205,8 +256,9 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
           systemPrompt: promptBytesByReviewer.get(name)!,
-        }),
-      ),
+          ...(prior ? { priorReview: prior } : {}),
+        });
+      }),
     );
 
     let anyFailed = false;
