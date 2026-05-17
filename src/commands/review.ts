@@ -1,6 +1,13 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { parseConfigFromYaml, type StampConfig } from "../lib/config.js";
-import { openDb, priorReviewByReviewer, recordReview } from "../lib/db.js";
+import {
+  findCachedVerdict,
+  openDb,
+  priorReviewByReviewer,
+  recordReview,
+  type CachedVerdict,
+} from "../lib/db.js";
 import {
   isAncestor,
   repoHasAnyCommit,
@@ -35,6 +42,13 @@ export interface ReviewOptions {
    * running stamp-cli on a public repo — the cap is the safe default.
    */
   allowLarge?: boolean;
+  /**
+   * Skip the (reviewer, diff_hash, prompt_hash) verdict cache and force a
+   * fresh LLM call for every reviewer. Use when you want to re-roll a
+   * verdict (e.g. testing prompt-side determinism). Also disable-able via
+   * STAMP_NO_REVIEW_CACHE=1 for shells where flag plumbing is awkward.
+   */
+  noCache?: boolean;
 }
 
 /** Pre-invocation diff size cap, bytes. Operator-overridable via env var. */
@@ -198,8 +212,47 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   );
   console.log();
 
+  // Cache keys: identical (reviewer, diff bytes, prompt bytes) → identical
+  // verdict, deterministically. Hashing the bytes (not the SHA pair) is what
+  // lets the cache survive rebases and amends — the LLM call's actual input
+  // is what matters, not the git refs surrounding it.
+  const diffHash = sha256(resolved.diff);
+  const promptHashes = new Map<string, string>();
+  for (const name of reviewerNames) {
+    promptHashes.set(name, sha256(promptBytesByReviewer.get(name)!));
+  }
+
   const db = openDb(stampStateDbPath(repoRoot));
   try {
+    // Verdict-cache short-circuit: when the same (reviewer, diff_hash,
+    // prompt_hash) tuple already has a stored verdict, return it without
+    // calling the LLM. This is the mechanical fix for the treadmill where
+    // the model non-deterministically re-flips verdicts on identical input.
+    // Prompt-level "ratchet" guidance loses to live diff content; pulling
+    // the decision out of the model is the only reliable lever.
+    const cacheEnabled =
+      !opts.noCache && process.env["STAMP_NO_REVIEW_CACHE"] !== "1";
+    const cacheHits = new Map<string, CachedVerdict>();
+    if (cacheEnabled) {
+      for (const name of reviewerNames) {
+        const hit = findCachedVerdict(
+          db,
+          name,
+          diffHash,
+          promptHashes.get(name)!,
+        );
+        if (hit) cacheHits.set(name, hit);
+      }
+    }
+
+    if (cacheHits.size > 0) {
+      const names = [...cacheHits.keys()].sort().join(", ");
+      console.log(
+        `note: ${cacheHits.size} verdict${cacheHits.size === 1 ? "" : "s"} served from cache (${names}); pass --no-cache to force re-review`,
+      );
+      console.log();
+    }
+
     // Per-reviewer prior-review lookup: surface the most recent verdict +
     // prose this reviewer recorded against the same base_sha, gated on the
     // prior head being an ancestor of the current head. This is the
@@ -207,8 +260,10 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     // prior approvals at the old (base, head) pair and the reviewer
     // re-evaluates from scratch with no memory of what it already approved.
     // See `PriorReviewContext` in lib/reviewer.ts for the prompt-side use.
+    // Skipped for cache-hit reviewers since they won't invoke the LLM.
     const priorByReviewer = new Map<string, PriorReviewContext>();
     for (const name of reviewerNames) {
+      if (cacheHits.has(name)) continue;
       const prior = priorReviewByReviewer(
         db,
         name,
@@ -247,6 +302,21 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
 
     const results = await Promise.allSettled(
       reviewerNames.map((name) => {
+        const cached = cacheHits.get(name);
+        if (cached) {
+          // Cache hit: synthesize a ReviewerInvocation from the stored row.
+          // tool_calls is empty by design — no fresh tool invocations happened
+          // this run. The original tool_calls audit trail (if any) is still
+          // on the source row. retros likewise — cached runs don't generate
+          // new retro candidates.
+          return Promise.resolve<ReviewerInvocation>({
+            reviewer: name,
+            prose: cached.issues ?? "",
+            verdict: cached.verdict,
+            tool_calls: [],
+            retros: [],
+          });
+        }
         const prior = priorByReviewer.get(name);
         return invokeReviewer({
           reviewer: name,
@@ -266,15 +336,27 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       const name = reviewerNames[i]!;
       const outcome = results[i]!;
       if (outcome.status === "fulfilled") {
+        const cached = cacheHits.get(name);
         recordReview(db, {
           reviewer: name,
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
           verdict: outcome.value.verdict,
           issues: outcome.value.prose,
-          tool_calls: serializeToolCalls(outcome.value.tool_calls),
+          // For cache hits no fresh tool calls happened; persist null so the
+          // row honestly reflects "this verdict was served from cache".
+          tool_calls: cached
+            ? null
+            : serializeToolCalls(outcome.value.tool_calls),
+          diff_hash: diffHash,
+          prompt_hash: promptHashes.get(name)!,
         });
-        printReview(outcome.value, resolved.base_sha, resolved.head_sha);
+        printReview(
+          outcome.value,
+          resolved.base_sha,
+          resolved.head_sha,
+          cached ?? null,
+        );
       } else {
         anyFailed = true;
         printError(name, outcome.reason);
@@ -287,6 +369,10 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   } finally {
     db.close();
   }
+}
+
+function sha256(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
 }
 
 function chooseReviewers(config: StampConfig, only?: string): string[] {
@@ -307,6 +393,7 @@ function printReview(
   result: ReviewerInvocation,
   base_sha: string,
   head_sha: string,
+  cached: CachedVerdict | null,
 ): void {
   const bar = "─".repeat(72);
   console.log(bar);
@@ -316,7 +403,16 @@ function printReview(
   console.log(bar);
   console.log(result.prose);
   console.log(bar);
-  console.log(`verdict: ${result.verdict}`);
+  // For cached verdicts, mark the verdict line so the operator can see the
+  // result wasn't freshly computed. Keep `verdict: <value>` grep-stable for
+  // existing parsers — the marker goes after the value, not before.
+  if (cached) {
+    console.log(
+      `verdict: ${result.verdict}   [cached from ${cached.base_sha.slice(0, 8)} → ${cached.head_sha.slice(0, 8)} at ${cached.created_at}]`,
+    );
+  } else {
+    console.log(`verdict: ${result.verdict}`);
+  }
   console.log(bar);
   // Retro fence is emitted AFTER the verdict bar so existing stdout consumers
   // — agents grepping for `verdict: ` or the `─` bars — see no change in

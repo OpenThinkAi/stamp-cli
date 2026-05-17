@@ -15,6 +15,12 @@ export interface ReviewRow {
   /** JSON-encoded ToolCall[] (see lib/toolCalls.ts), or null for reviews
    *  recorded before Step 4 shipped or where no tools were invoked. */
   tool_calls: string | null;
+  /** SHA-256 hex of the diff bytes the reviewer evaluated. Null for rows
+   *  recorded before 1.8.0 shipped. Cache key with prompt_hash + reviewer. */
+  diff_hash: string | null;
+  /** SHA-256 hex of the reviewer prompt text. Null for rows recorded before
+   *  1.8.0 shipped. Cache key with diff_hash + reviewer. */
+  prompt_hash: string | null;
   created_at: string;
 }
 
@@ -26,6 +32,12 @@ export interface RecordReviewInput {
   issues?: string | null;
   /** JSON-encoded ToolCall[] or null. See lib/toolCalls.ts. */
   tool_calls?: string | null;
+  /** SHA-256 hex of the diff bytes (caller computes; see commands/review.ts).
+   *  Optional for pre-1.8.0 call sites that haven't been updated yet. */
+  diff_hash?: string | null;
+  /** SHA-256 hex of the reviewer prompt text. Optional for pre-1.8.0 call
+   *  sites that haven't been updated yet. */
+  prompt_hash?: string | null;
 }
 
 export function openDb(path: string): DatabaseSync {
@@ -66,20 +78,39 @@ function initSchema(db: DatabaseSync): void {
       verdict     TEXT    NOT NULL CHECK (verdict IN ('approved','changes_requested','denied')),
       issues      TEXT,
       tool_calls  TEXT,
+      diff_hash   TEXT,
+      prompt_hash TEXT,
       created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE INDEX IF NOT EXISTS idx_reviews_shas
       ON reviews(base_sha, head_sha, reviewer);
+
+    CREATE INDEX IF NOT EXISTS idx_reviews_cache
+      ON reviews(reviewer, diff_hash, prompt_hash, created_at);
   `);
 
-  // Migration for DBs created before Step 4 shipped — tool_calls column
-  // wasn't in the original schema. PRAGMA table_info lists columns; if
-  // tool_calls is absent, add it. Idempotent: repeat opens no-op.
+  // Forward migrations: each column was added in a later release than the
+  // base schema. PRAGMA table_info lists current columns; missing ones get
+  // ALTER-added. Idempotent — repeat opens no-op.
   const cols = db.prepare("PRAGMA table_info(reviews)").all() as Array<{ name: string }>;
-  if (!cols.some((c) => c.name === "tool_calls")) {
+  const have = new Set(cols.map((c) => c.name));
+  if (!have.has("tool_calls")) {
     db.exec("ALTER TABLE reviews ADD COLUMN tool_calls TEXT");
   }
+  if (!have.has("diff_hash")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN diff_hash TEXT");
+  }
+  if (!have.has("prompt_hash")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN prompt_hash TEXT");
+  }
+  // Cache index needs to exist on DBs that were created before the cache
+  // shipped — CREATE INDEX IF NOT EXISTS above only fires on a fresh
+  // CREATE TABLE path. Repeat-safe.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reviews_cache
+      ON reviews(reviewer, diff_hash, prompt_hash, created_at)
+  `);
 }
 
 export function recordReview(
@@ -87,8 +118,9 @@ export function recordReview(
   input: RecordReviewInput,
 ): number {
   const stmt = db.prepare(
-    `INSERT INTO reviews (reviewer, base_sha, head_sha, verdict, issues, tool_calls)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO reviews
+       (reviewer, base_sha, head_sha, verdict, issues, tool_calls, diff_hash, prompt_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
     input.reviewer,
@@ -97,8 +129,50 @@ export function recordReview(
     input.verdict,
     input.issues ?? null,
     input.tool_calls ?? null,
+    input.diff_hash ?? null,
+    input.prompt_hash ?? null,
   );
   return Number(result.lastInsertRowid);
+}
+
+export interface CachedVerdict {
+  verdict: Verdict;
+  /** Prose stored on the cached row; may be null on pre-prose rows. */
+  issues: string | null;
+  /** (base_sha, head_sha) the cached verdict was originally recorded against.
+   *  Surfaced in the cache-hit message so operators can trace provenance. */
+  base_sha: string;
+  head_sha: string;
+  created_at: string;
+}
+
+/**
+ * Look up the most recent stored verdict for (reviewer, diff_hash, prompt_hash).
+ * Both hashes are required — null/missing-hash rows never match, so pre-1.8.0
+ * rows are silently skipped. Returns null when no matching row exists.
+ *
+ * Used by `stamp review` to short-circuit the LLM call when an identical
+ * (diff, prompt, reviewer) tuple has already been evaluated. The point is
+ * to break the treadmill where the model non-deterministically re-flips
+ * verdicts on unchanged input.
+ */
+export function findCachedVerdict(
+  db: DatabaseSync,
+  reviewer: string,
+  diff_hash: string,
+  prompt_hash: string,
+): CachedVerdict | null {
+  const stmt = db.prepare(`
+    SELECT verdict, issues, base_sha, head_sha, created_at
+    FROM reviews
+    WHERE reviewer = ? AND diff_hash = ? AND prompt_hash = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `);
+  const row = stmt.get(reviewer, diff_hash, prompt_hash) as
+    | CachedVerdict
+    | undefined;
+  return row ?? null;
 }
 
 export interface LatestVerdict {

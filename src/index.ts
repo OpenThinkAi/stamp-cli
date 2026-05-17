@@ -505,17 +505,32 @@ program
     "--allow-large",
     "bypass the 200KB diff size cap (raise STAMP_REVIEW_DIFF_CAP_BYTES for a different threshold)",
   )
-  .action(async (opts: { diff: string; only?: string; allowLarge?: boolean }) => {
-    try {
-      await runReview({
-        diff: opts.diff,
-        only: opts.only,
-        allowLarge: opts.allowLarge,
-      });
-    } catch (err) {
-      handleCliError(err);
-    }
-  });
+  .option(
+    "--no-cache",
+    "skip the verdict cache and force a fresh LLM call for every reviewer (default: serve from cache when (reviewer, diff, prompt) tuple matches a prior verdict). STAMP_NO_REVIEW_CACHE=1 has the same effect.",
+  )
+  .action(
+    async (opts: {
+      diff: string;
+      only?: string;
+      allowLarge?: boolean;
+      cache?: boolean;
+    }) => {
+      try {
+        // commander's --no-cache sets opts.cache = false; absent flag leaves
+        // it undefined (default-on). Normalize to noCache: true on the
+        // runReview side.
+        await runReview({
+          diff: opts.diff,
+          only: opts.only,
+          allowLarge: opts.allowLarge,
+          noCache: opts.cache === false,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 
 program
   .command("status")
