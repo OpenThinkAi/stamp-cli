@@ -185,15 +185,6 @@ export function commitSummary(sha: string, cwd: string): CommitSummary {
 }
 
 /**
- * Parse and resolve a git revspec of the form "<base>..<head>".
- * - base_sha is merge-base(<base>, <head>), the point at which <head> diverged
- * - head_sha is the commit SHA that <head> currently points to
- * - diff is `git diff <base>...<head>` — changes introduced by <head>
- *   relative to <base>, ignoring any changes that <base> has since made
- *
- * Throws on invalid revspecs or on git failures.
- */
-/**
  * Diff between two commits (`<priorHead>..<currentHead>`) with enlarged
  * unified-context lines. Used by `stamp review` to feed the LLM ONLY the
  * code that has changed since a prior approved/rejected review on the same
@@ -216,6 +207,15 @@ export function deltaDiff(
   );
 }
 
+/**
+ * Parse and resolve a git revspec of the form "<base>..<head>".
+ * - base_sha is merge-base(<base>, <head>), the point at which <head> diverged
+ * - head_sha is the commit SHA that <head> currently points to
+ * - diff is `git diff <base>...<head>` — changes introduced by <head>
+ *   relative to <base>, ignoring any changes that <base> has since made
+ *
+ * Throws on invalid revspecs or on git failures.
+ */
 export function resolveDiff(revspec: string, cwd: string): ResolvedDiff {
   const parts = revspec.split("..");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {

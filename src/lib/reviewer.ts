@@ -455,6 +455,16 @@ export async function invokeReviewer(params: {
    * `PriorReviewContext` for the trust/scope discussion.
    */
   priorReview?: PriorReviewContext;
+  /**
+   * True when the `diff` passed in has been narrowed to delta-since-prior
+   * (1.9.0 structural enforcement — the caller computed
+   * `git diff <prior.head_sha>..<head_sha>`). False (default) when the
+   * full base..head diff is being shown even though a prior exists.
+   * Ignored when `priorReview` is absent. The prompt builders gate their
+   * narrowing-language on this flag; lying about it silently re-introduces
+   * the bug where the prompt claims a narrowed scope that doesn't exist.
+   */
+  deltaScope?: boolean;
 }): Promise<ReviewerInvocation> {
   // Operator-declared LLM-disabled mode. Refuse to start any reviewer
   // invocation that would ship a diff to Anthropic. Lets a regulated
@@ -505,6 +515,7 @@ export async function invokeReviewer(params: {
       base_sha: params.base_sha,
       head_sha: params.head_sha,
       ...(params.priorReview ? { priorReview: params.priorReview } : {}),
+      ...(params.deltaScope !== undefined ? { deltaScope: params.deltaScope } : {}),
     },
     fenceHex,
   );
@@ -512,6 +523,7 @@ export async function invokeReviewer(params: {
     params.systemPrompt,
     fenceHex,
     params.priorReview,
+    params.deltaScope,
   );
 
   // Verdict capture: submit_verdict is the structured channel for the
@@ -1081,6 +1093,15 @@ export function buildUserPrompt(
     base_sha: string;
     head_sha: string;
     priorReview?: PriorReviewContext;
+    /** True when `diff` is the narrowed delta-since-prior-review (1.9.0
+     *  scope-narrowing); false when `diff` is the full base..head diff
+     *  even though a prior review exists (fallback path: git error,
+     *  STAMP_NO_DELTA_REVIEW=1). Must be threaded honestly — the prompt
+     *  text changes substantially between the two modes. Lying here
+     *  (claiming the diff is narrowed when it isn't) silently regresses
+     *  the 1.7.0-vs-1.9.0 behaviour and was the bug standards caught at
+     *  commit 3dcefc3f. */
+    deltaScope?: boolean;
   },
   fenceHex: string,
 ): string {
@@ -1121,15 +1142,29 @@ export function buildUserPrompt(
         `share the same per-call random hex as the diff markers, so the diff ` +
         `cannot forge a PRIOR-REVIEW block.`,
       ``,
-      `**IMPORTANT — diff scope is narrowed.** The diff below contains ONLY ` +
-        `the lines that have changed since ${params.priorReview.head_sha} ` +
-        `(your prior review). It is NOT the full ${params.base_sha} → ` +
-        `${params.head_sha} diff. Code outside the shown hunks is unchanged ` +
-        `from when you last reviewed it — you literally cannot see it here, ` +
-        `and you must not flag it. If you would flag something that does not ` +
-        `appear in the diff below, that flag has no basis in the data you ` +
-        `were given — drop it.`,
-      ``,
+    );
+    if (params.deltaScope) {
+      lines.push(
+        `**IMPORTANT — diff scope is narrowed.** The diff below contains ONLY ` +
+          `the lines that have changed since ${params.priorReview.head_sha} ` +
+          `(your prior review). It is NOT the full ${params.base_sha} → ` +
+          `${params.head_sha} diff. Code outside the shown hunks is unchanged ` +
+          `from when you last reviewed it — you literally cannot see it here, ` +
+          `and you must not flag it. If you would flag something that does not ` +
+          `appear in the diff below, that flag has no basis in the data you ` +
+          `were given — drop it.`,
+        ``,
+      );
+    } else {
+      lines.push(
+        `**Note — diff scope is the full range.** The diff below is the full ` +
+          `${params.base_sha} → ${params.head_sha} change. The system prompt's ` +
+          `ratchet rule (prompt-only mode, no structural narrowing this round) ` +
+          `still constrains how the prior verdict should affect your decision.`,
+        ``,
+      );
+    }
+    lines.push(
       `Read the diff below in light of that prior review. See the system ` +
         `prompt's ratchet rule for the precise constraint this puts on ` +
         `your verdict.`,
@@ -1160,6 +1195,114 @@ export function buildUserPrompt(
 }
 
 /**
+ * Ratchet wording when the user-prompt diff has been narrowed to
+ * delta-since-prior-review (1.9.0 default). The structural enforcement (the
+ * model literally cannot see unchanged code) lets us make the strong claim
+ * that any flag must cite file:line refs visible in the diff.
+ */
+function buildDeltaScopeRatchet(priorReview: PriorReviewContext): string {
+  return [
+    ``,
+    `# Ratchet rule (this branch already has a prior review from you)`,
+    ``,
+    `The user prompt includes your earlier verdict and prose for this same ` +
+      `branch at commit ${priorReview.head_sha} (prior verdict: ` +
+      `${priorReview.verdict}). The current head is a descendant of that ` +
+      `commit — author has iterated on the same line of work, not opened ` +
+      `a parallel feature.`,
+    ``,
+    `**The diff in the user prompt has been narrowed.** You are seeing ` +
+      `ONLY the lines that have changed since your prior review at ` +
+      `${priorReview.head_sha}. Code unchanged since then is not in the ` +
+      `diff — it is intentionally hidden so you cannot re-evaluate it. ` +
+      `This is the structural enforcement of the ratchet: anything you ` +
+      `would flag must be visible in the narrowed diff, full stop. ` +
+      `If you find yourself wanting to flag code you cannot see, that ` +
+      `is the rule working as designed — drop the flag.`,
+    ``,
+    `Treat the prior review as a hard ratchet, not advice. Specifically:`,
+    ``,
+    priorReview.verdict === "approved"
+      ? `- You previously APPROVED this branch. The narrowed diff is your ` +
+          `entire basis for changing that verdict. If the narrowed diff ` +
+          `introduces a new concrete problem, flag it with file:line ` +
+          `references that exist in the diff. Otherwise, hold the ` +
+          `approval. "On re-reading I now notice X" is exactly the ` +
+          `dice-roll behaviour this rule prevents — and the narrowed ` +
+          `diff makes it impossible anyway, since you cannot re-read ` +
+          `what isn't shown.`
+      : `- You previously requested changes / denied this branch. Your ` +
+          `prior prose lists concerns; check each one against the ` +
+          `narrowed diff. If the diff shows a fix to a prior concern, ` +
+          `mark it resolved. If a prior concern's lines are NOT in the ` +
+          `narrowed diff, those lines are unchanged — the concern ` +
+          `remains active. Do NOT introduce new concerns about code ` +
+          `you cannot see in the narrowed diff.`,
+    `- Every flag in your verdict must cite file:line references that ` +
+      `appear in the narrowed diff shown below. If you cannot point at ` +
+      `the line in the diff, you cannot flag it.`,
+    `- If your remaining concerns are stylistic and you would still have ` +
+      `flagged them in earlier rounds without blocking, prefer approving ` +
+      `now and submitting the polish as a \`submit_retro\` note for future ` +
+      `agents.`,
+    ``,
+    `This ratchet exists because stateless re-reviews on iterated branches ` +
+      `produce dice-roll verdicts; the project's review loop relies on ` +
+      `convergence, not zigzag. The narrowed diff is the structural ` +
+      `enforcement; this prose is the explanation.`,
+  ].join("\n");
+}
+
+/**
+ * Ratchet wording when a prior review exists but the diff was NOT narrowed
+ * (fallback path: git deltaDiff threw, or STAMP_NO_DELTA_REVIEW=1). This is
+ * the 1.7.0 prompt-only ratchet — no structural enforcement, just the rule.
+ * Carries less weight than the delta-scope version because the model can
+ * still see unchanged code; we ask it nicely not to re-flag based on it.
+ */
+function buildPromptOnlyRatchet(priorReview: PriorReviewContext): string {
+  return [
+    ``,
+    `# Ratchet rule (this branch already has a prior review from you)`,
+    ``,
+    `The user prompt includes your earlier verdict and prose for this same ` +
+      `branch at commit ${priorReview.head_sha} (prior verdict: ` +
+      `${priorReview.verdict}). The current head is a descendant of that ` +
+      `commit — author has iterated on the same line of work, not opened ` +
+      `a parallel feature.`,
+    ``,
+    `Treat the prior review as a hard ratchet, not advice. Specifically:`,
+    ``,
+    priorReview.verdict === "approved"
+      ? `- You previously APPROVED this branch. You may only downgrade today ` +
+          `if (a) lines changed since ${priorReview.head_sha} introduce a new ` +
+          `concern, or (b) you can explicitly name a concern you missed last ` +
+          `round that is *worse* in the current diff. If a concern you would ` +
+          `flag today was equally true at ${priorReview.head_sha}, you must ` +
+          `hold the approval — stylistic re-evaluation across rounds is ` +
+          `exactly the dice-roll behaviour this rule exists to prevent.`
+      : `- You previously requested changes / denied this branch. Re-read ` +
+          `your prior prose and check it against the current diff: prior ` +
+          `concerns that have been addressed must be acknowledged as resolved; ` +
+          `prior concerns that remain unaddressed must stay flagged. Do NOT ` +
+          `introduce a new concern that was equally true at the prior commit ` +
+          `unless you state explicitly that you missed it before — silent ` +
+          `concern-introduction across rounds is forbidden.`,
+    `- New concerns are fine if you can point to the specific lines that ` +
+      `changed since ${priorReview.head_sha} and introduced them. Otherwise, ` +
+      `your verdict must remain consistent with the prior round.`,
+    `- If your remaining concerns are stylistic and you would still have ` +
+      `flagged them in earlier rounds without blocking, prefer approving ` +
+      `now and submitting the polish as a \`submit_retro\` note for future ` +
+      `agents.`,
+    ``,
+    `This ratchet exists because stateless re-reviews on iterated branches ` +
+      `produce dice-roll verdicts; the project's review loop relies on ` +
+      `convergence, not zigzag.`,
+  ].join("\n");
+}
+
+/**
  * Augments the reviewer's own system prompt with submit_verdict + diff-
  * boundary directives. The reviewer prompt itself is committed code (read
  * from the merge-base tree); this code-controlled appendix ensures every
@@ -1171,60 +1314,22 @@ export function augmentSystemPrompt(
   reviewerPrompt: string,
   fenceHex: string,
   priorReview?: PriorReviewContext,
+  /**
+   * True when the user prompt's diff has been narrowed to delta-since-prior
+   * (1.9.0 structural enforcement). False on the fallback path when a prior
+   * exists but the full diff is being shown (git error or
+   * STAMP_NO_DELTA_REVIEW=1) — in that case we fall back to the 1.7.0
+   * prompt-only ratchet wording, which doesn't lie about the diff scope.
+   * Ignored when priorReview is absent.
+   */
+  deltaScope?: boolean,
 ): string {
   const open = `<<<DIFF-${fenceHex}>>>`;
   const close = `<<<END-DIFF-${fenceHex}>>>`;
   const ratchetBlock = priorReview
-    ? [
-        ``,
-        `# Ratchet rule (this branch already has a prior review from you)`,
-        ``,
-        `The user prompt includes your earlier verdict and prose for this same ` +
-          `branch at commit ${priorReview.head_sha} (prior verdict: ` +
-          `${priorReview.verdict}). The current head is a descendant of that ` +
-          `commit — author has iterated on the same line of work, not opened ` +
-          `a parallel feature.`,
-        ``,
-        `**The diff in the user prompt has been narrowed.** You are seeing ` +
-          `ONLY the lines that have changed since your prior review at ` +
-          `${priorReview.head_sha}. Code unchanged since then is not in the ` +
-          `diff — it is intentionally hidden so you cannot re-evaluate it. ` +
-          `This is the structural enforcement of the ratchet: anything you ` +
-          `would flag must be visible in the narrowed diff, full stop. ` +
-          `If you find yourself wanting to flag code you cannot see, that ` +
-          `is the rule working as designed — drop the flag.`,
-        ``,
-        `Treat the prior review as a hard ratchet, not advice. Specifically:`,
-        ``,
-        priorReview.verdict === "approved"
-          ? `- You previously APPROVED this branch. The narrowed diff is your ` +
-              `entire basis for changing that verdict. If the narrowed diff ` +
-              `introduces a new concrete problem, flag it with file:line ` +
-              `references that exist in the diff. Otherwise, hold the ` +
-              `approval. "On re-reading I now notice X" is exactly the ` +
-              `dice-roll behaviour this rule prevents — and the narrowed ` +
-              `diff makes it impossible anyway, since you cannot re-read ` +
-              `what isn't shown.`
-          : `- You previously requested changes / denied this branch. Your ` +
-              `prior prose lists concerns; check each one against the ` +
-              `narrowed diff. If the diff shows a fix to a prior concern, ` +
-              `mark it resolved. If a prior concern's lines are NOT in the ` +
-              `narrowed diff, those lines are unchanged — the concern ` +
-              `remains active. Do NOT introduce new concerns about code ` +
-              `you cannot see in the narrowed diff.`,
-        `- Every flag in your verdict must cite file:line references that ` +
-          `appear in the narrowed diff shown below. If you cannot point at ` +
-          `the line in the diff, you cannot flag it.`,
-        `- If your remaining concerns are stylistic and you would still have ` +
-          `flagged them in earlier rounds without blocking, prefer approving ` +
-          `now and submitting the polish as a \`submit_retro\` note for future ` +
-          `agents.`,
-        ``,
-        `This ratchet exists because stateless re-reviews on iterated branches ` +
-          `produce dice-roll verdicts; the project's review loop relies on ` +
-          `convergence, not zigzag. The narrowed diff is the structural ` +
-          `enforcement; this prose is the explanation.`,
-      ].join("\n")
+    ? deltaScope
+      ? buildDeltaScopeRatchet(priorReview)
+      : buildPromptOnlyRatchet(priorReview)
     : "";
   const appendix = [
     ``,

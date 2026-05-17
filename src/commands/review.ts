@@ -311,10 +311,17 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
             name,
             deltaDiff(prior.head_sha, resolved.head_sha, repoRoot),
           );
-        } catch {
-          // Fall back to full diff if the git command itself errors.
-          // Better to do a full review than to abort the whole run on a
-          // transient git glitch.
+        } catch (err) {
+          // Fall back to full diff if the git command itself errors. Surface
+          // a warning so the agent's mental model of which reviewers saw a
+          // narrowed diff stays accurate — silent fallback would let the
+          // agent assume narrowing held when it didn't, producing exactly
+          // the confusion this feature exists to prevent.
+          const message = err instanceof Error ? err.message : String(err);
+          process.stderr.write(
+            `warning: delta computation failed for reviewer '${name}' — ` +
+              `falling back to full diff with prompt-only ratchet (${message})\n`,
+          );
         }
       }
     }
@@ -322,10 +329,19 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     if (priorByReviewer.size > 0) {
       const names = [...priorByReviewer.keys()].sort().join(", ");
       const deltaCount = deltaDiffs.size;
-      const scopeNote =
-        deltaCount > 0
-          ? `delta-since-prior-review scope for ${deltaCount} reviewer${deltaCount === 1 ? "" : "s"}`
-          : `full-diff scope (delta computation failed or STAMP_NO_DELTA_REVIEW=1)`;
+      const totalPriors = priorByReviewer.size;
+      let scopeNote: string;
+      if (deltaCount === totalPriors) {
+        scopeNote = `delta-since-prior-review scope for ${deltaCount} reviewer${deltaCount === 1 ? "" : "s"}`;
+      } else if (deltaCount > 0) {
+        scopeNote =
+          `delta scope for ${deltaCount}/${totalPriors} reviewers; ` +
+          `${totalPriors - deltaCount} fell back to full-diff (see warnings above)`;
+      } else if (deltaEnabled) {
+        scopeNote = `full-diff scope for all (delta computation failed; see warnings above)`;
+      } else {
+        scopeNote = `full-diff scope (STAMP_NO_DELTA_REVIEW=1 set)`;
+      }
       console.log(
         `note: surfacing earlier verdicts for ${names} (ratchet rule active; ${scopeNote})`,
       );
@@ -354,7 +370,10 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         // we have a delta computed, the reviewer sees only the delta. The
         // base_sha + head_sha args still describe the full range (used for
         // attestation / display); only the bytes the model evaluates are
-        // narrowed.
+        // narrowed. deltaScope flag is threaded honestly so the prompt
+        // builders gate their narrowing-language correctly — fallback path
+        // gets the 1.7.0 prompt-only ratchet wording instead.
+        const isDeltaScope = deltaDiffs.has(name);
         const diffForReviewer = deltaDiffs.get(name) ?? resolved.diff;
         return invokeReviewer({
           reviewer: name,
@@ -364,7 +383,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
           systemPrompt: promptBytesByReviewer.get(name)!,
-          ...(prior ? { priorReview: prior } : {}),
+          ...(prior ? { priorReview: prior, deltaScope: isDeltaScope } : {}),
         });
       }),
     );
