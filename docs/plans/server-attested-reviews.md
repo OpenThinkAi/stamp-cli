@@ -750,3 +750,6 @@ Remaining items, all operational:
 4. **PR-mode workflow scaffold** — write the
    `.github/workflows/stamp-mirror.yml` template that `stamp init
    --pr-mode` will install, along with the org-secret setup walkthrough.
+   *(Shipped — AGT-343; see `src/commands/init.ts`'s
+   `renderMirrorWorkflow` + `printPrModeWalkthrough`, and
+   `tests/initPrModeMirrorWorkflow.test.ts`.)*
