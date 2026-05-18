@@ -36,6 +36,24 @@
  * Exits 0 on success, 1 on any verification failure. Prints a
  * structured summary either way; a CI consumer can fail the check
  * purely on exit code without parsing prose.
+ *
+ * AGT-338 BREAKING CHANGES (deliberate; flagged per product review):
+ *   - `MIN_ACCEPTED_PR_ATTESTATION_VERSION` raised from 1 to 3. All v1 and
+ *     v2 envelopes are rejected with the schema-too-old actionable error.
+ *     Matches `pre-receive.ts`'s same-direction bump.
+ *   - Success-output format dropped the `trusted-key:` row (single-key
+ *     filename was load-bearing under v1/v2; v4-trust resolves through
+ *     `.stamp/trusted-keys/manifest.yml` and there's no single filename
+ *     to print). The `signer:` row carries the fingerprint, which is the
+ *     architecturally correct identifier under v4-trust. Scripts grepping
+ *     for `trusted-key:` will not match; switch to `signer:` for the
+ *     fingerprint-keyed lookup.
+ *   - `readAttestationRef` now returns null for envelopes below
+ *     `MIN_ACCEPTED_PR_ATTESTATION_VERSION` (in addition to its existing
+ *     "ref missing" null). Callers that need to distinguish "ref absent"
+ *     from "ref present but unsupported schema" should use
+ *     `readAttestationBlobBytes` + `peekSchemaVersion`, which is the
+ *     pattern this verifier follows internally.
  */
 
 import { spawnSync } from "node:child_process";
@@ -105,11 +123,26 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
   // parsing through the strict version-floor gate.
   const blobBytes = readAttestationBlobBytes(patch_id, repoRoot);
   if (!blobBytes) {
+    // Bridge-window-aware remediation. v3 envelopes are produced ONLY
+    // by stamp-server (AGT-355, not landed yet); `stamp attest` in
+    // 1.x AND 2.x emits v2, which this verifier rejects. Pointing
+    // operators at `stamp attest --into <branch>` (the natural
+    // suggestion) sends them on a dead-end loop — they'd produce a
+    // v2 envelope and hit the schema-too-old error here. So the
+    // error names both ends of the bridge: the "happy path with a
+    // 2.x server" answer for after AGT-355 ships, and the
+    // "pin to a 1.x verifier via stamp-version" workaround for repos
+    // that need to keep operating during the bridge window. Per
+    // AGT-338 product reviewer round 1.
     fail(
       `no attestation found at refs/stamp/attestations/${patch_id} ` +
         `(diff ${resolved.base_sha.slice(0, 8)}..${resolved.head_sha.slice(0, 8)}). ` +
-        `Operator must run \`stamp attest --into ${opts.into}\` and push the ` +
-        `attestation ref to this remote.`,
+        `Production path (post-AGT-355, lands in 2.0.1): the stamp-server signs and ` +
+        `publishes the attestation ref on every reviewed PR. ` +
+        `Bridge-window workaround (until AGT-355 ships): pin the GitHub Action to a ` +
+        `1.x \`stamp-version\` input — 1.x \`stamp attest\` writes a v2 envelope and ` +
+        `the 1.x verifier accepts it. See docs/migration-1.x-to-2.x.md for the ` +
+        `full bridge-window procedure.`,
       patch_id,
       resolved.base_sha,
       resolved.head_sha,
