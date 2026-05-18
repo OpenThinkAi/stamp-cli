@@ -27,7 +27,6 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
@@ -36,8 +35,6 @@ import {
   type AttestationPayload,
 } from "../lib/attestation.js";
 import {
-  canonicalSerializeApproval,
-  canonicalSerializePayload,
   MIN_ACCEPTED_V4_SCHEMA_VERSION,
   type AttestationPayloadV4,
 } from "../lib/attestationV4.js";
@@ -50,63 +47,52 @@ import {
   readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
-import { buildPubkeyMap } from "../lib/sshReviewClient.js";
+import { parseManifest } from "../lib/trustedKeysManifest.js";
+// V4-trust-level verification pipeline lives in src/lib/v4Trust.ts so
+// both this hook and the PR-mode verifier (src/commands/verifyPr.ts)
+// call into the same phase functions — no logic divergence between
+// server-gated and PR-mode. AGT-338 lifted these out of this file
+// per the standards-reviewer round 2 concern about
+// `src/commands/` importing from `src/hooks/`.
 import {
-  parseManifest,
-  resolveCapability,
-  snapshotSha256,
-  type TrustedKeysManifest,
-} from "../lib/trustedKeysManifest.js";
+  COMMIT_PHASES_V4,
+  parsePathRules,
+  readPubkeyMapAt,
+  readChangedFilesAtRef,
+  type BranchRule as V4BranchRule,
+  type CheckDef as V4CheckDef,
+  type PathRule as V4PathRule,
+  type PhaseInputV4,
+} from "../lib/v4Trust.js";
+// Re-export so external callers that imported from this hook before
+// AGT-338's lift-out (none in production, but tests like
+// tests/preReceiveV4.test.ts and tests/v4Roundtrip.test.ts) keep
+// working without a churn-only test rewrite.
+export {
+  verifyV4MergeStructure,
+  verifyV4TargetBranch,
+  verifyV4SignerTrust,
+  verifyV4OuterSignature,
+  verifyV4Approvals,
+  verifyV4DiffHash,
+  verifyV4ApprovalSignatures,
+  verifyV4Checks,
+  verifyV4TrustAnchorSignatures,
+  verifyV4StampPathsGuard,
+  parsePathRules,
+  type PhaseInputV4,
+  type PathRule,
+  type BranchRule,
+} from "../lib/v4Trust.js";
 
 const ZERO_SHA = "0000000000000000000000000000000000000000";
 
-interface CheckDef {
-  name: string;
-  run: string;
-}
-
-/**
- * Exported so PR-mode verification (`src/commands/verifyPr.ts`) can
- * construct a PhaseInputV4 with the same rule shape pre-receive does.
- * Kept narrow to what `verifyV4Approvals` / `verifyV4Checks` consume —
- * not a leak of the hook's internal config model.
- */
-export interface BranchRule {
-  required: string[];
-  required_checks?: CheckDef[];
-}
-
-/**
- * One `path_rules:` entry from `.stamp/config.yml`. Keyed in the YAML by
- * its path-glob (e.g. `".stamp/**"`); the key is carried alongside as
- * `pattern` for error messages.
- *
- * `require_capability` is one of the manifest's known capabilities (we
- * keep the field a free string here — the manifest's own validator
- * decides which capability strings exist, and we just look up against
- * whatever it returns).
- *
- * `minimum_signatures` is the count of trust-anchor signatures, each
- * coming from a manifest-listed key that carries `require_capability`,
- * required when the merge's diff touches any file matching `pattern`.
- *
- * `bypass_review_cycle: true` means the path-gate REPLACES the normal
- * reviewer cycle for matched paths — `.stamp/**` changes are gated by
- * admin signatures, not by reviewer verdicts. `false` means the path-
- * gate is layered ON TOP OF the reviewer cycle (admins must also sign,
- * and reviewers must also have run).
- */
-/**
- * Exported so PR-mode verification (`src/commands/verifyPr.ts`) can
- * pass the same path-rule list into a PhaseInputV4 that pre-receive
- * does. Pure data; no behavior change.
- */
-export interface PathRule {
-  pattern: string;
-  require_capability: string;
-  minimum_signatures: number;
-  bypass_review_cycle: boolean;
-}
+// CheckDef / BranchRule / PathRule are owned by `src/lib/v4Trust.ts`
+// post-AGT-338. Local aliases here so the hook's internal code reads
+// identically; the runtime types are the same module's exports.
+type CheckDef = V4CheckDef;
+type BranchRule = V4BranchRule;
+type PathRule = V4PathRule;
 
 interface StampConfigAtRef {
   branches: Record<string, BranchRule>;
@@ -635,106 +621,15 @@ function verifyReviewerHashesAtMergeBase(input: PhaseInput): PhaseResult {
   return { ok: true };
 }
 
-// ---------- v4 (server-attested) verification pipeline ----------
+// ---------- v4 (server-attested) verification: dispatcher ----------
 //
-// Mirrors the v3 phase structure above but verifies the v4 envelope
-// from AGT-325/334. Differences from v3:
-//   - Trust is sourced from `.stamp/trusted-keys/manifest.yml` at
-//     `base_sha` (NOT the pubkey directory alone) — the manifest binds
-//     each fingerprint to one or more capabilities (admin / operator /
-//     server). The verifier uses the manifest as the trust root and
-//     resolves pubkeys from `.stamp/trusted-keys/*.pub` indexed by
-//     fingerprint via `buildPubkeyMap`.
-//   - Each approval carries an inner Ed25519 signature from a
-//     `server`-capability key. The verifier re-derives the canonical
-//     bytes via `canonicalSerializeApproval` and re-verifies; tampering
-//     with a row, swapping in a different server key, or forging a
-//     server signature all fail closed here.
-//   - Lenient revocation: the inner approval's
-//     `trusted_keys_snapshot_sha256` must match the manifest hash AT
-//     `base_sha`. A server key that's still listed at base_sha but has
-//     since been revoked on a later commit is grandfathered (its
-//     approvals signed before the revocation remain valid). Conversely,
-//     a key not present at base_sha — even if it has been since added —
-//     can't sign valid approvals retroactively.
-//   - `diff_sha256` and `prompt_sha256` are re-derived from the actual
-//     merge content / merge-base `.stamp/` tree and compared to the
-//     signed values; mismatch rejects.
-//   - `.stamp/**` admin-signature gate is OUT OF SCOPE for AGT-335 (see
-//     AGT-336/337). We DO verify any `trust_anchor_signatures` that
-//     happen to be present (they're cheap to check and rejecting a
-//     forged one is a clear win); we DO NOT enforce the
-//     "require N admin sigs when diff touches .stamp/**" rule — that
-//     requires reading `path_rules` out of `.stamp/config.yml` and
-//     enforcing minimum_signatures, which is AGT-336/337's deliverable.
-
-type PhaseResultV4 = { ok: true } | { ok: false; reason: string };
-
-export interface PhaseInputV4 {
-  sha: string;
-  branch: string;
-  rule: BranchRule;
-  payload: AttestationPayloadV4;
-  payloadBytes: Buffer;
-  signatureBase64: string;
-  /** Manifest parsed from `.stamp/trusted-keys/manifest.yml` at
-   *  payload.base_sha. The trust root for every signature check below. */
-  manifest: TrustedKeysManifest;
-  /** Fingerprint → PEM map built from `.stamp/trusted-keys/*.pub` at
-   *  payload.base_sha. Resolves manifest entries to actual pubkeys. */
-  pubkeyByFingerprint: Map<string, string>;
-  /** `path_rules` parsed from `.stamp/config.yml` at payload.base_sha.
-   *  Empty when the section is absent / malformed — the verifier then
-   *  treats this commit as having no path-gate, the v3-era behavior.
-   *  AGT-336 introduced this field; earlier phase-input shapes had no
-   *  path_rules concept. */
-  pathRules: PathRule[];
-  /** Paths changed between payload.base_sha and payload.head_sha
-   *  (3-dot diff; matches what `verifyV4DiffHash` hashes). The path-
-   *  rules guard intersects this list with each rule's glob. Empty
-   *  when the merge has no file changes (degenerate case — the
-   *  diff_sha256 binding above will already have rejected most such
-   *  merges, but the field can still legitimately be empty for a
-   *  pure-tree-rearrangement). */
-  changedFiles: string[];
-}
-
-type PhaseV4 = (input: PhaseInputV4) => PhaseResultV4;
-
-// ORDERING — defense-in-depth note (NOT security-load-bearing):
-//
-// Conceptually `verifyV4TrustAnchorSignatures` runs before
-// `verifyV4StampPathsGuard` so a forged trust-anchor signature is
-// caught with a clear "does not verify" message instead of via the
-// guard's quieter "count short" path. But the guard's correctness
-// does NOT depend on this ordering — it independently re-verifies
-// every `trust_anchor_signatures` entry cryptographically before
-// counting, so a future reorder degrades the UX (later/quieter
-// error message) but does NOT open a hole. The structural property
-// is enforced by the
-// "rejects a forged trust_anchor_signature even if the upstream
-// phase is bypassed" test in tests/preReceiveV4.test.ts, which
-// drives the guard standalone against a forged entry and asserts
-// the count stays at zero.
-//
-// If you reorder these phases, you'll still be secure. Just expect
-// noisier-looking errors when something is actually wrong.
-const COMMIT_PHASES_V4: ReadonlyArray<{ name: string; fn: PhaseV4 }> = [
-  { name: "verifyV4MergeStructure", fn: verifyV4MergeStructure },
-  { name: "verifyV4TargetBranch", fn: verifyV4TargetBranch },
-  { name: "verifyV4SignerTrust", fn: verifyV4SignerTrust },
-  { name: "verifyV4OuterSignature", fn: verifyV4OuterSignature },
-  { name: "verifyV4Approvals", fn: verifyV4Approvals },
-  { name: "verifyV4DiffHash", fn: verifyV4DiffHash },
-  { name: "verifyV4ApprovalSignatures", fn: verifyV4ApprovalSignatures },
-  { name: "verifyV4Checks", fn: verifyV4Checks },
-  // Runs before verifyV4StampPathsGuard for UX (clearer error message
-  // on forged sigs); the guard is correct out-of-order too.
-  { name: "verifyV4TrustAnchorSignatures", fn: verifyV4TrustAnchorSignatures },
-  // Independently re-verifies trust-anchor signatures — see the
-  // ORDERING note above. Phase ordering is not security-load-bearing.
-  { name: "verifyV4StampPathsGuard", fn: verifyV4StampPathsGuard },
-];
+// The v4 phase functions + the COMMIT_PHASES_V4 pipeline live in
+// `src/lib/v4Trust.ts` (lifted out of this file in AGT-338 so PR-mode
+// — `src/commands/verifyPr.ts` — can call the SAME helpers without
+// importing from `src/hooks/`). This dispatcher reads bytes off the
+// commit trailer, builds the PhaseInputV4 from `base_sha`'s tree, and
+// runs the pipeline. PR-mode builds its own PhaseInputV4 from a
+// patch-id-keyed envelope and runs the PR-mode subset.
 
 function verifyCommitV4(
   sha: string,
@@ -834,7 +729,7 @@ function verifyCommitV4(
   // hash binding covers. Reading via `git diff --name-only` keeps us
   // off the working tree (load-bearing — the hook runs in a bare repo
   // with no checkout).
-  const changedFiles = readChangedFiles(payload.base_sha, payload.head_sha);
+  const changedFiles = readChangedFilesAtRef(payload.base_sha, payload.head_sha);
   if (changedFiles === null) {
     // `reject` is typed `: never` (process.exit(1) inside), so the
     // bare `return` below is structurally unreachable. We keep it

@@ -40,7 +40,11 @@ function sha256HexUtf8(s: string): string {
   return createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
 }
 
-import { canonicalSerializePayload } from "../src/lib/attestationV4.ts";
+import {
+  canonicalSerializePayload,
+  type ApprovalEntryV4,
+  type CheckAttestationV4,
+} from "../src/lib/attestationV4.ts";
 import {
   MIN_ACCEPTED_PR_ATTESTATION_VERSION,
   PR_ATTESTATION_SCHEMA_VERSION,
@@ -352,8 +356,8 @@ describe("runVerifyPr v3 — rejection modes", () => {
         head_sha: env.payload.head_sha,
         target_branch: env.payload.target_branch,
         diff_sha256: env.payload.diff_sha256!,
-        approvals: env.payload.approvals as never,
-        checks: env.payload.checks as never,
+        approvals: env.payload.approvals as ApprovalEntryV4[],
+        checks: env.payload.checks as CheckAttestationV4[],
         trust_anchor_signatures: [],
         signer_key_id: env.payload.signer_key_id,
       });

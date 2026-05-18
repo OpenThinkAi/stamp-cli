@@ -168,14 +168,30 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
     );
   }
   if (claimedVersion < MIN_ACCEPTED_PR_ATTESTATION_VERSION) {
+    // Bridge-window-aware remediation — same shape as the missing-
+    // blob path above. Operators landing here have an attestation
+    // ref present but its `schema_version` is below the floor
+    // (typically v2 from a 1.x `stamp attest`). The naive "upgrade
+    // to 2.x and re-attest" advice is a dead-end loop: 2.x
+    // `stamp attest` is INTENTIONALLY frozen at v2 (only stamp-
+    // server can fabricate v3 envelopes — that's AGT-355, not yet
+    // shipped), so following that advice produces the same v2
+    // envelope and lands on the same rejection. Name both ends of
+    // the bridge so the operator's next step actually clears the
+    // error. Per AGT-338 product reviewer round 2.
     fail(
       `attestation schema_version ${claimedVersion} is no longer accepted ` +
         `(minimum supported is ${MIN_ACCEPTED_PR_ATTESTATION_VERSION}). ` +
         `v${claimedVersion} envelopes pre-date the v4 trust model: they lack ` +
         `per-approval server signatures, top-level diff_sha256 binding, and ` +
-        `trust-anchor counter-signature support. Upgrade the operator's ` +
-        `stamp-cli to a 2.x build that produces v${MIN_ACCEPTED_PR_ATTESTATION_VERSION}+ ` +
-        `attestations and re-run \`stamp attest --into ${opts.into}\`.`,
+        `trust-anchor counter-signature support. ` +
+        `Production path (post-AGT-355, lands in 2.0.1): stamp-server signs and ` +
+        `publishes v${MIN_ACCEPTED_PR_ATTESTATION_VERSION}+ attestations on every reviewed PR; no client-side ` +
+        `re-attestation needed. ` +
+        `Bridge-window workaround (until AGT-355 ships): pin the GitHub Action ` +
+        `to a 1.x \`stamp-version\` input — 1.x \`stamp attest\` writes the ` +
+        `v${claimedVersion} envelope you have here and the 1.x verifier accepts it. ` +
+        `See docs/migration-1.x-to-2.x.md for the full bridge-window procedure.`,
       patch_id,
       resolved.base_sha,
       resolved.head_sha,
