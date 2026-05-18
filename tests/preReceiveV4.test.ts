@@ -71,10 +71,10 @@ import {
   type PhaseInputV4,
 } from "../src/hooks/pre-receive.ts";
 
-// Schema versions live here so test names + assertions don't re-encode them.
+// Schema version constant used when building test payloads. The
+// dispatch-threshold test imports the real constants from
+// attestation.ts / attestationV4.ts to assert the contract.
 const SCHEMA_V4 = 4;
-const SCHEMA_V3 = 3;
-const SCHEMA_V2 = 2;
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -535,38 +535,28 @@ describe("pre-receive v4 — rejection modes", () => {
     assert.match(reason!, /prompt_sha256 mismatch/);
   });
 
-  it("rejects schema_version < MIN_ACCEPTED_V4_SCHEMA_VERSION via the dispatcher", () => {
-    // The dispatcher routes schema_version < 4 to the legacy v3 path;
-    // schema_version 2 should be rejected outright by the v3 phase
-    // `verifySchemaVersion`. We model that path-level invariant here
-    // structurally: a v4 phase being asked to verify a sub-4 payload
-    // (impossible via the real dispatcher) would still surface as a
-    // wrong-version failure at the envelope shape check. The v3
-    // dispatch path's rejection is already covered by v3's existing
-    // tests in attest.test.ts. This test asserts the integer is the
-    // unambiguous disambiguator: a v2 envelope NEVER enters v4 land,
-    // because the dispatcher's threshold is MIN_ACCEPTED_V4_SCHEMA_VERSION = 4.
-    h = setupHarness();
-    process.chdir(h.repo);
-
-    const payload = buildPayload(h, { schema_version: SCHEMA_V2 });
-    const sig = signOuter(h, payload);
-    const input = h.inputFor(payload, sig);
-    // The shape check is in verifyCommitV4 (not a phase fn), but the
-    // pipeline running on a v2-tagged payload still fails at the
-    // v4-trust step because the dispatcher would never have sent it
-    // here. We verify the dispatcher's threshold constant directly.
-    assert.equal(SCHEMA_V4 > SCHEMA_V3, true);
-    assert.equal(SCHEMA_V3 > SCHEMA_V2, true);
-    // And run the pipeline to confirm no phase silently accepts a
-    // wrong-versioned payload (the v4 phases don't gate on
-    // schema_version; that's verifyCommitV4's job).
-    const reason = runAllPhases(input);
-    // Either accepts or fails — but the dispatcher would have routed
-    // this to v3 first. The structural check we DO assert is that the
-    // v4 phases are never wired to see schema_version < 4 in real
-    // operation; the dispatcher integer comparison is the contract.
-    void reason;
+  it("dispatcher threshold: only schema_version >= 4 enters the v4 pipeline (regression on the integer comparison)", async () => {
+    // The dispatcher in verifyCommit uses `>= MIN_ACCEPTED_V4_SCHEMA_VERSION`
+    // to decide whether a payload goes through the v4 pipeline. v3
+    // payloads (schema_version: 3) must continue to route to the
+    // legacy v3 path — both verifiers coexist in the bridge era. This
+    // test pins the dispatch contract: the constants must satisfy a
+    // strict ordering so v3 traffic can never accidentally cross into
+    // v4 verification or vice-versa.
+    const v3 = await import("../src/lib/attestation.ts");
+    const v4 = await import("../src/lib/attestationV4.ts");
+    // v3 floor below v4 floor: schema 3 routes to v3, schema 4 routes to v4.
+    assert.ok(v3.MIN_ACCEPTED_PAYLOAD_VERSION < v4.MIN_ACCEPTED_V4_SCHEMA_VERSION);
+    assert.equal(v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, 4);
+    // Anything strictly less than the v4 floor must NOT be considered
+    // a v4 payload by the dispatcher.
+    for (const tooLow of [1, 2, 3]) {
+      assert.equal(tooLow >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, false);
+    }
+    // Anything >= the v4 floor is a v4 payload.
+    for (const v4Ish of [4, 5, 99]) {
+      assert.equal(v4Ish >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, true);
+    }
   });
 
   it("rejects when a required reviewer is missing approvals (verdict != approved)", () => {

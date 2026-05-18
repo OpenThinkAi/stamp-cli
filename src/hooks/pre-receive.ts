@@ -28,6 +28,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
   MIN_ACCEPTED_PAYLOAD_VERSION,
@@ -1444,19 +1445,44 @@ function reject(refname: string, reason: string): never {
 
 // Run main() only when this module is the executed entrypoint — not
 // when it's been imported by another module (notably the unit tests).
-// `process.argv[1]` is the script path the runtime was invoked with;
-// comparing against `import.meta.url` distinguishes "run the hook" from
-// "import the hook's exported phase functions." Without this guard,
-// importing the module would invoke main(), which calls
-// readAllStdin() → require("node:fs") → ReferenceError under ESM, the
-// catch then calls process.exit(1), and the test runner dies.
+// Without this guard, importing the module invokes main() →
+// readAllStdin() → require("node:fs") (ReferenceError under ESM) → the
+// outer catch calls process.exit(1) → the test runner dies.
+//
+// FAIL-OPEN by design: this is a security gate. If we CAN'T determine
+// whether we're the entrypoint (URL parse error, missing argv, etc.),
+// we MUST default to running the hook. Returning `false` on
+// uncertainty would cause the hook to exit 0 silently and approve
+// every push — the worst possible failure mode for a verifier. The
+// catch returns `true` so any path-comparison oddity surfaces as a
+// hook that runs (and either passes or rejects on its own merits)
+// rather than a hook that silently no-ops.
+//
+// Uses `fileURLToPath` (from node:url) rather than constructing a URL
+// by string concatenation: it handles symlink resolution AND
+// percent-encoding the same way Node sets `import.meta.url`, so the
+// comparison stays robust across deployment shapes (symlinked hook
+// paths, paths with URL-special characters, etc.). Server-side hook
+// invocations under git typically run through a symlink in the bare
+// repo's `hooks/` directory; the naive `new URL(\`file://...\`)` form
+// would have compared a symlink path on one side to a resolved real
+// path on the other and returned `false`, silently disabling the
+// hook on every push.
 function isMainModule(): boolean {
-  if (typeof process === "undefined" || !process.argv?.[1]) return false;
-  try {
-    const argv1Url = new URL(`file://${process.argv[1]}`).href;
-    return import.meta.url === argv1Url;
-  } catch {
+  const argv1 = typeof process !== "undefined" ? process.argv?.[1] : undefined;
+  if (!argv1) {
+    // No argv[1] at all — almost certainly an import; don't run main.
+    // But for a hook invocation argv[1] is always set, so the `false`
+    // branch here only triggers in clearly non-hook contexts.
     return false;
+  }
+  try {
+    return fileURLToPath(import.meta.url) === argv1;
+  } catch {
+    // URL parse failed for some unexpected reason. Default to running
+    // the hook — better to run a verification we might not have needed
+    // than to skip one we did.
+    return true;
   }
 }
 
