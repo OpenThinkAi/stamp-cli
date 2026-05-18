@@ -110,6 +110,11 @@ STAMP_STATE_DIR=/srv/git/.stamp-state
 mkdir -p "$STAMP_STATE_DIR"
 chown root:git "$STAMP_STATE_DIR"
 chmod 1770 "$STAMP_STATE_DIR"
+# Export so child processes (stamp-bootstrap-review-key below; future
+# state-dir-aware helpers) can resolve the same location without
+# re-hardcoding the path. The DB-write code paths above use the shell
+# var directly, so no behavior change for them.
+export STAMP_STATE_DIR
 if /usr/local/sbin/stamp-seed-users; then
   if [ -f "$STAMP_STATE_DIR/users.db" ]; then
     chown root:git "$STAMP_STATE_DIR/users.db"
@@ -119,6 +124,41 @@ else
   # Don't abort the boot — sshd's AuthorizedKeysFile fallback still
   # services connections from AUTHORIZED_KEYS during transition.
   echo "WARNING: stamp-seed-users failed; AuthorizedKeysCommand path may be empty until next boot" >&2
+fi
+
+# Review-signing key bootstrap (AGT-327). When ANTHROPIC_API_KEY is
+# set, the server gains review-attestation capability; that capability
+# requires an Ed25519 signing key under stamp-server's control so the
+# operator cannot forge per-approval signatures. We mint on first boot
+# and reuse on every subsequent boot.
+#
+# Failure of this step IS fatal — unlike stamp-seed-users which has a
+# legacy AuthorizedKeysFile fallback, there's no fallback for a
+# missing or wrong-mode review key. The capability either works
+# correctly (with stable identity) or refuses to start. Reviews
+# remain opt-in via ANTHROPIC_API_KEY: with it unset, the bootstrap
+# logs "skipped" and exits 0 and the server continues to boot as it
+# does today.
+#
+# Permissions: the script runs as root (everything in entrypoint.sh
+# does until the exec at the bottom), creates the key file mode
+# 0600, and writes the .pub sibling mode 0644. The git user (which
+# runs SSH sessions and the stamp-server-pubkey wrapper) needs READ
+# access to the .pub file only — the .pub lives in $STAMP_STATE_DIR
+# which is 1770 root:git so the git user can traverse but not
+# delete/rename root-owned files within. The private .pem is
+# never read by the git user under any documented code path; if
+# Phase 2's signing handler runs as the git user, the file will
+# need to be chowned at that point (deferred — handled when the
+# signing path lands).
+if /usr/local/sbin/stamp-bootstrap-review-key; then
+  # Successful bootstrap. The script handles its own logging
+  # (silent on disabled-capability skip, loud banner on first
+  # generation, one-line reuse note on subsequent boots).
+  :
+else
+  echo "FATAL: stamp-bootstrap-review-key failed; aborting startup" >&2
+  exit 1
 fi
 
 # Launch the HTTP server in the background as the git user, BEFORE

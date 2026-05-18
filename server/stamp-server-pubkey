@@ -1,29 +1,42 @@
 #!/bin/sh
 #
-# stamp-server-pubkey — print the public half of a stamp-server-managed
-# GitHub mirror-push deploy key.
+# stamp-server-pubkey — print public keys held by the stamp server.
 #
-# Two modes:
+# Modes:
 #
 #   ssh git@<host> stamp-server-pubkey
-#       Print the LEGACY shared key (/srv/git/.ssh-client-keys/
-#       github_ed25519.pub). Kept for back-compat — older operators and
-#       scripts that called this command before the per-repo key feature
-#       existed continue to get the same output.
+#       Print the LEGACY shared GitHub mirror-push deploy key
+#       (/srv/git/.ssh-client-keys/github_ed25519.pub). Kept for
+#       back-compat — older operators and scripts that called this
+#       command before the per-repo key feature existed continue to
+#       get the same output.
 #
 #   ssh git@<host> stamp-server-pubkey <owner>/<repo>
-#       Print the per-repo key for the named GitHub mirror. Lazily
-#       generated on first request via sudo + stamp-ensure-repo-key (the
-#       only privilege-escalation path the git user has, and it refuses
-#       to overwrite existing keys). Subsequent requests for the same
-#       repo are cache hits — the file persists across container reboots
-#       on the /srv/git volume.
+#       Print the per-repo GitHub mirror-push deploy key for the named
+#       GitHub mirror. Lazily generated on first request via sudo +
+#       stamp-ensure-repo-key (the only privilege-escalation path the
+#       git user has, and it refuses to overwrite existing keys).
+#       Subsequent requests for the same repo are cache hits — the file
+#       persists across container reboots on the /srv/git volume.
 #
-# Output is a single OpenSSH-format public-key line on stdout, suitable
-# for piping into `gh api -X POST /repos/:o/:r/keys --field key=@-`. No
-# trailing decoration; trim downstream if necessary. The trailing
-# newline from `cat` is intentional and matches what every other CLI
-# tool that pipes pubkeys emits.
+#   ssh git@<host> stamp-server-pubkey --review-signing
+#       Print the server's REVIEW-SIGNING public key (the SPKI PEM
+#       written by stamp-bootstrap-review-key on first boot). This is
+#       the key whose signatures over per-approval payloads prove a
+#       given verdict came from a real server-side LLM call against
+#       the canonical reviewer prompt. Operators paste the fingerprint
+#       — derivable from the printed PEM with `openssl pkey -pubin -in
+#       - -outform DER | sha256sum | awk '{print "sha256:"$1}'` — into
+#       `.stamp/trusted-keys/manifest.yml` under `capabilities:
+#       [server]`. Returns a clear error (exit 1) when the key file is
+#       absent (review capability disabled — operator hasn't set
+#       ANTHROPIC_API_KEY, so stamp-bootstrap-review-key skipped
+#       generation).
+#
+# Output is a single key blob on stdout — OpenSSH single-line form for
+# the GitHub deploy-key modes, multi-line SPKI PEM for the
+# --review-signing mode. The trailing newline from `cat` is intentional
+# and matches what every other CLI tool that pipes pubkeys emits.
 #
 # Why this command exists rather than `cat ~/.ssh/<key>.pub` from the
 # operator's laptop: the keypair lives only on the stamp server (the
@@ -35,6 +48,31 @@ set -e
 
 KEY_DIR=/srv/git/.ssh-client-keys
 SPEC="${1:-}"
+
+# Review-signing pubkey mode. Branch BEFORE the deploy-key dispatch so
+# the leading "-" doesn't trip the "spec must not start with '-'"
+# guard below. The default location mirrors what stamp-bootstrap-
+# review-key resolves (env var override + STAMP_STATE_DIR fallback).
+if [ "$SPEC" = "--review-signing" ] || [ "$SPEC" = "review-signing" ]; then
+  REVIEW_KEY_PATH="${REVIEW_SIGNING_KEY_PATH:-${STAMP_STATE_DIR:-/srv/git/.stamp-state}/review-signing-key.pem}"
+  # The bootstrap script writes the public half at the same base path
+  # with a .pub extension (see publicKeyPathFor() in
+  # src/lib/reviewSigningKey.ts). Strip a trailing .pem if present,
+  # then append .pub — same suffix-swap the bootstrap uses, so the two
+  # stay in lockstep.
+  case "$REVIEW_KEY_PATH" in
+    *.pem) REVIEW_PUB_PATH="${REVIEW_KEY_PATH%.pem}.pub" ;;
+    *)     REVIEW_PUB_PATH="${REVIEW_KEY_PATH}.pub" ;;
+  esac
+  if [ ! -f "$REVIEW_PUB_PATH" ]; then
+    echo "stamp-server-pubkey: review-signing pubkey not found at $REVIEW_PUB_PATH" >&2
+    echo "stamp-server-pubkey: this usually means review capability is disabled (ANTHROPIC_API_KEY unset)" >&2
+    echo "stamp-server-pubkey: or the server hasn't booted with stamp-bootstrap-review-key yet" >&2
+    exit 1
+  fi
+  cat "$REVIEW_PUB_PATH"
+  exit 0
+fi
 
 if [ -z "$SPEC" ]; then
   # Back-compat path: emit the legacy shared key. Same behavior as

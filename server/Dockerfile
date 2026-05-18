@@ -173,6 +173,13 @@ COPY --from=builder /build/dist/server/authorized-keys.cjs /usr/local/sbin/stamp
 # membership sqlite. Invoked by entrypoint.sh as root on every container
 # start, before sshd exec.
 COPY --from=builder /build/dist/server/seed-users.cjs /usr/local/sbin/stamp-seed-users
+# Boot-time review-signing-key bootstrap. Invoked by entrypoint.sh as
+# root after stamp-seed-users, before sshd exec. No-ops when
+# ANTHROPIC_API_KEY is unset (review capability disabled). On first
+# boot with the env var set, mints an Ed25519 keypair at
+# $STAMP_STATE_DIR/review-signing-key.pem (mode 0600) and prints the
+# fingerprint loudly to stderr; subsequent boots reuse it.
+COPY --from=builder /build/dist/server/bootstrap-review-key.cjs /usr/local/sbin/stamp-bootstrap-review-key
 # Invite-mint SSH command. Invoked as `git@server stamp-mint-invite <name>`
 # via git-shell command dispatch (symlinked below). Binds to the
 # authenticated SSH key via SSH_USER_AUTH (ExposeAuthInfo).
@@ -221,6 +228,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
              /usr/local/sbin/stamp-http-server \
+             /usr/local/sbin/stamp-bootstrap-review-key \
              /entrypoint.sh \
  && chown root:root /usr/local/sbin/stamp-authorized-keys \
  && chmod 0755     /usr/local/sbin/stamp-authorized-keys
