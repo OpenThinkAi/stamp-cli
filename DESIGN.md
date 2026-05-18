@@ -178,7 +178,10 @@ envelope, but each approval inside it now carries a server signature
 that the operator cannot forge. The full design lives in
 [`docs/plans/server-attested-reviews.md`](./docs/plans/server-attested-reviews.md);
 the attestation envelope is `schema_version: 4` and is defined in
-`src/lib/attestationV4.ts`.
+`src/lib/attestationV4.ts`. If you are upgrading an existing 1.x
+deployment, see
+[`docs/migration-1.x-to-2.x.md`](./docs/migration-1.x-to-2.x.md) for the
+step-by-step walkthrough.
 
 ### Cryptographic guarantees in v4
 
