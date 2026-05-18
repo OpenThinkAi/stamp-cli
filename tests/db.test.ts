@@ -264,7 +264,7 @@ describe("AGT-333: migration preserves 1.x reviews rows", () => {
         assert.equal(
           r.server_key_id,
           null,
-          "legacy row server_key_id must be NULL so the marker renders as (unsigned 1.x)",
+          "legacy row server_key_id must be NULL so the marker renders as (unsigned)",
         );
         assert.equal(r.schema_version, null);
       }
@@ -481,7 +481,7 @@ describe("AGT-333: stamp log --reviews SIGNED-BY marker", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it("marks 1.x rows as (unsigned 1.x) and 2.x rows as signed-by server:<key8> in the same output", async () => {
+  it("marks unsigned rows as (unsigned — no server attestation) and 2.x server-signed rows as signed-by server:<key8> in the same output", async () => {
     // Minimal git repo + .stamp scaffold + state.db. Keep this in lock-
     // step with what `runLog` reads; if `runLog` later acquires new
     // dependencies, this setup may need to grow, but today the floor is:
@@ -562,11 +562,22 @@ describe("AGT-333: stamp log --reviews SIGNED-BY marker", () => {
     runLog({ limit: 10, reviews: true });
 
     const out = captured.join("\n");
-    // Legacy row marker.
+    // Unsigned-row marker. Note: the label is deliberately version-
+    // agnostic ("unsigned" not "unsigned 1.x") — a 2.x local-only row
+    // is indistinguishable from a 1.x legacy row at the DB level, and
+    // claiming "1.x" would mislabel every fresh 2.x local-only row
+    // (see the comment on the else-branch in src/commands/log.ts for
+    // the full rationale; this assertion is the pin that catches a
+    // future regression that re-adds the version claim).
     assert.match(
       out,
-      /signed-by: \(unsigned 1\.x — no server attestation\)/,
-      "expected 1.x row to render the (unsigned 1.x) marker",
+      /signed-by: \(unsigned — no server attestation\)/,
+      "expected unsigned row to render the (unsigned — no server attestation) marker",
+    );
+    assert.doesNotMatch(
+      out,
+      /unsigned 1\.x/,
+      "marker must not claim '1.x' (would mislabel 2.x local-only rows)",
     );
     // Server-attested row marker — first 8 hex chars of "e".repeat(64)
     // is "eeeeeeee". Pin the literal so a future change to the short-

@@ -269,16 +269,25 @@ function printReviewHistory(
     );
     // SIGNED-BY marker (AGT-333): rendered as a separate aligned line so
     // it lives in the same visual lane as the row header without forcing
-    // the existing header line to wrap. Three states:
-    //   - v2.x row with a server signature → `signed-by: server:<key8>`
-    //   - 2.x row with NO server signature (local-only mode) → omitted;
-    //     `schema_version` is null because `recordReview` only stamps it
-    //     when a serverAttestation is provided, so these look the same
-    //     as legacy 1.x rows here. That's intentional: from the merge-
-    //     gate's perspective both are "unsigned, not eligible," and the
-    //     stamp log marker exists to surface the trust property, not to
-    //     distinguish stamp versions.
-    //   - legacy 1.x row → `signed-by: (unsigned 1.x — no server attestation)`
+    // the existing header line to wrap. Two states (one branch each):
+    //
+    //   - row has a server signature → `signed-by: server:<key8>`
+    //   - row has NO server signature → `signed-by: (unsigned — no server attestation)`
+    //
+    // The "unsigned" case covers BOTH legacy 1.x rows AND 2.x rows
+    // recorded in local-only mode (no `review_server` configured). The
+    // two are indistinguishable at the DB level — `recordReview` only
+    // stamps `schema_version` when a `serverAttestation` rides with the
+    // row, so a 2.x local-only row reads the same as a 1.x legacy row
+    // here. We deliberately do NOT claim "1.x" in the marker text: a
+    // 2.x operator running local-only would otherwise see every one of
+    // their fresh reviews labeled as 1.x, which is factually wrong
+    // about the client version and misleading about why the row is
+    // unsigned.
+    //
+    // Distinguishing 1.x-legacy from 2.x-local-only is a future addition
+    // if it ever matters — it would key on `schema_version` rather than
+    // adding new claims to the unsigned-marker text.
     //
     // The dispatch is on `server_key_id` presence (not `schema_version`)
     // because that's the field the verifier actually consumes. If a
@@ -288,7 +297,7 @@ function printReviewHistory(
       const keyShort = row.server_key_id.replace(/^sha256:/, "").slice(0, 8);
       console.log(`     signed-by: server:${keyShort}`);
     } else {
-      console.log(`     signed-by: (unsigned 1.x — no server attestation)`);
+      console.log(`     signed-by: (unsigned — no server attestation)`);
     }
     if (row.issues) {
       console.log(bar);
