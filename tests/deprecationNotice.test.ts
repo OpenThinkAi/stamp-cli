@@ -36,9 +36,10 @@ describe("maybePrintDeprecationNotice", () => {
     delete process.env.STAMP_SUPPRESS_DEPRECATION;
     captured = [];
     savedWrite = process.stderr.write.bind(process.stderr);
-    // node's stderr.write has several overloads — use `as any` to satisfy
-    // the type-checker; the runtime cares only that the function exists
-    // and returns truthy.
+    // Replace stderr.write with a capturing stub. We cast through
+    // `{ write: unknown }` because node's `process.stderr.write` has
+    // several overloads (Buffer / string / encoding / callback) and the
+    // runtime only cares that the function exists and returns truthy.
     (process.stderr as { write: unknown }).write = ((
       chunk: string | Uint8Array,
     ) => {
@@ -62,6 +63,19 @@ describe("maybePrintDeprecationNotice", () => {
       out.match(/\n/g)?.length,
       1,
       "banner should be exactly one line (one terminating newline)",
+    );
+  });
+
+  it("uses the lowercase `warning:` prefix (stamp stderr convention)", () => {
+    // stamp's stderr convention is lowercase prefixes — `error:`,
+    // `warning:`, `note:` — so agent / operator stderr classifiers
+    // don't have to special-case this banner. The literal-string match
+    // locks the prefix in: changing it requires updating this test,
+    // which is the right friction.
+    maybePrintDeprecationNotice();
+    assert.ok(
+      captured.join("").startsWith("warning: "),
+      `banner must start with 'warning: '; got: ${JSON.stringify(captured.join("").slice(0, 40))}`,
     );
   });
 

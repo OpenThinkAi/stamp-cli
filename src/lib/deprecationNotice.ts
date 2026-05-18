@@ -29,8 +29,13 @@
 export function maybePrintDeprecationNotice(): void {
   if (process.env.STAMP_SUPPRESS_DEPRECATION === "1") return;
 
+  // Prefix is lowercase `warning:` to match the rest of stamp's stderr
+  // convention (`error:`, `warning:`, `note:` — see `maybePrintLlmNotice`,
+  // `requireHumanMerge`, and the CLI's error paths). Agents / operator
+  // scripts that classify stderr lines by prefix can route this one
+  // alongside other advisories without a special case.
   process.stderr.write(
-    "Notice: stamp 1.x is in maintenance — the server-attested 2.x line is active. " +
+    "warning: stamp 1.x is in maintenance — the server-attested 2.x line is active. " +
       "See docs/migration-1.x-to-2.x.md. " +
       "Suppress: STAMP_SUPPRESS_DEPRECATION=1.\n",
   );
