@@ -326,18 +326,25 @@ the auth boundary.
   ],
 
   "trust_anchor_signatures": [
-    // Only present if this merge modifies .stamp/** paths.
-    // Each entry signs a canonical-form payload describing the .stamp/** changes;
-    // signers must have the `admin` capability in the manifest.
     {
       "signer_key_id": "sha256:...",
       "signature": "<base64>"
     }
   ],
 
-  "signer_key_id": "sha256:..."  // Operator's key — signs the whole envelope
+  "signer_key_id": "sha256:..."
 }
 ```
+
+Field notes that don't fit in the JSON body itself:
+
+- `trust_anchor_signatures` is only present if this merge modifies
+  `.stamp/**` paths. Each entry signs a canonical-form payload
+  describing the `.stamp/**` changes; signers must have the `admin`
+  capability in the manifest.
+- Top-level `signer_key_id` is the operator's key — it signs the whole
+  envelope. Per-approval `server_attestation.server_key_id` is the
+  stamp-server's review-signing key.
 
 **Fields explicitly dropped from v2:**
 - `tools_sha256` — no tools in Phase 1
@@ -462,7 +469,7 @@ server deployment. Implementation reference:
 [`skills/stamp-review.md`](../../skills/stamp-review.md).
 
 ```
-agent runs `stamp review --plan main..feat`
+agent runs `stamp review --plan --diff main..feat`
   ↓
 stamp emits structured plan to stdout:
   {
@@ -615,7 +622,13 @@ discrete additions.
    diff between `base_sha` and `head_sha` on the merge commit.
 4. **New:** Recompute `approval.prompt_sha256` from the merge commit's
    own `.stamp/` tree and confirm equality with the value the server
-   signed.
+   signed. The server fetched the prompt from its bare repo at
+   `base_sha`; the verifier reads it from the merge commit's tree. The
+   two agree because `path_rules` with `bypass_review_cycle: true`
+   prevents `.stamp/**` changes from landing via the reviewer cycle —
+   the prompt the server reviewed and the prompt the verifier sees are
+   guaranteed to be the same file. Deployments without `path_rules`
+   configured do not get this guarantee.
 5. **New:** Verify `approval.trusted_keys_snapshot_sha256` matches the
    manifest committed at `base_sha`. This is the lenient-revocation
    hook — revoked keys remain valid for attestations whose snapshot

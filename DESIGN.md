@@ -272,7 +272,9 @@ they are properties v4 explicitly does not claim.
   checks are attested with `exit_code: 0`.
 - All subprocess calls in the CLI and hooks use argument-array form
   (`execFileSync(git, [args...])`); no `shell: true` is used except in
-  the two specific, documented cases below.
+  the `required_checks` case documented below. Reviewer-tool access
+  (the second tradeoff below) is shell-adjacent — MCP servers spawn as
+  stdio-transport subprocesses, no shell interpretation involved.
 
 **1.x `required_checks` shell-execution tradeoff:**
 
