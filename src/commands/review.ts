@@ -11,6 +11,7 @@ import {
 import {
   deltaDiff,
   isAncestor,
+  parentSha,
   repoHasAnyCommit,
   resolveDiff,
   showAtRef,
@@ -272,20 +273,39 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         resolved.head_sha,
       );
       if (!prior) continue;
-      // Ancestor-only carry-forward: a parallel feature branch sharing the
-      // same base_sha would otherwise inherit verdicts from a sibling. If
-      // the ancestor probe itself errors (orphan/missing object), fail
-      // closed — withhold the prior context rather than carrying it forward
-      // under uncertainty. Surfacing the prior is a best-effort iteration
-      // aid, not a security property, so a transient git glitch should
-      // never cause us to inject the wrong branch's verdict.
-      let ancestor = false;
+      // Carry-forward gate: accept the prior verdict's scope when the
+      // current head is either (a) a descendant of the prior head (normal
+      // commit-on-top workflow) OR (b) shares a parent with the prior
+      // head (amend / squash iteration on a single-commit branch — the
+      // dominant agent workflow). Strict-ancestor-only rejected case (b)
+      // entirely, which meant agents using `git commit --amend` between
+      // rounds never got the ratchet / delta-scope they were paying for.
+      // Same-base is already enforced by the DB query, so a true parallel
+      // sibling branch would normally have a different base_sha anyway;
+      // the residual edge case (two siblings off the exact same commit,
+      // both at "first amend" stage) is low-impact since the prior verdict
+      // is shown as context to the LLM, not granted directly. Fail closed
+      // on any git error: a transient glitch should never inject the
+      // wrong branch's verdict.
+      let related = false;
       try {
-        ancestor = isAncestor(prior.head_sha, resolved.head_sha, repoRoot);
+        if (isAncestor(prior.head_sha, resolved.head_sha, repoRoot)) {
+          related = true;
+        } else {
+          const priorParent = parentSha(prior.head_sha, repoRoot);
+          const currentParent = parentSha(resolved.head_sha, repoRoot);
+          if (
+            priorParent !== null &&
+            currentParent !== null &&
+            priorParent === currentParent
+          ) {
+            related = true;
+          }
+        }
       } catch {
-        ancestor = false;
+        related = false;
       }
-      if (!ancestor) continue;
+      if (!related) continue;
       priorByReviewer.set(name, {
         head_sha: prior.head_sha,
         verdict: prior.verdict,

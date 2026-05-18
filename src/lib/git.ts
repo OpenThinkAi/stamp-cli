@@ -185,6 +185,22 @@ export function commitSummary(sha: string, cwd: string): CommitSummary {
 }
 
 /**
+ * Returns the SHA of the first parent of `sha`, or null if the commit has
+ * no parent (root commit) or the lookup otherwise fails. Used by review's
+ * carry-forward gate to detect amend/squash iteration — two commits with
+ * the same first-parent are siblings produced by `git commit --amend` (or
+ * `git reset --soft HEAD~ && git commit`), the dominant agent workflow
+ * for single-commit feature branches.
+ */
+export function parentSha(sha: string, cwd: string): string | null {
+  try {
+    return git(["rev-parse", `${sha}^`], cwd).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Diff between two commits (`<priorHead>..<currentHead>`) with enlarged
  * unified-context lines. Used by `stamp review` to feed the LLM ONLY the
  * code that has changed since a prior approved/rejected review on the same
