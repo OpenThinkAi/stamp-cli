@@ -47,6 +47,7 @@ import {
 import { parseToolCalls, redactToolCallsForAttestation } from "../lib/toolCalls.js";
 import { signBytes, verifyBytes } from "../lib/signing.js";
 import { requireHumanMerge } from "../lib/humanMerge.js";
+import { maybePrintDeprecationNotice } from "../lib/deprecationNotice.js";
 
 export interface MergeOptions {
   branch: string;
@@ -59,6 +60,12 @@ export interface MergeOptions {
 }
 
 export function runMerge(opts: MergeOptions): void {
+  // Bridge-release deprecation banner (AGT-346). Printed once per merge
+  // invocation, before any of merge's own output, so the operator sees the
+  // pointer to the migration guide regardless of how their shell pipes
+  // stdout. Suppress with STAMP_SUPPRESS_DEPRECATION=1 (intended for CI).
+  maybePrintDeprecationNotice();
+
   const repoRoot = findRepoRoot();
   // Branch-rule lookup uses the WORKING TREE config (the operator's local
   // .stamp/config.yml at merge time, which is on the target branch since

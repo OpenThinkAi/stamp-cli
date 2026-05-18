@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureAgentsMd, ensureClaudeMd, type AgentsMdMode } from "../lib/agentsMd.js";
+import { maybePrintDeprecationNotice } from "../lib/deprecationNotice.js";
 import { isPathTracked, runGit } from "../lib/git.js";
 import {
   applyStampRuleset,
@@ -151,6 +152,11 @@ export interface InitOptions {
 }
 
 export function runInit(opts: InitOptions = {}): void {
+  // Bridge-release deprecation banner (AGT-346). Printed to stderr before
+  // any of init's own structured output so it never gets buried under the
+  // success-summary block. Suppress with STAMP_SUPPRESS_DEPRECATION=1.
+  maybePrintDeprecationNotice();
+
   const repoRoot = findRepoRoot();
   const configDir = stampConfigDir(repoRoot);
   const configFile = stampConfigFile(repoRoot);
