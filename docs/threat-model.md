@@ -27,11 +27,15 @@ definition, intended.
 
 Out of scope by design:
 
-- A determined keyholder forging signed merges on purpose. Stamp's
-  model is non-repudiation, not preventing operator-side abuse — see
-  ["What signing does NOT claim"][not-claim] in DESIGN.md. A
-  stamp-protected repo with one keyholder and one machine has the
-  same upper bound as a GPG-signed repo with one signer.
+- A determined keyholder forging signed merges on purpose **in 1.x
+  local-only mode**. Stamp 1.x's model is non-repudiation, not
+  preventing operator-side abuse — see ["What signing does NOT
+  claim"][not-claim] in DESIGN.md. A 1.x stamp-protected repo with one
+  keyholder and one machine has the same upper bound as a GPG-signed
+  repo with one signer. The 2.x server-attested design (see
+  [`plans/server-attested-reviews.md`](./plans/server-attested-reviews.md))
+  narrows this gap by introducing a signature category — the server —
+  that the operator does not hold.
 - Vulnerabilities in Anthropic's Claude models or the
   `@anthropic-ai/claude-agent-sdk` package itself.
 - Compromise of the operator's host outside stamp's process boundary
