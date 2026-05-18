@@ -178,7 +178,8 @@ COPY --from=builder /build/dist/server/seed-users.cjs /usr/local/sbin/stamp-seed
 # ANTHROPIC_API_KEY is unset (review capability disabled). On first
 # boot with the env var set, mints an Ed25519 keypair at
 # $STAMP_STATE_DIR/review-signing-key.pem (mode 0600) and prints the
-# fingerprint loudly to stderr; subsequent boots reuse it.
+# fingerprint loudly to stdout (operator-instruction prose, not an
+# error); subsequent boots reuse it.
 COPY --from=builder /build/dist/server/bootstrap-review-key.cjs /usr/local/sbin/stamp-bootstrap-review-key
 # Invite-mint SSH command. Invoked as `git@server stamp-mint-invite <name>`
 # via git-shell command dispatch (symlinked below). Binds to the

@@ -157,7 +157,11 @@ if /usr/local/sbin/stamp-bootstrap-review-key; then
   # generation, one-line reuse note on subsequent boots).
   :
 else
-  echo "FATAL: stamp-bootstrap-review-key failed; aborting startup" >&2
+  # Lowercase `error: ` prefix to match the codebase convention; the
+  # Node layer already uses it (process.stderr.write("error: ...")).
+  # The pre-existing "WARNING: stamp-seed-users failed" line above is
+  # a legacy convention break, not a reference for new code.
+  echo "error: stamp-bootstrap-review-key failed; aborting startup" >&2
   exit 1
 fi
 

@@ -213,7 +213,6 @@ export function ensureReviewSigningKey(opts: {
     const privateKeyPem = readFileSync(privateKeyPath, "utf8");
     privateKey = createPrivateKey({ key: privateKeyPem, format: "pem" });
   } catch (err) {
-    if (err instanceof ReviewSigningKeyError) throw err;
     throw new ReviewSigningKeyError(
       `review-signing key at ${privateKeyPath} could not be loaded: ${(err as Error).message}`,
     );

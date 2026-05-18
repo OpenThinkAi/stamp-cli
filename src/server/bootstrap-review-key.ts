@@ -127,7 +127,7 @@ function main(): void {
     printGeneratedBanner(result.fingerprint, result.publicKeyPath);
   } else {
     console.log(
-      `stamp-bootstrap-review-key: reusing existing review-signing key at ${result.privateKeyPath} (fingerprint=${result.fingerprint})`,
+      `stamp-bootstrap-review-key: reusing existing review-signing key at ${result.privateKeyPath} (fingerprint: ${result.fingerprint})`,
     );
   }
 }
