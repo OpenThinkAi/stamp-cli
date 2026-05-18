@@ -502,6 +502,10 @@ program
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")
   .option(
+    "--into <target>",
+    "target branch whose rule to evaluate (default: inferred from the diff's left side). Determines which branch rule's `review_server` is consulted in trusted mode — pass when the revspec base differs from the merge target.",
+  )
+  .option(
     "--allow-large",
     "bypass the 200KB diff size cap (raise STAMP_REVIEW_DIFF_CAP_BYTES for a different threshold)",
   )
@@ -521,6 +525,7 @@ program
     async (opts: {
       diff: string;
       only?: string;
+      into?: string;
       allowLarge?: boolean;
       cache?: boolean;
       plan?: boolean;
@@ -533,6 +538,7 @@ program
         await runReview({
           diff: opts.diff,
           only: opts.only,
+          into: opts.into,
           allowLarge: opts.allowLarge,
           noCache: opts.cache === false,
           plan: opts.plan === true,

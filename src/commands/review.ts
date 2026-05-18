@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { parseConfigFromYaml, type StampConfig } from "../lib/config.js";
+import { findBranchRule, parseConfigFromYaml, type StampConfig } from "../lib/config.js";
 import {
   findCachedVerdict,
   openDb,
@@ -11,6 +11,7 @@ import {
 import {
   deltaDiff,
   isAncestor,
+  listFilesAtRef,
   parentSha,
   repoHasAnyCommit,
   resolveDiff,
@@ -35,6 +36,13 @@ import {
   runHeadlessReview,
   type HeadlessReviewerResult,
 } from "../lib/headlessReviewer.js";
+import { deriveOrgRepoFromRemote } from "../lib/remote.js";
+import {
+  buildPubkeyMap,
+  requestServerReview,
+  type ServerReviewResult,
+  type SshSpawnFn,
+} from "../lib/sshReviewClient.js";
 import { loadOrCreateUserConfig, resolveReviewerModel } from "../lib/userConfig.js";
 import { UsageError } from "./serverRepo.js";
 import {
@@ -124,6 +132,27 @@ export interface ReviewOptions {
     head_sha: string;
     model: string;
   }) => Promise<HeadlessReviewerResult>;
+  /**
+   * Override `--into` target-branch resolution. Default is the left side
+   * of the revspec (`main` in `main..feature`), matching `stamp status`.
+   * Used by `stamp review` when the operator wants to evaluate a diff
+   * against a non-default target's branch rule (and therefore its
+   * `review_server` config field, since `review_server` lives on the
+   * branch rule).
+   */
+  into?: string;
+  /**
+   * Test-only injection seam for the SSH transport (AGT-332). When set
+   * in server-attested (trusted) mode, replaces the system `ssh` call
+   * with this function — letting `tests/sshReviewCommand.test.ts`
+   * exercise the parse-response/verify-signature/persist path without
+   * spawning a real subprocess. Production callers (the CLI in
+   * src/index.ts) leave this undefined and the standard ssh binary
+   * runs via `defaultSshSpawn` in src/lib/sshReviewClient.ts. Mirrors
+   * `_headlessReviewerForTest` above; same nomenclature so call sites
+   * read consistently.
+   */
+  _sshSpawnForTest?: SshSpawnFn;
 }
 
 /** Pre-invocation diff size cap, bytes. Operator-overridable via env var. */
@@ -395,6 +424,32 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       );
     }
     promptBytesByReviewer.set(name, bytes);
+  }
+
+  // Stamp 2.x server-attested transport (AGT-332). When `review_server`
+  // is configured on the target branch's rule, route each reviewer
+  // through the SSH verb instead of the local LLM. The branch rule is
+  // sourced from the merge-base tree like everything else, so a feature
+  // branch can't unilaterally point itself at an attacker-controlled
+  // review server — that change goes through the regular reviewer gate.
+  //
+  // 1.x compatibility contract (AGT-339/347): when `review_server` is
+  // unset, fall through to the legacy local-LLM path verbatim. Operators
+  // who never set the field see no behavior change.
+  const targetBranch = opts.into ?? inferTargetBranch(opts.diff);
+  const branchRule = targetBranch ? findBranchRule(config.branches, targetBranch) : undefined;
+  if (branchRule?.review_server) {
+    await runServerAttestedReviews({
+      opts,
+      config,
+      reviewerNames,
+      promptBytesByReviewer,
+      resolved,
+      repoRoot,
+      reviewServerUrl: branchRule.review_server,
+      targetBranch: targetBranch!,
+    });
+    return;
   }
 
   // Per-repo, one-time LLM data-flow disclosure (suppress with
@@ -733,6 +788,215 @@ function printError(reviewer: string, err: unknown): void {
   console.error(message);
   console.error(bar);
   console.error();
+}
+
+/**
+ * Extract the left-hand side of a `<base>..<head>` revspec — the
+ * documented "target branch" convention `stamp status` already uses
+ * (see `src/commands/status.ts:inferTarget`). Returns null if the
+ * revspec isn't in two-dot form so callers fall back to their default.
+ *
+ * Duplicated rather than imported because `runStatus`'s helper throws
+ * on malformed input; this caller wants null-on-malformed so it can
+ * gracefully fall through to the 1.x local-LLM branch when the operator
+ * passes an unusual revspec (single ref, three-dot, etc.). Once AGT-347
+ * makes `review_server` required, this can collapse back into the
+ * stricter status.ts helper.
+ */
+function inferTargetBranch(revspec: string): string | null {
+  const parts = revspec.split("..");
+  if (parts.length !== 2 || !parts[0]) return null;
+  return parts[0];
+}
+
+/**
+ * Stamp 2.x server-attested fan-out (AGT-332). Runs each reviewer in
+ * parallel against the configured `review_server`, verifies each
+ * response's signature against the manifest at base_sha, and persists
+ * `(approval_json, signature, server_key_id, schema_version=4)` to
+ * the local DB so AGT-334's `stamp merge` can fold them into the v4
+ * envelope.
+ *
+ * Stays inside `runReview` rather than splitting to a sibling because
+ * the trusted-mode and SSH-mode paths share the same upstream
+ * resolution (diff, config, reviewer names, prompts) — splitting earlier
+ * would duplicate the read paths and the related security pins.
+ */
+async function runServerAttestedReviews(input: {
+  opts: ReviewOptions;
+  config: StampConfig;
+  reviewerNames: string[];
+  promptBytesByReviewer: Map<string, string>;
+  resolved: ResolvedDiff;
+  repoRoot: string;
+  reviewServerUrl: string;
+  targetBranch: string;
+}): Promise<void> {
+  const {
+    opts,
+    config,
+    reviewerNames,
+    promptBytesByReviewer,
+    resolved,
+    repoRoot,
+    reviewServerUrl,
+    targetBranch,
+  } = input;
+
+  // Derive `{ org, repo }` from `git remote get-url origin`. The server's
+  // `--org` / `--repo` flags identify which bare repo on disk the prompt
+  // fetch should target; we use the origin URL as the source of truth
+  // because that's the operator's declared "where this repo lives." A
+  // mismatch (operator pointed at the wrong remote) surfaces server-side
+  // as a clean "promptFetch: no such repo" error rather than a silent
+  // wrong-repo verdict.
+  const orgRepo = deriveOrgRepoFromRemote("origin", repoRoot);
+  if (!orgRepo) {
+    throw new UsageError(
+      `review_server is configured for branch "${targetBranch}" but the origin remote ` +
+        `URL doesn't have a recognizable <org>/<repo> shape. Set the origin remote with ` +
+        `\`git remote add origin <url>\` or \`git remote set-url origin <url>\` first.`,
+    );
+  }
+
+  // Source the manifest + .pub files from the merge-base tree, NOT the
+  // working tree. Same security boundary as reviewer prompts: a feature
+  // branch shipping a modified manifest cannot have that manifest trust
+  // its own additions, because verification happens against base_sha.
+  let manifestYaml: string;
+  try {
+    manifestYaml = showAtRef(
+      resolved.base_sha,
+      ".stamp/trusted-keys/manifest.yml",
+      repoRoot,
+    );
+  } catch (err) {
+    throw new Error(
+      `review_server is configured but .stamp/trusted-keys/manifest.yml is missing ` +
+        `at base ${resolved.base_sha.slice(0, 8)}: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `Trusted mode requires the manifest in the merge-base tree so server signatures ` +
+        `can be verified against the keys the repo trusted at attestation time.`,
+    );
+  }
+
+  const pubFilenames = listFilesAtRef(
+    resolved.base_sha,
+    ".stamp/trusted-keys",
+    repoRoot,
+  );
+  const pubkeyByFingerprint = buildPubkeyMap(pubFilenames, (relPath) =>
+    showAtRef(resolved.base_sha, relPath, repoRoot),
+  );
+  if (pubkeyByFingerprint.size === 0) {
+    throw new Error(
+      `review_server is configured but no readable .pub files were found in ` +
+        `.stamp/trusted-keys/ at base ${resolved.base_sha.slice(0, 8)}. The server's ` +
+        `pubkey must be committed alongside the manifest entry so signatures verify.`,
+    );
+  }
+
+  console.log(
+    `running ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} in parallel via review_server: ${reviewerNames.join(", ")}`,
+  );
+  console.log(
+    `  diff: ${opts.diff} (${resolved.base_sha.slice(0, 8)} → ${resolved.head_sha.slice(0, 8)})`,
+  );
+  console.log(`  review_server: ${reviewServerUrl}`);
+  console.log(`  org/repo: ${orgRepo.org}/${orgRepo.repo}`);
+  console.log();
+
+  const diffBuffer = Buffer.from(resolved.diff, "utf8");
+  void config; // touched for symmetry with the LLM path — reserved for AGT-334 follow-up that wires per-reviewer `enforce_reads_on_dotstamp` policy through the SSH path.
+
+  const results = await Promise.allSettled(
+    reviewerNames.map((name) =>
+      requestServerReview({
+        reviewServerUrl,
+        reviewer: name,
+        org: orgRepo.org,
+        repo: orgRepo.repo,
+        baseSha: resolved.base_sha,
+        headSha: resolved.head_sha,
+        diff: diffBuffer,
+        manifestYaml,
+        pubkeyByFingerprint,
+        ...(opts._sshSpawnForTest ? { _sshSpawnForTest: opts._sshSpawnForTest } : {}),
+      }),
+    ),
+  );
+
+  const db = openDb(stampStateDbPath(repoRoot));
+  let anyFailed = false;
+  try {
+    for (let i = 0; i < reviewerNames.length; i++) {
+      const name = reviewerNames[i]!;
+      const outcome = results[i]!;
+      if (outcome.status === "fulfilled") {
+        const verdict: ServerReviewResult = outcome.value;
+        recordReview(db, {
+          reviewer: name,
+          base_sha: resolved.base_sha,
+          head_sha: resolved.head_sha,
+          verdict: verdict.verdict,
+          issues: verdict.prose,
+          // The local LLM path's cache index uses (diff_hash, prompt_hash)
+          // — server-attested rows still get the diff hash populated so
+          // the cache index has a meaningful entry, even though trusted-
+          // mode doesn't short-circuit through the verdict cache.
+          diff_hash: createHash("sha256").update(resolved.diff, "utf8").digest("hex"),
+          prompt_hash: createHash("sha256")
+            .update(promptBytesByReviewer.get(name) ?? "", "utf8")
+            .digest("hex"),
+          // Server-attested 2.x row: AGT-333's column trio. recordReview
+          // enforces all-or-nothing on these three fields so a downstream
+          // verifier can rely on "non-null server_approval_json ⇒ non-null
+          // signature + key_id" as a hard DB invariant.
+          serverAttestation: {
+            approval_json: verdict.approvalJson,
+            signature_b64: verdict.signature,
+            server_key_id: verdict.approval.server_key_id,
+          },
+        });
+        printServerReview(name, verdict, resolved.base_sha, resolved.head_sha);
+        if (verdict.verdict !== "approved") {
+          anyFailed = true;
+        }
+      } else {
+        anyFailed = true;
+        printError(name, outcome.reason);
+      }
+    }
+  } finally {
+    db.close();
+  }
+
+  if (anyFailed) {
+    process.exitCode = 1;
+  }
+}
+
+function printServerReview(
+  reviewerName: string,
+  result: ServerReviewResult,
+  base_sha: string,
+  head_sha: string,
+): void {
+  const bar = "─".repeat(72);
+  console.log(bar);
+  console.log(
+    `reviewer: ${reviewerName}   base: ${base_sha.slice(0, 8)} → head: ${head_sha.slice(0, 8)}   [server-attested]`,
+  );
+  console.log(bar);
+  console.log(result.prose);
+  console.log(bar);
+  // Mark the verdict with the server key fingerprint short form so the
+  // operator can see WHICH server signed at a glance. The full
+  // fingerprint is in the persisted row for `stamp log` to surface.
+  const keyShort = result.approval.server_key_id.replace(/^sha256:/, "").slice(0, 12);
+  console.log(`verdict: ${result.verdict}   [signed by ${keyShort}…]`);
+  console.log(bar);
+  console.log();
 }
 
 // Re-export types for callers who want them
