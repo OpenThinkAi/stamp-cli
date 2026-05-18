@@ -49,7 +49,9 @@ import { describe, it } from "node:test";
 import { fingerprintFromPem } from "../src/lib/keys.ts";
 import {
   ensureReviewSigningKey,
+  loadReviewSigningKey,
   publicKeyPathFor,
+  resolveReviewSigningKeyPath,
   ReviewSigningKeyError,
 } from "../src/lib/reviewSigningKey.ts";
 
@@ -320,6 +322,159 @@ describe("ensureReviewSigningKey — wrong-mode refusal", () => {
       );
     } finally {
       t.cleanup();
+    }
+  });
+});
+
+// ─── AGT-331: loadReviewSigningKey ─────────────────────────────────
+
+describe("loadReviewSigningKey", () => {
+  it("loads an existing key without mutating disk", () => {
+    const t = tmpDir();
+    try {
+      const keyPath = path.join(t.dir, "review-signing-key.pem");
+      const minted = ensureReviewSigningKey({ privateKeyPath: keyPath });
+      const beforePrivateBytes = readFileSync(keyPath, "utf8");
+      const beforePublicBytes = readFileSync(minted.publicKeyPath, "utf8");
+
+      const loaded = loadReviewSigningKey({ privateKeyPath: keyPath });
+      assert.equal(loaded.fingerprint, minted.fingerprint);
+      assert.equal(loaded.publicKeyPem, minted.publicKeyPem);
+      assert.equal(loaded.created, false);
+
+      // Loader must be read-only — production servers mount the key as
+      // read-only via secrets-manager, and a load-time rewrite would
+      // fail the deployment.
+      assert.equal(readFileSync(keyPath, "utf8"), beforePrivateBytes);
+      assert.equal(readFileSync(minted.publicKeyPath, "utf8"), beforePublicBytes);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("throws ReviewSigningKeyError with operator-actionable prose when the key is absent", () => {
+    const t = tmpDir();
+    try {
+      const keyPath = path.join(t.dir, "no-such-key.pem");
+      assert.throws(
+        () => loadReviewSigningKey({ privateKeyPath: keyPath }),
+        (err: Error) => {
+          assert.ok(err instanceof ReviewSigningKeyError);
+          assert.match(err.message, /review-signing key not found/);
+          // The message names the bootstrap step and STAMP_STATE_DIR so
+          // operators know where to look — this is the load-bearing
+          // operator-facing surface.
+          assert.match(err.message, /stamp-bootstrap-review-key/);
+          assert.match(err.message, /REVIEW_SIGNING_KEY_PATH|STAMP_STATE_DIR/);
+          return true;
+        },
+      );
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("refuses to load a wrong-mode key (refuses to auto-chmod)", () => {
+    const t = tmpDir();
+    try {
+      const keyPath = path.join(t.dir, "review-signing-key.pem");
+      ensureReviewSigningKey({ privateKeyPath: keyPath });
+      // Simulate a wrong-mode key restored from backup.
+      chmodSync(keyPath, 0o640);
+      assert.throws(
+        () => loadReviewSigningKey({ privateKeyPath: keyPath }),
+        (err: Error) => {
+          assert.ok(err instanceof ReviewSigningKeyError);
+          assert.match(err.message, /mode 0640/);
+          assert.match(err.message, /required 0600/);
+          return true;
+        },
+      );
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("never mints — distinct from ensureReviewSigningKey", () => {
+    // Belt-and-suspenders: confirm the load path doesn't fall back to
+    // mint-on-missing semantics. Without this guard, a future refactor
+    // that accidentally aliased the two functions would silently rotate
+    // server identity on every restart.
+    const t = tmpDir();
+    try {
+      const keyPath = path.join(t.dir, "review-signing-key.pem");
+      assert.equal(existsSync(keyPath), false);
+      assert.throws(() => loadReviewSigningKey({ privateKeyPath: keyPath }));
+      assert.equal(existsSync(keyPath), false, "loader minted a key it shouldn't have");
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("resolveReviewSigningKeyPath", () => {
+  it("honors REVIEW_SIGNING_KEY_PATH when set", () => {
+    const saved = process.env.REVIEW_SIGNING_KEY_PATH;
+    try {
+      process.env.REVIEW_SIGNING_KEY_PATH = "/opt/secrets/custom-key.pem";
+      assert.equal(resolveReviewSigningKeyPath(), "/opt/secrets/custom-key.pem");
+    } finally {
+      if (saved === undefined) delete process.env.REVIEW_SIGNING_KEY_PATH;
+      else process.env.REVIEW_SIGNING_KEY_PATH = saved;
+    }
+  });
+
+  it("falls back to STAMP_STATE_DIR/review-signing-key.pem when override unset", () => {
+    const savedKey = process.env.REVIEW_SIGNING_KEY_PATH;
+    const savedDir = process.env.STAMP_STATE_DIR;
+    try {
+      delete process.env.REVIEW_SIGNING_KEY_PATH;
+      process.env.STAMP_STATE_DIR = "/tmp/custom-state-dir";
+      assert.equal(
+        resolveReviewSigningKeyPath(),
+        "/tmp/custom-state-dir/review-signing-key.pem",
+      );
+    } finally {
+      if (savedKey === undefined) delete process.env.REVIEW_SIGNING_KEY_PATH;
+      else process.env.REVIEW_SIGNING_KEY_PATH = savedKey;
+      if (savedDir === undefined) delete process.env.STAMP_STATE_DIR;
+      else process.env.STAMP_STATE_DIR = savedDir;
+    }
+  });
+
+  it("strips trailing slashes on STAMP_STATE_DIR", () => {
+    const savedKey = process.env.REVIEW_SIGNING_KEY_PATH;
+    const savedDir = process.env.STAMP_STATE_DIR;
+    try {
+      delete process.env.REVIEW_SIGNING_KEY_PATH;
+      process.env.STAMP_STATE_DIR = "/tmp/custom-state-dir///";
+      assert.equal(
+        resolveReviewSigningKeyPath(),
+        "/tmp/custom-state-dir/review-signing-key.pem",
+      );
+    } finally {
+      if (savedKey === undefined) delete process.env.REVIEW_SIGNING_KEY_PATH;
+      else process.env.REVIEW_SIGNING_KEY_PATH = savedKey;
+      if (savedDir === undefined) delete process.env.STAMP_STATE_DIR;
+      else process.env.STAMP_STATE_DIR = savedDir;
+    }
+  });
+
+  it("falls back to /srv/git/.stamp-state/review-signing-key.pem when no env is set", () => {
+    const savedKey = process.env.REVIEW_SIGNING_KEY_PATH;
+    const savedDir = process.env.STAMP_STATE_DIR;
+    try {
+      delete process.env.REVIEW_SIGNING_KEY_PATH;
+      delete process.env.STAMP_STATE_DIR;
+      assert.equal(
+        resolveReviewSigningKeyPath(),
+        "/srv/git/.stamp-state/review-signing-key.pem",
+      );
+    } finally {
+      if (savedKey === undefined) delete process.env.REVIEW_SIGNING_KEY_PATH;
+      else process.env.REVIEW_SIGNING_KEY_PATH = savedKey;
+      if (savedDir === undefined) delete process.env.STAMP_STATE_DIR;
+      else process.env.STAMP_STATE_DIR = savedDir;
     }
   });
 });

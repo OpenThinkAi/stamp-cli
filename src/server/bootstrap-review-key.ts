@@ -46,21 +46,16 @@
  *     orchestration bugs the operator needs to see verbatim.
  */
 
-import { ensureReviewSigningKey, ReviewSigningKeyError } from "../lib/reviewSigningKey.js";
+import {
+  ensureReviewSigningKey,
+  resolveReviewSigningKeyPath,
+  ReviewSigningKeyError,
+} from "../lib/reviewSigningKey.js";
 
-const DEFAULT_STATE_DIR = "/srv/git/.stamp-state";
-const DEFAULT_KEY_FILENAME = "review-signing-key.pem";
-
-function resolveKeyPath(): string {
-  const override = process.env["REVIEW_SIGNING_KEY_PATH"];
-  if (override && override.length > 0) return override;
-  const stateDir = process.env["STAMP_STATE_DIR"] ?? DEFAULT_STATE_DIR;
-  // Path join via string concat — Node's `path.join` would normalize
-  // out a trailing slash but the input is always a directory and the
-  // filename is a literal, so concatenation with an explicit "/" keeps
-  // the code obvious.
-  return stateDir.replace(/\/+$/, "") + "/" + DEFAULT_KEY_FILENAME;
-}
+// Path resolution is shared with the pipeline's request-time loader
+// (`resolveReviewSigningKeyPath` in src/lib/reviewSigningKey.ts) so the
+// bootstrap and the pipeline can never disagree on which file is "the"
+// signing key. See that function's docstring for the precedence order.
 
 function printGeneratedBanner(fingerprint: string, publicKeyPath: string): void {
   // Visually distinct border + the instruction line that AC #2
@@ -106,7 +101,7 @@ function main(): void {
     return;
   }
 
-  const privateKeyPath = resolveKeyPath();
+  const privateKeyPath = resolveReviewSigningKeyPath();
 
   let result;
   try {

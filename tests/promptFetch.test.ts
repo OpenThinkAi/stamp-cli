@@ -35,7 +35,10 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import {
   defaultRepoResolver,
   fetchCanonicalPrompt,
+  fetchManifestAtBaseSha,
+  type FetchedManifest,
   type FetchedPrompt,
+  type ManifestFetchResult,
   type PromptFetchError,
   type RepoResolver,
 } from "../src/server/promptFetch.ts";
@@ -490,5 +493,148 @@ describe("fetchCanonicalPrompt — resolver injection", () => {
     assert.equal(acmeResult.bytes.toString("utf8"), "acme prompt\n");
     assert.equal(globexResult.bytes.toString("utf8"), "globex prompt\n");
     assert.notEqual(acmeResult.sha256, globexResult.sha256);
+  });
+});
+
+// ─── AGT-331: fetchManifestAtBaseSha ─────────────────────────────────
+
+/** Narrowing helper that fails the test if the fetch returned an
+ *  error result. Mirror of `assertOk` for the prompt fetcher. */
+function assertManifestOk(
+  result: ManifestFetchResult,
+): asserts result is FetchedManifest {
+  if (result.kind !== "ok") {
+    assert.fail(
+      `expected manifest fetch ok, got error kind=${result.kind} detail=${result.detail}`,
+    );
+  }
+}
+
+/** Build a bare repo whose initial commit includes the given manifest
+ *  bytes at `.stamp/trusted-keys/manifest.yml`. */
+function buildBareWithManifest(
+  baseDir: string,
+  name: string,
+  manifestYaml: string | null,
+): { barePath: string; baseSha: string } {
+  const barePath = join(baseDir, `${name}.git`);
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", barePath], {
+    stdio: "pipe",
+  });
+
+  const workDir = mkdtempSync(join(tmpdir(), "stamp-manifestfetch-seed-"));
+  try {
+    git(["init", "-q", "-b", "main"], workDir);
+    git(["config", "user.email", "t@example.com"], workDir);
+    git(["config", "user.name", "Test"], workDir);
+    git(["config", "commit.gpgsign", "false"], workDir);
+
+    // Always seed SOMETHING so the commit isn't empty (an empty initial
+    // commit would still resolve but the test reads more clearly with a
+    // marker file).
+    mkdirSync(join(workDir, ".stamp"), { recursive: true });
+    writeFileSync(join(workDir, ".stamp", "marker.txt"), "seed\n");
+    if (manifestYaml !== null) {
+      mkdirSync(join(workDir, ".stamp", "trusted-keys"), { recursive: true });
+      writeFileSync(
+        join(workDir, ".stamp", "trusted-keys", "manifest.yml"),
+        manifestYaml,
+      );
+    }
+    git(["add", "."], workDir);
+    git(["commit", "-q", "-m", "seed"], workDir);
+
+    git(["remote", "add", "origin", barePath], workDir);
+    git(["push", "-q", "origin", "main"], workDir);
+
+    const baseSha = git(["rev-parse", "HEAD"], workDir).trim();
+    return { barePath, baseSha };
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+describe("fetchManifestAtBaseSha — happy path", () => {
+  let baseDir: string;
+  beforeEach(() => {
+    baseDir = realpathSync(mkdtempSync(join(tmpdir(), "stamp-manifest-fetch-")));
+  });
+  afterEach(() => {
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("returns the manifest bytes when present at base_sha", async () => {
+    const manifest =
+      "keys:\n  alice:\n    fingerprint: sha256:" +
+      "a".repeat(64) +
+      "\n    capabilities: [admin]\n";
+    const seed = buildBareWithManifest(baseDir, "widget-co", manifest);
+    const resolver = defaultRepoResolver(baseDir);
+    const result = await fetchManifestAtBaseSha(
+      resolver,
+      "acme",
+      "widget-co",
+      seed.baseSha,
+    );
+    assertManifestOk(result);
+    assert.equal(result.bytes.toString("utf8"), manifest);
+  });
+});
+
+describe("fetchManifestAtBaseSha — error categories", () => {
+  let baseDir: string;
+  beforeEach(() => {
+    baseDir = realpathSync(mkdtempSync(join(tmpdir(), "stamp-manifest-fetch-")));
+  });
+  afterEach(() => {
+    rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("returns no_such_file when the manifest is missing from base_sha's tree", async () => {
+    const seed = buildBareWithManifest(baseDir, "widget-co", null);
+    const resolver = defaultRepoResolver(baseDir);
+    const result = await fetchManifestAtBaseSha(
+      resolver,
+      "acme",
+      "widget-co",
+      seed.baseSha,
+    );
+    assert.equal(result.kind, "no_such_file");
+  });
+
+  it("returns no_such_ref when base_sha doesn't resolve in the bare", async () => {
+    // Seed a bare with one commit, then ask for a different sha that
+    // doesn't exist in this repo.
+    buildBareWithManifest(baseDir, "widget-co", "keys: {}\n");
+    const resolver = defaultRepoResolver(baseDir);
+    const result = await fetchManifestAtBaseSha(
+      resolver,
+      "acme",
+      "widget-co",
+      "0".repeat(40),
+    );
+    assert.equal(result.kind, "no_such_ref");
+  });
+
+  it("returns no_such_repo when the resolved path isn't a git repo", async () => {
+    const resolver: RepoResolver = () => join(baseDir, "no-such.git");
+    const result = await fetchManifestAtBaseSha(
+      resolver,
+      "acme",
+      "widget-co",
+      "a".repeat(40),
+    );
+    assert.equal(result.kind, "no_such_repo");
+  });
+
+  it("returns invalid_input for a non-40-hex base_sha", async () => {
+    const resolver: RepoResolver = () => join(baseDir, "anything.git");
+    const result = await fetchManifestAtBaseSha(
+      resolver,
+      "acme",
+      "widget-co",
+      "shortsha",
+    );
+    assert.equal(result.kind, "invalid_input");
   });
 });

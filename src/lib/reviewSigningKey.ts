@@ -283,6 +283,116 @@ function exportPublicPem(privateKey: KeyObject): string {
 }
 
 /**
+ * Load an existing review-signing keypair from `privateKeyPath`. Unlike
+ * `ensureReviewSigningKey`, this is the runtime-request path — if the
+ * key file is absent we THROW (`ReviewSigningKeyError`) rather than
+ * minting a fresh one. Auto-minting on every review request would let
+ * a transient FS hiccup (volume not yet mounted, key file unlinked by
+ * a misconfigured tool) silently rotate the server's identity mid-flight,
+ * which is the exact failure mode the trust model exists to prevent.
+ *
+ * The bootstrap script (`src/server/bootstrap-review-key.ts`) is the
+ * ONLY caller permitted to mint — it runs once per container boot, as
+ * root, before sshd accepts connections. Every subsequent caller (the
+ * review pipeline, future admin verbs that need to read the fingerprint)
+ * MUST use this loader so the "key is stable across boots" invariant is
+ * structural rather than convention.
+ *
+ * Mode + parse validation are the same as `ensureReviewSigningKey`: a
+ * wrong-mode or unparseable file throws. The realistic load-time failure
+ * mode is "file went missing" — likely a deployment misconfiguration the
+ * operator needs to see verbatim.
+ */
+export function loadReviewSigningKey(opts: {
+  privateKeyPath: string;
+}): ReviewSigningKeyResult {
+  const privateKeyPath = opts.privateKeyPath;
+  const publicKeyPath = publicKeyPathFor(privateKeyPath);
+
+  let existingStat;
+  try {
+    existingStat = statSync(privateKeyPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new ReviewSigningKeyError(
+        `review-signing key not found at ${privateKeyPath}. ` +
+          `The server's bootstrap step (stamp-bootstrap-review-key) is ` +
+          `expected to mint this on first boot. Check that ` +
+          `ANTHROPIC_API_KEY is set on the server (so bootstrap runs) ` +
+          `and that REVIEW_SIGNING_KEY_PATH / STAMP_STATE_DIR points at ` +
+          `a writable volume that persists across restarts.`,
+      );
+    }
+    throw err;
+  }
+
+  const mode = existingStat.mode & 0o777;
+  if (mode !== REQUIRED_PRIVATE_KEY_MODE) {
+    throw new ReviewSigningKeyError(
+      `review-signing key at ${privateKeyPath} has mode 0${mode.toString(8).padStart(3, "0")}; ` +
+        `required 0${REQUIRED_PRIVATE_KEY_MODE.toString(8).padStart(3, "0")} (owner read+write, no group/other access). ` +
+        `Refusing to load. Fix with: chmod 600 ${privateKeyPath}`,
+    );
+  }
+
+  let privateKey: KeyObject;
+  let publicKeyPem: string;
+  let fingerprint: string;
+  try {
+    const privateKeyPem = readFileSync(privateKeyPath, "utf8");
+    privateKey = createPrivateKey({ key: privateKeyPem, format: "pem" });
+  } catch (err) {
+    throw new ReviewSigningKeyError(
+      `review-signing key at ${privateKeyPath} could not be loaded: ${(err as Error).message}`,
+    );
+  }
+
+  try {
+    if (privateKey.asymmetricKeyType !== "ed25519") {
+      throw new Error(
+        `expected asymmetricKeyType=ed25519, got ${privateKey.asymmetricKeyType ?? "<unknown>"}`,
+      );
+    }
+    publicKeyPem = exportPublicPem(privateKey);
+    fingerprint = fingerprintFromPem(publicKeyPem);
+  } catch (err) {
+    throw new ReviewSigningKeyError(
+      `review-signing key at ${privateKeyPath} could not be parsed as an Ed25519 private key: ` +
+        `${(err as Error).message}`,
+    );
+  }
+
+  return {
+    privateKeyPath,
+    publicKeyPath,
+    privateKey,
+    publicKeyPem,
+    fingerprint,
+    created: false,
+  };
+}
+
+/**
+ * Resolve the absolute path to the review-signing private key from env
+ * variables, mirroring the precedence the bootstrap script uses:
+ *
+ *   1. `REVIEW_SIGNING_KEY_PATH` (explicit override)
+ *   2. `$STAMP_STATE_DIR/review-signing-key.pem`
+ *   3. `/srv/git/.stamp-state/review-signing-key.pem` (container default)
+ *
+ * Kept here (not duplicated in bootstrap-review-key.ts) so that the
+ * pipeline at request time and the bootstrap at boot time always agree
+ * on which file is "the" signing key. A future move (e.g. to a secrets-
+ * manager mount) only needs to update one resolver.
+ */
+export function resolveReviewSigningKeyPath(): string {
+  const override = process.env["REVIEW_SIGNING_KEY_PATH"];
+  if (override && override.length > 0) return override;
+  const stateDir = process.env["STAMP_STATE_DIR"] ?? "/srv/git/.stamp-state";
+  return stateDir.replace(/\/+$/, "") + "/review-signing-key.pem";
+}
+
+/**
  * First-boot path. Creates the parent directory if missing (so a fresh
  * volume that hasn't seen `mkdir -p $STAMP_STATE_DIR` yet still works,
  * though entrypoint.sh does that anyway), then writes both halves of a
