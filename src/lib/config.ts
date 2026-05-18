@@ -45,6 +45,21 @@ export interface BranchRule {
    * by construction and always strict.
    */
   strict_base?: boolean;
+  /**
+   * Stamp 2.x server-attested reviews (AGT-332). When set, `stamp review`
+   * routes each reviewer through this URL's `stamp-review` SSH verb
+   * instead of calling the local Anthropic SDK. Shape is
+   * `ssh://<user>@<host>:<port>` — same form as the bare-repo remote in
+   * server-gated deployments. Absent → trusted mode falls back to the
+   * 1.x local LLM path (warn-and-proceed; 1.x compatibility is the
+   * documented contract through AGT-347).
+   *
+   * Sourced from the merge-base tree like every other field on this
+   * struct, so a feature branch cannot point itself at an attacker-
+   * controlled review server — the change goes through the regular
+   * reviewer gate first.
+   */
+  review_server?: string;
 }
 
 /**
@@ -264,11 +279,35 @@ function validateConfig(input: unknown): StampConfig {
       strict_base = r.strict_base;
     }
 
+    let review_server: string | undefined;
+    if (r.review_server !== undefined) {
+      if (typeof r.review_server !== "string" || !r.review_server.trim()) {
+        throw new Error(
+          `config.branches.${name}.review_server must be a non-empty string ` +
+            `(e.g. "ssh://git@stamp.example.com:22")`,
+        );
+      }
+      // Shape-validate at parse time so a typo or wrong-scheme URL
+      // surfaces as a config error rather than as an SSH connection
+      // failure several seconds into `stamp review`. The full URL parser
+      // in `src/lib/sshReviewClient.ts` re-validates on use; this is
+      // the cheap pre-flight.
+      const trimmed = r.review_server.trim();
+      if (!trimmed.startsWith("ssh://")) {
+        throw new Error(
+          `config.branches.${name}.review_server must be an ssh:// URL ` +
+            `(got ${JSON.stringify(trimmed)})`,
+        );
+      }
+      review_server = trimmed;
+    }
+
     branches[name] = {
       required: r.required.map(String),
       ...(required_checks ? { required_checks } : {}),
       ...(require_human_merge !== undefined ? { require_human_merge } : {}),
       ...(strict_base !== undefined ? { strict_base } : {}),
+      ...(review_server !== undefined ? { review_server } : {}),
     };
   }
 

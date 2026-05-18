@@ -86,6 +86,81 @@ export function classifyRemote(
 }
 
 /**
+ * Derive `{ org, repo }` from `git remote get-url <remote>` so AGT-332's
+ * SSH transport has something to pass to the server's `--org` / `--repo`
+ * flags. Returns null when the URL doesn't have a recognizable
+ * `<org>/<repo>` shape — the caller (`stamp review`) then surfaces a
+ * usage error asking the operator to set the remote.
+ *
+ * Recognized shapes:
+ *   - `git@host:org/repo.git` (scp-style)
+ *   - `ssh://[user@]host[:port]/.../org/repo.git` (where org/repo are
+ *     the last two path segments)
+ *   - `https://host/.../org/repo.git`
+ *
+ * The pattern intentionally matches the *last two* path segments rather
+ * than insisting on a top-of-path layout, so both the GitHub Shape 2
+ * (`github.com/<owner>/<repo>.git`) and the stamp-server Shape 1
+ * (`/srv/git/<owner>/<repo>.git`) hit the same code path. The server-
+ * side `parseRequest` re-validates `org` / `repo` against its own
+ * regexes, so anything that gets past this returns the same "invalid
+ * shape" prose either way.
+ */
+export function deriveOrgRepoFromRemote(
+  remote: string,
+  cwd: string,
+): { org: string; repo: string } | null {
+  let url: string;
+  try {
+    url = runGit(["remote", "get-url", remote], cwd).trim();
+  } catch {
+    return null;
+  }
+  if (!url) return null;
+  return parseOrgRepoFromUrl(url);
+}
+
+/**
+ * Pure URL → `{ org, repo }` parser; exposed separately so tests can
+ * hit every URL shape without standing up a git repo. Same logic as
+ * `deriveOrgRepoFromRemote` but skips the `git remote get-url` shell
+ * out. Returns null on any shape we can't confidently classify.
+ */
+export function parseOrgRepoFromUrl(
+  url: string,
+): { org: string; repo: string } | null {
+  // SCP shape: `<user>@<host>:<path>`. Anchored on `<user>@<host>:` so
+  // a URL whose path happens to contain `@` and `:` doesn't accidentally
+  // match. Repo segment is non-greedy with optional `.git` suffix.
+  const scp = url.match(/^[A-Za-z0-9._-]+@[^:]+:(.+)$/);
+  let pathPart: string | null = null;
+  if (scp && scp[1]) {
+    pathPart = scp[1];
+  } else {
+    try {
+      const parsed = new URL(url);
+      pathPart = parsed.pathname;
+    } catch {
+      return null;
+    }
+  }
+  if (!pathPart) return null;
+  // Strip any leading slashes + optional `.git` suffix, then split.
+  const cleaned = pathPart.replace(/^\/+/, "").replace(/\.git$/, "");
+  const parts = cleaned.split("/").filter((p) => p.length > 0);
+  if (parts.length < 2) return null;
+  // Use the LAST two segments — handles `/srv/git/owner/repo.git` and
+  // `/owner/repo` alike. A future per-tenant scheme that nests deeper
+  // (`/srv/git/tenants/foo/owner/repo.git`) still picks out the right
+  // pair because tenants don't appear in the server's `--org`/`--repo`
+  // contract in Phase 1.
+  const repo = parts[parts.length - 1]!;
+  const org = parts[parts.length - 2]!;
+  if (!org || !repo) return null;
+  return { org, repo };
+}
+
+/**
  * Pretty one-line summary of the classification, suitable for inclusion in
  * warning/error messages. The caller decides what action to take on the
  * shape — this is just the prose.

@@ -87,6 +87,46 @@ export function showAtRef(ref: string, path: string, cwd: string): string {
 }
 
 /**
+ * List basenames directly under `<ref>:<dirPath>` (non-recursive). Empty
+ * array if the directory doesn't exist at `<ref>` — distinguished from
+ * "git error" by branching on git ls-tree's exit code the same way
+ * `pathExistsAtRef` does. Used by `stamp review` (AGT-332) to enumerate
+ * `.stamp/trusted-keys/*.pub` at base_sha so each pubkey can be loaded
+ * from the merge-base tree (NOT the working tree — same security
+ * boundary as reviewer prompts).
+ */
+export function listFilesAtRef(
+  ref: string,
+  dirPath: string,
+  cwd: string,
+): string[] {
+  // `--name-only` keeps the output a clean list of relative paths; we
+  // strip the directory prefix here so callers get bare filenames. The
+  // trailing `/` on the path argument tells ls-tree to enter the tree
+  // rather than echo the entry for the directory itself.
+  const result = spawnSync(
+    "git",
+    ["ls-tree", "--name-only", `${ref}`, `${dirPath}/`],
+    { cwd, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  if (result.status === 128) return []; // directory absent at ref
+  if (result.status !== 0) {
+    const stderr = result.stderr?.toString("utf8").trim() ?? "";
+    throw new Error(
+      `git ls-tree ${ref}:${dirPath} failed (status ${result.status}): ${stderr || "(no stderr)"}`,
+    );
+  }
+  const text = result.stdout?.toString("utf8") ?? "";
+  return text
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const prefix = `${dirPath}/`;
+      return line.startsWith(prefix) ? line.slice(prefix.length) : line;
+    });
+}
+
+/**
  * True when `<path>` exists in the tree at `<ref>`. Use this when "missing"
  * is a legitimate state to branch on rather than an error to recover from —
  * e.g. probing for an optional file like a reviewer lock that may or may
