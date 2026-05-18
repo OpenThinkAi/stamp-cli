@@ -1,22 +1,29 @@
 /**
- * End-to-end tests for the SSH-invoked stamp-review wrapper (AGT-328
- * scaffold).
+ * End-to-end tests for the SSH-invoked stamp-review wrapper.
  *
  * Identical harness pattern to `tests/serverMintInvite.test.ts`: spawn
  * the unbundled TS via tsx, point STAMP_SERVER_DB_PATH + SSH_USER_AUTH
  * at a tmp fixture, exercise the wrapper as a black box.
  *
- * Scope: parse, auth, size cap, diff-sha256 cross-check, and the
- * response shape from design.md. The pipeline body is intentionally a
- * placeholder (see `src/server/reviewPipeline.ts`) so these tests
- * assert SHAPE — not LLM behavior. AGT-330 / AGT-331 add tests for the
- * real signature + LLM call.
+ * Scope (AGT-328 + AGT-330):
+ *   - parse, auth, size cap, diff-sha256 cross-check (verb-shaped)
+ *   - the verb reaches the pipeline and surfaces pipeline errors
+ *     correctly (e.g. ServerMissingApiKeyError, PromptFetchFailedError)
+ *
+ * Out of scope: the actual LLM call / verdict path. That's
+ * `tests/serverReviewPipeline.test.ts`, which exercises the pipeline
+ * directly with an injected `AnthropicClientShape` mock. The verb's
+ * subprocess shape doesn't admit an in-process mock; running the
+ * happy path here would require a real HTTP stub which would be more
+ * brittle than load-bearing.
+ *
+ * AGT-331 adds tests for the real signature once the signer wires in.
  */
 
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -43,6 +50,12 @@ const HEAD_SHA = "fedcba9876543210fedcba9876543210fedcba98";
 interface Harness {
   dbPath: string;
   authPath: string;
+  /** Server's bare-repo root (`STAMP_REPO_ROOT`). Optional —
+   *  populated only by setups that need a fixture bare repo. */
+  repoRoot?: string;
+  /** SHA the fixture bare repo's prompt was committed at. Useful for
+   *  tests that need to send a matching `--base-sha`. */
+  fixtureBaseSha?: string;
   cleanup: () => void;
 }
 
@@ -75,6 +88,49 @@ function setup(callerRole: "owner" | "admin" | "member" | "none"): Harness {
   };
 }
 
+/**
+ * Build a fixture bare repo at `<harness.repoRoot>/widget-co.git`
+ * containing `.stamp/reviewers/security.md` at a real commit. Returns the
+ * commit SHA so the test can pass it as `--base-sha`. Used by AGT-330
+ * tests that need the verb to reach the pipeline and produce a pipeline-
+ * shaped error (e.g. missing API key) rather than a prompt-fetch error.
+ */
+function setupWithFixtureBare(
+  callerRole: "owner" | "admin" | "member",
+): Harness {
+  const h = setup(callerRole);
+  const repoRoot = path.join(path.dirname(h.dbPath), "srv-git");
+  mkdirSync(repoRoot);
+  const work = path.join(path.dirname(h.dbPath), "work");
+  mkdirSync(work);
+  const bare = path.join(repoRoot, "widget-co.git");
+
+  const run = (args: string[], cwd: string) => {
+    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  run(["init", "-q", "-b", "main"], work);
+  run(["config", "user.email", "test@example.com"], work);
+  run(["config", "user.name", "Test"], work);
+  run(["config", "commit.gpgsign", "false"], work);
+  mkdirSync(path.join(work, ".stamp", "reviewers"), { recursive: true });
+  writeFileSync(
+    path.join(work, ".stamp", "reviewers", "security.md"),
+    "# security reviewer\n",
+  );
+  run(["add", "-A"], work);
+  run(["commit", "-q", "-m", "fixture"], work);
+  const baseSha = run(["rev-parse", "HEAD"], work);
+  run(["clone", "-q", "--bare", work, bare], path.dirname(h.dbPath));
+
+  return {
+    ...h,
+    repoRoot,
+    fixtureBaseSha: baseSha,
+  };
+}
+
 interface RunResult {
   stdout: string;
   stderr: string;
@@ -91,6 +147,9 @@ function runStampReview(
     STAMP_SERVER_DB_PATH: harness.dbPath,
     SSH_USER_AUTH: harness.authPath,
   };
+  if (harness.repoRoot) {
+    env.STAMP_REPO_ROOT = harness.repoRoot;
+  }
   if (opts.envOverrides) {
     for (const [k, v] of Object.entries(opts.envOverrides)) {
       if (v === undefined) {
@@ -133,69 +192,60 @@ function argvFor(diff: Buffer, overrides: Partial<Record<string, string>> = {}):
   return out;
 }
 
-describe("stamp-review — success path (scaffold response shape)", () => {
-  it("returns a structurally-valid JSON response on stdout", () => {
-    const h = setup("member");
+describe("stamp-review — verb reaches pipeline (AGT-330 wiring)", () => {
+  it("surfaces ServerMissingApiKeyError when fixture bare resolves but ANTHROPIC_API_KEY is unset", () => {
+    // With a real fixture bare repo (so the prompt fetch succeeds) and
+    // no ANTHROPIC_API_KEY, the verb should reach the pipeline, hit the
+    // missing-key throw, and exit 1 (server-side config error) with a
+    // clear stderr message. This pins the verb-to-pipeline wiring AND
+    // confirms the pipeline's typed-error path crosses the SSH boundary
+    // cleanly.
+    const h = setupWithFixtureBare("member");
     try {
       const diff = Buffer.from("diff --git a/foo b/foo\n");
-      const r = runStampReview(h, argvFor(diff), { stdin: diff });
-      assert.equal(r.status, 0, `stderr=${r.stderr}\nstdout=${r.stdout}`);
-
-      const payload = JSON.parse(r.stdout) as Record<string, unknown>;
-      // Top-level shape from design.md
-      assert.ok(typeof payload.verdict === "string", "verdict is string");
-      assert.ok(typeof payload.prose === "string", "prose is string");
-      assert.ok(typeof payload.signature === "string", "signature is string");
-      assert.ok(payload.approval && typeof payload.approval === "object", "approval is object");
-
-      // The approval body: ApprovalV4 shape, with values populated
-      // from the request and PLACEHOLDER markers for the LLM/signing
-      // bits that land in AGT-330/331.
-      const approval = payload.approval as Record<string, unknown>;
-      assert.equal(approval.reviewer, "security");
-      assert.equal(approval.base_sha, BASE_SHA);
-      assert.equal(approval.head_sha, HEAD_SHA);
-      assert.equal(
-        approval.diff_sha256,
-        createHash("sha256").update(diff).digest("hex"),
-      );
-      assert.ok(/^[0-9a-f]{64}$/.test(approval.prompt_sha256 as string), "prompt_sha256 is bare hex");
-      assert.match(
-        approval.trusted_keys_snapshot_sha256 as string,
-        /^sha256:[0-9a-f]{64}$/,
-        "trusted_keys_snapshot_sha256 carries sha256: prefix",
-      );
-      assert.match(
-        approval.server_key_id as string,
-        /^sha256:[0-9a-f]{64}$/,
-        "server_key_id carries sha256: prefix",
-      );
-      assert.match(
-        approval.issued_at as string,
-        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
-        "issued_at is ISO-8601 UTC, second precision",
-      );
-
-      // Verdict must be one of the three legal values, and the
-      // top-level mirror equals the approval body's value.
-      assert.ok(
-        approval.verdict === "approved" ||
-          approval.verdict === "changes_requested" ||
-          approval.verdict === "denied",
-      );
-      assert.equal(payload.verdict, approval.verdict);
+      const r = runStampReview(h, argvFor(diff, { "--base-sha": h.fixtureBaseSha! }), {
+        stdin: diff,
+        envOverrides: { ANTHROPIC_API_KEY: undefined },
+      });
+      assert.equal(r.status, 1, `stderr=${r.stderr}\nstdout=${r.stdout}`);
+      // The verb's top-level .catch surfaces the error message verbatim
+      // — pin the ServerMissingApiKeyError prose so a future agent
+      // tweaking the wording doesn't break operator-visible behavior.
+      assert.match(r.stderr, /ANTHROPIC_API_KEY is not set on the stamp-server/);
     } finally {
       h.cleanup();
     }
   });
 
-  it("accepts owner and admin callers (not just member)", () => {
-    for (const role of ["owner", "admin"] as const) {
+  it("surfaces PromptFetchFailedError when the prompt isn't reachable at base_sha", () => {
+    // No fixture bare repo, so the prompt fetch hits no_such_repo
+    // immediately. Verb should exit 1 with a clear category-flavored
+    // stderr message; the typed kind reaches the operator.
+    const h = setup("member");
+    try {
+      const diff = Buffer.from("x");
+      const r = runStampReview(h, argvFor(diff), { stdin: diff });
+      assert.equal(r.status, 1, `stderr=${r.stderr}\nstdout=${r.stdout}`);
+      assert.match(r.stderr, /canonical prompt fetch failed/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("accepts owner / admin / member callers as authorized to request reviews", () => {
+    // Authorization-only assertion — every role MAY reach the pipeline
+    // (i.e. NOT rejected at the auth gate with exit 3). The pipeline
+    // itself fails downstream (no fixture, no API key) and surfaces
+    // exit 1; that's fine for this test, which is about the role gate
+    // not the LLM path.
+    for (const role of ["owner", "admin", "member"] as const) {
       const h = setup(role);
       try {
         const diff = Buffer.from(`role=${role}\n`);
         const r = runStampReview(h, argvFor(diff), { stdin: diff });
-        assert.equal(r.status, 0, `role=${role} stderr=${r.stderr}`);
+        // Exit must NOT be 3 (role-rejected). Pipeline-flavored errors
+        // (exit 1) are expected here without a fixture bare repo.
+        assert.notEqual(r.status, 3, `role=${role} stderr=${r.stderr}`);
       } finally {
         h.cleanup();
       }
