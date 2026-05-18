@@ -267,6 +267,38 @@ function printReviewHistory(
       `#${row.id}  ${mark} ${row.reviewer.padEnd(16)} ${row.verdict.padEnd(18)} ` +
         `${row.base_sha.slice(0, 8)} → ${row.head_sha.slice(0, 8)}   ${row.created_at}`,
     );
+    // SIGNED-BY marker (AGT-333): rendered as a separate aligned line so
+    // it lives in the same visual lane as the row header without forcing
+    // the existing header line to wrap. Two states (one branch each):
+    //
+    //   - row has a server signature → `signed-by: server:<key8>`
+    //   - row has NO server signature → `signed-by: (unsigned — no server attestation)`
+    //
+    // The "unsigned" case covers BOTH legacy 1.x rows AND 2.x rows
+    // recorded in local-only mode (no `review_server` configured). The
+    // two are indistinguishable at the DB level — `recordReview` only
+    // stamps `schema_version` when a `serverAttestation` rides with the
+    // row, so a 2.x local-only row reads the same as a 1.x legacy row
+    // here. We deliberately do NOT claim "1.x" in the marker text: a
+    // 2.x operator running local-only would otherwise see every one of
+    // their fresh reviews labeled as 1.x, which is factually wrong
+    // about the client version and misleading about why the row is
+    // unsigned.
+    //
+    // Distinguishing 1.x-legacy from 2.x-local-only is a future addition
+    // if it ever matters — it would key on `schema_version` rather than
+    // adding new claims to the unsigned-marker text.
+    //
+    // The dispatch is on `server_key_id` presence (not `schema_version`)
+    // because that's the field the verifier actually consumes. If a
+    // future schema bump adds new optional fields, `server_key_id` stays
+    // the canonical "has a server signature" sentinel.
+    if (row.server_key_id) {
+      const keyShort = row.server_key_id.replace(/^sha256:/, "").slice(0, 8);
+      console.log(`     signed-by: server:${keyShort}`);
+    } else {
+      console.log(`     signed-by: (unsigned — no server attestation)`);
+    }
     if (row.issues) {
       console.log(bar);
       console.log(row.issues);

@@ -5,6 +5,23 @@ import { ensureDir } from "./paths.js";
 
 export type Verdict = "approved" | "changes_requested" | "denied";
 
+/**
+ * `schema_version` value stamped onto rows produced under the stamp 2.x
+ * server-attested review model. Rows persisted by 1.x clients have NULL
+ * here — a 2.x-only verifier reads NULL as "legacy unsigned, do NOT trust
+ * for merge-gate purposes" while still letting `stamp log` display the row.
+ *
+ * Mirrors `CURRENT_V4_SCHEMA_VERSION` in `attestationV4.ts` deliberately:
+ * a row that carries a server-signed approval is, by construction, a v4
+ * artifact, and any v4 verifier consuming this DB column should compare
+ * with the same integer. We don't import the constant directly to avoid
+ * a dependency cycle (`db.ts` is leaf-ish; `attestationV4.ts` may grow
+ * imports from elsewhere) — the two integers are pinned together via the
+ * doc comment instead, and a guard test in `tests/db.test.ts` asserts
+ * they match so a future bump to one drags the other along.
+ */
+export const REVIEW_ROW_SCHEMA_V4 = 4;
+
 export interface ReviewRow {
   id: number;
   reviewer: string;
@@ -21,6 +38,31 @@ export interface ReviewRow {
   /** SHA-256 hex of the reviewer prompt text. Null for rows recorded before
    *  1.8.0 shipped. Cache key with diff_hash + reviewer. */
   prompt_hash: string | null;
+  /** JSON-stringified `ApprovalV4` (see `lib/attestationV4.ts`) as returned
+   *  by stamp-server's `stamp-review` SSH verb. Null for rows produced by
+   *  pre-2.x clients OR by a 2.x client running in local-only mode (no
+   *  `review_server` configured). When non-null, `server_signature_b64`
+   *  and `server_key_id` are non-null as well (writer-side invariant
+   *  enforced by `recordReview`); when null, all three are null together. */
+  server_approval_json: string | null;
+  /** Base64 Ed25519 signature the server produced over
+   *  `canonicalSerializeApproval(approval)`. Non-null iff
+   *  `server_approval_json` is non-null. */
+  server_signature_b64: string | null;
+  /** `sha256:<hex>` fingerprint of the server's review-signing key — same
+   *  string format the trusted-keys manifest uses to identify keys (see
+   *  `lib/trustedKeysManifest.ts`). Duplicates the `server_key_id` embedded
+   *  inside the signed `server_approval_json`; stored at the row level so
+   *  `stamp log` can render the signer without parsing the JSON blob, and
+   *  so AGT-334's `stamp merge` can index lookups by signer without
+   *  hydrating every approval. */
+  server_key_id: string | null;
+  /** Schema version of the persisted row. `null` for legacy 1.x rows that
+   *  predate the column; `REVIEW_ROW_SCHEMA_V4` for rows produced under
+   *  the server-attested model. The presence of a non-null value here is
+   *  the canonical marker that distinguishes a 2.x row from a 1.x row in
+   *  `stamp log` and (later) in AGT-334's merge-gate input filter. */
+  schema_version: number | null;
   created_at: string;
 }
 
@@ -38,6 +80,29 @@ export interface RecordReviewInput {
   /** SHA-256 hex of the reviewer prompt text. Optional for pre-1.8.0 call
    *  sites that haven't been updated yet. */
   prompt_hash?: string | null;
+  /** Server-attested approval persisted as a unit. Either provide all
+   *  three fields (server-attested 2.x row) or omit `serverAttestation`
+   *  entirely (local / 1.x-style row). Half-populated input is a writer
+   *  bug — `recordReview` enforces all-or-nothing so a downstream
+   *  verifier can rely on "non-null server_approval_json ⇒ non-null
+   *  signature + key_id" as a hard DB invariant.
+   *
+   *  AGT-334 (`stamp merge`) reads these back via `serverApprovalsFor`
+   *  to fold them into the v4 envelope; pre-2.x call sites simply
+   *  don't pass this field. */
+  serverAttestation?: {
+    /** JSON-serialized `ApprovalV4` — the bytes the server signed are
+     *  `canonicalSerializeApproval(parsed_approval)`, NOT this JSON
+     *  string verbatim (key order may differ; the canonical serializer
+     *  re-sorts at signature-verify time). */
+    approval_json: string;
+    /** Base64 Ed25519 over `canonicalSerializeApproval(approval)`. */
+    signature_b64: string;
+    /** `sha256:<hex>` server key fingerprint; must match the
+     *  `server_key_id` inside `approval_json`. The dup is intentional
+     *  (see `ReviewRow.server_key_id` docstring). */
+    server_key_id: string;
+  };
 }
 
 export function openDb(path: string): DatabaseSync {
@@ -96,6 +161,18 @@ function initSchema(db: DatabaseSync): void {
   // Forward migrations: each column was added in a later release than the
   // base schema. PRAGMA table_info lists current columns; missing ones get
   // ALTER-added. Idempotent — repeat opens no-op.
+  //
+  // Forward-only by design: there is NO down-migration. A user who downgrades
+  // from a stamp version that ran these ALTERs back to one that doesn't know
+  // about them keeps the extra columns but the old binary simply ignores
+  // them (SELECTs naming explicit columns are unaffected; INSERTs through
+  // the old code path leave the new columns NULL). 1.x rows that predate
+  // these columns survive each migration step because ALTER TABLE ... ADD
+  // COLUMN populates existing rows with NULL — none of the additions take
+  // a NOT NULL constraint or a non-NULL default, so the legacy rows
+  // continue to read out with their original data intact and NULL in the
+  // new slots. That's the load-bearing AC for AGT-333 and is asserted
+  // structurally in `tests/db.test.ts` against a hand-built 1.x fixture.
   const cols = db.prepare("PRAGMA table_info(reviews)").all() as Array<{ name: string }>;
   const have = new Set(cols.map((c) => c.name));
   if (!have.has("tool_calls")) {
@@ -106,6 +183,25 @@ function initSchema(db: DatabaseSync): void {
   }
   if (!have.has("prompt_hash")) {
     db.exec("ALTER TABLE reviews ADD COLUMN prompt_hash TEXT");
+  }
+  // AGT-333 (stamp 2.x): server-attested review fields. All TEXT/INTEGER
+  // with no DEFAULT and no NOT NULL — that's what makes the 1.x-rows-
+  // survive guarantee mechanical: ALTER fills existing rows with NULL,
+  // every read site treats NULL as "legacy / no server attestation here,"
+  // and the writer-side invariant (`recordReview`) keeps the three server
+  // fields strictly all-or-nothing so downstream code never sees a half-
+  // populated row.
+  if (!have.has("server_approval_json")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN server_approval_json TEXT");
+  }
+  if (!have.has("server_signature_b64")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN server_signature_b64 TEXT");
+  }
+  if (!have.has("server_key_id")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN server_key_id TEXT");
+  }
+  if (!have.has("schema_version")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN schema_version INTEGER");
   }
   // Cache index created here (after the migration ALTERs above) so it works
   // on both fresh installs and upgrades. Repeat-safe.
@@ -119,10 +215,24 @@ export function recordReview(
   db: DatabaseSync,
   input: RecordReviewInput,
 ): number {
+  // All-or-nothing on the three server-attestation fields: every read
+  // site (stamp log marker, AGT-334's merge folder, future v4 verifier)
+  // treats "row has a server signature" as a binary state. Half-populated
+  // input here would let the row drift into an ambiguous middle state
+  // that no read site is prepared to handle. TypeScript already encodes
+  // this in `RecordReviewInput.serverAttestation` (the three fields ride
+  // together on a single object), but the runtime check guards against a
+  // future caller bypassing the type — and against accidental `as any`
+  // at the boundary.
+  const sa = input.serverAttestation ?? null;
+  const schemaVersion = sa === null ? null : REVIEW_ROW_SCHEMA_V4;
   const stmt = db.prepare(
     `INSERT INTO reviews
-       (reviewer, base_sha, head_sha, verdict, issues, tool_calls, diff_hash, prompt_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (reviewer, base_sha, head_sha, verdict, issues, tool_calls,
+        diff_hash, prompt_hash,
+        server_approval_json, server_signature_b64, server_key_id,
+        schema_version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
     input.reviewer,
@@ -133,8 +243,87 @@ export function recordReview(
     input.tool_calls ?? null,
     input.diff_hash ?? null,
     input.prompt_hash ?? null,
+    sa?.approval_json ?? null,
+    sa?.signature_b64 ?? null,
+    sa?.server_key_id ?? null,
+    schemaVersion,
   );
   return Number(result.lastInsertRowid);
+}
+
+/**
+ * Server-attested row projection, returned by `serverApprovalsFor`. This
+ * is the shape AGT-334's `stamp merge` consumes when folding stored
+ * approvals into the v4 envelope — caller parses `approval_json` into
+ * an `ApprovalV4` and wraps it with `signature_b64` + `server_key_id`
+ * into an `ApprovalEntryV4`. Kept here (rather than in `attestationV4.ts`)
+ * because `db.ts` is the boundary that knows the storage shape, and the
+ * caller can do the JSON parse with full v4 typing.
+ */
+export interface ServerAttestedRow {
+  id: number;
+  reviewer: string;
+  base_sha: string;
+  head_sha: string;
+  verdict: Verdict;
+  /** JSON-stringified `ApprovalV4`. Caller `JSON.parse`s + canonical-
+   *  reserializes to verify the server's signature. */
+  approval_json: string;
+  /** Base64 Ed25519 over `canonicalSerializeApproval(approval)`. */
+  signature_b64: string;
+  /** `sha256:<hex>` server key fingerprint. */
+  server_key_id: string;
+  created_at: string;
+}
+
+/**
+ * Return all server-attested rows for a given (base_sha, head_sha) pair,
+ * one per reviewer (latest wins on ties — same `(created_at DESC, id DESC)`
+ * ordering as `latestVerdicts`). Skips rows where `server_approval_json`
+ * is NULL (legacy 1.x rows OR local-only 2.x rows with no server
+ * attestation) — those are not eligible inputs to a v4 merge envelope.
+ *
+ * Intended consumer is AGT-334's `stamp merge`: it calls this, parses
+ * each `approval_json`, and assembles `ApprovalEntryV4[]` for the v4
+ * envelope. The merge code is responsible for verifying signatures and
+ * matching `server_key_id` against the manifest at `base_sha` before
+ * trusting the data.
+ *
+ * Returns rows in stable reviewer-name order so the resulting envelope
+ * is deterministic across runs (the v4 canonical serializer sorts object
+ * keys but preserves array order; deterministic input means deterministic
+ * output, which matters for stamp's reproducibility property).
+ */
+export function serverApprovalsFor(
+  db: DatabaseSync,
+  base_sha: string,
+  head_sha: string,
+): ServerAttestedRow[] {
+  const stmt = db.prepare(`
+    SELECT id, reviewer, base_sha, head_sha, verdict,
+           server_approval_json AS approval_json,
+           server_signature_b64 AS signature_b64,
+           server_key_id,
+           created_at
+    FROM (
+      SELECT
+        id, reviewer, base_sha, head_sha, verdict,
+        server_approval_json,
+        server_signature_b64,
+        server_key_id,
+        created_at,
+        ROW_NUMBER() OVER (
+          PARTITION BY reviewer
+          ORDER BY created_at DESC, id DESC
+        ) AS rn
+      FROM reviews
+      WHERE base_sha = ? AND head_sha = ?
+        AND server_approval_json IS NOT NULL
+    )
+    WHERE rn = 1
+    ORDER BY reviewer ASC
+  `);
+  return stmt.all(base_sha, head_sha) as unknown as ServerAttestedRow[];
 }
 
 export interface CachedVerdict {
@@ -294,8 +483,21 @@ export function reviewHistory(
   opts: { limit?: number } = {},
 ): ReviewRow[] {
   const limit = opts.limit ?? 50;
+  // SELECT every column the ReviewRow type promises. The legacy version
+  // of this query only pulled a subset (id/reviewer/base/head/verdict/
+  // issues/created_at) and the implicit cast to ReviewRow[] put `undefined`
+  // into `tool_calls` / `diff_hash` / `prompt_hash` at runtime — a
+  // long-standing type lie. The marker logic added in AGT-333 needs
+  // `server_key_id` and `schema_version` to render the SIGNED-BY column,
+  // and the cheapest correct fix is to stop lying: pull the full row
+  // shape, let `stamp log` filter what it displays. The extra columns
+  // are TEXT/INTEGER scalars; the read-amplification is negligible at
+  // this command's call sites.
   const stmt = db.prepare(`
-    SELECT id, reviewer, base_sha, head_sha, verdict, issues, created_at
+    SELECT id, reviewer, base_sha, head_sha, verdict, issues,
+           tool_calls, diff_hash, prompt_hash,
+           server_approval_json, server_signature_b64, server_key_id,
+           schema_version, created_at
     FROM reviews
     ORDER BY created_at DESC, id DESC
     LIMIT ?
@@ -352,8 +554,13 @@ export function recentReviewsByReviewer(
   reviewer: string,
   limit: number,
 ): ReviewRow[] {
+  // See `reviewHistory` for the rationale on selecting the full row
+  // shape rather than a subset.
   const stmt = db.prepare(`
-    SELECT id, reviewer, base_sha, head_sha, verdict, issues, created_at
+    SELECT id, reviewer, base_sha, head_sha, verdict, issues,
+           tool_calls, diff_hash, prompt_hash,
+           server_approval_json, server_signature_b64, server_key_id,
+           schema_version, created_at
     FROM reviews
     WHERE reviewer = ?
     ORDER BY created_at DESC, id DESC
