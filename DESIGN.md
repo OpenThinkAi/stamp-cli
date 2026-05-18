@@ -394,11 +394,19 @@ Stamp-Payload: <base64 JSON>
 Stamp-Verified: <base64 Ed25519 signature>
 ```
 
-**Payload schema (v2, current):**
+This section describes the **v3 envelope**, which is the current shape
+emitted by stamp 1.x and the only shape verifiers accept today. The
+canonical type definitions live in
+[`src/lib/attestation.ts`](./src/lib/attestation.ts)
+(`CURRENT_PAYLOAD_VERSION = 3`, `MIN_ACCEPTED_PAYLOAD_VERSION = 3`). For
+the stamp 2.x server-attested envelope (`schema_version: 4`), see the
+"What about v4?" subsection below.
+
+**Payload schema (v3, current in-code):**
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "base_sha": "abc123...",
   "head_sha": "def456...",
   "target_branch": "main",
@@ -427,36 +435,81 @@ Stamp-Verified: <base64 Ed25519 signature>
 
 Where `base_sha` and `head_sha` identify the diff: for `stamp merge <branch> --into <target>`, `base_sha = merge-base(branch, target)` and `head_sha = <branch>` tip prior to the merge commit.
 
-The signature covers the base64-decoded payload bytes. `signer_key_id` is a SHA-256 fingerprint of the public key (`sha256:<hex>`), not a human-readable name — names collide and can be forged; fingerprints don't.
+**Canonical-form serialization.** The payload is serialized to UTF-8 JSON via `JSON.stringify` and base64-encoded as the `Stamp-Payload` trailer value. The signer and verifier both operate on the base64-decoded payload bytes, so the bytes that were signed are recoverable verbatim from the trailer — no JSON canonicalization is required for correctness. See `serializePayload` / `parseCommitAttestation` in `src/lib/attestation.ts` for the exact codec. Individual per-approval hash fields use their own canonical forms (alphabetically-sorted JSON for `tools_sha256`; recursively-sorted object keys, array order preserved, for `mcp_sha256`).
 
-Per-approval fields beyond `{ reviewer, verdict, review_sha }` are v2+:
+**What gets signed.** The Ed25519 signature in `Stamp-Verified` covers the base64-decoded `Stamp-Payload` bytes. `signer_key_id` is a SHA-256 fingerprint of the public key (`sha256:<hex>`), not a human-readable name — names collide and can be forged; fingerprints don't.
 
-- `prompt_sha256` — sha256 of the reviewer's prompt file contents at merge time
-- `tools_sha256` — sha256 of the canonical-form tool allowlist (JSON, alphabetically-sorted array)
-- `mcp_sha256` — sha256 of the canonical-form MCP server config (JSON, recursively-sorted object keys; arrays preserve order)
+**Trailer convention.** Both trailers are single-line key/value pairs (`Stamp-Payload: …`, `Stamp-Verified: …`) appended after a blank-line separator at the end of the merge-commit message. Verifiers extract them with a single-line regex match (see `parseCommitAttestation`). A hard cap of `MAX_TRAILER_BYTES = 64KB` (on both the base64 string and the decoded bytes) bounds JSON-parse blast radius before signature verification — an attacker who can produce a commit could otherwise force JSON.parse on a multi-megabyte payload during pre-receive.
+
+Per-approval fields beyond `{ reviewer, verdict, review_sha }`:
+
+- `prompt_sha256` — sha256 of the reviewer's prompt file contents, **sourced from the merge-base tree** (see "Why merge-base sourcing matters" below)
+- `tools_sha256` — sha256 of the canonical-form tool allowlist (JSON, alphabetically-sorted array), sourced from the merge-base tree
+- `mcp_sha256` — sha256 of the canonical-form MCP server config (JSON, recursively-sorted object keys; arrays preserve order), sourced from the merge-base tree
 - `reviewer_source` (optional) — `{ source, ref }` from the reviewer's committed lock file (`.stamp/reviewers/<name>.lock.json`), present only when the reviewer was installed via `stamp reviewers fetch`. Lets auditors cross-reference which canonical manifest + ref produced the bundle.
 - `tool_calls` (optional) — audit trace of tool invocations the reviewer's Claude agent made during the review. Each entry is `{ tool, input_sha256 }` where `tool` is the SDK's name (`Read`, `Grep`, `mcp__<server>__<tool>`) and `input_sha256` hashes the canonical JSON of the input. **Not cryptographic evidence that the tools ran** — the operator runs the SDK locally and could forge the trace. This is audit metadata: an auditor who expects "a diff mentioning LIN-123 should produce a `mcp__linear__get_issue` call with input hashing to X" can verify that expectation. Catches lazy tampering, not determined forgery.
 
   **Mirror-privacy note (`STAMP_HASH_MCP_NAMES`).** Tool *inputs* are SHA-256 hashed; for MCP-hosted tools the *names* are also hashed by default (v4 audit M-PR1, shipped in v1.2). The verbatim name `mcp__<server>__<tool>` would otherwise disclose internal-service existence to anyone with read access to the public mirror — e.g. `mcp__acme-billing__lookup_invoice` reveals that an `acme-billing` MCP exists with an `lookup_invoice` tool. The hashed form `mcp__sha256:<hex8>__sha256:<hex8>` preserves the audit invariant ("did the right number of MCP calls happen, with consistent server/tool identities?") while keeping the names out of the mirror. Built-in SDK tool names (`Read`, `Grep`, `Bash`, …) have no `mcp__` prefix and pass through unchanged either way. The local DB rows used by `stamp reviewers show` always carry verbatim names regardless of the flag — operators retain full local visibility into what their reviewers did; only the mirrored attestation is redacted. Operators with all-public MCP servers, or wanting verbatim names while debugging an attestation by eye, opt out via `STAMP_HASH_MCP_NAMES=0` on the machine that runs `stamp merge`. Verifier-side parsing is unchanged because the `tool` field is opaque audit data, not cryptographically verified; existing attestations on already-merged commits stay valid regardless of the flag.
 
-These pin the config the reviewer was invoked against. See `docs/plans/verified-reviewer-configs.md` for the motivating threat model and the remaining steps (server-side manifest allowlists, tool-invocation traces).
+These hash fields pin the reviewer config the reviewer was invoked against. See `docs/plans/verified-reviewer-configs.md` for the motivating threat model and the remaining steps (server-side manifest allowlists, tool-invocation traces).
 
-**Backward compat.** `schema_version` absent or `1` is a legacy payload produced before Step 2 shipped. Verifiers treat legacy payloads as passing the hash checks (fail-open) so existing stamp repos don't break mid-upgrade. New payloads (`schema_version: 2+`) without the hash fields are rejected (fail-closed) — the hash evidence is required for v2+ and missing fields indicate either a malformed payload or a forged downgrade.
+**Why merge-base sourcing matters (v3's defining change vs v2).** All three hash fields are computed from the **merge-base tree** (the common ancestor of the two merge parents), *not* from the merge commit's own tree. This is the structural fix that v3 ships. Under v2, a feature branch could modify its own reviewer prompt (or tools/MCP config), and the resulting `prompt_sha256` would match the modified prompt — so the server-side hook accepted the merge as if a self-rewritten reviewer had legitimately approved its own diff. v3 sources the hashed config from the ancestor commit that *predates* the diff, which the feature branch cannot have tampered with, so a self-rewriting reviewer attempt produces a `prompt_sha256` that doesn't match the merge-base tree and gets rejected. The verifier performs the same merge-base lookup independently. See the leading comment in `src/lib/attestation.ts` for the full version history.
+
+**Version policy.** `CURRENT_PAYLOAD_VERSION = 3` is what `stamp merge` emits. `MIN_ACCEPTED_PAYLOAD_VERSION = 3` is the floor verifiers accept — v1 (absent / `schema_version: 1`) and v2 are **both rejected**, since v2 is known-broken under the self-review attack described above. Repos that have an older `stamp` binary in operator hands but a v3-only verifier on the server will see merges fail until operators upgrade; this is intentional — pre-v3 attestations have no trust property the server should honor.
 
 **Verification (both local `stamp verify` and server-side hook):**
 
-1. Extract `Stamp-Payload` and `Stamp-Verified` trailers from the commit message
-2. Look up the signer's public key by fingerprint among `.stamp/trusted-keys/*.pub` (fingerprint derived from the key file, not the filename)
-3. Verify Ed25519 signature over the payload bytes
-4. Confirm `base_sha` and `head_sha` in the payload match the commit's actual parent and tree lineage
-5. Confirm `target_branch` matches the branch being pushed into
-6. Confirm `approvals` satisfies `.stamp/config.yml`'s `branches.<target>.required`, where config is read from the repo's HEAD of the target branch **as it existed before this push**
-7. Confirm `checks` in the payload covers every entry in `branches.<target>.required_checks` from that same config, with each recording `exit_code: 0`
-8. **(v2+)** For each approval, recompute `prompt_sha256`, `tools_sha256`, and `mcp_sha256` from the merge commit's own `.stamp/` tree (via `git show <sha>:.stamp/...`) and confirm they equal the payload's. Mismatch → reject. This catches an operator who signs an attestation that references configs different from what's actually in the committed repo.
+1. Extract `Stamp-Payload` and `Stamp-Verified` trailers from the commit message (reject if absent or oversized — see trailer size cap above).
+2. Reject if `payload.schema_version < 3`. v1/v2 are no longer accepted.
+3. Look up the signer's public key by fingerprint among `.stamp/trusted-keys/*.pub` (fingerprint derived from the key file, not the filename).
+4. Verify the Ed25519 signature over the base64-decoded payload bytes.
+5. Confirm `base_sha` and `head_sha` in the payload match the commit's actual parent and tree lineage (`base_sha == merge-base(parents)`, `head_sha` is the second parent).
+6. Confirm `target_branch` matches the branch being pushed into.
+7. Confirm `approvals` satisfies `.stamp/config.yml`'s `branches.<target>.required`, where config is read from the repo's HEAD of the target branch **as it existed before this push**.
+8. Confirm `checks` in the payload covers every entry in `branches.<target>.required_checks` from that same config, with each recording `exit_code: 0`.
+9. For each approval, recompute `prompt_sha256`, `tools_sha256`, and `mcp_sha256` from the **merge-base tree** (via `git show <base_sha>:.stamp/...`) and confirm they equal the payload's. Mismatch → reject. This is the v3 hash check; it catches an operator who signs an attestation referencing configs different from what existed at the merge base.
 
 All checks must pass. Any failure → push rejected (or `stamp verify` returns non-zero).
 
-**Trailer size note:** Trailers are single-line. A 3-approval payload serializes to ~400–600 bytes base64 — well within any reasonable line-length limit. If payloads grow beyond a few KB (many approvals, verbose metadata), migrate storage to `git notes` under `refs/notes/stamp/attestations` with the trailer holding only a note reference. Not an MVP concern.
+**Trailer size note.** Trailers are single-line. A 3-approval payload serializes to ~400–600 bytes base64 — well within any reasonable line-length limit, and well under the 64KB hard cap. If payloads grow beyond a few KB (many approvals, verbose metadata), migrate storage to `git notes` under `refs/notes/stamp/attestations` with the trailer holding only a note reference. Not an MVP concern.
+
+### What about v4?
+
+The stamp 2.x line introduces a **`schema_version: 4`** envelope for
+*server-attested* reviews, where the LLM call moves out of the
+operator's machine and into stamp-server, and each approval carries a
+server-issued signature the operator does not hold. v4 lives in
+[`src/lib/attestationV4.ts`](./src/lib/attestationV4.ts) and is a
+parallel, intentionally-separate module from the v3 envelope above —
+the two coexist while the 2.x line ships. The 2.x design, threat
+model, exact v4 field shapes, and trust model live in
+[`docs/plans/server-attested-reviews.md`](./docs/plans/server-attested-reviews.md);
+the operator upgrade walkthrough lives in
+[`docs/migration-1.x-to-2.x.md`](./docs/migration-1.x-to-2.x.md).
+
+In v4, the `tools_sha256` / `mcp_sha256` / `tool_calls` fields are
+deliberately dropped — the Phase 1 server reviewer is prompt-only with
+no tools or MCP, so those fields would always be empty or absent.
+Everything else from v3 is preserved or replaced by a stronger
+construct (e.g. `prompt_sha256` keeps the same shape but is now
+cross-checked against the server's own copy of the prompt as well as
+the merge-base tree).
+
+The "Security model" section above describes v4 end-to-end; this
+section's job is to be the source-of-truth reference for what
+`stamp merge` actually produces in 1.x.
+
+### Deprecated: v2 history
+
+`schema_version: 2` was the predecessor to v3. It shipped the same
+per-approval hash fields (`prompt_sha256`, `tools_sha256`,
+`mcp_sha256`, `tool_calls`) but sourced them from the merge commit's
+own `.stamp/` tree rather than the merge-base tree, which let a
+feature branch self-rewrite a reviewer prompt and have the resulting
+attestation match the modified prompt. v3 fixed this by switching to
+merge-base sourcing. Verifiers no longer accept v2 (or v1) payloads —
+`MIN_ACCEPTED_PAYLOAD_VERSION` is `3`. Documentation reference only;
+no live v2 attestations should exist on a working stamp deployment.
 
 ## Bootstrap
 
