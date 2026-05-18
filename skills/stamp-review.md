@@ -123,4 +123,4 @@ After the verdict summary, repeat the banner from step 1. The operator's attenti
 - Plan schema: `src/lib/reviewPlan.ts` (`ReviewPlan` type, `schema_version: 1`)
 - Banner source: `src/lib/reviewPlan.ts` (`PLAN_NO_TRUST_BANNER`)
 - Mode background: [`docs/local-only-mode.md`](../docs/local-only-mode.md)
-- Design rationale: design.md "Local-only mode (Option E)"
+- Design rationale: external design.md (OpenThink stamp-server-attested-reviews project) — "Local-only mode (Option E)" section

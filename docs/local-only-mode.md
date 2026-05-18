@@ -94,4 +94,4 @@ The skill in this repo is pinned to `schema_version: 1` and will refuse to run a
 - [`src/lib/reviewPlan.ts`](../src/lib/reviewPlan.ts) — `ReviewPlan` type + `PLAN_NO_TRUST_BANNER` constant
 - [`README.md`](../README.md) — overview, install, deployment shapes
 - [`DESIGN.md`](../DESIGN.md) — trust model, security boundary, attestation schema
-- design.md "Local-only mode (Option E)" (in the OpenThink stamp-server-attested-reviews project) — design rationale
+- External design.md — "Local-only mode (Option E)" section in the OpenThink stamp-server-attested-reviews project (not in this repo) — design rationale and trust-model justification

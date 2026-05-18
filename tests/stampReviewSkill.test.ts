@@ -60,7 +60,8 @@ describe("skills/stamp-review.md — file presence and frontmatter", () => {
     // 'attestation' (NOT) keeps the no-trust framing salient so the
     // harness/operator doesn't mistake the skill for trusted-mode review.
     assert.match(desc, /local-only mode/i, "description must name 'local-only mode'");
-    assert.match(desc, /not? a verifiable attestation/i, "description must call out that no verifiable attestation is produced");
+    // Use a strict word-boundary 'not' (the loose 'not?' would also match the typo 'nota verifiable attestation' — caught in AGT-340 round 1 product review).
+    assert.match(desc, /\bnot\b[^.]*verifiable attestation/i, "description must call out that no verifiable attestation is produced");
   });
 
   it("allowed-tools declares Bash + Task at minimum", () => {
