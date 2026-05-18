@@ -690,26 +690,24 @@ export interface PhaseInputV4 {
 
 type PhaseV4 = (input: PhaseInputV4) => PhaseResultV4;
 
-// ORDERING INVARIANT — SECURITY-CRITICAL:
+// ORDERING — defense-in-depth note (NOT security-load-bearing):
 //
-// `verifyV4TrustAnchorSignatures` MUST run before `verifyV4StampPathsGuard`.
-// The guard counts entries in `payload.trust_anchor_signatures` and looks
-// up their capability against the manifest, but it does NOT re-verify
-// the cryptographic signatures — that's been done by the trust-anchor
-// phase, which proves each entry is manifest-listed, capability-bearing,
-// and a valid signature over the canonical payload-without-trust-anchors
-// bytes. If the order is flipped, an attacker controlling a valid outer
-// signing key (e.g., a stale operator key) could populate
-// `trust_anchor_signatures` with real admin `key_id`s and fabricated
-// signatures; the guard's count would reach `minimum_signatures`, the
-// `.stamp/**` gate would pass, and the admin requirement would
-// effectively dissolve.
+// Conceptually `verifyV4TrustAnchorSignatures` runs before
+// `verifyV4StampPathsGuard` so a forged trust-anchor signature is
+// caught with a clear "does not verify" message instead of via the
+// guard's quieter "count short" path. But the guard's correctness
+// does NOT depend on this ordering — it independently re-verifies
+// every `trust_anchor_signatures` entry cryptographically before
+// counting, so a future reorder degrades the UX (later/quieter
+// error message) but does NOT open a hole. The structural property
+// is enforced by the
+// "rejects a forged trust_anchor_signature even if the upstream
+// phase is bypassed" test in tests/preReceiveV4.test.ts, which
+// drives the guard standalone against a forged entry and asserts
+// the count stays at zero.
 //
-// The guard ALSO asserts this ordering at runtime (see
-// verifyV4StampPathsGuard's docstring + the
-// `assertTrustAnchorSignaturesValidatedFirst` invariant inside).
-// Belt-and-suspenders: a future reorder would break the assertion AND
-// produce a visible test failure, not a silent security regression.
+// If you reorder these phases, you'll still be secure. Just expect
+// noisier-looking errors when something is actually wrong.
 const COMMIT_PHASES_V4: ReadonlyArray<{ name: string; fn: PhaseV4 }> = [
   { name: "verifyV4MergeStructure", fn: verifyV4MergeStructure },
   { name: "verifyV4TargetBranch", fn: verifyV4TargetBranch },
@@ -1348,16 +1346,19 @@ export function verifyV4StampPathsGuard(input: PhaseInputV4): PhaseResultV4 {
   if (pathRules.length === 0) return { ok: true };
 
   // SECURITY-CRITICAL: independently validate every trust_anchor_signatures
-  // entry before counting it toward `minimum_signatures`. We could rely on
-  // the upstream `verifyV4TrustAnchorSignatures` phase (which runs first
-  // per COMMIT_PHASES_V4's ordering invariant) to have proved each entry
-  // genuine, but doing so would make this gate's correctness depend on a
-  // declaration-site ordering that future maintainers might unwittingly
-  // change. Re-verifying here removes the implicit dependency: any future
-  // reordering or partial bypass of the earlier phase still leaves THIS
-  // gate fail-closed against forged trust-anchor signatures. The cost is
-  // a handful of additional Ed25519 verifies (~µs each); the security
-  // upside is full structural independence between the two phases.
+  // entry before counting it toward `minimum_signatures`. We do NOT rely
+  // on the upstream `verifyV4TrustAnchorSignatures` phase to have already
+  // proved each entry genuine — doing so would make this gate's
+  // correctness depend on a declaration-site ordering that future
+  // maintainers might unwittingly change. Re-verifying here makes the
+  // gate fail-closed independent of phase order: a forged entry whose
+  // `signer_key_id` happens to match a real admin fingerprint will not
+  // be counted, regardless of what (if anything) ran before us. The
+  // cost is a handful of additional Ed25519 verifies (~µs each); the
+  // security upside is full structural independence between the two
+  // phases. The "rejects a forged trust_anchor_signature even if the
+  // upstream phase is bypassed" test in tests/preReceiveV4.test.ts
+  // structurally enforces this property.
   //
   // Each verified signer's fingerprint is collected into `validSigners`.
   // We do NOT short-circuit on the first failure: a forged entry alongside
