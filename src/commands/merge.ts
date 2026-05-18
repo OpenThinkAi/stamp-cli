@@ -1,9 +1,20 @@
 import { createHash } from "node:crypto";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
-import { latestReviews, openDb } from "../lib/db.js";
-import { pathExistsAtRef, resolveDiff, runGit, showAtRef } from "../lib/git.js";
+import { latestReviews, openDb, serverApprovalsFor } from "../lib/db.js";
+import {
+  listFilesAtRef,
+  pathExistsAtRef,
+  resolveDiff,
+  runGit,
+  showAtRef,
+} from "../lib/git.js";
 import { ensureUserKeypair } from "../lib/keys.js";
+import {
+  parseManifest,
+  resolveCapability,
+} from "../lib/trustedKeysManifest.js";
+import { buildPubkeyMap } from "../lib/sshReviewClient.js";
 import {
   findRepoRoot,
   stampConfigFile,
@@ -18,13 +29,23 @@ import {
   type CheckAttestation,
 } from "../lib/attestation.js";
 import {
+  CURRENT_V4_SCHEMA_VERSION,
+  canonicalSerializeApproval,
+  canonicalSerializePayload,
+  formatTrailers as formatTrailersV4,
+  type ApprovalEntryV4,
+  type ApprovalV4,
+  type AttestationPayloadV4,
+  type CheckAttestationV4,
+} from "../lib/attestationV4.js";
+import {
   hashMcpServers,
   hashPromptBytes,
   hashTools,
   readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { parseToolCalls, redactToolCallsForAttestation } from "../lib/toolCalls.js";
-import { signBytes } from "../lib/signing.js";
+import { signBytes, verifyBytes } from "../lib/signing.js";
 import { requireHumanMerge } from "../lib/humanMerge.js";
 
 export interface MergeOptions {
@@ -172,6 +193,11 @@ export function runMerge(opts: MergeOptions): void {
   // after the try-block can read them once the post-merge phase succeeds.
   let mergeSha: string;
   const checkAttestations: CheckAttestation[] = [];
+  // v4 `CheckAttestationV4` is structurally identical to v3
+  // `CheckAttestation` (same four fields: name, command, exit_code,
+  // output_sha). Capturing into the v3-shaped list and shaping into a
+  // v4 list inside `buildV4Trailers` keeps the checks runner above
+  // schema-agnostic.
 
   try {
     // 5. Re-load config from the working tree NOW (post-merge) rather than
@@ -228,56 +254,42 @@ export function runMerge(opts: MergeOptions): void {
       }
     }
 
-    // 6a. Compute per-reviewer prompt/tools/mcp hashes from the *merge-base*
-    //     tree (NOT the merge commit's own tree). v3 attestation security
-    //     boundary: the reviewer that approved is the one that existed at
-    //     base_sha — the version BEFORE the diff. Hashing the post-merge
-    //     tree (v2) was broken because a feature branch could modify a
-    //     reviewer prompt and the resulting hash would match the modified
-    //     prompt, allowing a self-reviewing merge to verify cleanly.
+    // Dispatch — server-attested v4 vs. legacy v3.
     //
-    //     reviewer_source comes from the on-disk lock file (which at this
-    //     point IS the merge-commit tree, since we just made the merge).
-    //     It's audit metadata, not part of the trust boundary — if a diff
-    //     swaps the lock file, the prompt_sha256 hash mismatch (computed
-    //     from the *base* tree below) is what would catch it.
-    const baseConfigYaml = showAtRef(resolved.base_sha, ".stamp/config.yml", repoRoot);
-    const baseReviewers = readReviewersFromYaml(baseConfigYaml);
+    // The branch rule's `review_server` field is the v4 trigger: if the
+    // operator configured a stamp-server review URL for this branch, the
+    // merge MUST fold real server-signed approvals into a v4 envelope.
+    // Missing/stale server signatures fail loudly; we never silently fall
+    // back to v3 here because doing so would let a misconfigured server
+    // (or a stale DB) downgrade the trust property without the operator
+    // noticing.
+    //
+    // v3 (legacy) is preserved for repos without `review_server` — they
+    // continue to ship operator-signed-only attestations as today.
+    const trailers = rule.review_server
+      ? buildV4Trailers({
+          repoRoot,
+          revspec,
+          baseSha: resolved.base_sha,
+          headSha: resolved.head_sha,
+          diff: resolved.diff,
+          targetBranch: opts.into,
+          requiredReviewers: rule.required,
+          checks: checkAttestations,
+          operatorPrivateKeyPem: keypair.privateKeyPem,
+          operatorFingerprint: keypair.fingerprint,
+        })
+      : buildV3Trailers({
+          repoRoot,
+          baseSha: resolved.base_sha,
+          headSha: resolved.head_sha,
+          approvals,
+          checks: checkAttestations,
+          targetBranch: opts.into,
+          operatorPrivateKeyPem: keypair.privateKeyPem,
+          operatorFingerprint: keypair.fingerprint,
+        });
 
-    approvals = approvals.map((a) => {
-      const def = baseReviewers[a.reviewer];
-      if (!def) {
-        throw new Error(
-          `reviewer "${a.reviewer}" approved the diff but is not defined in .stamp/config.yml at base ${resolved.base_sha.slice(0, 8)}. ` +
-            `This shouldn't happen — runReview reads from the same base. ` +
-            `File a bug at https://github.com/OpenThinkAi/stamp-cli/issues. ` +
-            `Merge rolled back.`,
-        );
-      }
-      const promptText = showAtRef(resolved.base_sha, def.prompt, repoRoot);
-      const source = readReviewerSource(a.reviewer, repoRoot);
-      return {
-        ...a,
-        prompt_sha256: hashPromptBytes(Buffer.from(promptText, "utf8")),
-        tools_sha256: hashTools(def.tools),
-        mcp_sha256: hashMcpServers(def.mcp_servers),
-        ...(source ? { reviewer_source: source } : {}),
-      };
-    });
-
-    // 6b. Build payload, sign, amend the merge commit with trailers.
-    const payload: AttestationPayload = {
-      schema_version: CURRENT_PAYLOAD_VERSION,
-      base_sha: resolved.base_sha,
-      head_sha: resolved.head_sha,
-      target_branch: opts.into,
-      approvals,
-      checks: checkAttestations,
-      signer_key_id: keypair.fingerprint,
-    };
-    const payloadBytes = serializePayload(payload);
-    const signature = signBytes(keypair.privateKeyPem, payloadBytes);
-    const trailers = formatTrailers(payload, signature);
     const fullMessage = `${title}\n\n${trailers}\n`;
 
     git(["commit", "--amend", "-m", fullMessage, "--no-edit"], repoRoot);
@@ -319,6 +331,382 @@ export function runMerge(opts: MergeOptions): void {
 
 function hashPart(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+/**
+ * Build the v3 (operator-signed-only, legacy) trailer block.
+ *
+ * Preserves the pre-AGT-334 behavior verbatim: per-reviewer
+ * prompt/tools/mcp hashes are sourced from the merge-base tree (NOT the
+ * merge commit's own tree). That's the v3 security boundary — the
+ * reviewer that approved is the one that existed at `base_sha`, the
+ * version BEFORE the diff. Hashing the post-merge tree (v2) was broken
+ * because a feature branch could modify a reviewer prompt and the
+ * resulting hash would match the modified prompt, allowing a self-
+ * reviewing merge to verify cleanly.
+ *
+ * reviewer_source comes from the on-disk lock file (which at this point
+ * IS the merge-commit tree, since we just made the merge). It's audit
+ * metadata, not part of the trust boundary — if a diff swaps the lock
+ * file, the prompt_sha256 mismatch (computed from the *base* tree) is
+ * what would catch it.
+ */
+function buildV3Trailers(input: {
+  repoRoot: string;
+  baseSha: string;
+  headSha: string;
+  approvals: Approval[];
+  checks: CheckAttestation[];
+  targetBranch: string;
+  operatorPrivateKeyPem: string;
+  operatorFingerprint: string;
+}): string {
+  const baseConfigYaml = showAtRef(
+    input.baseSha,
+    ".stamp/config.yml",
+    input.repoRoot,
+  );
+  const baseReviewers = readReviewersFromYaml(baseConfigYaml);
+
+  const approvalsWithHashes: Approval[] = input.approvals.map((a) => {
+    const def = baseReviewers[a.reviewer];
+    if (!def) {
+      throw new Error(
+        `reviewer "${a.reviewer}" approved the diff but is not defined in .stamp/config.yml at base ${input.baseSha.slice(0, 8)}. ` +
+          `This shouldn't happen — runReview reads from the same base. ` +
+          `File a bug at https://github.com/OpenThinkAi/stamp-cli/issues. ` +
+          `Merge rolled back.`,
+      );
+    }
+    const promptText = showAtRef(input.baseSha, def.prompt, input.repoRoot);
+    const source = readReviewerSource(a.reviewer, input.repoRoot);
+    return {
+      ...a,
+      prompt_sha256: hashPromptBytes(Buffer.from(promptText, "utf8")),
+      tools_sha256: hashTools(def.tools),
+      mcp_sha256: hashMcpServers(def.mcp_servers),
+      ...(source ? { reviewer_source: source } : {}),
+    };
+  });
+
+  const payload: AttestationPayload = {
+    schema_version: CURRENT_PAYLOAD_VERSION,
+    base_sha: input.baseSha,
+    head_sha: input.headSha,
+    target_branch: input.targetBranch,
+    approvals: approvalsWithHashes,
+    checks: input.checks,
+    signer_key_id: input.operatorFingerprint,
+  };
+  const payloadBytes = serializePayload(payload);
+  const signature = signBytes(input.operatorPrivateKeyPem, payloadBytes);
+  return formatTrailers(payload, signature);
+}
+
+/**
+ * Build the v4 (server-attested) trailer block.
+ *
+ * Validates that every required reviewer has a server-signed approval
+ * row in the local DB for `(baseSha, headSha)`, fails loudly on missing
+ * or stale rows, and assembles the v4 envelope with operator signature
+ * over the canonical payload bytes.
+ *
+ * Failure modes (all rollback-triggering):
+ *   - no server-signed row for a required reviewer → "missing server
+ *     signature"
+ *   - `approval.diff_sha256` doesn't match sha256(diff) → "stale server
+ *     signature"
+ *   - `approval.base_sha` / `head_sha` / `reviewer` mismatch → "server
+ *     signature for wrong target"
+ *   - `approval.verdict !== 'approved'` → "non-approval verdict"
+ *
+ * Each error message names the actionable next step (re-run `stamp
+ * review --diff <revspec>`).
+ */
+function buildV4Trailers(input: {
+  repoRoot: string;
+  revspec: string;
+  baseSha: string;
+  headSha: string;
+  diff: string;
+  targetBranch: string;
+  requiredReviewers: string[];
+  checks: CheckAttestation[];
+  operatorPrivateKeyPem: string;
+  operatorFingerprint: string;
+}): string {
+  // Compute the canonical diff_sha256 over the same bytes the server
+  // hashed. resolveDiff returned `diff` as a utf-8 string; encode the
+  // same way the SSH client did when it streamed bytes to the server.
+  const diffBytes = Buffer.from(input.diff, "utf8");
+  const diffSha256 = createHash("sha256").update(diffBytes).digest("hex");
+
+  // Load the trusted-keys manifest + pubkey set at base_sha.
+  //
+  // Defense-in-depth (AGT-334 security review #1): the SSH client
+  // verified every server signature at write time, but DB tampering
+  // or a writer-side bug could plant a row with a plausible-looking
+  // approval body and an invalid signature. Re-verifying at merge
+  // time means a corrupted DB row can NEVER produce a signed merge
+  // commit — the operator's local trust chain stays intact even when
+  // the DB is hostile. This closes the "AGT-335 will catch it" gap:
+  // a fault detected here surfaces at merge time with a clear local
+  // recovery path, not at push time after a permanent commit has
+  // already landed.
+  //
+  // Sourced from base_sha (same boundary as `stamp review`): a
+  // feature branch shipping a permissive manifest cannot have that
+  // manifest trust its own additions — the verifier reads the
+  // manifest as it existed BEFORE the diff.
+  let manifestYaml: string;
+  try {
+    manifestYaml = showAtRef(
+      input.baseSha,
+      ".stamp/trusted-keys/manifest.yml",
+      input.repoRoot,
+    );
+  } catch (err) {
+    throw new Error(
+      `review_server is configured but .stamp/trusted-keys/manifest.yml is missing ` +
+        `at base ${input.baseSha.slice(0, 8)}: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `Server-attested merges require the manifest in the merge-base tree so ` +
+        `each approval's server signature can be checked against the keys the repo ` +
+        `trusted at attestation time. Commit a manifest with capabilities: [server] ` +
+        `entries for the review server before merging.`,
+    );
+  }
+  const manifest = parseManifest(manifestYaml);
+  if (!manifest) {
+    throw new Error(
+      `.stamp/trusted-keys/manifest.yml at base ${input.baseSha.slice(0, 8)} ` +
+        `failed to parse as a valid trusted-keys manifest. Fix the YAML ` +
+        `(syntax error, duplicate fingerprint, unknown capability, etc.) ` +
+        `and re-merge.`,
+    );
+  }
+  const pubFilenames = listFilesAtRef(
+    input.baseSha,
+    ".stamp/trusted-keys",
+    input.repoRoot,
+  );
+  const pubkeyByFingerprint = buildPubkeyMap(pubFilenames, (relPath) =>
+    showAtRef(input.baseSha, relPath, input.repoRoot),
+  );
+
+  // Query server-signed approval rows for this (base, head) pair.
+  const db = openDb(stampStateDbPath(input.repoRoot));
+  let entries: ApprovalEntryV4[];
+  try {
+    const rows = serverApprovalsFor(db, input.baseSha, input.headSha);
+    const byReviewer = new Map(rows.map((r) => [r.reviewer, r]));
+
+    entries = input.requiredReviewers.map((reviewerName) => {
+      const row = byReviewer.get(reviewerName);
+      if (!row) {
+        throw new Error(
+          `missing server signature for reviewer "${reviewerName}" at base→head ${input.baseSha.slice(0, 8)}→${input.headSha.slice(0, 8)}. ` +
+            `Server-attested mode requires every required reviewer to have a stamp-server-signed approval in the local DB. ` +
+            `Run \`stamp review --diff ${input.revspec}\` to populate server signatures, then re-run \`stamp merge\`.`,
+        );
+      }
+
+      // Parse the JSON-stringified ApprovalV4 the SSH client persisted.
+      // The bytes the server signed are
+      // `canonicalSerializeApproval(parsed)`, NOT this JSON string
+      // verbatim — JSON.parse + re-stringify doesn't preserve key order
+      // and the canonical serializer re-sorts before signature checks.
+      //
+      // `JSON.parse` is typed as `any`; we narrow to `ApprovalV4` only
+      // after the field-by-field shape check below validates every
+      // string-typed field we care about. A row that parses to `null`,
+      // an array, or an object missing a required string field surfaces
+      // as a clean "malformed row" error rather than `Cannot read
+      // property of null` further down.
+      let parsedJson: unknown;
+      try {
+        parsedJson = JSON.parse(row.approval_json);
+      } catch (err) {
+        throw new Error(
+          `server approval row for reviewer "${reviewerName}" has malformed JSON in server_approval_json — DB corruption or a writer-side bug. ` +
+            `Re-run \`stamp review --diff ${input.revspec}\` to write a fresh row. ` +
+            `(parse error: ${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+      if (
+        !parsedJson ||
+        typeof parsedJson !== "object" ||
+        Array.isArray(parsedJson)
+      ) {
+        throw new Error(
+          `server approval row for reviewer "${reviewerName}" parsed to a non-object value — DB corruption or a writer-side bug. ` +
+            `Re-run \`stamp review --diff ${input.revspec}\` to write a fresh row.`,
+        );
+      }
+      const obj = parsedJson as Record<string, unknown>;
+      for (const field of [
+        "reviewer",
+        "verdict",
+        "prompt_sha256",
+        "diff_sha256",
+        "base_sha",
+        "head_sha",
+        "trusted_keys_snapshot_sha256",
+        "issued_at",
+        "server_key_id",
+      ]) {
+        if (typeof obj[field] !== "string") {
+          throw new Error(
+            `server approval row for reviewer "${reviewerName}" is missing required field "${field}" (or it isn't a string) — DB corruption or a writer-side bug. ` +
+              `Re-run \`stamp review --diff ${input.revspec}\` to write a fresh row.`,
+          );
+        }
+      }
+      const approval = parsedJson as ApprovalV4;
+
+      // Cross-check the parsed approval body against the inputs. The
+      // SSH client already enforces these on write, but verifying again
+      // here keeps the merge-time invariant explicit: the row we're
+      // about to fold into a trust-bearing envelope describes THIS
+      // merge, not some other one.
+      if (approval.reviewer !== reviewerName) {
+        throw new Error(
+          `server approval row for reviewer "${reviewerName}" carries approval.reviewer="${approval.reviewer}" — DB row drifted. ` +
+            `Re-run \`stamp review --diff ${input.revspec}\`.`,
+        );
+      }
+      if (approval.base_sha !== input.baseSha) {
+        throw new Error(
+          `server approval for "${reviewerName}" was signed against base_sha ${approval.base_sha.slice(0, 8)} but we're merging from ${input.baseSha.slice(0, 8)} — stale signature. ` +
+            `Re-run \`stamp review --diff ${input.revspec}\` to refresh.`,
+        );
+      }
+      if (approval.head_sha !== input.headSha) {
+        throw new Error(
+          `server approval for "${reviewerName}" was signed against head_sha ${approval.head_sha.slice(0, 8)} but we're merging head ${input.headSha.slice(0, 8)} — stale signature. ` +
+            `Re-run \`stamp review --diff ${input.revspec}\` to refresh.`,
+        );
+      }
+      if (approval.diff_sha256 !== diffSha256) {
+        throw new Error(
+          `server approval for "${reviewerName}" was signed against diff_sha256 ${approval.diff_sha256.slice(0, 12)}… but the current diff hashes to ${diffSha256.slice(0, 12)}… — stale signature. ` +
+            `The diff content drifted between review and merge (rebased base, modified head). ` +
+            `Re-run \`stamp review --diff ${input.revspec}\`.`,
+        );
+      }
+      if (approval.verdict !== "approved") {
+        throw new Error(
+          `server approval for "${reviewerName}" carries verdict "${approval.verdict}", not "approved". ` +
+            `Re-run \`stamp review --diff ${input.revspec}\` so the server signs the current approved verdict.`,
+        );
+      }
+
+      // Re-verify the server's Ed25519 signature over the canonical
+      // approval bytes. The SSH client already did this at write
+      // time, but the operator's local trust chain MUST NOT depend
+      // on that — a DB row is only as trustworthy as the bytes we
+      // can verify right now. Failure here means either the DB was
+      // tampered with after the SSH client wrote, the manifest /
+      // pubkey set at base_sha doesn't include the signing key, or
+      // the row drifted by writer-side bug. All three are merge-
+      // blocking; recovery is a fresh `stamp review`.
+      //
+      // Trust-key lookup uses the INNER signed payload's
+      // server_key_id (settled architectural decision #9), not the
+      // row's denormalized column.
+      const caps = resolveCapability(manifest, approval.server_key_id);
+      if (caps === null) {
+        throw new Error(
+          `server approval for "${reviewerName}" was signed by ${approval.server_key_id}, ` +
+            `but that key isn't listed in .stamp/trusted-keys/manifest.yml at base ${input.baseSha.slice(0, 8)}. ` +
+            `Either the server's signing key changed (commit the new fingerprint to the manifest with capabilities: [server]) ` +
+            `or this row was written by a server the repo no longer trusts. ` +
+            `Re-run \`stamp review --diff ${input.revspec}\` after fixing the manifest.`,
+        );
+      }
+      if (!caps.includes("server")) {
+        throw new Error(
+          `server approval for "${reviewerName}" was signed by ${approval.server_key_id}, ` +
+            `but that key's capabilities in .stamp/trusted-keys/manifest.yml at base ${input.baseSha.slice(0, 8)} are [${caps.join(", ")}] — ` +
+            `missing the required 'server' capability. Update the manifest entry and re-merge.`,
+        );
+      }
+      const serverPubPem = pubkeyByFingerprint.get(approval.server_key_id);
+      if (!serverPubPem) {
+        throw new Error(
+          `server approval for "${reviewerName}" was signed by ${approval.server_key_id}, ` +
+            `but no .pub file in .stamp/trusted-keys/ at base ${input.baseSha.slice(0, 8)} matches that fingerprint. ` +
+            `Commit the server's public key alongside its manifest entry and re-merge.`,
+        );
+      }
+      const sigOk = verifyBytes(
+        serverPubPem,
+        canonicalSerializeApproval(approval),
+        row.signature_b64,
+      );
+      if (!sigOk) {
+        throw new Error(
+          `server signature for "${reviewerName}" failed Ed25519 verification against key ${approval.server_key_id}. ` +
+            `The DB row's signature does not match the canonical bytes of its approval body — ` +
+            `either the row was tampered with or the writer was buggy. ` +
+            `Re-run \`stamp review --diff ${input.revspec}\` to refresh the signed row.`,
+        );
+      }
+
+      // Trust-lookup is derived from the INNER signed payload's
+      // server_key_id, not the row's denormalized column (settled
+      // architectural decision #9: the column is for display/indexing
+      // only; the signed payload's server_key_id is authoritative).
+      // The SSH client already verified the inner signature against the
+      // manifest at base_sha before writing this row; we re-export that
+      // server_key_id into the envelope here so downstream verifiers
+      // can re-resolve against the manifest themselves.
+      return {
+        approval,
+        server_attestation: {
+          server_key_id: approval.server_key_id,
+          signature: row.signature_b64,
+        },
+      };
+    });
+  } finally {
+    db.close();
+  }
+
+  // v4 checks share the field set with v3 (name, command, exit_code,
+  // output_sha) but live under a distinct type. Shape-cast — no field
+  // rename needed.
+  const v4Checks: CheckAttestationV4[] = input.checks.map((c) => ({
+    name: c.name,
+    command: c.command,
+    exit_code: c.exit_code,
+    output_sha: c.output_sha,
+  }));
+
+  const payload: AttestationPayloadV4 = {
+    schema_version: CURRENT_V4_SCHEMA_VERSION,
+    base_sha: input.baseSha,
+    head_sha: input.headSha,
+    target_branch: input.targetBranch,
+    diff_sha256: diffSha256,
+    approvals: entries,
+    checks: v4Checks,
+    // Empty for Phase-1 — `path_rules` trust-anchor signatures are an
+    // M4 deliverable. Verifiers reject if the diff touches `.stamp/**`
+    // and this is empty; that gate lives on the verifier side and is
+    // tested separately (AGT-335).
+    trust_anchor_signatures: [],
+    signer_key_id: input.operatorFingerprint,
+  };
+
+  // Operator's Ed25519 over the canonical payload bytes. The bytes that
+  // land in the Stamp-Verified trailer are produced by
+  // `canonicalSerializePayload`; trailerValueToPayloadBytes(b64) pulls
+  // the same bytes back out on the verify side, so the signature target
+  // is byte-stable across serialize → trailer-encode → trailer-decode.
+  const payloadBytes = canonicalSerializePayload(payload);
+  const signature = signBytes(input.operatorPrivateKeyPem, payloadBytes);
+  return formatTrailersV4(payload, signature);
 }
 
 function readReviewerSource(
