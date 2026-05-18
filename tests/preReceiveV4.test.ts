@@ -58,6 +58,7 @@ import {
 import { buildPubkeyMap } from "../src/lib/sshReviewClient.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import {
+  parsePathRules,
   verifyV4ApprovalSignatures,
   verifyV4Approvals,
   verifyV4Checks,
@@ -1077,10 +1078,20 @@ describe("pre-receive v4 — .stamp/** admin-sig guard (AGT-336)", () => {
     h = setupHarness({ touchStampPath: true });
     process.chdir(h.repo);
 
-    const { payload: signedPayload, outerSig: _outerSig } = payloadWithTrustAnchors(h, [h.adminKey]);
-    // Drop the approvals so the "reviewer cycle didn't run" branch
-    // triggers. Re-resign the outer signature against the new bytes.
-    const payload: AttestationPayloadV4 = { ...signedPayload, approvals: [] };
+    // Build a no-approvals payload from scratch so the
+    // trust_anchor_signatures are signed against the right canonical
+    // bytes (with approvals=[] already baked in, since the guard
+    // re-verifies them as a defense-in-depth check against forged
+    // trust-anchor signatures — see AGT-336 security round 1).
+    const base = buildPayload(h);
+    const noApprovalsBase: AttestationPayloadV4 = { ...base, approvals: [], trust_anchor_signatures: [] };
+    const signingBytes = canonicalSerializePayload(noApprovalsBase);
+    const payload: AttestationPayloadV4 = {
+      ...noApprovalsBase,
+      trust_anchor_signatures: [
+        { signer_key_id: h.adminKey.fingerprint, signature: signBytes(h.adminKey.privatePem, signingBytes) },
+      ],
+    };
     const outerSig = signOuter(h, payload);
 
     const input = h.inputFor(payload, outerSig);
@@ -1108,8 +1119,17 @@ describe("pre-receive v4 — .stamp/** admin-sig guard (AGT-336)", () => {
     h = setupHarness({ touchStampPath: true });
     process.chdir(h.repo);
 
-    const { payload: signedPayload, outerSig: _ } = payloadWithTrustAnchors(h, [h.adminKey]);
-    const payload: AttestationPayloadV4 = { ...signedPayload, approvals: [] };
+    // Same setup as the bypass=false test, just with bypass=true to
+    // confirm the empty-approvals envelope is NOT rejected.
+    const base = buildPayload(h);
+    const noApprovalsBase: AttestationPayloadV4 = { ...base, approvals: [], trust_anchor_signatures: [] };
+    const signingBytes = canonicalSerializePayload(noApprovalsBase);
+    const payload: AttestationPayloadV4 = {
+      ...noApprovalsBase,
+      trust_anchor_signatures: [
+        { signer_key_id: h.adminKey.fingerprint, signature: signBytes(h.adminKey.privatePem, signingBytes) },
+      ],
+    };
     const outerSig = signOuter(h, payload);
     const input = h.inputFor(payload, outerSig);
     input.rule = { required: [] };
@@ -1155,6 +1175,49 @@ describe("pre-receive v4 — .stamp/** admin-sig guard (AGT-336)", () => {
     assert.match(
       (guard as { reason: string }).reason,
       /\.stamp\/reviewers\/\*\*.*requires 2 signature/,
+    );
+  });
+
+  it("rejects a forged trust_anchor_signature even if the upstream phase is bypassed (defense in depth)", () => {
+    // SECURITY ROUND 1: the guard MUST NOT depend on
+    // verifyV4TrustAnchorSignatures having run first. We test that
+    // by driving the guard in isolation against a payload whose
+    // trust_anchor_signatures contains a forged entry (real admin
+    // key_id, garbage signature). The earlier phase would catch
+    // this in the production pipeline; the guard must also fail
+    // closed standalone.
+    h = setupHarness({ touchStampPath: true });
+    process.chdir(h.repo);
+
+    const base = buildPayload(h);
+    const payload: AttestationPayloadV4 = {
+      ...base,
+      trust_anchor_signatures: [
+        {
+          signer_key_id: h.adminKey.fingerprint,
+          // Garbage bytes — not a valid signature over any canonical
+          // payload. The guard's in-line Ed25519 verify must reject
+          // this and NOT count adminKey toward `minimum_signatures`.
+          signature: signBytes(h.adminKey.privatePem, Buffer.from("forged", "utf8")),
+        },
+      ],
+    };
+    const outerSig = signOuter(h, payload);
+    const input = h.inputFor(payload, outerSig);
+    input.pathRules = [
+      {
+        pattern: ".stamp/**",
+        require_capability: "admin",
+        minimum_signatures: 1,
+        bypass_review_cycle: true,
+      },
+    ];
+
+    const guard = verifyV4StampPathsGuard(input);
+    assert.equal(guard.ok, false);
+    assert.match(
+      (guard as { reason: string }).reason,
+      /requires 1 signature\(s\) from keys with capability 'admin'.*only 0 qualifying/,
     );
   });
 
@@ -1239,6 +1302,110 @@ describe("pre-receive v4 — .stamp/** admin-sig guard (AGT-336)", () => {
     input.pathRules = [STAMP_RULE_2ADMIN_BYPASS];
     const guard = verifyV4StampPathsGuard(input);
     assert.equal(guard.ok, true, `expected guard ok, got: ${(guard as { reason?: string }).reason}`);
+  });
+});
+
+describe("pre-receive v4 — path_rules: malformed-rule warnings (AGT-336 security round 1)", () => {
+  // AGT-336 security review flagged silent drops of malformed rules
+  // as an operational security gap. parsePathRules now returns
+  // warnings alongside the parsed rules so the hook can surface them
+  // on stderr. These tests pin that contract.
+
+  it("returns { rules: [], warnings: [] } when path_rules is absent", () => {
+    const p = parsePathRules(undefined);
+    assert.deepEqual(p.rules, []);
+    assert.deepEqual(p.warnings, []);
+  });
+
+  it("emits a top-level warning when path_rules is an array (wrong shape)", () => {
+    const p = parsePathRules([{ pattern: ".stamp/**" }]);
+    assert.deepEqual(p.rules, []);
+    assert.equal(p.warnings.length, 1);
+    assert.match(p.warnings[0]!, /top-level value must be a YAML map/);
+  });
+
+  it("drops a rule with non-integer minimum_signatures and warns", () => {
+    const p = parsePathRules({
+      ".stamp/**": {
+        require_capability: "admin",
+        minimum_signatures: "2", // wrong type
+        bypass_review_cycle: true,
+      },
+    });
+    assert.deepEqual(p.rules, []);
+    assert.equal(p.warnings.length, 1);
+    assert.match(p.warnings[0]!, /\.stamp\/\*\*.*minimum_signatures must be a positive integer/);
+    assert.match(p.warnings[0]!, /NOT gated/);
+  });
+
+  it("drops a rule with non-boolean bypass_review_cycle and warns", () => {
+    const p = parsePathRules({
+      ".stamp/**": {
+        require_capability: "admin",
+        minimum_signatures: 2,
+        bypass_review_cycle: "yes", // YAML 1.1's boolean-ish, but a plain string here
+      },
+    });
+    assert.deepEqual(p.rules, []);
+    assert.equal(p.warnings.length, 1);
+    assert.match(p.warnings[0]!, /bypass_review_cycle must be a YAML boolean/);
+  });
+
+  it("drops a rule with empty require_capability and warns", () => {
+    const p = parsePathRules({
+      ".stamp/**": {
+        require_capability: "",
+        minimum_signatures: 1,
+        bypass_review_cycle: true,
+      },
+    });
+    assert.deepEqual(p.rules, []);
+    assert.equal(p.warnings.length, 1);
+    assert.match(p.warnings[0]!, /require_capability must be a non-empty string/);
+  });
+
+  it("drops a rule with non-positive minimum_signatures and warns", () => {
+    const p = parsePathRules({
+      ".stamp/**": {
+        require_capability: "admin",
+        minimum_signatures: 0,
+        bypass_review_cycle: true,
+      },
+    });
+    assert.deepEqual(p.rules, []);
+    assert.equal(p.warnings.length, 1);
+    assert.match(p.warnings[0]!, /minimum_signatures must be a positive integer/);
+  });
+
+  it("accepts a well-formed rule with zero warnings", () => {
+    const p = parsePathRules({
+      ".stamp/**": {
+        require_capability: "admin",
+        minimum_signatures: 2,
+        bypass_review_cycle: true,
+      },
+    });
+    assert.equal(p.warnings.length, 0);
+    assert.equal(p.rules.length, 1);
+    assert.equal(p.rules[0]!.pattern, ".stamp/**");
+    assert.equal(p.rules[0]!.require_capability, "admin");
+    assert.equal(p.rules[0]!.minimum_signatures, 2);
+    assert.equal(p.rules[0]!.bypass_review_cycle, true);
+  });
+
+  it("partial-malformed: drops the bad rule, keeps the good one, warns once", () => {
+    const p = parsePathRules({
+      ".stamp/**": {
+        require_capability: "admin",
+        minimum_signatures: 1,
+        bypass_review_cycle: true,
+      },
+      ".github/workflows/*.yml": "not-a-map", // malformed
+    });
+    assert.equal(p.rules.length, 1);
+    assert.equal(p.rules[0]!.pattern, ".stamp/**");
+    assert.equal(p.warnings.length, 1);
+    assert.match(p.warnings[0]!, /\.github\/workflows.*rule body must be a YAML map/);
   });
 });
 
