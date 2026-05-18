@@ -874,12 +874,16 @@ export interface PrModeSubstitution {
 export interface PrModeMirrorResult {
   action: "wrote" | "exists" | "skipped";
   path: string;
-  /** Non-null when the workflow was written (or already exists with our
-   *  template shape) AND we could derive substitution values. Null when
-   *  the workflow was written with raw `<STAMP_SERVER_HOST>` /
-   *  `<STAMP_SERVER_PORT>` / `<REPO_ORG>` / `<REPO_NAME>` placeholders
-   *  because `.stamp/config.yml` had no `review_server` or origin
-   *  wasn't parseable. */
+  /** What `derivePrModeSubstitution` resolved at the time of this call.
+   *  Non-null when both `.stamp/config.yml`'s `review_server` parsed and
+   *  `origin` parsed into `(org, repo)`. Null otherwise — the workflow
+   *  is then rendered with `<STAMP_SERVER_HOST>` / `<STAMP_SERVER_PORT>`
+   *  / `<REPO_ORG>` / `<REPO_NAME>` placeholders.
+   *
+   *  This is a *snapshot of the derivation*, not an assertion about the
+   *  bytes on disk. When `action === "exists"`, this may be non-null
+   *  while the existing file still has stale placeholders (or vice
+   *  versa). Use `--pr-mode-force` to refresh the file. */
   substitution: PrModeSubstitution | null;
 }
 
@@ -986,15 +990,23 @@ export function derivePrModeSubstitution(
  * template is rendered with literal `<PLACEHOLDER>` markers so the
  * operator can fill them in by hand and re-run init with --force.
  *
+ * Defense-in-depth: substituted values (host/port/org/repo) are emitted
+ * as YAML `env:` variables on the run step and referenced as `"$VAR"`
+ * inside the shell — they never appear as command tokens. Even if the
+ * upstream parsers (`parseReviewServerUrl`, `parseOrgRepoFromUrl`)
+ * grow a regression that lets a metacharacter slip through, the
+ * generated shell still sees the values as quoted variable expansions,
+ * not as syntactically-active tokens.
+ *
  * Inline rather than file-loaded because the template is short and
  * version-bound to this release (matching the pattern of
  * `renderVerifyWorkflow` above).
  */
 export function renderMirrorWorkflow(sub: PrModeSubstitution | null): string {
-  // Use placeholders by default; substitute when we have parsed values.
-  // Keep the placeholder markers identical to the docs in
-  // docs/plans/server-attested-reviews.md so an operator who copy-pastes
-  // the design doc's example sees the same shape.
+  // Substituted values are emitted as YAML `env:` entries on the run
+  // step (see "Defense-in-depth" in the JSDoc above). Either a parsed
+  // value or a literal `<PLACEHOLDER>` marker the operator hand-fills.
+  // Either way the value never becomes a shell command token.
   const host = sub ? sub.host : "<STAMP_SERVER_HOST>";
   const port = sub ? String(sub.port) : "<STAMP_SERVER_PORT>";
   const org = sub ? sub.org : "<REPO_ORG>";
@@ -1038,6 +1050,14 @@ export function renderMirrorWorkflow(sub: PrModeSubstitution | null): string {
     "      - name: push to stamp-server",
     "        env:",
     "          STAMP_MIRROR_KEY: ${{ secrets.STAMP_MIRROR_KEY }}",
+    "          # Substituted values flow through env: so the shell never",
+    "          # sees them as command tokens — defense-in-depth against",
+    "          # any future parser regression that lets a shell",
+    "          # metacharacter slip past the upstream URL validators.",
+    `          STAMP_SERVER_HOST: ${yamlScalar(host)}`,
+    `          STAMP_SERVER_PORT: ${yamlScalar(port)}`,
+    `          STAMP_REPO_ORG: ${yamlScalar(org)}`,
+    `          STAMP_REPO_NAME: ${yamlScalar(repo)}`,
     "        run: |",
     "          set -euo pipefail",
     "          if [ -z \"${STAMP_MIRROR_KEY:-}\" ]; then",
@@ -1053,19 +1073,44 @@ export function renderMirrorWorkflow(sub: PrModeSubstitution | null): string {
     "          # reject keys without one), then lock down perms.",
     "          printf '%s\\n' \"$STAMP_MIRROR_KEY\" > ~/.ssh/stamp_mirror_key",
     "          chmod 0600 ~/.ssh/stamp_mirror_key",
-    `          # Pin the host key on first contact. For higher assurance,`,
-    `          # replace the keyscan with a known-host fingerprint your`,
-    `          # operator verified out-of-band (e.g. \`ssh-keygen -lf\`).`,
-    `          ssh-keyscan -p ${port} ${host} >> ~/.ssh/known_hosts 2>/dev/null`,
+    "          # Pin the host key on first contact. TOFU on every job;",
+    "          # for higher assurance, REPLACE the keyscan with a known-",
+    "          # host fingerprint your operator verified out-of-band",
+    "          # (e.g. `ssh-keygen -lf <pubkey>`). The walkthrough that",
+    "          # `stamp init --pr-mode` prints calls this out as a",
+    "          # post-setup hardening step.",
+    "          ssh-keyscan -p \"$STAMP_SERVER_PORT\" \"$STAMP_SERVER_HOST\" \\",
+    "            >> ~/.ssh/known_hosts 2>/dev/null",
     "          # `|| true` on remote-add because rerunning the job (e.g.",
     "          # workflow re-run) finds an existing remote and would fail",
     "          # otherwise. The fetch URL is fixed by template; nothing",
     "          # gets clobbered by tolerating the add-already-exists case.",
-    `          git remote add stamp-server ssh://git@${host}:${port}/srv/git/${org}/${repo}.git || true`,
+    "          git remote add stamp-server \\",
+    "            \"ssh://git@${STAMP_SERVER_HOST}:${STAMP_SERVER_PORT}/srv/git/${STAMP_REPO_ORG}/${STAMP_REPO_NAME}.git\" \\",
+    "            || true",
     "          GIT_SSH_COMMAND=\"ssh -i ~/.ssh/stamp_mirror_key -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/known_hosts\" \\",
     "            git push --mirror stamp-server",
     "",
   ].join("\n");
+}
+
+/**
+ * Emit a value as a YAML scalar that round-trips back to the same
+ * string regardless of its contents. Used to inject substituted
+ * host/port/org/repo into `env:` entries in the generated workflow
+ * without risking YAML parser hiccups when the value contains a `<`,
+ * a `-` lead, or any other character YAML treats specially in plain
+ * scalar form. We always double-quote, escaping `\` and `"` per the
+ * YAML 1.2 double-quoted-scalar grammar. This is the minimal subset
+ * needed for our four substituted strings (which are already shape-
+ * validated by `parseReviewServerUrl` / `parseOrgRepoFromUrl`); we
+ * deliberately do NOT use the `yaml` package's `stringify` here
+ * because the surrounding template is hand-built line-by-line and
+ * pulling a YAML stringifier in for four scalars is overkill.
+ */
+function yamlScalar(value: string): string {
+  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }
 
 /**
@@ -1081,8 +1126,14 @@ function printPrModeWalkthrough(result: PrModeMirrorResult): void {
     ? `stamp-server at ssh://git@${result.substitution.host}:${result.substitution.port}, mirror path /srv/git/${result.substitution.org}/${result.substitution.repo}.git`
     : "stamp-server host/port and org/repo placeholders unfilled — see below";
 
+  // Walkthrough verb must match `action` so it agrees with the
+  // `PR mirror:` summary line emitted earlier. "Wrote" on an "exists"
+  // result would produce a direct factual contradiction in the same
+  // stdout stream.
+  const verb = result.action === "wrote" ? "Wrote" : "Found existing";
+
   console.log("PR-mode (Shape 2) mirror workflow notes:");
-  console.log(`  Wrote ${result.path} (${subSummary}).`);
+  console.log(`  ${verb} ${result.path} (${subSummary}).`);
   console.log();
   if (!result.substitution) {
     console.log(
@@ -1117,15 +1168,16 @@ function printPrModeWalkthrough(result: PrModeMirrorResult): void {
   console.log(
     "    2. Register the public half (`stamp-mirror.pub`) on stamp-server",
   );
+  console.log("       via the invite flow:");
   if (result.substitution) {
     console.log(
-      `       (ssh -p ${result.substitution.port} git@${result.substitution.host}):`,
+      `         ssh -p ${result.substitution.port} git@${result.substitution.host} \\`,
     );
   } else {
-    console.log("       (ssh -p <port> git@<stamp-server-host>):");
+    console.log("         ssh -p <port> git@<stamp-server-host> \\");
   }
   console.log(
-    "         ssh git@<host> stamp-mint-invite mirror --role member",
+    "           stamp-mint-invite mirror --role member",
   );
   console.log(
     "       Accept the invite with the pubkey from step 1 to create the",
@@ -1150,6 +1202,35 @@ function printPrModeWalkthrough(result: PrModeMirrorResult): void {
   );
   console.log(
     "       the mirror; subsequent pushes mirror automatically.",
+  );
+  console.log();
+  console.log(
+    "    5. (Recommended) Pin the stamp-server SSH host key in the",
+  );
+  console.log(
+    "       workflow. The template uses `ssh-keyscan` for first-contact",
+  );
+  console.log(
+    "       TOFU on every run, which an active MitM at push time could",
+  );
+  console.log(
+    "       defeat. To harden, capture the fingerprint out-of-band:",
+  );
+  if (result.substitution) {
+    console.log(
+      `         ssh-keyscan -p ${result.substitution.port} ${result.substitution.host}`,
+    );
+  } else {
+    console.log("         ssh-keyscan -p <port> <stamp-server-host>");
+  }
+  console.log(
+    "       Verify it matches what your operator independently knows,",
+  );
+  console.log(
+    "       then commit the line into `~/.ssh/known_hosts` in the",
+  );
+  console.log(
+    "       workflow run-step (replacing the `ssh-keyscan` invocation).",
   );
   console.log();
   console.log(

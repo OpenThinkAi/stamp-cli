@@ -222,10 +222,13 @@ describe("maybeWritePrModeMirrorWorkflow — file output", () => {
       assert.equal(body.includes("<STAMP_SERVER_PORT>"), false);
       assert.equal(body.includes("<REPO_ORG>"), false);
       assert.equal(body.includes("<REPO_NAME>"), false);
-      // And the concrete values do appear, including inside the ssh URL.
-      assert.match(body, /stamp\.example\.com/);
-      assert.match(body, /2222/);
-      assert.match(body, /acme\/widgets\.git/);
+      // Values appear as quoted YAML env entries (not as bare shell
+      // command tokens — security feedback round 1 motivated the
+      // env-var indirection).
+      assert.match(body, /STAMP_SERVER_HOST:\s*"stamp\.example\.com"/);
+      assert.match(body, /STAMP_SERVER_PORT:\s*"2222"/);
+      assert.match(body, /STAMP_REPO_ORG:\s*"acme"/);
+      assert.match(body, /STAMP_REPO_NAME:\s*"widgets"/);
     } finally {
       r.cleanup();
     }
@@ -354,28 +357,72 @@ describe("renderMirrorWorkflow — pinned content", () => {
     assert.match(body, /IdentitiesOnly=yes/);
   });
 
-  it("pins host key via ssh-keyscan at the configured port", () => {
+  it("pins host key via ssh-keyscan referencing env vars (defense-in-depth)", () => {
     const body = renderMirrorWorkflow({
       host: "stamp.example.com",
       port: 2222,
       org: "acme",
       repo: "widgets",
     });
-    assert.match(body, /ssh-keyscan -p 2222 stamp\.example\.com/);
+    // The shell should reference $STAMP_SERVER_PORT / $STAMP_SERVER_HOST
+    // rather than embedding the values as command tokens — that way a
+    // future parser-regression that lets a metacharacter through still
+    // can't reach the shell as a syntactically-active token.
+    assert.match(
+      body,
+      /ssh-keyscan -p "\$STAMP_SERVER_PORT" "\$STAMP_SERVER_HOST"/,
+    );
+    // And the values themselves still appear in the file, as YAML env: entries.
+    assert.match(body, /STAMP_SERVER_HOST:\s*"stamp\.example\.com"/);
+    assert.match(body, /STAMP_SERVER_PORT:\s*"2222"/);
+    assert.match(body, /STAMP_REPO_ORG:\s*"acme"/);
+    assert.match(body, /STAMP_REPO_NAME:\s*"widgets"/);
+  });
+
+  it("constructs the stamp-server SSH URL through env-var expansion, not direct interpolation", () => {
+    const body = renderMirrorWorkflow({
+      host: "stamp.example.com",
+      port: 2222,
+      org: "acme",
+      repo: "widgets",
+    });
+    // The `git remote add stamp-server ...` line must use $VAR
+    // expansions inside a double-quoted argument so the values stay
+    // quoted at shell-token level. Embedding the literal host as a
+    // bare token would be the regression security flagged in round 1.
+    assert.match(
+      body,
+      /git remote add stamp-server\s*\\\n\s*"ssh:\/\/git@\$\{STAMP_SERVER_HOST\}:\$\{STAMP_SERVER_PORT\}\/srv\/git\/\$\{STAMP_REPO_ORG\}\/\$\{STAMP_REPO_NAME\}\.git"/,
+    );
+    // Defense-in-depth: bare-token interpolation of the four values
+    // must NOT appear anywhere in the rendered shell. (Match without
+    // quoting; a substring miss here would be the regression.)
+    assert.equal(body.includes(" stamp.example.com "), false);
+    assert.equal(body.includes("/srv/git/acme/widgets.git"), false);
   });
 
   it("does not interpolate raw `${sub}` placeholders into rendered text (regression)", () => {
     // Mirror of the renderVerifyWorkflow regression check: catch a draft
     // that used a string literal where a template literal was needed.
+    // Use a sentinel that no test value contains so a match means the
+    // template literal was malformed, not that the value coincidentally
+    // contained the placeholder name.
     const body = renderMirrorWorkflow({
       host: "stamp.example.com",
       port: 2222,
       org: "acme",
       repo: "widgets",
     });
+    // Variables named literally `host` / `port` / `org` / `repo` only
+    // appear as TypeScript-source identifiers in this file, never in
+    // the rendered output. The rendered output uses the namespaced
+    // shell vars (`STAMP_SERVER_HOST`, ...) instead. A `${host}` leak
+    // would indicate a string-literal-vs-template-literal regression.
     assert.equal(body.includes("${host}"), false);
     assert.equal(body.includes("${port}"), false);
-    assert.equal(body.includes("${org}"), false);
-    assert.equal(body.includes("${repo}"), false);
+    // `${org}` and `${repo}` are too generic to test in isolation
+    // because legitimate substrings of the namespaced vars
+    // (`STAMP_REPO_ORG`, `STAMP_REPO_NAME`) include "ORG" / "REPO".
+    // The two assertions above carry the regression-coverage load.
   });
 });
