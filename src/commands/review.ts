@@ -906,8 +906,11 @@ async function runServerAttestedReviews(input: {
   console.log(`  org/repo: ${orgRepo.org}/${orgRepo.repo}`);
   console.log();
 
+  // `config` is destructured for symmetry with the local-LLM path and as
+  // a forward-looking handle: AGT-334's follow-up will thread per-reviewer
+  // `enforce_reads_on_dotstamp` policy through the SSH path against it.
+  // No-op today.
   const diffBuffer = Buffer.from(resolved.diff, "utf8");
-  void config; // touched for symmetry with the LLM path — reserved for AGT-334 follow-up that wires per-reviewer `enforce_reads_on_dotstamp` policy through the SSH path.
 
   const results = await Promise.allSettled(
     reviewerNames.map((name) =>

@@ -189,10 +189,13 @@ export interface ServerReviewResult {
   prose: string;
   approval: ApprovalV4;
   signature: string;
-  /** The exact JSON text the server sent for `approval` (NOT the canonical
-   *  re-serialization). Persisted to `reviews.server_approval_json` so a
-   *  future verifier can parse + re-canonicalize and verify the signature
-   *  byte-for-byte. */
+  /** `JSON.stringify(approval)` for DB persistence. NOT the raw wire bytes
+   *  the server sent — JSON.parse + re-stringify reorders keys non-
+   *  deterministically. Downstream verifiers call
+   *  `canonicalSerializeApproval` before checking the signature, so key
+   *  order doesn't matter for verification; the field exists to give
+   *  `reviews.server_approval_json` a parseable record of the approval
+   *  body. AGT-334's merge folder also re-canonicalizes before checking. */
   approvalJson: string;
 }
 
@@ -567,12 +570,12 @@ export async function requestServerReview(
     );
   }
 
-  // Persist the EXACT bytes the server emitted for the `approval` field
-  // — not our re-canonicalization — so a downstream verifier (AGT-334's
-  // merge folder, the pre-receive hook) can parse + re-canonicalize and
-  // verify the signature byte-for-byte. The server's signature is over
-  // `canonicalSerializeApproval(approval)`, but the JSON-on-the-wire may
-  // be in a different key order; the verifier handles that.
+  // Serialize the parsed approval body for DB persistence. This is a
+  // re-stringification, NOT the raw wire bytes — JSON.parse + re-stringify
+  // doesn't preserve key order. That's fine: downstream verifiers
+  // (AGT-334's merge folder, the pre-receive hook) call
+  // `canonicalSerializeApproval` before signature verification, so the
+  // canonical sort makes key-order differences invisible to the check.
   return {
     verdict: parsed.verdict,
     prose: parsed.prose,
