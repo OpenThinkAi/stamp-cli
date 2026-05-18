@@ -85,6 +85,17 @@ export interface AdminSignOptions {
    *  prediction; the verifier reads target_branch from the commit's
    *  v4 envelope at merge time and doesn't consult this. */
   targetBranch?: string;
+  /** Override the predicted operator fingerprint (the `signer_key_id`
+   *  baked into the signing target). Default = the caller's local
+   *  stamp key. In a `minimum_signatures: 2` workflow where one admin
+   *  signs but a DIFFERENT admin will run `stamp merge`, the
+   *  non-operator admin MUST pass this flag with the eventual
+   *  operator's fingerprint — otherwise their signature will sign
+   *  bytes that diverge from what `stamp merge` re-derives, and the
+   *  gate will fail with "0 verifying signatures" at merge time. This
+   *  is the operational coordination point the multi-admin flow turns
+   *  on; surface it loudly. */
+  signerKeyId?: string;
   /** When true, list mode emits machine-readable JSON instead of the
    *  human table. */
   json?: boolean;
@@ -448,6 +459,23 @@ function signPending(
 
   const targetBranch = opts.targetBranch ?? guessTargetBranch(repoRoot);
 
+  // Predicted operator fingerprint for the eventual `stamp merge`.
+  // Defaults to the caller's own key (the common case: one admin
+  // signs and runs merge). For multi-admin workflows where a
+  // different admin will run merge, callers MUST pass --signer-key-id
+  // explicitly so every admin signs over identical bytes. Validate
+  // the override looks like a fingerprint to catch typos before they
+  // become merge-time "0 verifying signatures" surprises.
+  let predictedSigner = callerFingerprint;
+  if (opts.signerKeyId !== undefined) {
+    if (!/^sha256:[0-9a-f]{64}$/.test(opts.signerKeyId)) {
+      throw new Error(
+        `--signer-key-id must be a fingerprint of the form \`sha256:<64-hex>\` (got ${JSON.stringify(opts.signerKeyId)}).`,
+      );
+    }
+    predictedSigner = opts.signerKeyId;
+  }
+
   const signingBytes = trustAnchorSigningBytes({
     baseSha,
     headSha,
@@ -455,7 +483,7 @@ function signPending(
     diffSha256,
     approvals,
     checks: [], // see trustAnchorPayload.ts "Operational caveat"
-    signerKeyId: callerFingerprint, // operator-predicted; see module docstring
+    signerKeyId: predictedSigner,
   });
 
   const signatureB64 = signBytes(keypair.privateKeyPem, signingBytes);

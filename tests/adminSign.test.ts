@@ -51,7 +51,7 @@ import {
   type ApprovalV4,
   type AttestationPayloadV4,
 } from "../src/lib/attestationV4.ts";
-import { openDb, recordReview } from "../src/lib/db.ts";
+import { openDb, recordReview, serverApprovalsFor } from "../src/lib/db.ts";
 import { ensureUserKeypair, fingerprintFromPem } from "../src/lib/keys.ts";
 import { stampStateDbPath } from "../src/lib/paths.ts";
 import { signBytes } from "../src/lib/signing.ts";
@@ -444,6 +444,22 @@ describe("stamp admin sign --pending <sha> — validation", () => {
       h.cleanup();
     }
   });
+
+  it("rejects a malformed --signer-key-id override", () => {
+    const h = setupHarness();
+    try {
+      const featureHead = shaOf(h.repo, "feature");
+      assert.throws(
+        () =>
+          runFromRepo(h.repo, () =>
+            runAdminSign({ pending: featureHead, signerKeyId: "not-a-fingerprint" }),
+          ),
+        /must be a fingerprint of the form/,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
 });
 
 describe("stamp admin sign --pending <sha> — happy path + idempotency", () => {
@@ -605,30 +621,17 @@ function bobSigns(h: Harness, baseSha: string, headSha: string, targetBranch: st
   const diff = diffBetween(h.repo, baseSha, headSha);
   const diffSha = diffSha256Hex(diff);
 
-  // Mirror `runAdminSign`'s loadServerApprovals: read the DB row,
-  // verify the server sig, build the ApprovalEntryV4.
+  // Mirror `runAdminSign`'s loadServerApprovals shape using the exported
+  // projection helper so this test stays in sync with the production
+  // query shape automatically.
   const db = openDb(stampStateDbPath(h.repo));
   let approvals: import("../src/lib/attestationV4.ts").ApprovalEntryV4[];
   try {
-    const rows = db
-      .prepare(
-        `SELECT reviewer, server_approval_json, server_signature_b64, server_key_id
-         FROM reviews
-         WHERE base_sha = ? AND head_sha = ?
-           AND server_approval_json IS NOT NULL
-         ORDER BY reviewer ASC`,
-      )
-      .all(baseSha, headSha) as Array<{
-      reviewer: string;
-      server_approval_json: string;
-      server_signature_b64: string;
-      server_key_id: string;
-    }>;
-    approvals = rows.map((r) => ({
-      approval: JSON.parse(r.server_approval_json) as ApprovalV4,
+    approvals = serverApprovalsFor(db, baseSha, headSha).map((r) => ({
+      approval: JSON.parse(r.approval_json) as ApprovalV4,
       server_attestation: {
         server_key_id: r.server_key_id,
-        signature: r.server_signature_b64,
+        signature: r.signature_b64,
       },
     }));
   } finally {

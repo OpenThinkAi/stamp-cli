@@ -805,7 +805,7 @@ const admin = program
 admin
   .command("sign")
   .description(
-    "collect or add admin-capability counter-signatures for pending .stamp/** commits (AGT-337)",
+    "collect or add admin-capability counter-signatures for pending .stamp/** commits",
   )
   .option(
     "--pending [sha]",
@@ -815,8 +815,12 @@ admin
     "--target-branch <name>",
     "override the predicted target branch baked into the admin signing target (default: current branch's upstream basename, else current branch)",
   )
+  .option(
+    "--signer-key-id <fingerprint>",
+    "override the predicted operator fingerprint baked into the signing target — required for non-operator co-signers in multi-admin workflows (form: sha256:<64-hex>)",
+  )
   .option("--json", "(list mode only) emit pending commits as JSON")
-  .action((opts: { pending?: string | boolean; targetBranch?: string; json?: boolean }) => {
+  .action((opts: { pending?: string | boolean; targetBranch?: string; signerKeyId?: string; json?: boolean }) => {
     try {
       // commander returns `true` when --pending is passed without a value
       // (the [sha] form). Map that to undefined → list mode. A real string
@@ -828,6 +832,7 @@ admin
       runAdminSign({
         pending: pendingArg,
         targetBranch: opts.targetBranch,
+        signerKeyId: opts.signerKeyId,
         json: opts.json,
       });
     } catch (err) {

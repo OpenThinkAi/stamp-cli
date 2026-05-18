@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
 import { latestReviews, openDb, serverApprovalsFor } from "../lib/db.js";
@@ -40,7 +39,12 @@ import {
   type CheckAttestationV4,
   type TrustAnchorSignatureV4,
 } from "../lib/attestationV4.js";
-import { readNote, TRUST_ANCHOR_NOTES_REF } from "../lib/trustAnchorNotes.js";
+import {
+  listChangedFiles,
+  readNote,
+  TRUST_ANCHOR_NOTES_REF,
+} from "../lib/trustAnchorNotes.js";
+import { trustAnchorSigningBytes } from "../lib/trustAnchorPayload.js";
 import { parsePathRules } from "../hooks/pre-receive.js";
 import { parse as parseYaml } from "yaml";
 import {
@@ -793,17 +797,16 @@ function collectTrustAnchorSignatures(input: {
   const { rules: pathRules } = parsePathRules(rawPathRules);
   if (pathRules.length === 0) return [];
 
-  // Enumerate changed files and find matching rules.
-  let changedRaw: string;
-  try {
-    changedRaw = execFileSyncCapture(
-      input.repoRoot,
-      ["diff", "-z", "--name-only", `${input.baseSha}...${input.headSha}`],
-    );
-  } catch {
-    return [];
-  }
-  const changedFiles = changedRaw.split("\0").filter((p) => p.length > 0);
+  // Enumerate changed files and find matching rules. Reuse the helper
+  // in `trustAnchorNotes.ts` rather than spawning a local `git diff`
+  // — same null-on-failure contract, single point of truth for the
+  // base...head enumeration.
+  const changedFiles = listChangedFiles(
+    input.repoRoot,
+    input.baseSha,
+    input.headSha,
+  );
+  if (!changedFiles) return [];
   const matchingRules = pathRules.filter((r) =>
     changedFiles.some((f) => pathRuleMatches(f, r.pattern)),
   );
@@ -828,18 +831,19 @@ function collectTrustAnchorSignatures(input: {
   }
 
   // Re-derive the signing target the SAME way `stamp admin sign` did:
-  // the v4 payload with `trust_anchor_signatures: []`. Verify each note
-  // entry against these bytes + the manifest at base_sha.
-  const signingTarget = canonicalSerializePayload({
-    schema_version: CURRENT_V4_SCHEMA_VERSION,
-    base_sha: input.baseSha,
-    head_sha: input.headSha,
-    target_branch: input.targetBranch,
-    diff_sha256: input.diffSha256,
+  // the v4 payload with `trust_anchor_signatures: []`. Both call sites
+  // MUST go through `trustAnchorSigningBytes` so any future field
+  // addition propagates to both producers atomically. Inlining the
+  // construction here would re-introduce the divergence-bug class
+  // `trustAnchorPayload.ts` exists to prevent.
+  const signingTarget = trustAnchorSigningBytes({
+    baseSha: input.baseSha,
+    headSha: input.headSha,
+    targetBranch: input.targetBranch,
+    diffSha256: input.diffSha256,
     approvals: input.approvals,
     checks: input.checks,
-    trust_anchor_signatures: [],
-    signer_key_id: input.operatorFingerprint,
+    signerKeyId: input.operatorFingerprint,
   });
 
   const verified: TrustAnchorSignatureV4[] = [];
@@ -939,17 +943,6 @@ function pathRuleMatches(filePath: string, pattern: string): boolean {
   return new RegExp(`^${translated}$`).test(filePath);
 }
 
-/** Local execFileSync wrapper that captures stdout (with 16MB buffer)
- *  and returns its utf-8 text. `runGit` exists in `lib/git.ts` but
- *  re-throws stderr-merged errors; we just need raw bytes here. */
-function execFileSyncCapture(cwd: string, args: string[]): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-}
 
 function readReviewerSource(
   reviewerName: string,
