@@ -395,4 +395,58 @@ describe("runReview({ headless: true }) — stdout/stderr separation + shape", (
     assert.equal(plan.reviewers[0]!.verdict, null);
     assert.match(plan.reviewers[0]!.error ?? "", /rate_limit_error/);
   });
+
+  it("changes_requested verdict → process.exitCode = 1 (non-approved is a failure for cron callers)", async () => {
+    // Regression pin: an earlier iteration's `anyFailed` predicate only
+    // checked `verdict === null`, so a successful `changes_requested`
+    // from every reviewer silently exited 0 — directly contradicting
+    // the documented contract (docs/local-only-mode.md: "exit 1 if any
+    // reviewer ... returned a non-null non-approved verdict"). The
+    // primary --headless audience is cron / git hooks gating off the
+    // exit code; this case must surface as a failure.
+    process.exitCode = 0;
+    const fake: ReviewerFake = async (opts) => ({
+      ...opts.reviewer,
+      verdict: "changes_requested",
+      prose: "fix the foo before merging",
+      model: opts.model,
+    });
+    const cap = captureStreams();
+    try {
+      await runReview({
+        diff: "main..feature",
+        headless: true,
+        _headlessReviewerForTest: fake,
+      });
+    } finally {
+      cap.restore();
+    }
+    assert.equal(process.exitCode, 1);
+    const plan = JSON.parse(cap.stdout.trimEnd()) as {
+      reviewers: Array<{ verdict: string | null; error?: string }>;
+    };
+    assert.equal(plan.reviewers[0]!.verdict, "changes_requested");
+    assert.equal(plan.reviewers[0]!.error, undefined);
+  });
+
+  it("denied verdict → process.exitCode = 1 (paired regression for the changes_requested case)", async () => {
+    process.exitCode = 0;
+    const fake: ReviewerFake = async (opts) => ({
+      ...opts.reviewer,
+      verdict: "denied",
+      prose: "blocking security finding",
+      model: opts.model,
+    });
+    const cap = captureStreams();
+    try {
+      await runReview({
+        diff: "main..feature",
+        headless: true,
+        _headlessReviewerForTest: fake,
+      });
+    } finally {
+      cap.restore();
+    }
+    assert.equal(process.exitCode, 1);
+  });
 });

@@ -209,12 +209,20 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     };
     process.stdout.write(JSON.stringify(headlessPlan) + "\n");
     process.stderr.write(HEADLESS_NO_TRUST_BANNER + "\n");
-    // Non-zero exit if any reviewer failed OR returned non-approved.
-    // Match trusted-mode behaviour where anyFailed → exitCode 1. The
-    // headless caller (cron, hook, script) is far more likely to gate
-    // off the exit code than parse the JSON — give them an honest
-    // signal.
-    const anyFailed = results.some((r) => r.error || r.verdict === null);
+    // Non-zero exit if any reviewer failed OR returned a non-approved
+    // verdict. Cron / git-hook / script callers — the primary audience
+    // for --headless — are far more likely to gate off the exit code
+    // than to parse the JSON, so a `changes_requested` or `denied`
+    // verdict MUST surface as exit 1. The narrow `verdict === null`
+    // guard the first iteration shipped only caught API/parse
+    // failures, which silently exited 0 on a `changes_requested` from
+    // every reviewer — the exact failure mode `--headless` exists to
+    // prevent. AGT-341 round-1 review caught this; the matching
+    // `changes_requested → exit 1` test is in
+    // tests/headlessReviewCommand.test.ts.
+    const anyFailed = results.some(
+      (r) => r.error != null || r.verdict !== "approved",
+    );
     if (anyFailed) process.exitCode = 1;
     return;
     // consider auto-detect when claude-code SDK exposes a parent-agent
