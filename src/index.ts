@@ -509,12 +509,17 @@ program
     "--no-cache",
     "skip the verdict cache and force a fresh LLM call for every reviewer (default: serve from cache when (reviewer, diff, prompt) tuple matches a prior verdict). STAMP_NO_REVIEW_CACHE=1 has the same effect.",
   )
+  .option(
+    "--plan",
+    "local-only mode: emit a JSON plan (diff + reviewer prompts + per-reviewer fence hex) on stdout for a parent agent to dispatch subagents against; do NOT call the LLM. Writes a no-trust banner to stderr. See `src/lib/reviewPlan.ts` for the schema (consumed by the Claude Code skill). In plan mode `--no-cache` and `--allow-large` are inert — no LLM call, no cache hit, no diff-size cap.",
+  )
   .action(
     async (opts: {
       diff: string;
       only?: string;
       allowLarge?: boolean;
       cache?: boolean;
+      plan?: boolean;
     }) => {
       try {
         // commander's --no-cache sets opts.cache = false; absent flag leaves
@@ -525,6 +530,7 @@ program
           only: opts.only,
           allowLarge: opts.allowLarge,
           noCache: opts.cache === false,
+          plan: opts.plan === true,
         });
       } catch (err) {
         handleCliError(err);
