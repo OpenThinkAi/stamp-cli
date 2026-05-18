@@ -25,8 +25,18 @@
  * Reviewer-hash sourcing matches `stamp merge` exactly: prompt / tools
  * / mcp_servers SHAs come from the merge-BASE tree, not the feature
  * branch's tree, so a malicious feature branch can't self-review by
- * editing its own reviewer prompt. Same v3 schema, same security
- * boundary.
+ * editing its own reviewer prompt.
+ *
+ * NOTE on schema: this command produces PR-attestations at the LEGACY
+ * client schema version (v2 — see `LEGACY_CLIENT_PR_ATTESTATION_SCHEMA_VERSION`
+ * in `prAttestation.ts`). The 2.x v3 envelope embeds v4-trust fields
+ * (per-approval server signatures, top-level diff_sha256,
+ * trust_anchor_signatures) that the local CLI can't fabricate without
+ * already being the trust root — that's stamp-server's job (AGT-355).
+ * The 2.x verifier (`stamp verify-pr`, `stamp/verify-attestation@v1`,
+ * post-AGT-338) rejects v2 envelopes with an actionable "schema_version
+ * too old" error; operators upgrading to server-attested reviews must
+ * also upgrade the producer to a 2.x stamp-server.
  */
 
 import { spawnSync } from "node:child_process";
