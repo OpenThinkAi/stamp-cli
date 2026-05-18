@@ -102,10 +102,14 @@ export interface ApprovalV4 {
   diff_sha256: string;
   base_sha: string;
   head_sha: string;
-  /** Hex sha256 of `.stamp/trusted-keys/manifest.yml` as it existed at
-   *  `base_sha`. Enables lenient revocation: a verdict signed by a
-   *  later-revoked server key remains valid for merges whose snapshot
-   *  predates the revocation. */
+  /** `sha256:<hex>` of `.stamp/trusted-keys/manifest.yml` as it existed
+   *  at `base_sha`, in the same prefixed form as fingerprints. Matches
+   *  the value `snapshotSha256()` in `src/lib/trustedKeysManifest.ts`
+   *  returns — the docstring was previously under-specified (just "hex
+   *  sha256") and is tightened here to pin the prefixed convention the
+   *  helper + tests already enforce. Enables lenient revocation: a
+   *  verdict signed by a later-revoked server key remains valid for
+   *  merges whose snapshot predates the revocation. */
   trusted_keys_snapshot_sha256: string;
   /** ISO-8601 UTC timestamp the server assigned at signing time. Part
    *  of the signed bytes; the verifier reads it for audit-log surface

@@ -185,6 +185,13 @@ COPY --from=builder /build/dist/server/bootstrap-review-key.cjs /usr/local/sbin/
 # via git-shell command dispatch (symlinked below). Binds to the
 # authenticated SSH key via SSH_USER_AUTH (ExposeAuthInfo).
 COPY --from=builder /build/dist/server/mint-invite.cjs /usr/local/bin/stamp-mint-invite
+# Server-attested review SSH command (AGT-328 scaffold). Invoked as
+# `git@server stamp-review --reviewer X --org Y --repo Z --base-sha S
+# --head-sha H --diff-sha256 D < diff` via git-shell command dispatch
+# (symlinked below). Same SSH_USER_AUTH identity-binding pattern as
+# stamp-mint-invite; rejects callers below role=member. AGT-330 fills
+# in the Anthropic call; AGT-331 fills in the real signature.
+COPY --from=builder /build/dist/server/stamp-review.cjs /usr/local/bin/stamp-review
 # HTTP listener for invite/accept. Started by entrypoint.sh as the git
 # user, runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
 # the hosting platform's job (Railway terminates at its edge proxy).
@@ -224,6 +231,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/list-trash \
              /usr/local/bin/stamp-server-pubkey \
              /usr/local/bin/stamp-mint-invite \
+             /usr/local/bin/stamp-review \
              /usr/local/bin/stamp-users \
              /usr/local/sbin/stamp-ensure-repo-key \
              /usr/local/sbin/stamp-authorized-keys \
@@ -254,6 +262,7 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/list-trash /home/git/git-shell-commands/list-trash \
  && ln -s /usr/local/bin/stamp-server-pubkey /home/git/git-shell-commands/stamp-server-pubkey \
  && ln -s /usr/local/bin/stamp-mint-invite /home/git/git-shell-commands/stamp-mint-invite \
+ && ln -s /usr/local/bin/stamp-review /home/git/git-shell-commands/stamp-review \
  && ln -s /usr/local/bin/stamp-users /home/git/git-shell-commands/stamp-users \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands
