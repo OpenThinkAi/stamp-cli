@@ -511,7 +511,7 @@ program
   )
   .option(
     "--plan",
-    "local-only mode: emit a JSON plan (diff + reviewer prompts + per-reviewer fence hex) on stdout for a parent agent to dispatch subagents against; do NOT call the LLM. Writes a no-trust banner to stderr. See `src/lib/reviewPlan.ts` for the schema (consumed by the Claude Code skill). In plan mode `--no-cache` and `--allow-large` are inert — no LLM call, no cache hit, no diff-size cap.",
+    "local-only mode: emit a JSON plan on stdout for a parent agent to dispatch subagents against; do NOT call the LLM. Plan fields: schema_version, revspec, base_sha, head_sha, diff, reviewers[] (each with name, prompt, fence_hex). Writes a `note:`-prefixed no-trust advisory to stderr (no attestation is produced). In plan mode `--no-cache` and `--allow-large` are inert — no LLM call, no cache hit, no diff-size cap.",
   )
   .action(
     async (opts: {

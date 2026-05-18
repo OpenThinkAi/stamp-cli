@@ -25,7 +25,6 @@ import { randomBytes } from "node:crypto";
 
 import { parseConfigFromYaml, type StampConfig } from "./config.js";
 import { resolveDiff, showAtRef, type ResolvedDiff } from "./git.js";
-import { stampConfigFile } from "./paths.js";
 
 /**
  * One entry per reviewer in the plan. The parent agent uses this to
@@ -82,10 +81,12 @@ export interface ReviewPlan {
  * here (not in the command) so the wording stays under the lib's
  * versioning — if the contract changes, the test that pins this string
  * forces a deliberate update. Wording aligned with design.md "Local-only
- * mode (Option E)".
+ * mode (Option E)"; `note: ` prefix matches the stamp-cli stderr-advisory
+ * convention (lowercase prefix + trailing space, same shape as the
+ * per-user reviewer-model notice in review.ts).
  */
 export const PLAN_NO_TRUST_BANNER =
-  "This produces iteration feedback only. No attestation will be created. " +
+  "note: this produces iteration feedback only. No attestation will be created. " +
   "To produce a verifiable verdict, configure a `review_server` in `.stamp/config.yml`.";
 
 export interface BuildReviewPlanOptions {
@@ -113,14 +114,6 @@ export interface BuildReviewPlanOptions {
  * to state.db. Pure plan emission.
  */
 export function buildReviewPlan(opts: BuildReviewPlanOptions): ReviewPlan {
-  const configPath = stampConfigFile(opts.repoRoot);
-  // The command layer already throws a friendly "run `stamp init`" error
-  // when the config file is missing, so this function assumes the caller
-  // has verified existence. We re-read via `git show` against base_sha
-  // anyway, so a missing working-tree config is not the failure mode we
-  // catch here.
-  void configPath;
-
   const resolved: ResolvedDiff = resolveDiff(opts.diff, opts.repoRoot);
 
   let baseConfigYaml: string;

@@ -215,4 +215,15 @@ describe("PLAN_NO_TRUST_BANNER", () => {
     assert.match(PLAN_NO_TRUST_BANNER, /review_server/);
     assert.match(PLAN_NO_TRUST_BANNER, /\.stamp\/config\.yml/);
   });
+
+  it("uses the lowercase `note: ` stderr-advisory prefix (stamp-cli convention)", () => {
+    // Every other stderr advisory in stamp-cli uses `note: ` or
+    // `warning: ` (lowercase, trailing space). The plan banner is a
+    // notice, not an error — pin the prefix so a future edit can't drift
+    // back to an unprefixed string.
+    assert.ok(
+      PLAN_NO_TRUST_BANNER.startsWith("note: "),
+      `banner should start with "note: "; got: ${JSON.stringify(PLAN_NO_TRUST_BANNER.slice(0, 16))}`,
+    );
+  });
 });

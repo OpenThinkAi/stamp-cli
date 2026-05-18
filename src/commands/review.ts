@@ -74,14 +74,6 @@ export interface ReviewOptions {
 const DEFAULT_DIFF_SIZE_CAP_BYTES = 200 * 1024;
 
 export async function runReview(opts: ReviewOptions): Promise<void> {
-  const repoRoot = findRepoRoot();
-  const configPath = stampConfigFile(repoRoot);
-  if (!existsSync(configPath)) {
-    throw new Error(
-      `no .stamp/config.yml at ${configPath}. Run \`stamp init\` first.`,
-    );
-  }
-
   // --plan mode short-circuits the trusted-mode pipeline entirely. We do
   // NOT enter the STAMP_NO_LLM guard, the empty-base bootstrap branch,
   // the diff-size cap, the verdict cache, the prior-review lookup, or
@@ -99,11 +91,24 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   // `jq` / `JSON.parse` without prose stripping). The no-trust banner
   // goes to stderr so a parent that captures only stdout doesn't lose it
   // — and a parent that captures both can distinguish data from notice.
+  //
+  // The repoRoot + config-existence check is duplicated in the plan and
+  // trusted branches so that trusted mode preserves its prior ordering:
+  // `STAMP_NO_LLM=1` with no config still throws the LLM error first
+  // (operators relying on that as a clean short-circuit before stamp
+  // touches the repo don't get a new behavior change).
   if (opts.plan) {
+    const planRepoRoot = findRepoRoot();
+    const planConfigPath = stampConfigFile(planRepoRoot);
+    if (!existsSync(planConfigPath)) {
+      throw new Error(
+        `no .stamp/config.yml at ${planConfigPath}. Run \`stamp init\` first.`,
+      );
+    }
     const plan = buildReviewPlan({
       diff: opts.diff,
       ...(opts.only !== undefined ? { only: opts.only } : {}),
-      repoRoot,
+      repoRoot: planRepoRoot,
     });
     process.stdout.write(JSON.stringify(plan) + "\n");
     process.stderr.write(PLAN_NO_TRUST_BANNER + "\n");
@@ -128,6 +133,14 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         `all continue to work. Unset STAMP_NO_LLM to re-enable. ` +
         `(For LLM-free iteration on a parent-agent loop, see ` +
         `\`stamp review --plan\`.)`,
+    );
+  }
+
+  const repoRoot = findRepoRoot();
+  const configPath = stampConfigFile(repoRoot);
+  if (!existsSync(configPath)) {
+    throw new Error(
+      `no .stamp/config.yml at ${configPath}. Run \`stamp init\` first.`,
     );
   }
 
