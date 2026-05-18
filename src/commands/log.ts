@@ -267,6 +267,29 @@ function printReviewHistory(
       `#${row.id}  ${mark} ${row.reviewer.padEnd(16)} ${row.verdict.padEnd(18)} ` +
         `${row.base_sha.slice(0, 8)} → ${row.head_sha.slice(0, 8)}   ${row.created_at}`,
     );
+    // SIGNED-BY marker (AGT-333): rendered as a separate aligned line so
+    // it lives in the same visual lane as the row header without forcing
+    // the existing header line to wrap. Three states:
+    //   - v2.x row with a server signature → `signed-by: server:<key8>`
+    //   - 2.x row with NO server signature (local-only mode) → omitted;
+    //     `schema_version` is null because `recordReview` only stamps it
+    //     when a serverAttestation is provided, so these look the same
+    //     as legacy 1.x rows here. That's intentional: from the merge-
+    //     gate's perspective both are "unsigned, not eligible," and the
+    //     stamp log marker exists to surface the trust property, not to
+    //     distinguish stamp versions.
+    //   - legacy 1.x row → `signed-by: (unsigned 1.x — no server attestation)`
+    //
+    // The dispatch is on `server_key_id` presence (not `schema_version`)
+    // because that's the field the verifier actually consumes. If a
+    // future schema bump adds new optional fields, `server_key_id` stays
+    // the canonical "has a server signature" sentinel.
+    if (row.server_key_id) {
+      const keyShort = row.server_key_id.replace(/^sha256:/, "").slice(0, 8);
+      console.log(`     signed-by: server:${keyShort}`);
+    } else {
+      console.log(`     signed-by: (unsigned 1.x — no server attestation)`);
+    }
     if (row.issues) {
       console.log(bar);
       console.log(row.issues);
