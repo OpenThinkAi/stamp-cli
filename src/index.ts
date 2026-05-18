@@ -37,6 +37,7 @@ import {
   keysList,
   keysTrust,
 } from "./commands/keys.js";
+import { runAdminSign } from "./commands/adminSign.js";
 import { runLog } from "./commands/log.js";
 import { runAttest } from "./commands/attest.js";
 import { runMerge } from "./commands/merge.js";
@@ -794,6 +795,45 @@ keys
   .command("trust <pub-file>")
   .description("copy a public key into the repo's .stamp/trusted-keys/")
   .action((pubFile: string) => wrap(() => keysTrust(pubFile)));
+
+const admin = program
+  .command("admin")
+  .description(
+    "operator workflows for trust-anchor (admin-capability) actions on .stamp/** changes",
+  );
+
+admin
+  .command("sign")
+  .description(
+    "collect or add admin-capability counter-signatures for pending .stamp/** commits (AGT-337)",
+  )
+  .option(
+    "--pending [sha]",
+    "list pending .stamp/** commits awaiting counter-signature, or sign the given SHA",
+  )
+  .option(
+    "--target-branch <name>",
+    "override the predicted target branch baked into the admin signing target (default: current branch's upstream basename, else current branch)",
+  )
+  .option("--json", "(list mode only) emit pending commits as JSON")
+  .action((opts: { pending?: string | boolean; targetBranch?: string; json?: boolean }) => {
+    try {
+      // commander returns `true` when --pending is passed without a value
+      // (the [sha] form). Map that to undefined → list mode. A real string
+      // value → sign mode for that SHA. Absence of the flag entirely is
+      // currently also treated as list mode — there's no other meaningful
+      // shape for `stamp admin sign` today.
+      const pendingArg =
+        typeof opts.pending === "string" ? opts.pending : undefined;
+      runAdminSign({
+        pending: pendingArg,
+        targetBranch: opts.targetBranch,
+        json: opts.json,
+      });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
 
 function wrap(fn: () => void): void {
   try {
