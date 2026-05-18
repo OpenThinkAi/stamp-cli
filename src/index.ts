@@ -513,6 +513,10 @@ program
     "--plan",
     "local-only mode: emit a JSON plan on stdout for a parent agent to dispatch subagents against; do NOT call the LLM. Plan fields: schema_version, revspec, base_sha, head_sha, diff, reviewers[] (each with name, prompt, fence_hex). Writes a `note:`-prefixed no-trust advisory to stderr (no attestation is produced). In plan mode `--no-cache` and `--allow-large` are inert — no LLM call, no cache hit, no diff-size cap.",
   )
+  .option(
+    "--headless",
+    "headless local-only mode (sibling to --plan, for cron / git hooks / scripts): stamp calls the Anthropic Messages API directly for each reviewer (one shot, no tool-use loop, no MCP) and emits a JSON plan on stdout with each reviewer's verdict + prose folded in. Requires ANTHROPIC_API_KEY (otherwise exits with usage error 2). Output JSON is a superset of --plan so downstream tooling doesn't branch. No attestation is produced; the stderr banner flags API-key metering separate from Claude Code subscription billing. Mutually exclusive with --plan. See docs/local-only-mode.md.",
+  )
   .action(
     async (opts: {
       diff: string;
@@ -520,6 +524,7 @@ program
       allowLarge?: boolean;
       cache?: boolean;
       plan?: boolean;
+      headless?: boolean;
     }) => {
       try {
         // commander's --no-cache sets opts.cache = false; absent flag leaves
@@ -531,6 +536,7 @@ program
           allowLarge: opts.allowLarge,
           noCache: opts.cache === false,
           plan: opts.plan === true,
+          headless: opts.headless === true,
         });
       } catch (err) {
         handleCliError(err);

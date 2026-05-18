@@ -23,8 +23,20 @@ import {
   type ReviewerInvocation,
 } from "../lib/reviewer.js";
 import { maybePrintLlmNotice } from "../lib/llmNotice.js";
-import { buildReviewPlan, PLAN_NO_TRUST_BANNER } from "../lib/reviewPlan.js";
-import { loadOrCreateUserConfig } from "../lib/userConfig.js";
+import {
+  buildReviewPlan,
+  PLAN_NO_TRUST_BANNER,
+  type ReviewPlan,
+} from "../lib/reviewPlan.js";
+import {
+  HEADLESS_DEFAULT_MODEL,
+  HEADLESS_NO_TRUST_BANNER,
+  MissingApiKeyError,
+  runHeadlessReview,
+  type HeadlessReviewerResult,
+} from "../lib/headlessReviewer.js";
+import { loadOrCreateUserConfig, resolveReviewerModel } from "../lib/userConfig.js";
+import { UsageError } from "./serverRepo.js";
 import {
   findRepoRoot,
   stampConfigFile,
@@ -68,12 +80,148 @@ export interface ReviewOptions {
    * diffs in its subagent fan-out).
    */
   plan?: boolean;
+  /**
+   * Headless local-only mode (AGT-341). Sibling to `--plan`: instead of
+   * emitting a plan for a parent agent to dispatch, stamp itself calls
+   * the Anthropic Messages API directly per reviewer (one shot, no
+   * tool-use loop, no MCP) and folds each reviewer's verdict + prose
+   * into the JSON it writes to stdout. Designed for cron jobs, git
+   * hooks, CI steps, ad-hoc scripts — any context where there's no
+   * parent Claude Code session to drive subagent dispatch.
+   *
+   * Requires `ANTHROPIC_API_KEY`. Absent that env var, throws a
+   * `UsageError` (CLI exit code 2) pointing at docs/local-only-mode.md.
+   *
+   * Output JSON shape is a superset of `--plan` (AC #3 — downstream
+   * code doesn't branch on mode); see `HeadlessReviewerResult` in
+   * src/lib/headlessReviewer.ts. The stderr no-trust banner is
+   * `HEADLESS_NO_TRUST_BANNER` — diverges from the plan-mode banner by
+   * one sentence flagging the API-key metering (headless = your
+   * ANTHROPIC_API_KEY, billed per token; plan = parent's Claude Code
+   * session, unmetered by the June 15 subscription split).
+   *
+   * Mutually exclusive with `--plan`. Like `--plan`, the trusted-mode-only
+   * flags (`noCache`, `allowLarge`) are inert: no verdict cache is
+   * consulted, no diff-size cap is applied (the operator who set up the
+   * cron/hook/script decides what budget they want to spend).
+   */
+  headless?: boolean;
+  /**
+   * Test-only injection seam (AGT-341). When set in `--headless` mode,
+   * replaces the per-reviewer `runHeadlessReview` call with this
+   * function — letting `tests/headlessReviewCommand.test.ts` exercise
+   * the command-layer JSON shape, stderr banner, and exit-code wiring
+   * without standing up a real Anthropic client. Production callers
+   * (the CLI in src/index.ts) leave this `undefined` and the standard
+   * `runHeadlessReview` from src/lib/headlessReviewer.ts runs. Marked
+   * with a leading underscore so the field's test-only nature is
+   * visible at call sites; the type stays internal (not re-exported).
+   */
+  _headlessReviewerForTest?: (opts: {
+    reviewer: import("../lib/reviewPlan.js").ReviewPlanReviewer;
+    diff: string;
+    base_sha: string;
+    head_sha: string;
+    model: string;
+  }) => Promise<HeadlessReviewerResult>;
 }
 
 /** Pre-invocation diff size cap, bytes. Operator-overridable via env var. */
 const DEFAULT_DIFF_SIZE_CAP_BYTES = 200 * 1024;
 
 export async function runReview(opts: ReviewOptions): Promise<void> {
+  // Mutual exclusion: `--plan` and `--headless` are sibling local-only
+  // variants and only one makes sense per invocation. UsageError → exit
+  // code 2 (the documented "you passed bad args" code) so an agent loop
+  // can distinguish from a runtime failure without parsing stderr.
+  if (opts.plan && opts.headless) {
+    throw new UsageError(
+      "--plan and --headless are mutually exclusive (both are local-only " +
+        "review variants). Pick `--plan` when there's a parent Claude Code " +
+        "agent in the loop to dispatch subagents, or `--headless` for " +
+        "cron / git hooks / scripts where stamp itself drives the API call.",
+    );
+  }
+
+  // --headless mode: sibling to --plan for cron / git hooks / scripts.
+  // Same no-trust posture; stamp calls the Anthropic API directly via
+  // @anthropic-ai/sdk (one Messages call per reviewer, no tool-use loop,
+  // no MCP) and emits per-reviewer verdicts as JSON on stdout. Output
+  // shape is a superset of --plan (AC #3) so downstream code can read
+  // both without branching. See src/lib/headlessReviewer.ts.
+  //
+  // Positioned BEFORE the STAMP_NO_LLM guard for the same reason --plan
+  // is: local-only iteration is the workflow operators reach for when
+  // they've disabled LLM use on stamp itself. Refusing headless on
+  // STAMP_NO_LLM=1 would be incoherent — the headless path IS the LLM
+  // call from stamp's perspective, and the operator opted into it
+  // explicitly with the flag. (Open question if we should make
+  // STAMP_NO_LLM gate headless too; revisit if it causes real ops
+  // confusion — leaving consistent with --plan for now.)
+  if (opts.headless) {
+    const headlessRepoRoot = findRepoRoot();
+    const headlessConfigPath = stampConfigFile(headlessRepoRoot);
+    if (!existsSync(headlessConfigPath)) {
+      throw new Error(
+        `no .stamp/config.yml at ${headlessConfigPath}. Run \`stamp init\` first.`,
+      );
+    }
+    // Pre-flight: catch missing API key BEFORE the fan-out so the operator
+    // sees ONE clean error with the docs pointer instead of N copies (one
+    // per reviewer the runner would have folded into its error field).
+    // The library still defends in depth — runHeadlessReview throws
+    // MissingApiKeyError if called without a client and without the env
+    // var — but this is the user-friendly path.
+    if (!process.env["ANTHROPIC_API_KEY"]) {
+      throw new UsageError(new MissingApiKeyError().message);
+    }
+    const plan = buildReviewPlan({
+      diff: opts.diff,
+      ...(opts.only !== undefined ? { only: opts.only } : {}),
+      repoRoot: headlessRepoRoot,
+    });
+    // Fan out via Promise.all (NOT allSettled): each call internally
+    // catches its own failures into the result's `error` field so the
+    // promise never rejects. allSettled would be redundant and would
+    // require an extra mapping step to flatten back to the same shape.
+    const reviewerImpl = opts._headlessReviewerForTest ?? runHeadlessReview;
+    const results: HeadlessReviewerResult[] = await Promise.all(
+      plan.reviewers.map((entry) =>
+        reviewerImpl({
+          reviewer: entry,
+          diff: plan.diff,
+          base_sha: plan.base_sha,
+          head_sha: plan.head_sha,
+          // Per-reviewer model resolution: same source as trusted mode
+          // (~/.stamp/config.yml via resolveReviewerModel), with the
+          // headless default as the fallback so an operator who hasn't
+          // pinned anything still gets the Sonnet shipping default. The
+          // headless path can't call the SDK with a null model — the
+          // wire requires an explicit string — hence the fallback.
+          model: resolveReviewerModel(entry.name) ?? HEADLESS_DEFAULT_MODEL,
+        }),
+      ),
+    );
+    const headlessPlan: ReviewPlan = {
+      ...plan,
+      mode: "headless",
+      reviewers: results,
+    };
+    process.stdout.write(JSON.stringify(headlessPlan) + "\n");
+    process.stderr.write(HEADLESS_NO_TRUST_BANNER + "\n");
+    // Non-zero exit if any reviewer failed OR returned non-approved.
+    // Match trusted-mode behaviour where anyFailed → exitCode 1. The
+    // headless caller (cron, hook, script) is far more likely to gate
+    // off the exit code than parse the JSON — give them an honest
+    // signal.
+    const anyFailed = results.some((r) => r.error || r.verdict === null);
+    if (anyFailed) process.exitCode = 1;
+    return;
+    // consider auto-detect when claude-code SDK exposes a parent-agent
+    // indicator — `process.stdout.isTTY === false` false-triggers inside
+    // CI, so leaving headless as an explicit opt-in for now.
+  }
+
   // --plan mode short-circuits the trusted-mode pipeline entirely. We do
   // NOT enter the STAMP_NO_LLM guard, the empty-base bootstrap branch,
   // the diff-size cap, the verdict cache, the prior-review lookup, or

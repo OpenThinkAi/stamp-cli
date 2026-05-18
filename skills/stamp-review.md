@@ -16,7 +16,7 @@ You — the parent agent — are running stamp's reviewers in **local-only mode*
 |---|---|
 | Operator has `review_server` configured | Run `stamp review --diff <revspec>` directly — no skill needed. That path produces signed verdicts. |
 | Operator wants fast iteration, no server | Use this skill. Iteration feedback only. |
-| Headless context (cron, hook, no parent agent) | Skill is the wrong tool — see [`docs/local-only-mode.md`](../docs/local-only-mode.md) for the headless fallback (AGT-341, in flight). |
+| Headless context (cron, hook, no parent agent) | Skill is the wrong tool — use `stamp review --headless` directly. See [`docs/local-only-mode.md`](../docs/local-only-mode.md). |
 
 ## Procedure
 
