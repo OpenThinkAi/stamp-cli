@@ -157,13 +157,12 @@ describe("defaultRepoResolver", () => {
 
 describe("fetchCanonicalPrompt — happy path", () => {
   let tmpRoot: string;
-  let barePath: string;
   let baseSha: string;
   const promptBody = "You are a security reviewer.\n\nReject all hardcoded secrets.\n";
 
   beforeEach(() => {
     tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-")));
-    ({ barePath, baseSha } = buildSeededBareRepo(
+    ({ baseSha } = buildSeededBareRepo(
       tmpRoot,
       "widget-co",
       "security",
@@ -214,13 +213,12 @@ describe("fetchCanonicalPrompt — happy path", () => {
     // Seed a prompt with CRLF + trailing whitespace + a final-no-newline
     // edge case to confirm git show returns bytes verbatim.
     const oddBody = "line one\r\nline two   \nfinal-no-newline";
-    const { barePath: oddBare, baseSha: oddSha } = buildSeededBareRepo(
+    const { baseSha: oddSha } = buildSeededBareRepo(
       tmpRoot,
       "odd-repo",
       "standards",
       oddBody,
     );
-    assert.ok(oddBare); // satisfy unused-var lint while making the path visible
 
     const resolver = defaultRepoResolver(tmpRoot);
     const result = await fetchCanonicalPrompt(
@@ -252,7 +250,6 @@ describe("fetchCanonicalPrompt — error paths", () => {
       "security",
       "prompt body\n",
     ));
-    assert.ok(barePath);
   });
 
   afterEach(() => {

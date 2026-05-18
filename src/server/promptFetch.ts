@@ -150,6 +150,16 @@ export interface PromptFetchError {
 
 export type PromptFetchResult = FetchedPrompt | PromptFetchError;
 
+// ─── Limits ─────────────────────────────────────────────────────────
+
+/** Hard cap on a single fetched prompt. Reviewer prompts are normally a
+ *  few KB; a megabyte is already huge. 1 MB gives plenty of headroom for
+ *  rich prompts without leaving DoS surface open. Exceeding this on
+ *  execFile surfaces as a `git_error` with the `maxBuffer` exceeded
+ *  message, which is exactly the failure mode we want — the verb handler
+ *  rejects rather than processing a runaway file. */
+const MAX_PROMPT_BYTES = 1 * 1024 * 1024;
+
 // ─── Input validation ───────────────────────────────────────────────
 
 /** Reviewer-name shape; mirrors `VALID_REVIEWER_NAME` in
@@ -301,7 +311,7 @@ export async function fetchCanonicalPrompt(
   // resolvable in this bare repo." See AGT-329 test
   // `no_such_ref: base_sha doesn't exist in the bare repo` for the
   // regression this guards against.
-  const refCheck = await runGitShow(
+  const refCheck = await runGit(
     bareRepoPath,
     ["rev-parse", "--verify", "--end-of-options", `${baseSha}^{commit}`],
   );
@@ -346,10 +356,13 @@ export async function fetchCanonicalPrompt(
   }
 }
 
-/** Minimal async git-runner used by the ref-existence probe. Returns a
+/** Minimal async git-runner used by the ref-existence probe. Wraps an
+ *  arbitrary `git` subcommand against the given bare repo and returns a
  *  discriminated union so callers can classify failures explicitly
- *  without try/catch threading. */
-async function runGitShow(
+ *  without try/catch threading. Not specific to `git show` despite the
+ *  ref-probe being its current sole caller — `args` carries whichever
+ *  git subcommand the caller needs. */
+async function runGit(
   bareRepoPath: string,
   args: string[],
 ): Promise<{ ok: true } | { ok: false; err: unknown }> {
@@ -364,14 +377,6 @@ async function runGitShow(
     return { ok: false, err };
   }
 }
-
-/** Hard cap on a single fetched prompt. Reviewer prompts are normally a
- *  few KB; a megabyte is already huge. 1 MB gives plenty of headroom for
- *  rich prompts without leaving DoS surface open. Exceeding this on
- *  execFile surfaces as a `git_error` with the `maxBuffer` exceeded
- *  message, which is exactly the failure mode we want — the verb handler
- *  rejects rather than processing a runaway file. */
-const MAX_PROMPT_BYTES = 1 * 1024 * 1024;
 
 // ─── Error classification ───────────────────────────────────────────
 
@@ -421,7 +426,7 @@ function classifyRefCheckError(
     /not a git repository/i.test(stderrText) ||
     /cannot access/i.test(stderrText) ||
     /unable to access/i.test(stderrText) ||
-    /does not exist/i.test(stderrText) && /\.git/.test(stderrText)
+    (/does not exist/i.test(stderrText) && /\.git/.test(stderrText))
   ) {
     return { kind: "no_such_repo", detail };
   }
