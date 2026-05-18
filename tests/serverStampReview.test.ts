@@ -242,6 +242,33 @@ describe("stamp-review — authorization", () => {
   // adding a new Role variant remembers to add the regression test.
 });
 
+describe("stamp-review — help", () => {
+  it("prints usage to stdout and exits 0 on --help", () => {
+    const h = setup("member");
+    try {
+      const r = runStampReview(h, ["--help"]);
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(r.stdout, /^usage: stamp-review --reviewer/);
+      // stderr may carry Node's "experimental SQLite" warning, but
+      // must not carry an `error:` line from the verb itself.
+      assert.doesNotMatch(r.stderr, /^error:/m);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("prints usage to stdout and exits 0 on -h", () => {
+    const h = setup("member");
+    try {
+      const r = runStampReview(h, ["-h"]);
+      assert.equal(r.status, 0, `stderr=${r.stderr}`);
+      assert.match(r.stdout, /^usage: stamp-review --reviewer/);
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
 describe("stamp-review — request validation", () => {
   it("rejects missing required flags with a usage error", () => {
     const h = setup("member");

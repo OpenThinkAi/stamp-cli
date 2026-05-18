@@ -52,17 +52,27 @@
 import { createHash } from "node:crypto";
 
 import {
-  type ApprovalV4,
-  canonicalSerializeApproval,
-} from "../lib/attestationV4.js";
-import { findUserBySshFingerprint, openServerDb, type Role } from "../lib/serverDb.js";
+  findUserBySshFingerprint,
+  openServerDb,
+  type Role,
+  type UserRow,
+} from "../lib/serverDb.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 
 import {
   type ParsedReviewRequest,
   resolveMaxDiffBytes,
+  type ReviewPipelineResult,
   runReviewPipeline,
 } from "./reviewPipeline.js";
+
+// Read the diff-size cap once at module load so a hypothetical
+// future HTTP entrypoint that imports this file shares one constant
+// across all requests (operators tune via restart, never per-call).
+// Today's SSH verb is one process per invocation, so the distinction
+// is forward-looking — pinned at module scope to enforce the contract
+// by call-site placement rather than by comment.
+const MAX_DIFF_BYTES = resolveMaxDiffBytes();
 
 // ─── Shape validators ───────────────────────────────────────────────
 //
@@ -94,6 +104,14 @@ function fail(message: string, exitCode: number): never {
   process.exit(exitCode);
 }
 
+/** Single source of truth for the usage line. Surfaced both by the
+ *  missing-flags error and by the `--help` short-circuit so the two
+ *  prose paths can't drift. Trailing newline omitted; callers add
+ *  their own. */
+const USAGE =
+  "usage: stamp-review --reviewer <name> --org <org> --repo <repo> " +
+  "--base-sha <40-hex> --head-sha <40-hex> --diff-sha256 <64-hex> < diff";
+
 // ─── parseRequest ───────────────────────────────────────────────────
 
 /**
@@ -124,6 +142,14 @@ export function parseRequest(argv: string[]): ParsedReviewRequest {
     };
 
     switch (arg) {
+      case "--help":
+      case "-h":
+        // Help short-circuits the parser: print usage to stdout (it's
+        // not an error — operators SSH'ing in to read the surface
+        // shouldn't see exit 2 + stderr) and exit clean.
+        process.stdout.write(USAGE + "\n");
+        process.exit(0);
+        break; // unreachable; satisfies no-fallthrough lint
       case "--reviewer":
         reviewer = takeNext("--reviewer");
         break;
@@ -158,12 +184,7 @@ export function parseRequest(argv: string[]): ParsedReviewRequest {
   if (!headSha) missing.push("--head-sha");
   if (!diffSha256) missing.push("--diff-sha256");
   if (missing.length > 0) {
-    fail(
-      `missing required flag(s): ${missing.join(", ")}. ` +
-        `usage: stamp-review --reviewer <name> --org <org> --repo <repo> ` +
-        `--base-sha <40-hex> --head-sha <40-hex> --diff-sha256 <64-hex> < diff`,
-      2,
-    );
+    fail(`missing required flag(s): ${missing.join(", ")}. ${USAGE}`, 2);
   }
 
   // Shape validation — fail loud on anything that wouldn't make it
@@ -206,7 +227,7 @@ export function parseRequest(argv: string[]): ParsedReviewRequest {
 // ─── resolveAuth ────────────────────────────────────────────────────
 
 interface AuthContext {
-  caller: import("../lib/serverDb.js").UserRow;
+  caller: UserRow;
   /** The db handle the caller resolved against; held so the main
    *  function can close it in `finally`. */
   db: ReturnType<typeof openServerDb>;
@@ -290,54 +311,34 @@ async function readBoundedStdin(maxBytes: number): Promise<Buffer> {
   return Buffer.concat(chunks, total);
 }
 
-// ─── buildResponse ──────────────────────────────────────────────────
+// ─── response shape ─────────────────────────────────────────────────
 
 /**
- * The JSON shape design.md pins for the SSH `stamp-review` response.
- * Field order matches the spec for human readability — `JSON.stringify`
- * emits keys in insertion order for string keys, and operators reading
- * the raw stdout deserve a predictable layout.
+ * The JSON shape design.md pins for the SSH `stamp-review` response
+ * is the same four-field bag the pipeline already returns. Re-exported
+ * here under a wire-format-flavored name so callers reading verb code
+ * have a local-feeling alias without a duplicate type definition.
  *
- * Not the same as `canonicalSerializeApproval`'s output (which sorts
- * keys for cross-implementation byte equality of the signing target).
- * The response wrapper is just a transport envelope; the signature
- * inside it commits to the canonical bytes of `approval`, not to the
- * envelope's serialization.
+ * The wrapper is just a transport envelope; the `signature` inside it
+ * commits to the canonical bytes of `approval`
+ * (`canonicalSerializeApproval(approval)`), NOT to this envelope's
+ * own serialization. AGT-331 will wire that signing call inside
+ * `runReviewPipeline`.
  */
-export interface StampReviewResponse {
-  verdict: ApprovalV4["verdict"];
-  prose: string;
-  approval: ApprovalV4;
-  signature: string;
-}
-
-function buildResponse(result: {
-  verdict: ApprovalV4["verdict"];
-  prose: string;
-  approval: ApprovalV4;
-  signature: string;
-}): StampReviewResponse {
-  return {
-    verdict: result.verdict,
-    prose: result.prose,
-    approval: result.approval,
-    signature: result.signature,
-  };
-}
+export type StampReviewResponse = ReviewPipelineResult;
 
 // ─── main ───────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   // parseRequest → resolveAuth → runReviewPipeline (stubbed) →
-  // buildResponse → emitJson. The flow is intentionally linear so a
+  // emit JSON to stdout. The flow is intentionally linear so a
   // future HTTP entrypoint can fold the same steps into a request
   // handler without inheriting any stdin/stdout assumption.
   const params = parseRequest(process.argv.slice(2));
   const { caller, db } = resolveAuth();
 
   try {
-    const maxBytes = resolveMaxDiffBytes();
-    const diff = await readBoundedStdin(maxBytes);
+    const diff = await readBoundedStdin(MAX_DIFF_BYTES);
 
     // Cross-check the streamed diff against the client's claimed
     // sha256 BEFORE invoking the pipeline. A mismatch here is either
@@ -353,16 +354,15 @@ async function main(): Promise<void> {
       );
     }
 
-    const result = await runReviewPipeline({ diff, params, caller });
-    const response = buildResponse(result);
-
-    // Emit a sentinel signature that DOES NOT validate against the
-    // canonical bytes — that's the AGT-331 placeholder contract. The
-    // bytes still exist (a future verifier hashing them won't NaN out)
-    // so downstream code can be wired against the response shape.
-    void canonicalSerializeApproval(response.approval);
-
-    process.stdout.write(JSON.stringify(response) + "\n");
+    // TODO(AGT-331): sign canonicalSerializeApproval(result.approval)
+    // and populate result.signature with the real Ed25519 signature
+    // instead of the PLACEHOLDER_SIGNATURE sentinel currently emitted.
+    const result: StampReviewResponse = await runReviewPipeline({
+      diff,
+      params,
+      caller,
+    });
+    process.stdout.write(JSON.stringify(result) + "\n");
   } finally {
     db.close();
   }
