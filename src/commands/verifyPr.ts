@@ -80,20 +80,18 @@ import {
   parseManifest,
   type TrustedKeysManifest,
 } from "../lib/trustedKeysManifest.js";
+// PR-mode imports the shared v4-trust pipeline from src/lib/v4Trust.ts —
+// the same module pre-receive.ts uses. Both verifiers run the SAME
+// phase functions against PhaseInputV4 instances. AGT-338 standards
+// review round 2 lifted these out of src/hooks/pre-receive.ts so
+// src/commands/ no longer imports from src/hooks/ (proper layering:
+// commands → lib, hooks → lib, never commands → hooks).
 import {
+  PR_MODE_PHASES_V4,
   parsePathRules,
-  verifyV4Approvals,
-  verifyV4ApprovalSignatures,
-  verifyV4Checks,
-  verifyV4DiffHash,
-  verifyV4OuterSignature,
-  verifyV4SignerTrust,
-  verifyV4StampPathsGuard,
-  verifyV4TargetBranch,
-  verifyV4TrustAnchorSignatures,
   type PhaseInputV4,
   type PathRule,
-} from "../hooks/pre-receive.js";
+} from "../lib/v4Trust.js";
 
 export interface VerifyPrOptions {
   /** Head ref (commit SHA, branch name, or any rev-parse-able value). */
@@ -376,23 +374,14 @@ function verifyV3Envelope(
     changedFiles,
   };
 
-  // PR-mode pipeline. Subset of COMMIT_PHASES_V4 — we skip
-  // verifyV4MergeStructure (no merge commit) but keep every other v4
-  // phase. Ordering matches pre-receive's, so an error from any phase
-  // surfaces in the same order operators see in server-gated mode.
-  const phases = [
-    { name: "verifyV4TargetBranch", fn: verifyV4TargetBranch },
-    { name: "verifyV4SignerTrust", fn: verifyV4SignerTrust },
-    { name: "verifyV4OuterSignature", fn: verifyV4OuterSignature },
-    { name: "verifyV4Approvals", fn: verifyV4Approvals },
-    { name: "verifyV4DiffHash", fn: verifyV4DiffHash },
-    { name: "verifyV4ApprovalSignatures", fn: verifyV4ApprovalSignatures },
-    { name: "verifyV4Checks", fn: verifyV4Checks },
-    { name: "verifyV4TrustAnchorSignatures", fn: verifyV4TrustAnchorSignatures },
-    { name: "verifyV4StampPathsGuard", fn: verifyV4StampPathsGuard },
-  ] as const;
-
-  for (const phase of phases) {
+  // PR-mode pipeline. Reuses the PR_MODE_PHASES_V4 constant from
+  // v4Trust.ts — same pipeline order pre-receive runs, minus
+  // `verifyV4MergeStructure` (no merge commit exists yet in PR-mode;
+  // patch-id ref + diff_sha256 + outer signature provide the
+  // equivalent integrity binding). Sharing the constant means a
+  // future reorder of the pipeline lands in one place and applies to
+  // both verifiers automatically.
+  for (const phase of PR_MODE_PHASES_V4) {
     const result = phase.fn(input);
     if (!result.ok) {
       fail(
