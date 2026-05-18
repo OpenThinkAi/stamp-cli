@@ -154,6 +154,22 @@ The same logic applies to tag pushes whose ref name matches one of the `tags:` p
 
 ## Security model
 
+> **At-a-glance — 1.x is operator-trust, 2.x closes the gap.** stamp 1.x
+> attestation proves *a keyholder signed off*, not that an LLM actually
+> received the canonical prompt or actually returned the verdict — both
+> are constructed on the operator's machine and only the relationship
+> between them is trusted. **This is a structural limitation of the 1.x
+> line**, not a bug, and it does not get fixed by tightening 1.x. The
+> resolution is the **v4 envelope shipped by 2.x (server-attested
+> reviews)** — see
+> [`docs/plans/server-attested-reviews.md`](./docs/plans/server-attested-reviews.md)
+> for the design and
+> [`docs/migration-1.x-to-2.x.md`](./docs/migration-1.x-to-2.x.md) for the
+> upgrade path. The rest of this section describes both: the v4 gates that
+> close the gap (Cryptographic guarantees / Threat model) **and** the
+> 1.x caveats that still apply where v4 is not yet deployed (Legacy
+> local-only mode subsections).
+
 ### The structural problem this section resolves
 
 stamp 1.x attestation proves *"a keyholder signed off that reviewer X

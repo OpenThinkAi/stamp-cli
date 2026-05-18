@@ -1,5 +1,14 @@
 # stamp-cli
 
+> **Notice — stamp 1.x is in maintenance.** This is the operator-trust line.
+> The active line is **2.x (server-attested reviews)**, which closes the
+> structural gap where the operator constructs both sides of "what the
+> reviewer LLM saw" and "what the LLM said." See the
+> [**1.x → 2.x migration guide**](./docs/migration-1.x-to-2.x.md) for the
+> upgrade path. The bridge release (1.x final) ships the same surface plus
+> deprecation banners on `stamp init` / `stamp merge` (suppress with
+> `STAMP_SUPPRESS_DEPRECATION=1` for CI).
+
 Local, headless pull-request system for agent-to-agent code review workflows.
 
 An author-agent opens a diff, reviewer-agents consume it and return structured

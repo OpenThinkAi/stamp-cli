@@ -377,7 +377,7 @@ This is deliberate. An automated promotion would conflate "this key can merge co
 
 The detailed timeline + deprecation messaging lands in **AGT-346**. Rough shape:
 
-- **Bridge release (stamp 1.x final):** ships with prominent deprecation notices wired into `stamp init`, `stamp review`, and `stamp merge` output. Both 1.x and 2.x verification work side by side, per-repo. README and `DESIGN.md` carry forward-pointers to this guide.
+- **Bridge release (stamp 1.x final):** ships with prominent deprecation notices wired into `stamp init` and `stamp merge` (one-line stderr banner on each invocation) plus a README banner and a louder operator-trust caveat at the top of `DESIGN.md`'s security-model section. Both 1.x and 2.x verification work side by side, per-repo. The CLI banner is suppressible with `STAMP_SUPPRESS_DEPRECATION=1` — intended for CI runs and scripted automations where the banner would just be noise; interactive operators are expected to see it.
 - **stamp 2.0 GA:** `stamp review` requires `review_server` configured (or `--plan` / `--headless` for local-only). Old v2/v3 attestations on already-merged commits remain verifiable indefinitely. Default `stamp init` scaffolds 2.x-aware config; `--local-only` flag opts into no-trust mode with an explicit banner.
 - **2.x maintenance:** 1.x receives security patches only for N months after 2.0 GA — exact window finalized by AGT-346.
 
