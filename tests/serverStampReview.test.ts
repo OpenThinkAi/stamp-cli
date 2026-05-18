@@ -24,7 +24,6 @@ import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import {
-  chmodSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -141,8 +140,13 @@ function setupWithFixtureBare(
     format: "pem",
   }) as string;
   const publicPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+  // `writeFileSync` honors the mode option on creation, which is what
+  // we're doing here (fresh tmp file). A follow-up chmodSync is the
+  // production defensive-pattern for files that may already exist on
+  // disk (see `mintNewKey` in reviewSigningKey.ts), but it's redundant
+  // for a one-shot test fixture write — the mode bits are already
+  // 0600 after writeFileSync returns.
   writeFileSync(signingKeyPath, privatePem, { mode: 0o600 });
-  chmodSync(signingKeyPath, 0o600);
   const signingKeyFingerprint = fingerprintFromPem(publicPem);
 
   // Commit the matching manifest entry so the pipeline's manifest fetch
