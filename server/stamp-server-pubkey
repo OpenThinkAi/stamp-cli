@@ -66,9 +66,9 @@ if [ "$SPEC" = "--review-signing" ]; then
     *)     REVIEW_PUB_PATH="${REVIEW_KEY_PATH}.pub" ;;
   esac
   if [ ! -f "$REVIEW_PUB_PATH" ]; then
-    echo "stamp-server-pubkey: review-signing pubkey not found at $REVIEW_PUB_PATH" >&2
-    echo "stamp-server-pubkey: this usually means review capability is disabled (ANTHROPIC_API_KEY unset)" >&2
-    echo "stamp-server-pubkey: or the server hasn't booted with stamp-bootstrap-review-key yet" >&2
+    echo "error: review-signing pubkey not found at $REVIEW_PUB_PATH" >&2
+    echo "error: this usually means review capability is disabled (ANTHROPIC_API_KEY unset)" >&2
+    echo "error: or the server hasn't booted with stamp-bootstrap-review-key yet" >&2
     exit 1
   fi
   cat "$REVIEW_PUB_PATH"
