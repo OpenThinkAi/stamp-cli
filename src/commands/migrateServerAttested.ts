@@ -24,7 +24,6 @@ import { dirname, join, relative } from "node:path";
 
 import { readLineSync } from "../lib/humanMerge.js";
 import {
-  configPath,
   DEFAULT_PATH_RULES_BLOCK,
   detectExistingKeys,
   disambiguateNames,
@@ -35,7 +34,7 @@ import {
 import {
   ensureDir,
   findRepoRoot,
-  stampTrustedKeysDir,
+  stampConfigFile,
 } from "../lib/paths.js";
 import { MANIFEST_RELATIVE_PATH } from "../lib/trustedKeysManifest.js";
 
@@ -127,7 +126,7 @@ export function runMigrateToServerAttested(
   // 4. Rewrite .stamp/config.yml: comment out mcp_servers/tools, append
   //    path_rules block when none exists. Read raw to preserve operator
   //    comments + formatting.
-  const cfgPath = configPath(repoRoot);
+  const cfgPath = stampConfigFile(repoRoot);
   if (!existsSync(cfgPath)) {
     throw new Error(
       `expected .stamp/config.yml at ${cfgPath} but found none. ` +
@@ -148,7 +147,6 @@ export function runMigrateToServerAttested(
       manifestText,
       manifestExists,
       cfgPath,
-      cfgInput,
       cfgRewrite: rewrite,
       detected,
       adminFingerprints,
@@ -333,14 +331,20 @@ interface DryRunSnapshot {
   manifestText: string;
   manifestExists: boolean;
   cfgPath: string;
-  cfgInput: string;
   cfgRewrite: ReturnType<typeof rewriteConfigForMigration>;
   detected: DetectedKey[];
   adminFingerprints: Set<string>;
 }
 
 function printDryRun(s: DryRunSnapshot): void {
-  console.log("--- dry-run: --migrate-to-server-attested ---");
+  // Structural markers use the established convention — U+2500 box-drawing
+  // dashes — so agent consumers parsing stamp output see the same shape
+  // as `stamp review` and `stamp status`. `---` is reserved for YAML doc
+  // separators / Markdown HRs and would collide with operator tooling.
+  const bar = "─".repeat(72);
+  console.log(bar);
+  console.log("dry-run: --migrate-to-server-attested");
+  console.log(bar);
   console.log();
   console.log(`Detected ${s.detected.length} pubkey(s) in .stamp/trusted-keys/:`);
   for (const k of s.detected) {
@@ -374,12 +378,18 @@ function printDryRun(s: DryRunSnapshot): void {
     );
   }
 
+  // Warnings always go to stderr, including from dry-run. An agent that
+  // splits stdout (the diff preview) from stderr (advisories) needs the
+  // same shape from both code paths — otherwise dry-run silently loses
+  // the warning the real run would surface.
   for (const w of s.cfgRewrite.warnings) {
-    console.log(`  warning: ${w}`);
+    console.error(`warning: ${w}`);
   }
 
   console.log();
-  console.log("--- end dry-run ---");
+  console.log(bar);
+  console.log("end dry-run");
+  console.log(bar);
 }
 
 function indent(text: string, prefix: string): string {
@@ -388,8 +398,3 @@ function indent(text: string, prefix: string): string {
     .map((l) => (l.length > 0 ? prefix + l : l))
     .join("\n");
 }
-
-/** Re-export for use by `stamp init --migrate-to-server-attested`
- *  argument-handling code that wants the same `stampTrustedKeysDir`
- *  path shape without pulling `paths.js` directly. */
-export { stampTrustedKeysDir };

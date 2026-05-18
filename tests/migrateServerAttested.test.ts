@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { generateKeypair } from "../src/lib/keys.ts";
@@ -534,5 +534,4 @@ reviewers:
     }
   });
 
-  void relative; // satisfy unused-import linter if relative isn't used inline
 });

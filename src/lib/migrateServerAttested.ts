@@ -32,7 +32,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { fingerprintFromPem } from "./keys.js";
-import { stampTrustedKeysDir, stampConfigFile } from "./paths.js";
+import { stampTrustedKeysDir } from "./paths.js";
 
 /**
  * One detected pubkey under `.stamp/trusted-keys/`. The `name` is the
@@ -462,13 +462,4 @@ function indentBlock(block: string, indent: string): string {
     .split("\n")
     .map((l) => (l.length > 0 ? indent + l : l))
     .join("\n");
-}
-
-/**
- * Path to a repo's `.stamp/config.yml`. Re-exported here so command
- * code can import a single migration-facing module instead of pulling
- * `paths.js` directly.
- */
-export function configPath(repoRoot: string): string {
-  return stampConfigFile(repoRoot);
 }
