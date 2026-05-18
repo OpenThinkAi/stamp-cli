@@ -70,8 +70,39 @@ interface BranchRule {
   required_checks?: CheckDef[];
 }
 
+/**
+ * One `path_rules:` entry from `.stamp/config.yml`. Keyed in the YAML by
+ * its path-glob (e.g. `".stamp/**"`); the key is carried alongside as
+ * `pattern` for error messages.
+ *
+ * `require_capability` is one of the manifest's known capabilities (we
+ * keep the field a free string here — the manifest's own validator
+ * decides which capability strings exist, and we just look up against
+ * whatever it returns).
+ *
+ * `minimum_signatures` is the count of trust-anchor signatures, each
+ * coming from a manifest-listed key that carries `require_capability`,
+ * required when the merge's diff touches any file matching `pattern`.
+ *
+ * `bypass_review_cycle: true` means the path-gate REPLACES the normal
+ * reviewer cycle for matched paths — `.stamp/**` changes are gated by
+ * admin signatures, not by reviewer verdicts. `false` means the path-
+ * gate is layered ON TOP OF the reviewer cycle (admins must also sign,
+ * and reviewers must also have run).
+ */
+interface PathRule {
+  pattern: string;
+  require_capability: string;
+  minimum_signatures: number;
+  bypass_review_cycle: boolean;
+}
+
 interface StampConfigAtRef {
   branches: Record<string, BranchRule>;
+  /** Optional. Absent / empty → no path_rules layer, the v3-era
+   *  behavior. AGT-336 added this. Map shape (glob → rule) chosen to
+   *  match the spec doc and to mirror `branches:`'s map keying. */
+  path_rules?: PathRule[];
 }
 
 // ---------- per-commit verification pipeline ----------
@@ -641,6 +672,20 @@ export interface PhaseInputV4 {
   /** Fingerprint → PEM map built from `.stamp/trusted-keys/*.pub` at
    *  payload.base_sha. Resolves manifest entries to actual pubkeys. */
   pubkeyByFingerprint: Map<string, string>;
+  /** `path_rules` parsed from `.stamp/config.yml` at payload.base_sha.
+   *  Empty when the section is absent / malformed — the verifier then
+   *  treats this commit as having no path-gate, the v3-era behavior.
+   *  AGT-336 introduced this field; earlier phase-input shapes had no
+   *  path_rules concept. */
+  pathRules: PathRule[];
+  /** Paths changed between payload.base_sha and payload.head_sha
+   *  (3-dot diff; matches what `verifyV4DiffHash` hashes). The path-
+   *  rules guard intersects this list with each rule's glob. Empty
+   *  when the merge has no file changes (degenerate case — the
+   *  diff_sha256 binding above will already have rejected most such
+   *  merges, but the field can still legitimately be empty for a
+   *  pure-tree-rearrangement). */
+  changedFiles: string[];
 }
 
 type PhaseV4 = (input: PhaseInputV4) => PhaseResultV4;
@@ -741,6 +786,29 @@ function verifyCommitV4(
 
   const pubkeyByFingerprint = readPubkeyMapAt(payload.base_sha);
 
+  // Read path_rules from .stamp/config.yml at base_sha. We re-read
+  // here (rather than reusing the config the outer verifyRef loaded
+  // from oldSha) because v4's invariant is "trust artifacts come from
+  // payload.base_sha." For a fast-forward merge oldSha === base_sha
+  // and the two reads agree; for a non-trivial merge there's
+  // intermediate history and base_sha is the only source-of-truth.
+  // Matches the manifest read above.
+  const configAtBase = readConfigAt(payload.base_sha);
+  const pathRules = configAtBase?.path_rules ?? [];
+
+  // Changed files: 3-dot diff (`base...head`) — same diff form used by
+  // verifyV4DiffHash, so a rule that matches here matches what the
+  // hash binding covers. Reading via `git diff --name-only` keeps us
+  // off the working tree (load-bearing — the hook runs in a bare repo
+  // with no checkout).
+  const changedFiles = readChangedFiles(payload.base_sha, payload.head_sha);
+  if (changedFiles === null) {
+    reject(
+      refname,
+      `commit ${sha.slice(0, 8)}: unable to enumerate changed files between base ${payload.base_sha.slice(0, 8)} and head ${payload.head_sha.slice(0, 8)} for path_rules evaluation`,
+    );
+  }
+
   const input: PhaseInputV4 = {
     sha,
     branch,
@@ -750,6 +818,8 @@ function verifyCommitV4(
     signatureBase64,
     manifest,
     pubkeyByFingerprint,
+    pathRules,
+    changedFiles,
   };
 
   for (const phase of COMMIT_PHASES_V4) {
@@ -1195,38 +1265,119 @@ export function verifyV4TrustAnchorSignatures(input: PhaseInputV4): PhaseResultV
   return { ok: true };
 }
 
-/** STUB — AGT-336/337 deliverable.
+/** Threat: an operator (or compromised reviewer key) pushes a commit
+ *  that modifies `.stamp/**` (the trust root) through the normal
+ *  reviewer cycle, smuggling in a permissive reviewer prompt, a
+ *  newly-trusted attacker pubkey, or a tampered config. The reviewer
+ *  cycle is structurally vulnerable to this — a sufficiently permissive
+ *  new prompt could approve its own merging. The path-rules gate
+ *  imposes a STRUCTURAL requirement that admin-capability trust-anchor
+ *  signatures accompany any merge that touches a path-rule's glob.
  *
- *  The full check is: if the diff touches any path matching a
- *  `path_rules.<glob>` from `.stamp/config.yml` at base_sha, count
- *  `trust_anchor_signatures` entries whose signer carries the required
- *  capability per the rule, and reject if fewer than
+ *  Per AGT-335's retro: `verifyV4TrustAnchorSignatures` above already
+ *  validates any admin sigs that are present (a forged or non-admin
+ *  sig is caught end-to-end against the manifest at base_sha). This
+ *  phase adds the missing piece — the REQUIREMENT layer.
+ *
+ *  For each rule whose glob set intersects the merge's changed-files
+ *  list, count the trust_anchor_signatures whose signer_key_id
+ *  resolves (via the manifest at base_sha) to a key carrying
+ *  `require_capability`. Reject when that count is below
  *  `minimum_signatures`.
  *
- *  Implementing this requires:
- *    - Reading + parsing `path_rules` out of `.stamp/config.yml` (the
- *      current config parser in this file only handles `branches.*`)
- *    - A path-glob matcher applied to the diff's changed-files list
- *    - Per-rule capability + minimum_signatures bookkeeping
+ *  When `bypass_review_cycle: false` AND the rule matches, also
+ *  require that the reviewer cycle actually ran for this merge
+ *  (envelope.approvals non-empty). `verifyV4Approvals` above already
+ *  enforces the branch rule's `required:` list, so the empty-list
+ *  check here is the safety net for repos whose `branches.<x>.required`
+ *  is empty (a permissive branch-level config that happens to be
+ *  pointing at a path-rule that demands the cycle).
  *
- *  Done correctly that's a non-trivial slice; the AGT-335 ticket text
- *  explicitly allows scoping it to AGT-336/337 if it adds significant
- *  scope, which it does. This stub returns ok=true so a v4 envelope
- *  with NO `.stamp/**` changes verifies cleanly today. The
- *  `verifyV4TrustAnchorSignatures` phase above DOES validate any
- *  trust-anchor signatures that happen to be present, so a partially-
- *  configured deployment can't slip a forged admin sig past us — it
- *  just can't yet require them.
+ *  When `bypass_review_cycle: true` (the spec example for `.stamp/**`)
+ *  the admin gate REPLACES the reviewer gate for these paths — no
+ *  additional reviewer-cycle requirement is added by this phase.
  *
- *  Operational caveat surfaced to the orchestrator: production v4
- *  rollout (enabling `review_server` and v4 envelopes) without
- *  AGT-336/337 leaves the `.stamp/**` admin-gate stubbed. The
- *  AGT-334 security review already flagged this. Block production
- *  enable on AGT-336/337 landing.
+ *  Capability resolution uses `resolveCapability(manifest, key_id)`,
+ *  same lookup as `verifyV4TrustAnchorSignatures`. The manifest is
+ *  the one at base_sha (lenient-revocation snapshot semantics —
+ *  decision #5). Forged/non-admin sigs were already weeded out by the
+ *  earlier phase, so each entry we COUNT here is guaranteed to be:
+ *  (a) in the manifest at base_sha, (b) carrying the capability it
+ *  claims, (c) a valid signature over the canonical payload-without-
+ *  trust-anchors bytes. We just have to count the matching ones.
  */
-export function verifyV4StampPathsGuard(_input: PhaseInputV4): PhaseResultV4 {
-  // TODO(AGT-336/337): enforce path_rules + minimum_signatures for
-  // .stamp/** touches.
+export function verifyV4StampPathsGuard(input: PhaseInputV4): PhaseResultV4 {
+  const { sha, payload, manifest, pathRules, changedFiles } = input;
+
+  // No path_rules configured → no path-gate, no rejection. Repos
+  // pre-AGT-336 / pre-path_rules deployment get the v3-era behavior
+  // (the admin-sig defense-in-depth from verifyV4TrustAnchorSignatures
+  // still applies to any sigs that ARE present; just no requirement).
+  if (pathRules.length === 0) return { ok: true };
+
+  // Precompute the set of trust-anchor signer_key_ids on this
+  // envelope. By the time we reach this phase,
+  // verifyV4TrustAnchorSignatures has already proved every entry
+  // resolves to a manifest-listed key with non-null capabilities,
+  // verifies cryptographically, and appears at most once. We just
+  // need to count which carry the required capability per rule.
+  //
+  // Note: we DO re-resolve capability here against the manifest at
+  // base_sha. We can't shortcut via "the earlier phase checked admin"
+  // because that phase only checked the 'admin' capability — a rule
+  // demanding a different capability (e.g. a hypothetical
+  // `release-manager` capability for tag pushes) would need its own
+  // resolution pass. Doing it once here keeps the gate generic.
+  const sigSignerIds = payload.trust_anchor_signatures.map((t) => t.signer_key_id);
+
+  for (const rule of pathRules) {
+    const matched = changedFiles.filter((f) => pathMatchesAny(f, [rule.pattern]));
+    if (matched.length === 0) continue; // Rule doesn't apply to this merge.
+
+    // Count signers with the required capability per the manifest at
+    // base_sha. resolveCapability returns null for keys not in the
+    // manifest (already rejected by the earlier phase, but we treat
+    // null as "doesn't count" defensively).
+    let qualifying = 0;
+    for (const keyId of sigSignerIds) {
+      const caps = resolveCapability(manifest, keyId);
+      if (caps !== null && caps.includes(rule.require_capability as (typeof caps)[number])) {
+        qualifying++;
+      }
+    }
+    if (qualifying < rule.minimum_signatures) {
+      const sample = matched.slice(0, 3).join(", ");
+      const moreSuffix = matched.length > 3 ? `, +${matched.length - 3} more` : "";
+      return {
+        ok: false,
+        reason:
+          `commit ${sha.slice(0, 8)}: v4 path_rules gate for pattern "${rule.pattern}" requires ` +
+          `${rule.minimum_signatures} signature(s) from keys with capability '${rule.require_capability}' ` +
+          `(diff touches ${matched.length} matched path(s): ${sample}${moreSuffix}), ` +
+          `but only ${qualifying} qualifying trust_anchor_signature(s) are present at base ${payload.base_sha.slice(0, 8)}. ` +
+          `Re-run the merge after collecting the required admin counter-signatures.`,
+      };
+    }
+
+    // bypass_review_cycle: false → reviewer cycle must also have run
+    // for this merge. We can't validate the reviewer-set against the
+    // path itself (the cycle is branch-scoped, not path-scoped, in v4)
+    // so the minimum we can enforce here is "at least one approval was
+    // recorded." Anything stricter would re-implement
+    // verifyV4Approvals; anything looser would let a path-rule with
+    // bypass_review_cycle: false silently pass on a no-approvals
+    // envelope when the branch's required list happens to be empty.
+    if (!rule.bypass_review_cycle && payload.approvals.length === 0) {
+      return {
+        ok: false,
+        reason:
+          `commit ${sha.slice(0, 8)}: v4 path_rules gate for pattern "${rule.pattern}" has ` +
+          `bypass_review_cycle=false (admin signatures + reviewer cycle required), but the envelope ` +
+          `carries no approvals — the reviewer cycle did not run for this merge.`,
+      };
+    }
+  }
+
   return { ok: true };
 }
 
@@ -1349,10 +1500,133 @@ function readConfigAt(sha: string): StampConfigAtRef | null {
         };
       }
     }
-    return { branches };
+    const path_rules = parsePathRules(obj.path_rules);
+    return {
+      branches,
+      ...(path_rules.length > 0 ? { path_rules } : {}),
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Parse the `path_rules:` section out of a parsed `.stamp/config.yml`.
+ *
+ * Spec form (per docs/plans/server-attested-reviews.md "Path rules"):
+ *
+ * ```yaml
+ * path_rules:
+ *   ".stamp/**":
+ *     require_capability: admin
+ *     minimum_signatures: 2
+ *     bypass_review_cycle: true
+ * ```
+ *
+ * Returns `[]` when the section is absent / malformed at the
+ * top level — the verifier treats "no path_rules" identically to
+ * "path_rules: {}", which is the safe-by-default posture (no gate, but
+ * also no false-positive rejection of well-formed envelopes from repos
+ * that haven't adopted path_rules yet).
+ *
+ * Per-rule, we silently drop entries that are missing required fields
+ * or carry wrong types — the verifier's posture for malformed config is
+ * "treat as absent and let the operator notice via missing
+ * enforcement," which matches how `branches:` parses (a malformed
+ * branch entry just doesn't gate that branch). A future linter
+ * (`stamp config check`) is the better place to surface
+ * malformed-rules errors visibly.
+ */
+function parsePathRules(raw: unknown): PathRule[] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const out: PathRule[] = [];
+  for (const [pattern, rule] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof pattern !== "string" || pattern.length === 0) continue;
+    if (!rule || typeof rule !== "object") continue;
+    const r = rule as Record<string, unknown>;
+    if (typeof r.require_capability !== "string" || r.require_capability.length === 0) continue;
+    if (typeof r.minimum_signatures !== "number" || !Number.isInteger(r.minimum_signatures) || r.minimum_signatures < 1) continue;
+    if (typeof r.bypass_review_cycle !== "boolean") continue;
+    out.push({
+      pattern,
+      require_capability: r.require_capability,
+      minimum_signatures: r.minimum_signatures,
+      bypass_review_cycle: r.bypass_review_cycle,
+    });
+  }
+  // Sort by pattern for deterministic iteration / stable error messages.
+  out.sort((a, b) => (a.pattern < b.pattern ? -1 : a.pattern > b.pattern ? 1 : 0));
+  return out;
+}
+
+/**
+ * Path-glob → anchored regex. Distinct from `globToRegex` in
+ * `lib/refPatterns.ts` because **paths** have hierarchy and conventional
+ * path-glob syntax distinguishes `*` (anything except `/`) from `**`
+ * (anything including `/`). The ref-glob equivalent collapses both into
+ * a single dotstar, which is wrong for `.stamp/*` (would match
+ * `.stamp/sub/file` — too permissive) and for `src/**.ts` (would over-
+ * match across directories).
+ *
+ * Supported metacharacters:
+ *   `**`  → `.*`   (any characters, including `/`)
+ *   `*`   → `[^/]*`   (any characters, EXCLUDING `/`)
+ *   `?`   → `[^/]`    (one character, excluding `/`)
+ *
+ * Everything else is regex-escaped, so `.` matches literal `.` and not
+ * any-char. Translation order matters: `**` must translate before `*`
+ * to avoid `**` collapsing into `[^/]*[^/]*`.
+ *
+ * No support for `{a,b}` alternation, character classes, or negation —
+ * the small handful of patterns path_rules will exercise (`.stamp/**`,
+ * `.github/workflows/*.yml`) don't need them, and a richer surface
+ * means more ways for an operator to write a permissive rule by
+ * accident.
+ */
+function pathGlobToRegex(pattern: string): RegExp {
+  // Escape every regex metachar except `*` and `?`, which are translated
+  // afterward. The set `[.+^${}()|[\]\\]` covers everything special in JS
+  // regex except `*` and `?`. We intentionally do NOT escape `/` — it's
+  // a literal in regex anyway, and treating it as such keeps our
+  // double-vs-single-star semantics clean.
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  // Translate `**` first, then `*`, then `?`. We use sentinels to
+  // avoid `**` translating into `.* .*` after `*` runs.
+  const DOUBLE = "\x00DOUBLESTAR\x00";
+  const SINGLE = "\x00SINGLESTAR\x00";
+  const QMARK = "\x00QMARK\x00";
+  const translated = escaped
+    .replace(/\*\*/g, DOUBLE)
+    .replace(/\*/g, SINGLE)
+    .replace(/\?/g, QMARK)
+    .replace(new RegExp(DOUBLE, "g"), ".*")
+    .replace(new RegExp(SINGLE, "g"), "[^/]*")
+    .replace(new RegExp(QMARK, "g"), "[^/]");
+  return new RegExp(`^${translated}$`);
+}
+
+/** True if `filePath` matches any pattern in `patterns` under path-glob
+ *  semantics (see `pathGlobToRegex`). Empty list → false. */
+function pathMatchesAny(filePath: string, patterns: string[]): boolean {
+  for (const p of patterns) {
+    if (pathGlobToRegex(p).test(filePath)) return true;
+  }
+  return false;
+}
+
+/** List of files changed between base_sha and head_sha via
+ *  `git diff --name-only base...head`. Returns `null` if the diff
+ *  is unreadable (e.g. unknown SHA); callers should treat null as a
+ *  hard error (something else has gone very wrong if base/head don't
+ *  resolve — earlier phases would have caught that). */
+function readChangedFiles(baseSha: string, headSha: string): string[] | null {
+  let out: string;
+  try {
+    out = run(["diff", "--name-only", `${baseSha}...${headSha}`]);
+  } catch {
+    return null;
+  }
+  return out.split("\n").filter((l) => l.length > 0);
 }
 
 function readTrustedKeysAt(sha: string): Map<string, string> {
