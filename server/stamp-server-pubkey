@@ -53,7 +53,8 @@ SPEC="${1:-}"
 # the leading "-" doesn't trip the "spec must not start with '-'"
 # guard below. The default location mirrors what stamp-bootstrap-
 # review-key resolves (env var override + STAMP_STATE_DIR fallback).
-if [ "$SPEC" = "--review-signing" ] || [ "$SPEC" = "review-signing" ]; then
+# Only the --flag form is accepted; one canonical spelling.
+if [ "$SPEC" = "--review-signing" ]; then
   REVIEW_KEY_PATH="${REVIEW_SIGNING_KEY_PATH:-${STAMP_STATE_DIR:-/srv/git/.stamp-state}/review-signing-key.pem}"
   # The bootstrap script writes the public half at the same base path
   # with a .pub extension (see publicKeyPathFor() in

@@ -115,15 +115,30 @@ describe("ensureReviewSigningKey — first-boot generation", () => {
       assert.equal(statSync(keyPath).mode & 0o777, 0o600);
       assert.equal(statSync(pubPath).mode & 0o777, 0o644);
 
-      // Content checks: the PEM the function returned matches what's
-      // on disk, and the fingerprint round-trips through
-      // fingerprintFromPem against the returned public key.
-      assert.equal(readFileSync(keyPath, "utf8"), result.privateKeyPem);
+      // Content checks. The .pub file content matches the returned
+      // PEM, and the fingerprint round-trips through fingerprintFromPem
+      // against the returned public key. We deliberately do NOT assert
+      // on a private-key string field — `result.privateKey` is a
+      // KeyObject (not a PEM string) so it can't accidentally leak via
+      // JSON.stringify. Verify the on-disk private PEM separately by
+      // shape; the round-trip "load + reuse" tests below cover that
+      // the saved bytes round-trip into an equivalent fingerprint.
       assert.equal(readFileSync(pubPath, "utf8"), result.publicKeyPem);
       assert.equal(
         fingerprintFromPem(result.publicKeyPem),
         result.fingerprint,
       );
+      const onDiskPriv = readFileSync(keyPath, "utf8");
+      assert.match(onDiskPriv, /-----BEGIN PRIVATE KEY-----/);
+      assert.match(onDiskPriv, /-----END PRIVATE KEY-----/);
+
+      // Security property check: result.privateKey is a KeyObject that
+      // JSON.stringify renders as `{}` — accidental serialization of
+      // the whole result cannot leak the key material. This is what
+      // security review (#753) explicitly asked for.
+      assert.equal(JSON.stringify(result.privateKey), "{}");
+      assert.equal(result.privateKey.type, "private");
+      assert.equal(result.privateKey.asymmetricKeyType, "ed25519");
     } finally {
       t.cleanup();
     }
@@ -155,8 +170,12 @@ describe("ensureReviewSigningKey — idempotent reuse", () => {
       const second = ensureReviewSigningKey({ privateKeyPath: keyPath });
       assert.equal(second.created, false);
       assert.equal(second.fingerprint, first.fingerprint);
-      assert.equal(second.privateKeyPem, first.privateKeyPem);
       assert.equal(second.publicKeyPem, first.publicKeyPem);
+      // Private-key identity: the KeyObjects on either side both
+      // derive (or originate from) the same on-disk PEM, so their
+      // public halves agree. Comparing KeyObjects directly via === is
+      // not meaningful (different references); the fingerprint
+      // equality above is the load-bearing assertion.
     } finally {
       t.cleanup();
     }
@@ -290,7 +309,12 @@ describe("ensureReviewSigningKey — wrong-mode refusal", () => {
         () => ensureReviewSigningKey({ privateKeyPath: keyPath }),
         (err: Error) => {
           assert.ok(err instanceof ReviewSigningKeyError);
-          assert.match(err.message, /could not be parsed/);
+          // Either "could not be loaded" (createPrivateKey blew up
+          // on malformed bytes) or "could not be parsed" (createPrivateKey
+          // succeeded but produced a non-Ed25519 key, which the
+          // post-parse asymmetricKeyType guard rejects). Both are
+          // valid failure paths for an invalid file.
+          assert.match(err.message, /could not be (loaded|parsed)/);
           return true;
         },
       );

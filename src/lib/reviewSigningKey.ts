@@ -52,8 +52,10 @@
  */
 
 import {
+  createPrivateKey,
   createPublicKey,
   generateKeyPairSync,
+  KeyObject,
 } from "node:crypto";
 import {
   chmodSync,
@@ -103,9 +105,17 @@ export interface ReviewSigningKeyResult {
   privateKeyPath: string;
   /** Absolute path of the sibling public key file. */
   publicKeyPath: string;
-  /** PEM-encoded private key (pkcs8). */
-  privateKeyPem: string;
-  /** PEM-encoded public key (spki). */
+  /** Private key as a Node `KeyObject` rather than a raw PEM string.
+   *  This is the load-bearing security property of the return shape:
+   *  `JSON.stringify` on a `KeyObject` produces `{}` by design, so a
+   *  future caller that accidentally serializes the whole result
+   *  (structured logging, error contexts, `JSON.stringify(result)`)
+   *  cannot leak the private material. Signing call sites use
+   *  `crypto.sign(null, data, privateKey)` directly against this
+   *  object; callers that need PEM bytes for disk writes have the
+   *  paths and can read from disk explicitly. */
+  privateKey: KeyObject;
+  /** PEM-encoded public key (spki). Safe to log/serialize. */
   publicKeyPem: string;
   /** `sha256:<hex>` over the SPKI DER bytes — matches `fingerprintFromPem`
    *  output so the same string round-trips into
@@ -189,13 +199,23 @@ export function ensureReviewSigningKey(opts: {
     );
   }
 
-  // Mode looks right — read and parse.
-  let privateKeyPem: string;
+  // Mode looks right — read and parse. We materialize the PEM as a
+  // string only as long as it takes to construct the KeyObject, then
+  // discard it: the public return surface holds the opaque
+  // KeyObject (non-serializable, can't accidentally leak via
+  // JSON.stringify) and the derived public-half PEM (safe to log).
+  // A caller that wants to sign feeds the KeyObject directly to
+  // crypto.sign(null, data, privateKey).
+  let privateKey: KeyObject;
+  let publicKeyPem: string;
+  let fingerprint: string;
   try {
-    privateKeyPem = readFileSync(privateKeyPath, "utf8");
+    const privateKeyPem = readFileSync(privateKeyPath, "utf8");
+    privateKey = createPrivateKey({ key: privateKeyPem, format: "pem" });
   } catch (err) {
+    if (err instanceof ReviewSigningKeyError) throw err;
     throw new ReviewSigningKeyError(
-      `review-signing key at ${privateKeyPath} could not be read: ${(err as Error).message}`,
+      `review-signing key at ${privateKeyPath} could not be loaded: ${(err as Error).message}`,
     );
   }
 
@@ -204,11 +224,13 @@ export function ensureReviewSigningKey(opts: {
   // serves the pubkey; the signing identity is whatever the private key
   // says it is. If a future operator deletes the .pub file by accident
   // we still want the server to come up.
-  let publicKeyPem: string;
-  let fingerprint: string;
   try {
-    const pub = createPublicKey({ key: privateKeyPem, format: "pem" });
-    publicKeyPem = pub.export({ type: "spki", format: "pem" }) as string;
+    if (privateKey.asymmetricKeyType !== "ed25519") {
+      throw new Error(
+        `expected asymmetricKeyType=ed25519, got ${privateKey.asymmetricKeyType ?? "<unknown>"}`,
+      );
+    }
+    publicKeyPem = exportPublicPem(privateKey);
     fingerprint = fingerprintFromPem(publicKeyPem);
   } catch (err) {
     throw new ReviewSigningKeyError(
@@ -243,11 +265,22 @@ export function ensureReviewSigningKey(opts: {
   return {
     privateKeyPath,
     publicKeyPath,
-    privateKeyPem,
+    privateKey,
     publicKeyPem,
     fingerprint,
     created: false,
   };
+}
+
+/** Helper: derive the SPKI PEM bytes for the public half of a private
+ *  key object. `createPublicKey` accepts a private `KeyObject` and
+ *  returns the corresponding public `KeyObject`; `.export({type:"spki",
+ *  format:"pem"})` produces the PEM bytes. Public PEM is the form the
+ *  rest of the codebase uses for `fingerprintFromPem` + the .pub
+ *  sibling file. */
+function exportPublicPem(privateKey: KeyObject): string {
+  const publicKeyObj = createPublicKey(privateKey);
+  return publicKeyObj.export({ type: "spki", format: "pem" }) as string;
 }
 
 /**
@@ -273,6 +306,11 @@ function mintNewKey(
   mkdirSync(parent, { recursive: true, mode: 0o700 });
 
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  // PEM serialization is needed once for the on-disk write; after that
+  // the PEM string goes out of scope and only the KeyObject is held
+  // on the returned result. Mirrors the load path's "materialize
+  // briefly, then drop" pattern so accidental serialization of the
+  // result can't leak the private bytes.
   const privateKeyPem = privateKey.export({
     type: "pkcs8",
     format: "pem",
@@ -293,7 +331,7 @@ function mintNewKey(
   return {
     privateKeyPath,
     publicKeyPath,
-    privateKeyPem,
+    privateKey,
     publicKeyPem,
     fingerprint: fingerprintFromPem(publicKeyPem),
     created: true,

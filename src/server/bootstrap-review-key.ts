@@ -26,20 +26,21 @@
  *      default for invocations outside the container (rare; tests
  *      always override path 1).
  *
- * On first generation we print a visually distinct block to STDERR
- * showing the new fingerprint plus the one-line instruction. Stdout is
- * reserved for nothing — keeping it clean means a future caller
- * that wants to consume this script's output (CI parser, etc.) sees a
- * stable empty stream rather than mixed advertisements. On re-boot we
- * print a one-line "reused existing key" log so operators see
- * something during normal boots without re-spamming the loud block.
+ * Output streams follow the standard CLI convention: prose and
+ * operational status (including the first-boot banner) go to stdout;
+ * errors go to stderr with the `error: ` prefix. The first-boot
+ * fingerprint advertisement is operator-instruction prose, not an
+ * error, so it lives on stdout. On re-boot we print a one-line
+ * "reused existing key" log so operators see something during normal
+ * boots without re-spamming the loud block.
  *
  * Failure handling:
  *   - ReviewSigningKeyError (wrong mode, unreadable, unparseable):
- *     print the error to stderr and exit 1. Entrypoint.sh treats this
- *     as a fatal startup failure — the trust model requires a stable
- *     server identity, and silently regenerating on a wrong-mode file
- *     would rotate that identity without operator consent.
+ *     print to stderr with the `error: ` prefix and exit 1.
+ *     Entrypoint.sh treats this as a fatal startup failure — the
+ *     trust model requires a stable server identity, and silently
+ *     regenerating on a wrong-mode file would rotate that identity
+ *     without operator consent.
  *   - Generic FS errors (write fail on volume not mounted, etc.):
  *     bubble with original message + non-zero exit. These are
  *     orchestration bugs the operator needs to see verbatim.
@@ -62,17 +63,20 @@ function resolveKeyPath(): string {
 }
 
 function printGeneratedBanner(fingerprint: string, publicKeyPath: string): void {
-  // Visually distinct ASCII border + the instruction line that AC #2
+  // Visually distinct border + the instruction line that AC #2
   // requires. The instruction text matches the exact phrasing in the
   // ticket so operators searching their logs for the docs cue can
-  // find it. Goes to stderr (process.stderr.write) rather than
-  // console.error so we don't get console.error's "Error: " prefix
-  // and so the surrounding box characters survive without quoting.
+  // find it. Border uses U+2500 (BOX DRAWINGS LIGHT HORIZONTAL) to
+  // match the established structural-marker convention used by
+  // `stamp status`, `stamp review`, etc. Goes to stdout — this is
+  // operator-instruction prose, not an error.
+  const border =
+    "────────────────────────────────────────────────────────────────────";
   const lines = [
     "",
-    "===================================================================",
+    border,
     "  STAMP-SERVER: review-signing key generated (first boot)",
-    "===================================================================",
+    border,
     "  fingerprint:  " + fingerprint,
     "  public key:   " + publicKeyPath,
     "",
@@ -83,10 +87,10 @@ function printGeneratedBanner(fingerprint: string, publicKeyPath: string): void 
     "  See `docs/plans/server-attested-reviews.md` (Trust model section)",
     "  for the manifest entry format. The pubkey is also fetchable via",
     "  `ssh git@<host> stamp-server-pubkey --review-signing`.",
-    "===================================================================",
+    border,
     "",
   ];
-  process.stderr.write(lines.join("\n"));
+  process.stdout.write(lines.join("\n"));
 }
 
 function main(): void {
@@ -109,7 +113,11 @@ function main(): void {
     result = ensureReviewSigningKey({ privateKeyPath });
   } catch (err) {
     if (err instanceof ReviewSigningKeyError) {
-      console.error("stamp-bootstrap-review-key: " + err.message);
+      // stderr + lowercase `error: ` prefix per the codebase
+      // convention; the domain-specific message body (which path,
+      // what's wrong, what to do) is already constructed by
+      // ReviewSigningKeyError.
+      process.stderr.write("error: " + err.message + "\n");
       process.exit(1);
     }
     throw err;

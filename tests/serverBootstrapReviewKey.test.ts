@@ -142,12 +142,19 @@ describe("stamp-bootstrap-review-key", () => {
 
       assert.equal(r.status, 0, `non-zero exit; stderr=${r.stderr}`);
 
-      // Banner lines: AC #2 names the visually-distinct block + the
-      // manifest-commit instruction. We assert on those concrete phrases.
-      assert.match(r.stderr, /review-signing key generated/);
-      assert.match(r.stderr, /sha256:[0-9a-f]{64}/);
-      assert.match(r.stderr, /capabilities: \[server\]/);
-      assert.match(r.stderr, /\.stamp\/trusted-keys\/manifest\.yml/);
+      // Banner goes to STDOUT (operator-instruction prose, not an
+      // error). AC #2 names the visually-distinct block + the
+      // manifest-commit instruction. We assert on those concrete
+      // phrases plus the U+2500 border per the structural-marker
+      // convention.
+      assert.match(r.stdout, /review-signing key generated/);
+      assert.match(r.stdout, /sha256:[0-9a-f]{64}/);
+      assert.match(r.stdout, /capabilities: \[server\]/);
+      assert.match(r.stdout, /\.stamp\/trusted-keys\/manifest\.yml/);
+      assert.match(r.stdout, /─────/); // U+2500 border, not "=====".
+      assert.doesNotMatch(r.stdout, /====/, "must not use ASCII '=' borders");
+      // stderr is clean on the success path.
+      assert.equal(r.stderr, "", `expected empty stderr; got ${r.stderr}`);
 
       // Disk state.
       assert.equal(existsSync(keyPath), true);
@@ -175,7 +182,7 @@ describe("stamp-bootstrap-review-key", () => {
         ANTHROPIC_API_KEY: "sk-test-not-real",
       });
       assert.equal(first.status, 0);
-      const firstFingerprint = extractFingerprint(first.stderr);
+      const firstFingerprint = extractFingerprint(first.stdout);
       assert.ok(firstFingerprint, "could not extract fingerprint from banner");
 
       const second = runBootstrap({
@@ -186,7 +193,7 @@ describe("stamp-bootstrap-review-key", () => {
 
       // Reuse path: no banner, single-line log on stdout that
       // includes the same fingerprint.
-      assert.doesNotMatch(second.stderr, /review-signing key generated/);
+      assert.doesNotMatch(second.stdout, /review-signing key generated/);
       assert.match(second.stdout, /reusing existing review-signing key/);
       assert.match(second.stdout, new RegExp(firstFingerprint!));
     } finally {
@@ -233,6 +240,7 @@ describe("stamp-bootstrap-review-key", () => {
       });
 
       assert.equal(second.status, 1, `expected exit 1; stderr=${second.stderr}`);
+      assert.match(second.stderr, /^error: /, "stderr error must use the lowercase `error: ` prefix");
       assert.match(second.stderr, /has mode/);
       assert.match(second.stderr, /chmod 600/);
       // Critical: NO regeneration on the wrong-mode path. The file
@@ -271,7 +279,10 @@ describe("stamp-bootstrap-review-key", () => {
   });
 });
 
-function extractFingerprint(stderr: string): string | null {
-  const m = stderr.match(/sha256:[0-9a-f]{64}/);
+function extractFingerprint(stream: string): string | null {
+  // Works against either stream — banner went to stderr in the
+  // initial implementation and now to stdout per the prose-on-stdout
+  // convention; the regex is the same either way.
+  const m = stream.match(/sha256:[0-9a-f]{64}/);
   return m ? m[0] : null;
 }
