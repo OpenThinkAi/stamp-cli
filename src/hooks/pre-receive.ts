@@ -717,10 +717,11 @@ const COMMIT_PHASES_V4: ReadonlyArray<{ name: string; fn: PhaseV4 }> = [
   { name: "verifyV4DiffHash", fn: verifyV4DiffHash },
   { name: "verifyV4ApprovalSignatures", fn: verifyV4ApprovalSignatures },
   { name: "verifyV4Checks", fn: verifyV4Checks },
-  // PRECEDES verifyV4StampPathsGuard — see ORDERING INVARIANT comment.
+  // Runs before verifyV4StampPathsGuard for UX (clearer error message
+  // on forged sigs); the guard is correct out-of-order too.
   { name: "verifyV4TrustAnchorSignatures", fn: verifyV4TrustAnchorSignatures },
-  // DEPENDS ON verifyV4TrustAnchorSignatures having validated every
-  // trust_anchor_signatures entry's cryptographic signature.
+  // Independently re-verifies trust-anchor signatures — see the
+  // ORDERING note above. Phase ordering is not security-load-bearing.
   { name: "verifyV4StampPathsGuard", fn: verifyV4StampPathsGuard },
 ];
 
