@@ -640,6 +640,8 @@ discrete additions.
 
 ## Migration path
 
+> _Detailed walkthrough: [`../migration-1.x-to-2.x.md`](../migration-1.x-to-2.x.md)._
+
 Hard version bump: stamp 1.x stays on the operator-trust local model with
 its documented caveats; stamp 2.x is server-attested-only for the trust
 property.

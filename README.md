@@ -13,7 +13,7 @@ PR dashboard, no human comment threads in core. Just a CLI + a git hook.
 
 Part of the [OpenThink](https://openthink.dev) suite.
 
-**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [threat model](./docs/threat-model.md) (who attacks, how, what defends) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [local-only mode](./docs/local-only-mode.md) (no-trust iteration via stamp review --plan + Claude Code skill) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
+**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [threat model](./docs/threat-model.md) (who attacks, how, what defends) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [local-only mode](./docs/local-only-mode.md) (no-trust iteration via stamp review --plan + Claude Code skill) · [1.x → 2.x migration](./docs/migration-1.x-to-2.x.md) (server-attested reviews upgrade guide) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
 
 ## Install
 
