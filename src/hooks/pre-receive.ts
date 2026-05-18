@@ -18,6 +18,12 @@
  *
  * Exits 0 on success, 1 on rejection. Rejection reasons go to stderr —
  * git forwards these to the pushing client.
+ *
+ * Per-commit verification is structured as a pipeline of named phase
+ * functions (see `COMMIT_PHASES`). Each phase is a pure check returning
+ * a `PhaseResult`; the orchestrator (`verifyCommit`) invokes them in
+ * order and rejects on the first failure. AGT-350 (this refactor) is the
+ * precursor for AGT-335, which will append v4 verification phases.
  */
 
 import { execFileSync } from "node:child_process";
@@ -52,6 +58,22 @@ interface BranchRule {
 interface StampConfigAtRef {
   branches: Record<string, BranchRule>;
 }
+
+// ---------- per-commit verification pipeline ----------
+
+type PhaseResult = { ok: true } | { ok: false; reason: string };
+
+interface PhaseInput {
+  sha: string;
+  branch: string;
+  rule: BranchRule;
+  trustedKeys: Map<string, string>;
+  payload: AttestationPayload;
+  payloadBytes: Buffer;
+  signatureBase64: string;
+}
+
+type Phase = (input: PhaseInput) => PhaseResult;
 
 function main(): void {
   const stdin = readAllStdin();
@@ -249,6 +271,28 @@ function verifyTagPush(newSha: string, refname: string): void {
   );
 }
 
+// Per-commit verification phases (in order). Each `fn` is a pure check;
+// the orchestrator (`verifyCommit`) rejects on the first failure. Order
+// is load-bearing — cheaper / more-structural checks first, and later
+// phases assume earlier ones have run (e.g. verifyTrailerSignature relies
+// on verifySignerTrust having confirmed the trusted-key lookup). When
+// AGT-335 adds v4 phases, prefer appending.
+//
+// Trailer presence (no Stamp-Payload at all → reject) is handled in
+// `verifyCommit` before the pipeline, since phases operate on an
+// already-parsed `AttestationPayload`. Threat caught there: unstamped
+// commit landing on a protected branch.
+const COMMIT_PHASES: ReadonlyArray<{ name: string; fn: Phase }> = [
+  { name: "verifyMergeStructure", fn: verifyMergeStructure },
+  { name: "verifyTargetBranch", fn: verifyTargetBranch },
+  { name: "verifySignerTrust", fn: verifySignerTrust },
+  { name: "verifyTrailerSignature", fn: verifyTrailerSignature },
+  { name: "verifyApprovals", fn: verifyApprovals },
+  { name: "verifyChecks", fn: verifyChecks },
+  { name: "verifySchemaVersion", fn: verifySchemaVersion },
+  { name: "verifyReviewerHashesAtMergeBase", fn: verifyReviewerHashesAtMergeBase },
+];
+
 function verifyCommit(
   sha: string,
   branch: string,
@@ -256,9 +300,9 @@ function verifyCommit(
   trustedKeys: Map<string, string>,
   refname: string,
 ): void {
+  // commit message body is everything after the first blank-line separator
+  // in `git cat-file -p <commit>` output (headers then blank line then body)
   const commitMessage = run(["cat-file", "-p", sha]).split(/\n\n/s).slice(1).join("\n\n");
-  // ^ commit message body is everything after the first blank-line separator
-  //   in `git cat-file -p <commit>` output (headers then blank line then body)
 
   const parsed = parseCommitAttestation(commitMessage);
   if (!parsed) {
@@ -268,67 +312,115 @@ function verifyCommit(
     );
   }
 
-  const { payload, payloadBytes, signatureBase64 } = parsed;
+  const input: PhaseInput = {
+    sha,
+    branch,
+    rule,
+    trustedKeys,
+    payload: parsed.payload,
+    payloadBytes: parsed.payloadBytes,
+    signatureBase64: parsed.signatureBase64,
+  };
 
-  // Fetch parents to cross-check SHAs.
+  for (const phase of COMMIT_PHASES) {
+    const result = phase.fn(input);
+    if (!result.ok) reject(refname, result.reason);
+  }
+}
+
+// ---------- phase implementations (pure; no reject / process.exit) ----------
+
+/** Threat: stamped commit lying about what was merged — a wrong second
+ *  parent or wrong merge-base would mean the attestation reviewed one
+ *  diff while git applied another. */
+function verifyMergeStructure(input: PhaseInput): PhaseResult {
+  const { sha, branch, payload } = input;
+
   const parents = run(["rev-list", "--parents", "-n", "1", sha])
     .trim()
     .split(/\s+/)
     .slice(1);
   if (parents.length !== 2) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)} is not a merge commit (has ${parents.length} parent(s)). Every commit to '${branch}' must be a --no-ff merge.`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)} is not a merge commit (has ${parents.length} parent(s)). Every commit to '${branch}' must be a --no-ff merge.`,
+    };
   }
   const [parent0, parent1] = parents as [string, string];
 
   if (parent1 !== payload.head_sha) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: second parent (${parent1.slice(0, 8)}) != payload.head_sha (${payload.head_sha.slice(0, 8)})`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: second parent (${parent1.slice(0, 8)}) != payload.head_sha (${payload.head_sha.slice(0, 8)})`,
+    };
   }
 
   const mergeBase = run(["merge-base", parent0, parent1]).trim();
   if (mergeBase !== payload.base_sha) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: merge-base(${parent0.slice(0, 8)}, ${parent1.slice(0, 8)}) = ${mergeBase.slice(0, 8)} != payload.base_sha (${payload.base_sha.slice(0, 8)})`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: merge-base(${parent0.slice(0, 8)}, ${parent1.slice(0, 8)}) = ${mergeBase.slice(0, 8)} != payload.base_sha (${payload.base_sha.slice(0, 8)})`,
+    };
   }
 
+  return { ok: true };
+}
+
+/** Threat: cross-branch replay — attestation produced for one protected
+ *  branch reused on another. `target_branch` in the signed payload must
+ *  match the branch being pushed. */
+function verifyTargetBranch(input: PhaseInput): PhaseResult {
+  const { sha, branch, payload } = input;
   if (payload.target_branch !== branch) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: payload.target_branch ("${payload.target_branch}") does not match the branch being pushed ("${branch}")`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: payload.target_branch ("${payload.target_branch}") does not match the branch being pushed ("${branch}")`,
+    };
   }
+  return { ok: true };
+}
 
-  const trustedPem = trustedKeys.get(payload.signer_key_id);
-  if (!trustedPem) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: signer key ${payload.signer_key_id} is not in .stamp/trusted-keys/`,
-    );
+/** Threat: signer key not in `.stamp/trusted-keys/` at the pre-push
+ *  tree — unknown or attacker-controlled. */
+function verifySignerTrust(input: PhaseInput): PhaseResult {
+  const { sha, payload, trustedKeys } = input;
+  if (!trustedKeys.has(payload.signer_key_id)) {
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: signer key ${payload.signer_key_id} is not in .stamp/trusted-keys/`,
+    };
   }
+  return { ok: true };
+}
 
+/** Threat: payload tampering or signature forgery — the Ed25519
+ *  signature over the canonical payload bytes must verify against the
+ *  trusted signer's pubkey. Assumes verifySignerTrust has passed. */
+function verifyTrailerSignature(input: PhaseInput): PhaseResult {
+  const { sha, payload, payloadBytes, signatureBase64, trustedKeys } = input;
+  const trustedPem = trustedKeys.get(payload.signer_key_id)!;
   let sigValid = false;
   try {
     sigValid = verifyBytes(trustedPem, payloadBytes, signatureBase64);
   } catch (err) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: signature verification threw — ${err instanceof Error ? err.message : String(err)}`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: signature verification threw — ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
   if (!sigValid) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: Ed25519 signature does not verify against the signer's trusted key`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: Ed25519 signature does not verify against the signer's trusted key`,
+    };
   }
+  return { ok: true };
+}
 
+/** Threat: missing required reviewers — every name in the branch rule's
+ *  `required:` list must appear with verdict='approved'. */
+function verifyApprovals(input: PhaseInput): PhaseResult {
+  const { sha, payload, rule } = input;
   const approvedReviewers = new Set(
     payload.approvals
       .filter((a) => a.verdict === "approved")
@@ -336,14 +428,19 @@ function verifyCommit(
   );
   const missing = rule.required.filter((r) => !approvedReviewers.has(r));
   if (missing.length > 0) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: missing required approvals — ${missing.join(", ")}`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: missing required approvals — ${missing.join(", ")}`,
+    };
   }
+  return { ok: true };
+}
 
-  // Verify attested checks cover every required_check in the committed
-  // config, and that each recorded an exit code of 0.
+/** Threat: skipped or failing required checks (CI) — every
+ *  `required_checks` entry in the committed config must be attested with
+ *  exit_code === 0. */
+function verifyChecks(input: PhaseInput): PhaseResult {
+  const { sha, payload, rule } = input;
   const requiredChecks = rule.required_checks ?? [];
   const attestedByName = new Map(
     ((payload as { checks?: { name: string; exit_code: number }[] }).checks ?? [])
@@ -362,68 +459,58 @@ function verifyCommit(
     }
   }
   if (missingChecks.length > 0) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: attestation is missing required check(s) — ${missingChecks.join(", ")}`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: attestation is missing required check(s) — ${missingChecks.join(", ")}`,
+    };
   }
   if (failingChecks.length > 0) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: attestation records failing check(s) — ${failingChecks.join(", ")}`,
-    );
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: attestation records failing check(s) — ${failingChecks.join(", ")}`,
+    };
   }
+  return { ok: true };
+}
 
-  // v3+: verify per-reviewer prompt/tools/mcp hashes against the
-  // merge-base tree (the common ancestor of the two parents). Reading from
-  // the commit's own tree (v2) was broken — a feature branch could modify
-  // a reviewer prompt and the resulting attestation would self-verify.
-  // v3 sources hashes from the version of the reviewer that existed at
-  // merge-base, which is invariant under the diff.
-  //
-  // v2 and below are rejected outright. They're cryptographically valid
-  // but bound to the wrong tree (the post-merge tree, which the diff
-  // could have modified). No upgrade path other than re-merging with a
-  // current stamp-cli build that produces v3.
+/** Threat: known-broken v2 attestations — v2 sourced reviewer hashes
+ *  from the merge commit's own (post-merge) tree, enabling a feature
+ *  branch to modify a reviewer prompt and self-verify. v3+ binds to the
+ *  merge-base tree (handled by verifyReviewerHashesAtMergeBase); v<3 is
+ *  rejected outright with no upgrade path other than re-merging. */
+function verifySchemaVersion(input: PhaseInput): PhaseResult {
+  const { sha, payload } = input;
   const version = payload.schema_version ?? 1;
   if (version < MIN_ACCEPTED_PAYLOAD_VERSION) {
-    reject(
-      refname,
-      `commit ${sha.slice(0, 8)}: attestation schema_version ${version} is no longer accepted ` +
+    return {
+      ok: false,
+      reason: `commit ${sha.slice(0, 8)}: attestation schema_version ${version} is no longer accepted ` +
         `(minimum supported is ${MIN_ACCEPTED_PAYLOAD_VERSION} — earlier versions are known-broken under ` +
         `the feature-branch self-review attack). Re-create the merge with a current stamp-cli build ` +
         `which produces v${MIN_ACCEPTED_PAYLOAD_VERSION} attestations bound to the merge-base tree.`,
-    );
+    };
   }
-  // The merge-base check earlier in verifyCommit already cross-checked
-  // payload.base_sha against the actual merge-base of the two parents and
-  // rejected on mismatch. So we can pass payload.base_sha directly here
-  // instead of recomputing the merge-base; it's provably the same value.
-  verifyReviewerHashesAtMergeBase(sha, payload.base_sha, payload, refname);
+  return { ok: true };
 }
 
-function verifyReviewerHashesAtMergeBase(
-  sha: string,
-  baseSha: string,
-  payload: AttestationPayload,
-  refname: string,
-): void {
+/** Threat: feature branch modifying `.stamp/config.yml` or a reviewer
+ *  prompt/tools/mcp config and self-verifying. Defense: recompute hashes
+ *  from the merge-base tree (invariant under the diff).
+ *  `payload.base_sha` is provably the merge-base because
+ *  verifyMergeStructure already cross-checked it. */
+function verifyReviewerHashesAtMergeBase(input: PhaseInput): PhaseResult {
+  const { sha, payload } = input;
+  const baseSha = payload.base_sha;
   const prefix = `commit ${sha.slice(0, 8)}: v3 attestation:`;
-
-  // baseSha is the merge-base, already cross-checked against payload.base_sha
-  // by the caller (verifyRef). The reviewer config + prompts at this tree
-  // are the version that existed BEFORE the diff — invariant under
-  // whatever the feature branch added — so a feature branch can't modify
-  // a reviewer prompt and have the modified version verify here.
 
   let configYaml: string;
   try {
     configYaml = run(["show", `${baseSha}:.stamp/config.yml`]);
   } catch {
-    reject(
-      refname,
-      `${prefix} .stamp/config.yml unreadable at merge-base ${baseSha.slice(0, 8)}`,
-    );
+    return {
+      ok: false,
+      reason: `${prefix} .stamp/config.yml unreadable at merge-base ${baseSha.slice(0, 8)}`,
+    };
   }
   const reviewers = readReviewersFromYaml(configYaml);
 
@@ -433,48 +520,45 @@ function verifyReviewerHashesAtMergeBase(
     if (!approval.tools_sha256) missing.push("tools_sha256");
     if (!approval.mcp_sha256) missing.push("mcp_sha256");
     if (missing.length > 0) {
-      reject(
-        refname,
-        `${prefix} approval for "${approval.reviewer}" is missing ${missing.join(", ")}`,
-      );
+      return {
+        ok: false,
+        reason: `${prefix} approval for "${approval.reviewer}" is missing ${missing.join(", ")}`,
+      };
     }
     const def = reviewers[approval.reviewer];
     if (!def) {
-      reject(
-        refname,
-        `${prefix} reviewer "${approval.reviewer}" not defined in .stamp/config.yml at merge-base`,
-      );
+      return {
+        ok: false,
+        reason: `${prefix} reviewer "${approval.reviewer}" not defined in .stamp/config.yml at merge-base`,
+      };
     }
     let promptBytes: string;
     try {
       promptBytes = run(["show", `${baseSha}:${def.prompt}`]);
     } catch {
-      reject(
-        refname,
-        `${prefix} reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at merge-base`,
-      );
+      return {
+        ok: false,
+        reason: `${prefix} reviewer "${approval.reviewer}" prompt "${def.prompt}" unreadable at merge-base`,
+      };
     }
-    checkHashOrReject(prefix, refname, approval.reviewer, "prompt", hashPromptBytes(Buffer.from(promptBytes, "utf8")), approval.prompt_sha256!);
-    checkHashOrReject(prefix, refname, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
-    checkHashOrReject(prefix, refname, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
-  }
-}
 
-function checkHashOrReject(
-  prefix: string,
-  refname: string,
-  reviewer: string,
-  field: string,
-  computed: string,
-  expected: string,
-): void {
-  if (computed === expected) return;
-  reject(
-    refname,
-    `${prefix} reviewer "${reviewer}" ${field} hash mismatch ` +
-      `(expected ${expected.slice(0, 16)}..., committed tree has ${computed.slice(0, 16)}...). ` +
-      `The committed config differs from what the attestation claims; re-run stamp merge or revert the change.`,
-  );
+    const fields: Array<{ field: string; computed: string; expected: string }> = [
+      { field: "prompt", computed: hashPromptBytes(Buffer.from(promptBytes, "utf8")), expected: approval.prompt_sha256! },
+      { field: "tools", computed: hashTools(def.tools), expected: approval.tools_sha256! },
+      { field: "mcp_servers", computed: hashMcpServers(def.mcp_servers), expected: approval.mcp_sha256! },
+    ];
+    for (const f of fields) {
+      if (f.computed === f.expected) continue;
+      return {
+        ok: false,
+        reason: `${prefix} reviewer "${approval.reviewer}" ${f.field} hash mismatch ` +
+          `(expected ${f.expected.slice(0, 16)}..., committed tree has ${f.computed.slice(0, 16)}...). ` +
+          `The committed config differs from what the attestation claims; re-run stamp merge or revert the change.`,
+      };
+    }
+  }
+
+  return { ok: true };
 }
 
 // ---------- git wrappers (hook runs in the bare repo's cwd) ----------
