@@ -12,6 +12,7 @@ process.on("warning", (warn) => {
 import { Command } from "commander";
 import { runBootstrap } from "./commands/bootstrap.js";
 import { runInit } from "./commands/init.js";
+import { runMigrateToServerAttested } from "./commands/migrateServerAttested.js";
 import {
   runInvitesAccept,
   runInvitesMint,
@@ -115,6 +116,14 @@ program
     "--no-pr-check",
     "skip dropping .github/workflows/stamp-verify.yml (PR-check mode workflow). Default behaviour: write the workflow for forge-direct + local-only modes, skip for server-gated.",
   )
+  .option(
+    "--migrate-to-server-attested",
+    "scaffold the stamp 2.x trust anchors for an existing 1.x repo: writes .stamp/trusted-keys/manifest.yml, comments out reviewer mcp_servers/tools blocks, adds a default path_rules gate. Operator picks which existing keys gain `admin` capability via interactive prompt. See docs/migration-1.x-to-2.x.md.",
+  )
+  .option(
+    "--dry-run",
+    "with --migrate-to-server-attested: print proposed changes without writing them. No-op outside the migration path.",
+  )
   .action(
     (opts: {
       minimal?: boolean;
@@ -126,8 +135,20 @@ program
       remote: string;
       oteam: boolean;
       prCheck: boolean;
+      migrateToServerAttested?: boolean;
+      dryRun?: boolean;
     }) => {
       try {
+        // The migration flag short-circuits the normal init flow: an
+        // existing 1.x repo already has reviewers + a keypair + a
+        // committed config; the migration only adds the v4 trust
+        // anchors. Re-running the full `stamp init` scaffold against an
+        // existing repo would be redundant (and would print the
+        // already-on-disk summary block again).
+        if (opts.migrateToServerAttested) {
+          runMigrateToServerAttested({ dryRun: opts.dryRun === true });
+          return;
+        }
         let mode: "server-gated" | "local-only" | undefined;
         if (opts.mode === undefined) {
           mode = undefined;
