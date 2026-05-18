@@ -13,7 +13,7 @@ PR dashboard, no human comment threads in core. Just a CLI + a git hook.
 
 Part of the [OpenThink](https://openthink.dev) suite.
 
-**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [threat model](./docs/threat-model.md) (who attacks, how, what defends) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
+**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [threat model](./docs/threat-model.md) (who attacks, how, what defends) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [local-only mode](./docs/local-only-mode.md) (no-trust iteration via stamp review --plan + Claude Code skill) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
 
 ## Install
 
@@ -132,6 +132,10 @@ repo — the merge commits carry signed attestations and `stamp verify <sha>`
 validates them on any clone. What you don't get: server-side rejection of
 unstamped pushes. Anyone with repo write access can `git push origin main`
 of any commit, stamped or not.
+
+### Local-only iteration mode (no server, no attestation)
+
+Local-only mode is a sibling pathway focused on fast reviewer feedback during iteration when you have not deployed a stamp server. `stamp review --plan --diff <revspec>` emits a structured JSON plan (diff + reviewers + per-reviewer prompts + fence hex) on stdout and a `note:`-prefixed no-trust advisory on stderr. The plan is consumed by a parent agent — the [`stamp-review` Claude Code skill](./skills/stamp-review.md) ships in this repo — which fans out one subagent per reviewer in parallel, surfaces their verdicts, and reprints the no-attestation banner. **No verdict signed, no server round-trip, no `stamp merge` gate change.** See [`docs/local-only-mode.md`](./docs/local-only-mode.md) for the consumer contract, the schema-versioning rules, the security boundary, and the headless fallback (AGT-341, in flight).
 
 ### Local-test (no server, on-disk bare repo)
 
