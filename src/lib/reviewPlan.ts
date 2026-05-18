@@ -33,6 +33,13 @@ import { resolveDiff, showAtRef, type ResolvedDiff } from "./git.js";
  * diff inside per-reviewer `fence_hex` markers so an attacker who controls
  * diff content cannot trivially close the fence and emit out-of-band
  * instructions. Mirrors the trusted-mode reviewer.ts pattern.
+ *
+ * Headless mode (AGT-341) reuses this shape as a superset base — its
+ * per-reviewer result adds post-call fields (`verdict`, `prose`, `model`,
+ * optional `error`) WITHOUT changing the wire shape of `--plan` mode.
+ * The optional fields below let plan-mode JSON consumers keep their
+ * existing parsers; headless-mode consumers see the additional fields
+ * populated. Both modes carry `schema_version: 1` — additive only.
  */
 export interface ReviewPlanReviewer {
   /** Reviewer key as it appears in `.stamp/config.yml` (e.g. "security"). */
@@ -51,6 +58,30 @@ export interface ReviewPlanReviewer {
    * fresh hex so subagent prompts cannot collide.
    */
   fence_hex: string;
+  /**
+   * Headless-mode only (AGT-341). Final verdict after the API call;
+   * `null` when the call or parse failed. Absent in `--plan` mode JSON
+   * (the parent agent dispatches subagents itself and writes its own
+   * verdicts client-side).
+   */
+  verdict?: "approved" | "changes_requested" | "denied" | null;
+  /**
+   * Headless-mode only (AGT-341). Reviewer prose returned by the model.
+   * Empty string on failure; absent in `--plan` mode.
+   */
+  prose?: string;
+  /**
+   * Headless-mode only (AGT-341). Model id actually used for this
+   * reviewer's call — useful for operator debug and metering
+   * attribution. Absent in `--plan` mode.
+   */
+  model?: string;
+  /**
+   * Headless-mode only (AGT-341). Set IFF the API call or parse failed;
+   * short single-line message. Pairs with `verdict: null`. Absent on
+   * success and in `--plan` mode.
+   */
+  error?: string;
 }
 
 /**
@@ -64,6 +95,18 @@ export interface ReviewPlanReviewer {
 export interface ReviewPlan {
   /** Plan-shape version. Bumped on breaking changes only. */
   schema_version: 1;
+  /**
+   * Mode discriminator (AGT-341, additive). `"plan"` is the AGT-339
+   * default — reviewers carry only `{name, prompt, fence_hex}` and the
+   * parent agent dispatches subagents itself. `"headless"` is the
+   * AGT-341 variant — each reviewer carries post-call `verdict`,
+   * `prose`, `model`, and possibly `error` fields populated by stamp
+   * directly via the Anthropic SDK. The skill (AGT-340) keys off this
+   * field to refuse a `headless` plan (which has no work for it to do).
+   * Absent in pre-AGT-341 JSON; consumers should treat missing as
+   * `"plan"` for back-compat.
+   */
+  mode?: "plan" | "headless";
   /** Original revspec the operator passed (e.g. "main..HEAD"). */
   revspec: string;
   /** Merge-base commit SHA of the diff. */

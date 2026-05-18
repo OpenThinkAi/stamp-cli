@@ -44,18 +44,29 @@ The skill is **purely orchestration**. It does not introduce a new stamp CLI ver
 
 To invoke from Claude Code: trigger the `stamp-review` skill (e.g. via the `Skill` tool, or however your harness exposes skills) and pass the diff revspec you want reviewed.
 
-### 2. Headless / scripted: roll your own consumer (AGT-341)
+### 2. Headless / scripted: `stamp review --headless`
 
-For cron jobs, git hooks, CI steps, or any context with no parent agent in the loop, the same `stamp review --plan` output is consumable directly. A standalone headless wrapper that drives `@anthropic-ai/sdk` with `ANTHROPIC_API_KEY` is in flight as AGT-341 (sibling ticket to this doc).
-
-Until AGT-341 lands, a minimal headless consumer looks like:
+For cron jobs, git hooks, CI steps, or any context with no parent agent in the loop, use the built-in headless mode. Stamp calls the Anthropic Messages API directly via `@anthropic-ai/sdk` — one request per reviewer, no tool-use loop, no MCP — and folds each reviewer's verdict + prose into the same JSON envelope that `--plan` mode emits.
 
 ```sh
-plan=$(stamp review --plan --diff main..feature)
-echo "$plan" | jq -r '.reviewers[] | .name + ": " + .prompt' | ...
+export ANTHROPIC_API_KEY=sk-ant-...
+plan=$(stamp review --headless --diff main..feature)
+echo "$plan" | jq -r '.reviewers[] | "\(.name): \(.verdict)\n\(.prose)\n"'
 ```
 
-Note that the headless path uses your Anthropic API key directly, which is billed per token. The Claude Code skill path runs through the parent agent's session and is unmetered by the June 15 API/subscription split.
+The exit code mirrors trusted-mode behaviour: `0` if every reviewer returned `approved`, `1` if any reviewer failed or returned a non-null non-approved verdict. Cron / hook callers can gate off the exit code without parsing the JSON. (`2` is reserved for usage errors like a missing `ANTHROPIC_API_KEY`.)
+
+**Output shape parity with `--plan`.** Each entry in `reviewers[]` carries the same `name`, `prompt`, `fence_hex` keys as `--plan` mode, plus the headless additions: `verdict`, `prose`, `model`, and (on failure) `error`. The top-level plan adds `mode: "headless"` so a single consumer that wants to handle both modes can switch on that field; absent `mode` means `"plan"` (the pre-AGT-341 default).
+
+**Model selection.** Per-reviewer model pins from `~/.stamp/config.yml` (set via `stamp config reviewers set <name> <model-id>`) apply to headless mode too. With no pin, headless falls back to `claude-sonnet-4-6` — same as the trusted-mode default — so flipping between `--plan` and `--headless` doesn't silently change the model behind a reviewer.
+
+**Missing key.** Without `ANTHROPIC_API_KEY` exported, `stamp review --headless` exits 2 with a clean error pointing back at this doc. The check happens before any API call so an unkeyed environment fails fast.
+
+**Metering caveat.** Headless mode uses your `ANTHROPIC_API_KEY` and is billed per token by Anthropic. `--plan` mode runs reviewers through the parent's Claude Code session, which is unmetered by the June 15 API/subscription split. The stderr no-trust banner in headless mode explicitly flags this so a script-running operator sees the billing implication without needing to re-read this doc — the banner divergence is intentional.
+
+**No-trust posture is identical to `--plan`.** Headless mode produces NO attestation, does NOT write to `state.db`, does NOT unlock `stamp merge`. It's iteration feedback only. For a verifiable, signed verdict, configure a `review_server` per [trusted mode](../README.md#concepts).
+
+**When to skip headless and reach for `--plan` instead.** When you have a parent Claude Code session, `--plan` is cheaper (unmetered subscription billing) and gives the parent agent richer dispatch control. Use `--headless` specifically when there is no parent agent — cron, post-receive hooks, ad-hoc bash scripts, CI steps. (Auto-detect was considered and skipped — the SDK doesn't expose a reliable "no parent agent" signal, and `isTTY` false-triggers in CI. Explicit flag is the contract.)
 
 ## Security boundary: what local-only mode does NOT promise
 
