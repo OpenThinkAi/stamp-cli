@@ -396,12 +396,8 @@ function seedV4Review(args: {
   serverKey: ServerKey;
   manifestSnapshot: string;
   verdict?: Verdict;
-  /** Optionally override the approval body before it's signed (negative-test hook). */
-  mutate?: (a: ApprovalV4) => ApprovalV4;
-  /** Optionally replace the signature with arbitrary bytes (negative-test hook). */
-  forgeSignatureB64?: string;
 }): { approval: ApprovalV4; signatureB64: string } {
-  const approval = (args.mutate ?? ((a) => a))({
+  const approval: ApprovalV4 = {
     reviewer: args.reviewer,
     verdict: args.verdict ?? "approved",
     prompt_sha256: sha256Hex(REVIEWER_PROMPT),
@@ -411,10 +407,11 @@ function seedV4Review(args: {
     trusted_keys_snapshot_sha256: args.manifestSnapshot,
     issued_at: "2026-05-17T18:42:13Z",
     server_key_id: args.serverKey.fingerprint,
-  });
-  const signatureB64 =
-    args.forgeSignatureB64 ??
-    signBytes(args.serverKey.privatePem, canonicalSerializeApproval(approval));
+  };
+  const signatureB64 = signBytes(
+    args.serverKey.privatePem,
+    canonicalSerializeApproval(approval),
+  );
 
   const db = openDb(stampStateDbPath(args.repo));
   try {
@@ -553,11 +550,13 @@ describe("v4 attestation round-trip — happy path", () => {
       signatureB64,
     });
     const failure = runAllV4Phases(input);
-    assert.equal(
-      failure,
-      null,
-      `every v4 phase must accept the produced trailer (failed: ${failure?.phase} — ${failure?.reason})`,
-    );
+    // Two-step so the diagnostic doesn't render "failed: undefined —
+    // undefined" when `failure` is null (the success case).
+    if (failure !== null) {
+      assert.fail(
+        `every v4 phase must accept the produced trailer (failed at ${failure.phase}: ${failure.reason})`,
+      );
+    }
   });
 });
 
