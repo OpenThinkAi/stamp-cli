@@ -19,7 +19,11 @@
  * check), the shared `runReviewPipeline` call (currently returns
  * obvious placeholders — see `src/server/reviewPipeline.ts`), and the
  * JSON response shape from design.md. The Anthropic call lands in
- * AGT-330 inside the pipeline; the real signature lands in AGT-331.
+ * AGT-330 inside the pipeline; the real signature lands in AGT-331
+ * (which also makes `approval.diff_sha256` come from the server's hash
+ * of the streamed bytes rather than echoing the client's claimed
+ * sha — see the verb's stdin-cross-check below, kept as a fast-fail
+ * surface that rejects mismatched input before the LLM call).
  *
  * Refuses to run if:
  *
@@ -321,9 +325,9 @@ async function readBoundedStdin(maxBytes: number): Promise<Buffer> {
  *
  * The wrapper is just a transport envelope; the `signature` inside it
  * commits to the canonical bytes of `approval`
- * (`canonicalSerializeApproval(approval)`), NOT to this envelope's
- * own serialization. AGT-331 will wire that signing call inside
- * `runReviewPipeline`.
+ * (`canonicalSerializeApproval(approval)`), NOT to this envelope's own
+ * serialization. The signing call lives inside `runReviewPipeline`
+ * (AGT-331); this verb is unaware of the Ed25519 mechanism.
  */
 export type StampReviewResponse = ReviewPipelineResult;
 
@@ -345,6 +349,11 @@ async function main(): Promise<void> {
     // a transport corruption or an attempted attestation-detached-
     // from-content attack; either way it's a clean exit-4 reject
     // rather than a pipeline-flavored failure.
+    //
+    // The pipeline itself rehashes the diff and uses ITS hash to bake
+    // `approval.diff_sha256` into the signed bytes — this verb-level
+    // check is the operator-facing fast-fail so a corrupt diff doesn't
+    // burn an Anthropic API call before being rejected.
     const observedDiffSha = createHash("sha256").update(diff).digest("hex");
     if (observedDiffSha !== params.diffSha256) {
       fail(
@@ -354,9 +363,6 @@ async function main(): Promise<void> {
       );
     }
 
-    // TODO(AGT-331): sign canonicalSerializeApproval(result.approval)
-    // and populate result.signature with the real Ed25519 signature
-    // instead of the PLACEHOLDER_SIGNATURE sentinel currently emitted.
     const result: StampReviewResponse = await runReviewPipeline({
       diff,
       params,

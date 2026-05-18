@@ -22,12 +22,18 @@
 
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
+import { fingerprintFromPem } from "../src/lib/keys.ts";
 import { insertUser, openServerDb } from "../src/lib/serverDb.ts";
 
 const STAMP_REVIEW_TS = path.resolve(
@@ -56,6 +62,15 @@ interface Harness {
   /** SHA the fixture bare repo's prompt was committed at. Useful for
    *  tests that need to send a matching `--base-sha`. */
   fixtureBaseSha?: string;
+  /** Absolute path to a fixture review-signing key minted for the test
+   *  (mode 0600, sibling .pub written). Wired into the verb's env as
+   *  `REVIEW_SIGNING_KEY_PATH` so the pipeline's signing-key loader
+   *  resolves to this file instead of `/srv/git/.stamp-state/...`. Only
+   *  populated by `setupWithFixtureBare`. */
+  signingKeyPath?: string;
+  /** Fingerprint (sha256:<hex>) of the fixture review-signing key.
+   *  Used by tests to assert that the signed approval names this key. */
+  signingKeyFingerprint?: string;
   cleanup: () => void;
 }
 
@@ -90,10 +105,17 @@ function setup(callerRole: "owner" | "admin" | "member" | "none"): Harness {
 
 /**
  * Build a fixture bare repo at `<harness.repoRoot>/widget-co.git`
- * containing `.stamp/reviewers/security.md` at a real commit. Returns the
- * commit SHA so the test can pass it as `--base-sha`. Used by AGT-330
- * tests that need the verb to reach the pipeline and produce a pipeline-
- * shaped error (e.g. missing API key) rather than a prompt-fetch error.
+ * containing `.stamp/reviewers/security.md` AND
+ * `.stamp/trusted-keys/manifest.yml` at a real commit, plus a fixture
+ * Ed25519 review-signing key minted at the harness path. Returns the
+ * commit SHA, the signing-key path, and the key's fingerprint so the
+ * test can wire them into the verb's env and assert against the signed
+ * response.
+ *
+ * AGT-331 added the manifest + signing-key dependencies: the pipeline's
+ * structural-error order is prompt → manifest → signing-key → anthropic.
+ * Without all three on disk the verb can't reach the API-key check
+ * (which is the verb-to-pipeline wiring this fixture exists to exercise).
  */
 function setupWithFixtureBare(
   callerRole: "owner" | "admin" | "member",
@@ -104,6 +126,41 @@ function setupWithFixtureBare(
   const work = path.join(path.dirname(h.dbPath), "work");
   mkdirSync(work);
   const bare = path.join(repoRoot, "widget-co.git");
+
+  // Mint a fixture review-signing key in the harness state dir. The
+  // pipeline's loader will read this from REVIEW_SIGNING_KEY_PATH at
+  // request time; 0600 perms are required for `loadReviewSigningKey`
+  // to accept the file.
+  const stateDir = path.join(path.dirname(h.dbPath), "state");
+  mkdirSync(stateDir, { recursive: true });
+  const signingKeyPath = path.join(stateDir, "review-signing-key.pem");
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const privatePem = privateKey.export({
+    type: "pkcs8",
+    format: "pem",
+  }) as string;
+  const publicPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+  // `writeFileSync` honors the mode option on creation, which is what
+  // we're doing here (fresh tmp file). A follow-up chmodSync is the
+  // production defensive-pattern for files that may already exist on
+  // disk (see `mintNewKey` in reviewSigningKey.ts), but it's redundant
+  // for a one-shot test fixture write — the mode bits are already
+  // 0600 after writeFileSync returns.
+  writeFileSync(signingKeyPath, privatePem, { mode: 0o600 });
+  const signingKeyFingerprint = fingerprintFromPem(publicPem);
+
+  // Commit the matching manifest entry so the pipeline's manifest fetch
+  // resolves and the snapshot hash binds to a manifest that trusts this
+  // key for `server` capability. The fixture's manifest is byte-stable
+  // (sorted keys, no comments) so the snapshot hash test stays
+  // deterministic.
+  const manifestYaml = [
+    `keys:`,
+    `  review-server-test:`,
+    `    fingerprint: ${signingKeyFingerprint}`,
+    `    capabilities: [server]`,
+    ``,
+  ].join("\n");
 
   const run = (args: string[], cwd: string) => {
     const r = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -119,6 +176,11 @@ function setupWithFixtureBare(
     path.join(work, ".stamp", "reviewers", "security.md"),
     "# security reviewer\n",
   );
+  mkdirSync(path.join(work, ".stamp", "trusted-keys"), { recursive: true });
+  writeFileSync(
+    path.join(work, ".stamp", "trusted-keys", "manifest.yml"),
+    manifestYaml,
+  );
   run(["add", "-A"], work);
   run(["commit", "-q", "-m", "fixture"], work);
   const baseSha = run(["rev-parse", "HEAD"], work);
@@ -128,6 +190,8 @@ function setupWithFixtureBare(
     ...h,
     repoRoot,
     fixtureBaseSha: baseSha,
+    signingKeyPath,
+    signingKeyFingerprint,
   };
 }
 
@@ -149,6 +213,9 @@ function runStampReview(
   };
   if (harness.repoRoot) {
     env.STAMP_REPO_ROOT = harness.repoRoot;
+  }
+  if (harness.signingKeyPath) {
+    env.REVIEW_SIGNING_KEY_PATH = harness.signingKeyPath;
   }
   if (opts.envOverrides) {
     for (const [k, v] of Object.entries(opts.envOverrides)) {

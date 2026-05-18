@@ -367,6 +367,132 @@ export async function fetchCanonicalPrompt(
   }
 }
 
+// ─── Manifest fetch (AGT-331) ───────────────────────────────────────
+
+/**
+ * Result of fetching `.stamp/trusted-keys/manifest.yml` from the bare
+ * repo at a specific `base_sha`. Same discriminated-union shape as
+ * `PromptFetchResult` so callers can use the same `kind`-branching
+ * pattern.
+ *
+ * The manifest's hash is computed by the caller (after parsing it into
+ * the structured `TrustedKeysManifest` shape) — `bytes` here is the raw
+ * YAML so a future caller that wants to round-trip / log the source
+ * form still has access. The bare-sha256-hex form of the YAML bytes is
+ * NOT what `approval.trusted_keys_snapshot_sha256` carries — see
+ * `snapshotSha256()` in `src/lib/trustedKeysManifest.ts` (the bound
+ * value is over the parsed canonical form, not the raw YAML, so
+ * benign YAML reformats don't invalidate past attestations).
+ */
+export interface FetchedManifest {
+  kind: "ok";
+  bytes: Buffer;
+}
+
+export type ManifestFetchResult = FetchedManifest | PromptFetchError;
+
+/** Hard cap on the manifest blob fetched from the bare repo. Mirrors
+ *  `MAX_MANIFEST_BYTES` in `src/lib/trustedKeysManifest.ts` (256 KB).
+ *  Bigger than reviewer prompts since a real manifest can grow with the
+ *  organization, but still well bounded against a hostile commit that
+ *  lands a multi-megabyte file at the manifest path. */
+const MAX_MANIFEST_BYTES = 256 * 1024;
+
+/**
+ * Fetch `.stamp/trusted-keys/manifest.yml` from the bare repo at
+ * `baseSha`. Mirrors `fetchCanonicalPrompt`'s shape — same resolver
+ * contract, same two-stage rev-parse + show pattern, same typed-error
+ * categorization — but for the manifest file rather than a reviewer
+ * prompt.
+ *
+ * The manifest is fetched at `baseSha` specifically (not HEAD, not the
+ * working tree). The lenient-revocation property of v4 attestations
+ * depends on each approval binding to the manifest as it was at the
+ * attestation's `base_sha`: a server key revoked after attestation
+ * issuance remains valid for that attestation's verifier.
+ *
+ * `no_such_file` is the expected response on a repo whose operator
+ * hasn't yet committed a manifest — the pipeline must treat this as a
+ * structural failure and throw. There is no "no manifest = no
+ * trusted_keys_snapshot needed" graceful path: the verifier requires a
+ * snapshot, and a server with no committed manifest cannot service a
+ * trusted-mode review.
+ */
+export async function fetchManifestAtBaseSha(
+  resolver: RepoResolver,
+  org: string,
+  repo: string,
+  baseSha: string,
+): Promise<ManifestFetchResult> {
+  if (!FULL_SHA_RE.test(baseSha)) {
+    return {
+      kind: "invalid_input",
+      detail: `baseSha must be a full 40-char lowercase hex SHA (got ${JSON.stringify(baseSha)})`,
+    };
+  }
+
+  let bareRepoPath: string;
+  try {
+    bareRepoPath = resolver(org, repo);
+  } catch (err) {
+    return {
+      kind: "invalid_input",
+      detail: `resolver rejected (org=${JSON.stringify(org)}, repo=${JSON.stringify(repo)}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    };
+  }
+
+  const manifestPath = ".stamp/trusted-keys/manifest.yml";
+  const spec = `${baseSha}:${manifestPath}`;
+
+  // Stage 1: confirm the commit resolves. Same rationale as the prompt
+  // fetcher — without this, `git show <bad-sha>:<path>` blurs the
+  // missing-ref signal with missing-file.
+  try {
+    await execFileAsync(
+      "git",
+      [
+        "--git-dir",
+        bareRepoPath,
+        "-c",
+        "core.quotePath=false",
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${baseSha}^{commit}`,
+      ],
+      { encoding: "buffer" },
+    );
+  } catch (err) {
+    return classifyRefCheckError(err, bareRepoPath, baseSha, manifestPath);
+  }
+
+  // Stage 2: read the manifest blob at the commit. Same buffered-bytes
+  // approach as the prompt fetcher; we hand the bytes back unchanged so
+  // the downstream parser sees the same YAML the operator committed.
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      [
+        "--git-dir",
+        bareRepoPath,
+        "-c",
+        "core.quotePath=false",
+        "show",
+        spec,
+      ],
+      {
+        encoding: "buffer",
+        maxBuffer: MAX_MANIFEST_BYTES,
+      },
+    );
+    return { kind: "ok", bytes: stdout as Buffer };
+  } catch (err) {
+    return classifyShowError(err, bareRepoPath, baseSha, manifestPath);
+  }
+}
+
 // ─── Error classification ───────────────────────────────────────────
 
 /** Classify a stage-1 `rev-parse --verify <sha>^{commit}` failure. The
