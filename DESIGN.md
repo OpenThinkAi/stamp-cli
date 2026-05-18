@@ -154,47 +154,233 @@ The same logic applies to tag pushes whose ref name matches one of the `tags:` p
 
 ## Security model
 
-stamp-cli's threat model centers on agent-driven workflows: the primary defender position is "an unattended AI agent cannot land code on `main` that wasn't reviewed, checked, and signed by a key the agent does not possess." A secondary position is non-repudiation — every merge is cryptographically attributed to a specific key's holder.
+### The structural problem this section resolves
 
-**What is enforced:**
+stamp 1.x attestation proves *"a keyholder signed off that reviewer X
+returned verdict V on commit Y, against a prompt whose hash matches the
+committed `.stamp/reviewers/X.md` file."* It does **not** prove that the
+LLM actually received that prompt as input, or that the LLM actually
+produced that verdict. Both are constructed entirely on the operator's
+machine. Any local signature attests to what the operator *claims*
+happened, not what happened. An operator who wants to forge an approval
+can pass a permissive prompt to the LLM while embedding the canonical
+prompt's hash in the attestation — every consistency check passes, a
+real LLM call did take place, and only the relationship between them is
+a lie. This is the structural gap motivating the stamp 2.x line.
 
-- Author-agents cannot produce a valid signed merge without the private key (kept in `~/.stamp/keys/`, file mode 0600, never transmitted)
-- The server-side pre-receive hook performs all seven verification steps from the "Signing & attestation" section before accepting a push — signature validity, SHA binding, approvals satisfy the branch rule, checks are attested with exit 0
-- All subprocess calls in the CLI and hooks use argument-array form (`execFileSync(git, [args...])`); no `shell: true` is used except in one specific, documented case below
+### The resolution: server-attested reviews (v4 envelope)
 
-**What is NOT enforced — the `required_checks` shell-execution tradeoff:**
+stamp 2.x moves the LLM call into stamp-server, which holds its own
+review-signing key. The server fetches the canonical prompt from its
+local bare repo, calls the LLM itself, and signs the verdict with a key
+the operator does not hold. The operator still signs the outer merge
+envelope, but each approval inside it now carries a server signature
+that the operator cannot forge. The full design lives in
+[`docs/plans/server-attested-reviews.md`](./docs/plans/server-attested-reviews.md);
+the attestation envelope is `schema_version: 4` and is defined in
+`src/lib/attestationV4.ts`.
 
-Each entry in `branches.<target>.required_checks` is a `{ name, run }` pair where `run` is a shell command (`npm run build`, `pytest`, etc.). To support real developer commands, `stamp merge` invokes each check with `spawnSync(check.run, { shell: true, cwd: repoRoot, ... })`.
+### Cryptographic guarantees in v4
 
-This means: **anyone with write access to `.stamp/config.yml` can add a check whose `run` string is arbitrary shell code that will execute on every operator's machine during `stamp merge`**, with the cwd set to the repo root.
+**Server-attested verdicts.** Each approval is signed by stamp-server's
+`server`-capability key (`server_attestation.signature` over the
+canonical-form approval payload). The server fetches the reviewer
+prompt itself from the bare repo at `base_sha` — the client cannot
+substitute it. Forging a verdict requires forging the server's
+signature, which requires either stealing the server's signing key or
+compromising the server.
 
-The mitigation is the review gate itself. Changes to `.stamp/config.yml` are diffs like any other — they go through `stamp review` against the configured personas before they can land on `main`. A well-calibrated `security` or `standards` reviewer should flag a `required_checks` addition that introduces a new command category, especially one that reads from paths outside the repo or writes anywhere persistent. Operators relying on stamp should therefore:
+**Diff binding (`diff_sha256`).** The server signs the hash of the diff
+it actually reviewed. The verifier rehashes the actual merge diff at
+verify time; any mismatch rejects the push. An operator cannot get a
+verdict for a sanitized diff and then push a malicious one.
 
-1. Treat `.stamp/config.yml` as security-sensitive. A merge that adds a new check deserves a closer look from reviewers than a merge that only touches application code.
-2. Include language in the `security` reviewer prompt instructing the reviewer to flag new or modified `required_checks` entries and scrutinize what the command does.
-3. Not use stamp as the sole boundary against adversarial-insider threats. The signing key + reviewer gate protect against an agent that doesn't hold the key. They do not protect against a keyholder who merges malicious config on purpose — non-repudiation makes that forgery attributable, not preventable.
+**Prompt cross-check (`prompt_sha256`).** The server's signature covers
+the hash of the prompt it loaded. The verifier independently recomputes
+that hash from the merge commit's own `.stamp/` tree and rejects on
+mismatch. This catches an operator who signs a downstream envelope
+referencing a different prompt than what's actually committed.
 
-**Reviewer tool access — a second, opt-in shell-adjacent tradeoff:**
+**Role-gated trust-anchor changes (`path_rules` + admin capability +
+`bypass_review_cycle`).** `.stamp/**` changes — prompts, config, the
+trusted-keys manifest — are gated by signatures from `admin`-capability
+keys, not by reviewer verdicts. `bypass_review_cycle: true` makes this
+gate *replace* the reviewer gate for these paths, not stack on top of
+it. This is deliberate: the regular reviewer cycle is structurally
+vulnerable to the rotating-prompt attack (a permissive new prompt
+could approve its own merging). Admin gate replaces reviewer gate for
+trust-anchor paths. `minimum_signatures: 2+` in the rule turns admin
+key theft into a multi-compromise requirement.
 
-By default, reviewers run with **no tools** — they see only the diff and their prompt. Reviewer definitions in `.stamp/config.yml` may opt in per-reviewer to:
+**Lenient revocation (`trusted_keys_snapshot_sha256`).** Each approval
+embeds the hash of the manifest as it existed at the verdict's
+issue-time. When a compromised `server` key is rotated, future merges
+fail (the snapshot no longer matches the live manifest), but past
+merges remain valid because their snapshot references the manifest as
+it was when the key was still trusted. Revocation is forward-looking
+without retroactively invalidating clean history.
 
-- A subset of the Claude Agent SDK's built-in tools (`Read`, `Grep`, `WebFetch`, …) via a `tools:` allowlist
-- Stdio-transport MCP servers via `mcp_servers:` (e.g. a Linear MCP so the product reviewer can cross-check ticket references)
+### Threat model
 
-Granting tools expands what a malicious reviewer prompt can do beyond voting approval. A prompt with `Read` can slurp files from the repo tree (which is already committed public-by-default content, but includes the diff context too). `WebFetch` can exfiltrate diff contents to an attacker-controlled URL. An MCP server runs as a subprocess on the operator's machine with whatever permissions the MCP binary asks for.
+The table below names the attacks v4's gates close. Pair this with
+[`docs/threat-model.md`](./docs/threat-model.md) for the attacker-position
+walkthrough; pair both with the design plan for the full reasoning.
 
-The mitigation model is the same as `required_checks`: the reviewer gate on `.stamp/config.yml` changes. Additions of `tools:` entries or `mcp_servers:` blocks should be scrutinized by the security reviewer, and new MCP commands should be treated with the same skepticism as a new `required_checks.run` string. Conservative guidance:
+| Attack | Gate that catches it |
+|---|---|
+| Operator passes fake prompt to local LLM, signs canonical prompt's hash | Server-attested verdicts — server fetches prompt itself; operator cannot influence what the LLM sees |
+| Operator signs a verdict for a sanitized diff, pushes a malicious one | `diff_sha256` binding — verifier hashes actual merge diff; mismatch rejected |
+| Operator embeds a permissive prompt's hash to justify approval | `prompt_sha256` cross-check against the committed `.stamp/` tree |
+| Operator modifies `.stamp/reviewers/*.md` or `.stamp/config.yml` with permissive content, signed via the normal review flow | `path_rules` + `admin` capability + `bypass_review_cycle: true` — `.stamp/**` requires admin signatures, not reviewer verdicts |
+| Operator adds a new pubkey to `.stamp/trusted-keys/` to grant themselves more authority | Same as above — entire `.stamp/**` is gated |
+| Replay: reuse an old verdict's signature for a new diff | `diff_sha256` binding + `issued_at` in the signed payload — server's signature binds to a specific diff hash |
+| Server signing-key theft → forged verdicts | Rotation + revocation + lenient snapshot semantics — manifest update blocks future merges; past merges grandfathered through `trusted_keys_snapshot_sha256` |
+| Admin key theft → forged trust-anchor changes | Multi-sig (`minimum_signatures: 2+`) — multiple compromises required |
+| Operator key theft → forged merges | Server signatures still required on every approval; stolen operator key alone cannot produce a valid v4 attestation |
 
-1. `Read`, `Grep`, and `Glob` are scoped to `repoRoot` by an explicit allowlist enforced in the SDK's `hooks.PreToolUse` callback (path inputs are resolved against `repoRoot` and rejected if they escape; `.git/stamp/state.db` and `.stamp/trusted-keys/*` are denied even inside the repo). Avoid `Bash` and `Write` — nothing a reviewer should need.
-2. `WebFetch` should be enabled only when a reviewer genuinely needs it and the prompt constrains *where* it's allowed to fetch from. The `allowed_hosts` field on a WebFetch entry is a *domain-level* allowlist enforced by the same `hooks.PreToolUse` callback; bare entries like `[linear.app]` permit any path on the host. To pin the URL path too, set `path_prefix:` on the entry (e.g. `path_prefix: /repos/` on `api.github.com`) — the hook then denies any URL whose `URL.pathname` does not begin with that prefix. Query strings are intentionally not inspected (legitimate API parameters use them). Consider an MCP server with narrowly scoped tools as an alternative when a single host serves multiple unrelated surfaces.
-3. Do not share MCP API keys across reviewers if a single-reviewer compromise shouldn't imply access to everything.
+Out of scope by design (server compromise issuing arbitrary signed
+verdicts; admin keys cold-stored but operationally lost) is documented
+in the plan doc's "Honest scope" section.
 
-Verification of *which* tools a reviewer actually ran with is planned (see `docs/plans/verified-reviewer-configs.md`). Today's model trusts the committed config: the attestation proves "the keyholder signed this verdict" but not "this reviewer ran with these specific tools."
+### Legacy local-only mode
 
-**What signing does NOT claim:**
+stamp can run without a stamp-server: skip the deployment, omit
+`review_server` from `.stamp/config.yml`, and `stamp review --plan`
+emits a structured plan that a parent agent (typically Claude Code) can
+dispatch to subagents directly. **Local-only mode offers no trust
+property; this is by design.** Any "attestation" producible without a
+server can be forged by the operator, so v4 does not pretend to offer
+one — local-only runs produce no attestation, just iteration feedback.
+See [`docs/plans/server-attested-reviews.md`](./docs/plans/server-attested-reviews.md)
+for the trust-bearing server-attested mode and
+[`docs/local-only-mode.md`](./docs/local-only-mode.md) for the
+iteration-only mode.
 
-- The signature proves "a keyholder approved this specific diff with these specific reviewer verdicts and these specific check results." It does not prove the check actually ran, that the reviewer actually read the diff, or that the approvals reflect objective correctness. It proves a keyholder took responsibility.
-- A stamp-protected repo with a single keyholder using a single machine has the same failure modes as a GPG-signed git repo with one signer. The layered defenses in stamp-cli (reviewer gate, check gate, attestation binding to exact SHA pairs) compound to make agent-driven bypass structurally impossible, but do not make human-operator bypass cryptographically impossible.
+The 1.x line keeps shipping the local-only enforcement path with its
+documented caveats. Everything below in this subsection describes those
+caveats — they apply to 1.x deployments and to anyone running 2.x
+without a `review_server`. None of them are properties v4 attests to;
+they are properties v4 explicitly does not claim.
+
+**What 1.x enforces:**
+
+- Author-agents cannot produce a valid signed merge without the private
+  key (kept in `~/.stamp/keys/`, file mode 0600, never transmitted).
+- The server-side pre-receive hook performs the verification steps from
+  the "Signing & attestation" section before accepting a push —
+  signature validity, SHA binding, approvals satisfy the branch rule,
+  checks are attested with `exit_code: 0`.
+- All subprocess calls in the CLI and hooks use argument-array form
+  (`execFileSync(git, [args...])`); no `shell: true` is used except in
+  the `required_checks` case documented below. Reviewer-tool access
+  (the second tradeoff below) is shell-adjacent — MCP servers spawn as
+  stdio-transport subprocesses, no shell interpretation involved.
+
+**1.x `required_checks` shell-execution tradeoff:**
+
+Each entry in `branches.<target>.required_checks` is a `{ name, run }`
+pair where `run` is a shell command (`npm run build`, `pytest`, etc.).
+To support real developer commands, `stamp merge` invokes each check
+with `spawnSync(check.run, { shell: true, cwd: repoRoot, ... })`.
+
+This means: **anyone with write access to `.stamp/config.yml` can add a
+check whose `run` string is arbitrary shell code that will execute on
+every operator's machine during `stamp merge`**, with the cwd set to
+the repo root.
+
+The 1.x mitigation is the review gate itself. Changes to
+`.stamp/config.yml` are diffs like any other — they go through `stamp
+review` against the configured personas before they can land on `main`.
+A well-calibrated `security` or `standards` reviewer should flag a
+`required_checks` addition that introduces a new command category.
+Operators relying on stamp should therefore:
+
+1. Treat `.stamp/config.yml` as security-sensitive. A merge that adds a
+   new check deserves a closer look from reviewers than a merge that
+   only touches application code.
+2. Include language in the `security` reviewer prompt instructing the
+   reviewer to flag new or modified `required_checks` entries and
+   scrutinize what the command does.
+3. Not use stamp as the sole boundary against adversarial-insider
+   threats. The signing key + reviewer gate protect against an agent
+   that doesn't hold the key. They do not protect against a keyholder
+   who merges malicious config on purpose — non-repudiation makes that
+   forgery attributable, not preventable.
+
+v4 closes this gap structurally: `.stamp/config.yml` is under
+`path_rules`, so the `required_checks` addition cannot land via the
+reviewer cycle — only via admin-signed commits.
+
+**1.x reviewer tool access — a second, opt-in shell-adjacent tradeoff:**
+
+By default in 1.x, reviewers run with **no tools** — they see only the
+diff and their prompt. Reviewer definitions in `.stamp/config.yml` may
+opt in per-reviewer to:
+
+- A subset of the Claude Agent SDK's built-in tools (`Read`, `Grep`,
+  `WebFetch`, …) via a `tools:` allowlist
+- Stdio-transport MCP servers via `mcp_servers:` (e.g. a Linear MCP so
+  the product reviewer can cross-check ticket references)
+
+Granting tools expands what a malicious reviewer prompt can do beyond
+voting approval. A prompt with `Read` can slurp files from the repo
+tree (which is already committed public-by-default content, but includes
+the diff context too). `WebFetch` can exfiltrate diff contents to an
+attacker-controlled URL. An MCP server runs as a subprocess on the
+operator's machine with whatever permissions the MCP binary asks for.
+
+The 1.x mitigation model is the same as `required_checks`: the reviewer
+gate on `.stamp/config.yml` changes. Additions of `tools:` entries or
+`mcp_servers:` blocks should be scrutinized by the security reviewer,
+and new MCP commands should be treated with the same skepticism as a
+new `required_checks.run` string. Conservative guidance:
+
+1. `Read`, `Grep`, and `Glob` are scoped to `repoRoot` by an explicit
+   allowlist enforced in the SDK's `hooks.PreToolUse` callback (path
+   inputs are resolved against `repoRoot` and rejected if they escape;
+   `.git/stamp/state.db` and `.stamp/trusted-keys/*` are denied even
+   inside the repo). Avoid `Bash` and `Write` — nothing a reviewer
+   should need.
+2. `WebFetch` should be enabled only when a reviewer genuinely needs it
+   and the prompt constrains *where* it's allowed to fetch from. The
+   `allowed_hosts` field on a WebFetch entry is a *domain-level*
+   allowlist enforced by the same `hooks.PreToolUse` callback; bare
+   entries like `[linear.app]` permit any path on the host. To pin the
+   URL path too, set `path_prefix:` on the entry (e.g. `path_prefix:
+   /repos/` on `api.github.com`) — the hook then denies any URL whose
+   `URL.pathname` does not begin with that prefix. Query strings are
+   intentionally not inspected (legitimate API parameters use them).
+   Consider an MCP server with narrowly scoped tools as an alternative
+   when a single host serves multiple unrelated surfaces.
+3. Do not share MCP API keys across reviewers if a single-reviewer
+   compromise shouldn't imply access to everything.
+
+The first step toward narrowing this gap — hash-pinning the prompt,
+tools, and MCP config in the attestation — landed in
+[`docs/plans/verified-reviewer-configs.md`](./docs/plans/verified-reviewer-configs.md)
+(stamp 0.3 / payload v2). That mitigation hashes the *committed* config,
+which still leaves the substitution attack open: the LLM call itself
+remains on the operator's machine, so the hash and the model input can
+disagree. The
+[server-attested reviews plan](./docs/plans/server-attested-reviews.md)
+is the structural resolution — v4 also drops `tools_sha256` /
+`mcp_sha256` / `tool_calls` because the Phase 1 server reviewer is
+prompt-only with no tools.
+
+**What 1.x signing does NOT claim:**
+
+- The signature proves "a keyholder approved this specific diff with
+  these specific reviewer verdicts and these specific check results."
+  It does not prove the check actually ran, that the reviewer actually
+  read the diff, or that the approvals reflect objective correctness.
+  It proves a keyholder took responsibility.
+- A stamp-protected repo with a single keyholder using a single machine
+  has the same failure modes as a GPG-signed git repo with one signer.
+  The layered defenses in stamp 1.x (reviewer gate, check gate,
+  attestation binding to exact SHA pairs) compound to make agent-driven
+  bypass structurally impossible, but do not make human-operator bypass
+  cryptographically impossible. v4 narrows this gap by introducing a
+  signature category — the server — that the operator does not hold.
 
 ## Signing & attestation
 

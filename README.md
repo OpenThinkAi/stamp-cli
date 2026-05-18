@@ -329,12 +329,14 @@ matches the committed config.
 > **Security note.** `required_checks[].run` values execute as shell commands
 > on the merger's machine via `spawnSync(cmd, { shell: true })`. Anyone who
 > can land a PR that touches `.stamp/config.yml` can introduce arbitrary
-> code that will run on the next person to call `stamp merge`. The mitigation
-> is the reviewer gate itself: `.stamp/config.yml` changes go through the
-> same reviewers as any other code change, and your security reviewer prompt
-> should treat `required_checks` edits as high-scrutiny. Unlike GitHub
-> Actions, these commands are **not** sandboxed. See
-> [`DESIGN.md`](./DESIGN.md#security-model) for the full threat model.
+> code that will run on the next person to call `stamp merge`. The 1.x
+> mitigation is the reviewer gate itself: `.stamp/config.yml` changes go
+> through the same reviewers as any other code change, and your security
+> reviewer prompt should treat `required_checks` edits as high-scrutiny.
+> Unlike GitHub Actions, these commands are **not** sandboxed. See
+> [`DESIGN.md`](./DESIGN.md#security-model) for the full threat model and
+> the 2.x server-attested resolution, which moves `.stamp/**` (including
+> `required_checks`) under admin-only signing via `path_rules`.
 
 Optional: `.stamp/mirror.yml` enables GitHub mirroring via the post-receive
 hook. See [`server/README.md`](./server/README.md).
@@ -601,12 +603,20 @@ cannot forge merges (the signing key isn't on disk anywhere they can
 exfiltrate without the operator's explicit consent), and cannot bypass the
 remote's verification.
 
-**What this doesn't protect against.** You, the human holding the signing
-key, can still produce a valid signed merge for arbitrary content. That's
-inherent to any local-first system. What signing gives you is
-**non-repudiation** — every merge on `main` is permanently attributed to a
-specific key's owner, provable from git history alone. For the
-agent-can't-bypass threat model this is exactly right.
+**What this doesn't protect against (in 1.x local-only mode).** You, the
+human holding the signing key, can still produce a valid signed merge for
+arbitrary content. That's inherent to any local-first system. What signing
+gives you is **non-repudiation** — every merge on `main` is permanently
+attributed to a specific key's owner, provable from git history alone. For
+the agent-can't-bypass threat model this is exactly right.
+
+The 2.x server-attested design closes the operator-substitution gap by
+moving the LLM call to stamp-server with its own signing key — the operator
+holds only the outer envelope key, not the per-review signature. See
+[`docs/plans/server-attested-reviews.md`](./docs/plans/server-attested-reviews.md)
+for the full design and
+[`DESIGN.md#security-model`](./DESIGN.md#security-model) for the
+cryptographic guarantees and threat-model table.
 
 See [`DESIGN.md`](./DESIGN.md) for the full bootstrap, key-management, and
 verification-rule details, including the security model around user-configured
