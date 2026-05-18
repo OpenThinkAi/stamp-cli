@@ -200,6 +200,14 @@ function buildPhaseInput(args: {
     git(args.repo, ["show", `${payload.base_sha}:${relPath}`]),
   );
 
+  const diffOut = git(args.repo, [
+    "diff",
+    "--name-only",
+    "-z",
+    `${payload.base_sha}...${payload.head_sha}`,
+  ]);
+  const changedFiles = diffOut.split("\0").filter((s) => s.length > 0);
+
   return {
     sha: args.mergeSha,
     branch: args.branch,
@@ -209,6 +217,8 @@ function buildPhaseInput(args: {
     signatureBase64: args.signatureB64,
     manifest,
     pubkeyByFingerprint,
+    pathRules: [],
+    changedFiles,
   };
 }
 
