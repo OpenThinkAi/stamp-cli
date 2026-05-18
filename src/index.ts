@@ -124,6 +124,14 @@ program
     "--dry-run",
     "with --migrate-to-server-attested: print proposed changes without writing them. No-op outside the migration path.",
   )
+  .option(
+    "--pr-mode",
+    "Shape 2 (PR mode) auto-mirror scaffold: write .github/workflows/stamp-mirror.yml so every push to GitHub mirrors to stamp-server for server-attested reviews. Prints the org-secret + keypair walkthrough. See docs/migration-1.x-to-2.x.md.",
+  )
+  .option(
+    "--pr-mode-force",
+    "with --pr-mode, overwrite an existing .github/workflows/stamp-mirror.yml (useful when re-running after configuring review_server so the host/port placeholders fill in)",
+  )
   .action(
     (opts: {
       minimal?: boolean;
@@ -137,6 +145,8 @@ program
       prCheck: boolean;
       migrateToServerAttested?: boolean;
       dryRun?: boolean;
+      prMode?: boolean;
+      prModeForce?: boolean;
     }) => {
       try {
         // The migration flag short-circuits the normal init flow: an
@@ -173,6 +183,8 @@ program
           // to forward an explicit `false` to runInit so its mode-aware
           // default fires when the operator hasn't opted out.
           prCheck: opts.prCheck === false ? false : undefined,
+          prMode: opts.prMode === true,
+          prModeForce: opts.prModeForce === true,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

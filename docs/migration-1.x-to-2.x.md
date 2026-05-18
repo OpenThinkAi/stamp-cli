@@ -248,19 +248,25 @@ In each repo:
 ```sh
 git checkout -b stamp-2x-migration
 
-# Scaffold the GitHub Action that mirrors every push to stamp-server
-stamp init --pr-mode           # _will ship via AGT-343_
-
-# Same trust-anchor scaffold as Shape 1
+# Same trust-anchor scaffold as Shape 1 — adds `review_server` to
+# .stamp/config.yml. Run this FIRST so the next step can substitute
+# host/port into the workflow template.
 stamp init --migrate-to-server-attested   # _will ship via AGT-342_
+
+# Scaffold the GitHub Action that mirrors every push to stamp-server.
+# Reads host/port from the `review_server` URL the previous step added,
+# and org/repo from `git remote get-url origin`.
+stamp init --pr-mode
 ```
 
-`stamp init --pr-mode` (scaffolded in AGT-343) installs:
+`stamp init --pr-mode` installs:
 
-- `.github/workflows/stamp-mirror.yml` — pushes the ref to stamp-server on every GitHub push, using `STAMP_MIRROR_KEY`.
-- `.github/workflows/stamp-verify.yml` — runs `stamp/verify-attestation@v1` on every PR; required check via GitHub branch protection.
+- `.github/workflows/stamp-mirror.yml` — pushes the ref to stamp-server on every GitHub push, using `STAMP_MIRROR_KEY` (org-level secret). Host, port, org, repo are substituted from `review_server` + `origin`.
+- Prints a walkthrough to stdout covering keypair generation, the `stamp-mint-invite mirror --role member` step on stamp-server, and the GitHub org-secret registration URL.
 
-The trust-anchor scaffold from AGT-342 is identical to Shape 1's step 3.
+The PR-check workflow (`.github/workflows/stamp-verify.yml`) is dropped separately by the mode-aware default in `stamp init` (it lands automatically for forge-direct / local-only modes; opt out with `--no-pr-check`). The trust-anchor scaffold from AGT-342 is identical to Shape 1's step 3.
+
+> Running `--pr-mode` is idempotent — an existing `stamp-mirror.yml` is left in place so operator customizations (concurrency block, fork-PR gating, etc.) survive re-runs. Pass `--pr-mode-force` to overwrite (useful after configuring `review_server` so the host/port placeholders fill in).
 
 ### Step 4 — Land the migration commit through 1.x
 
@@ -396,7 +402,6 @@ For the path-of-most-operators issues, see the expanded entries in [`troubleshoo
 This guide forward-points to several tickets that ship the migration commands. Status as of writing:
 
 - **AGT-342** — `stamp init --migrate-to-server-attested` scaffolding. *In flight.* Until it ships, the scaffold steps can be done by hand following the manifest + path_rules examples above.
-- **AGT-343** — `stamp init --pr-mode` workflow scaffolding. *In flight.* Until it ships, copy `.github/workflows/stamp-mirror.yml` + `stamp-verify.yml` from a reference deployment.
 - **AGT-346** — bridge-release deprecation messaging + the exact 1.x EOL window. *In flight.*
 - **AGT-347** — finalizes the `stamp review` no-`review_server` error path in 2.0 GA. *In flight.*
 
