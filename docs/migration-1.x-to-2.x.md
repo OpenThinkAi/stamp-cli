@@ -42,7 +42,7 @@ The day-to-day surface barely changes for operators who already deployed a stamp
 | Surface | 1.x | 2.x |
 |---|---|---|
 | **Trust model** | Operator-only signature | Operator + server + admin capabilities (additive on a single key, or split across keys) |
-| **Attestation envelope** | `schema_version: 2` / `3` | `schema_version: 4` ([`src/lib/attestationV4.ts`](../src/lib/attestationV4.ts)) |
+| **Attestation envelope** | `schema_version: 3` ([`src/lib/attestation.ts`](../src/lib/attestation.ts); v2 / v1 no longer accepted by verifiers) | `schema_version: 4` ([`src/lib/attestationV4.ts`](../src/lib/attestationV4.ts)) |
 | **Reviewer features** | `tools:` + `mcp_servers:` per reviewer; Read/Grep/WebFetch allowlisted | Phase 1 reviewers are diff-only; `tools` / `mcp_servers` config is warned + ignored |
 | **`stamp review` (trusted mode)** | Runs LLM locally via Claude Agent SDK | Calls stamp-server's `stamp-review` SSH verb; server runs the LLM and signs the verdict |
 | **Trust anchor (`.stamp/**`) changes** | Gated by the same reviewer cycle as any other diff | Gated by `path_rules` requiring `admin`-capability signatures; reviewer cycle bypassed for these paths |
