@@ -36,6 +36,7 @@ export default defineConfig([
       "server/start-http-server": "src/server/start-http-server.ts",
       "server/users-cli": "src/server/users-cli.ts",
       "server/bootstrap-review-key": "src/server/bootstrap-review-key.ts",
+      "server/stamp-review": "src/server/stamp-review.ts",
     },
     format: ["cjs"],
     target: "node22",
