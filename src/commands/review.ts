@@ -23,6 +23,7 @@ import {
   type ReviewerInvocation,
 } from "../lib/reviewer.js";
 import { maybePrintLlmNotice } from "../lib/llmNotice.js";
+import { buildReviewPlan, PLAN_NO_TRUST_BANNER } from "../lib/reviewPlan.js";
 import { loadOrCreateUserConfig } from "../lib/userConfig.js";
 import {
   findRepoRoot,
@@ -51,12 +52,69 @@ export interface ReviewOptions {
    * STAMP_NO_REVIEW_CACHE=1 for shells where flag plumbing is awkward.
    */
   noCache?: boolean;
+  /**
+   * Local-only mode (design.md "Local-only mode (Option E)"). When true,
+   * emit a structured JSON plan on stdout instead of calling the LLM. The
+   * parent agent (typically a Claude Code session) consumes the plan and
+   * dispatches N parallel subagents that review independently. Stamp's
+   * role ends after emitting the plan — there is no `stamp record-feedback`
+   * round-trip. No attestation is created; the stderr banner says so. See
+   * `src/lib/reviewPlan.ts` for the `ReviewPlan` schema (consumed by the
+   * AGT-340 Claude Code skill).
+   *
+   * In `--plan` mode all the trusted-mode-only flags (`noCache`,
+   * `allowLarge`) are inert — no LLM call happens, no cache is consulted,
+   * no diff-size cap is applied (the parent decides how to handle large
+   * diffs in its subagent fan-out).
+   */
+  plan?: boolean;
 }
 
 /** Pre-invocation diff size cap, bytes. Operator-overridable via env var. */
 const DEFAULT_DIFF_SIZE_CAP_BYTES = 200 * 1024;
 
 export async function runReview(opts: ReviewOptions): Promise<void> {
+  // --plan mode short-circuits the trusted-mode pipeline entirely. We do
+  // NOT enter the STAMP_NO_LLM guard, the empty-base bootstrap branch,
+  // the diff-size cap, the verdict cache, the prior-review lookup, or
+  // any LLM call. The parent agent — a Claude Code session — dispatches
+  // its own subagents using the plan; stamp's role ends here. See
+  // lib/reviewPlan.ts for the schema (consumed by the AGT-340 skill).
+  //
+  // Plan mode is positioned BEFORE the STAMP_NO_LLM guard deliberately:
+  // local-only iteration is exactly the workflow operators reach for when
+  // they've disabled LLM use on the stamp CLI itself. Refusing to emit a
+  // plan because STAMP_NO_LLM=1 is set would be incoherent — no LLM call
+  // is going to happen on stamp's side either way.
+  //
+  // stdout is strictly the JSON plan (so the parent can pipe it through
+  // `jq` / `JSON.parse` without prose stripping). The no-trust banner
+  // goes to stderr so a parent that captures only stdout doesn't lose it
+  // — and a parent that captures both can distinguish data from notice.
+  //
+  // The repoRoot + config-existence check is duplicated in the plan and
+  // trusted branches so that trusted mode preserves its prior ordering:
+  // `STAMP_NO_LLM=1` with no config still throws the LLM error first
+  // (operators relying on that as a clean short-circuit before stamp
+  // touches the repo don't get a new behavior change).
+  if (opts.plan) {
+    const planRepoRoot = findRepoRoot();
+    const planConfigPath = stampConfigFile(planRepoRoot);
+    if (!existsSync(planConfigPath)) {
+      throw new Error(
+        `no .stamp/config.yml at ${planConfigPath}. Run \`stamp init\` first.`,
+      );
+    }
+    const plan = buildReviewPlan({
+      diff: opts.diff,
+      ...(opts.only !== undefined ? { only: opts.only } : {}),
+      repoRoot: planRepoRoot,
+    });
+    process.stdout.write(JSON.stringify(plan) + "\n");
+    process.stderr.write(PLAN_NO_TRUST_BANNER + "\n");
+    return;
+  }
+
   // STAMP_NO_LLM=1 short-circuit. The invokeReviewer guard would catch
   // each per-reviewer call individually, but the default multi-reviewer
   // flow runs Promise.allSettled across N reviewers in parallel — with
@@ -72,7 +130,9 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         `bootstrap) are disabled — no diff content will leave the host. ` +
         `The signing, verification, and merge primitives (stamp keys / ` +
         `stamp merge / stamp verify / stamp log / the pre-receive hook) ` +
-        `all continue to work. Unset STAMP_NO_LLM to re-enable.`,
+        `all continue to work. Unset STAMP_NO_LLM to re-enable. ` +
+        `(For LLM-free iteration on a parent-agent loop, see ` +
+        `\`stamp review --plan\`.)`,
     );
   }
 
