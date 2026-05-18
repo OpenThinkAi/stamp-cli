@@ -285,6 +285,14 @@ stamp attest --into main --push origin  # signs envelope, pushes branch + attest
 
 The attestation is keyed on `git patch-id`, so it survives squash / rebase / merge-commit — same property as 1.x PR-mode.
 
+#### v3 PR-attestation shape (verifier-side, AGT-338)
+
+The Action's verifier ships in 2.x at envelope `schema_version: 3`. v3 envelopes carry the same v4-trust fields the server-gated commit-trailer envelope does — per-approval server attestations (one per required reviewer, byte-canonical `ApprovalV4` shape), a top-level `diff_sha256` binding the operator's outer signature to the actual diff, the manifest snapshot hash for lenient revocation, and `trust_anchor_signatures` (admin counter-signatures) populated when the diff touches a `path_rules` glob. The same `verifyV4*` phase helpers the pre-receive hook runs against commit trailers verify the v3 PR-envelope's embedded fields — no logic divergence between server-gated and PR-mode trust checks.
+
+The verifier rejects v2 envelopes (produced by 1.x `stamp attest`) with a "schema_version too old" actionable error. v2 envelopes pre-date the v4 trust model and cannot be upgraded in place — re-attestation against a 2.x stamp-server is required.
+
+> **PR-mode end-to-end production lands in 2.0.1 via [AGT-355](#in-flight-references).** AGT-338 ships the verifier first so no client-version skew exists when the producer arrives; until 2.0.1, the verifier accepts only fabricated test-fixture v3 envelopes (used in CI to validate the verifier itself) and production-shape v3 envelopes that AGT-355's server-side fold step will start writing. 1.x `stamp attest` continues to produce v2 envelopes — those rejection-loop the new verifier with the actionable error above. Operators that need to keep using `stamp attest` during the bridge window should pin the Action to a 1.x version of `stamp-cli` via the `stamp-version` input (see `.github/actions/verify-attestation/action.yml`).
+
 ### Step 6 — Repeat for each repo
 
 Each repo independently opts in via its own `review_server` config and mirror workflow. Mix-and-match across the org is supported.
@@ -404,6 +412,7 @@ This guide forward-points to several tickets that ship the migration commands. S
 - **AGT-342** — `stamp init --migrate-to-server-attested` scaffolding. *In flight.* Until it ships, the scaffold steps can be done by hand following the manifest + path_rules examples above.
 - **AGT-346** — bridge-release deprecation messaging + the exact 1.x EOL window. *In flight.*
 - **AGT-347** — finalizes the `stamp review` no-`review_server` error path in 2.0 GA. *In flight.*
+- **AGT-355** — server-side v3 PR-attestation production (the stamp-server-emits-the-envelope half of PR mode). *In flight; lands in 2.0.1.* The verifier (AGT-338) shipped first so client-version skew won't exist at producer-land time. Until AGT-355 ships, fabricated v3 envelopes in the test suite exercise the verifier; 1.x `stamp attest`'s v2 envelopes are rejected by the new verifier with an actionable schema-too-old error.
 
 Already shipped on `main`:
 

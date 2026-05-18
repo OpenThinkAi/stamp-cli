@@ -43,7 +43,7 @@ import {
 } from "../lib/paths.js";
 import { patchIdForSpan } from "../lib/patchId.js";
 import {
-  PR_ATTESTATION_SCHEMA_VERSION,
+  LEGACY_CLIENT_PR_ATTESTATION_SCHEMA_VERSION,
   serializePayload,
   writeAttestationRef,
   type PrAttestationPayload,
@@ -187,14 +187,17 @@ export function runAttest(opts: AttestOptions): void {
     repoRoot,
   ).trim();
 
-  // Sign + build envelope. Schema version is independent of the
-  // server-gated trailer schema (PR_ATTESTATION_SCHEMA_VERSION = 1
-  // here) but the per-Approval fields below mirror
-  // CURRENT_PAYLOAD_VERSION's v3 shape exactly so a future verifier
-  // can treat them uniformly.
+  // Sign + build envelope. Schema version is pinned at the LEGACY
+  // client-producer level (v2) — the 2.x v3 envelope can only be
+  // produced server-side (AGT-355). 1.x operators using `stamp attest`
+  // keep producing v2 envelopes; the verifier (`stamp verify-pr`,
+  // `stamp/verify-attestation@v1`) rejects these with an actionable
+  // "schema_version too old" error so operators see a clear upgrade
+  // path. See `prAttestation.ts` LEGACY_CLIENT_PR_ATTESTATION_SCHEMA_VERSION
+  // docstring for the rationale on holding the producer at v2.
   const { keypair } = ensureUserKeypair();
   const payload: PrAttestationPayload = {
-    schema_version: PR_ATTESTATION_SCHEMA_VERSION,
+    schema_version: LEGACY_CLIENT_PR_ATTESTATION_SCHEMA_VERSION,
     patch_id,
     base_sha: resolved.base_sha,
     head_sha: resolved.head_sha,

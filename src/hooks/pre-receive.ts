@@ -65,7 +65,13 @@ interface CheckDef {
   run: string;
 }
 
-interface BranchRule {
+/**
+ * Exported so PR-mode verification (`src/commands/verifyPr.ts`) can
+ * construct a PhaseInputV4 with the same rule shape pre-receive does.
+ * Kept narrow to what `verifyV4Approvals` / `verifyV4Checks` consume —
+ * not a leak of the hook's internal config model.
+ */
+export interface BranchRule {
   required: string[];
   required_checks?: CheckDef[];
 }
@@ -90,7 +96,12 @@ interface BranchRule {
  * gate is layered ON TOP OF the reviewer cycle (admins must also sign,
  * and reviewers must also have run).
  */
-interface PathRule {
+/**
+ * Exported so PR-mode verification (`src/commands/verifyPr.ts`) can
+ * pass the same path-rule list into a PhaseInputV4 that pre-receive
+ * does. Pure data; no behavior change.
+ */
+export interface PathRule {
   pattern: string;
   require_capability: string;
   minimum_signatures: number;
