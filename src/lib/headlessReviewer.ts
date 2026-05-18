@@ -179,21 +179,29 @@ export interface RunHeadlessReviewOptions {
  */
 export interface AnthropicClientShape {
   messages: {
-    create: (params: {
-      model: string;
-      max_tokens: number;
-      system: string;
-      messages: Array<{ role: "user"; content: string }>;
-      tools: Array<{
-        name: string;
-        description: string;
-        input_schema: {
-          type: "object";
-          properties: Record<string, unknown>;
-          required: string[];
-        };
-      }>;
-    }) => Promise<{
+    create: (
+      params: {
+        model: string;
+        max_tokens: number;
+        system: string;
+        messages: Array<{ role: "user"; content: string }>;
+        tools: Array<{
+          name: string;
+          description: string;
+          input_schema: {
+            type: "object";
+            properties: Record<string, unknown>;
+            required: string[];
+          };
+        }>;
+      },
+      /** Optional request options (the real SDK supports `signal` for
+       *  AbortController-based timeouts). AGT-330's server-side reviewer
+       *  passes `{ signal: AbortSignal.timeout(timeoutMs) }`; the
+       *  headless path leaves this unset. Tests that inject a mock
+       *  ignore the second arg. */
+      options?: { signal?: AbortSignal | null | undefined },
+    ) => Promise<{
       content: Array<
         | { type: "text"; text: string }
         | {
@@ -271,8 +279,15 @@ export async function runHeadlessReview(
  * this tool: the fallback last-line VERDICT regex catches the legacy
  * prompt shape. Forcing tool use would break the `VERDICT:` backward
  * compat the docs still promise.
+ *
+ * Exported so the server-side reviewer (AGT-330's
+ * `src/server/reviewPipeline.ts`) can share one schema + name + description
+ * across both the local-only headless path and the server-attested path.
+ * Both reviewers feed reviewer prompts written for the same `submit_verdict`
+ * contract; if one path drifts, the prompts must drift too — keeping the
+ * schema in one place pins the contract.
  */
-const SUBMIT_VERDICT_TOOL = {
+export const SUBMIT_VERDICT_TOOL = {
   name: "submit_verdict",
   description:
     "Submit your final review verdict. Call this exactly once, after you " +
