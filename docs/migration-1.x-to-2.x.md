@@ -4,7 +4,9 @@ stamp 2.x introduces **server-attested reviews**: the LLM call moves into stamp-
 
 This guide walks you through the upgrade. Read [`plans/server-attested-reviews.md`](./plans/server-attested-reviews.md) first if you want the full design rationale; this doc focuses on the operational steps.
 
-> **Scope.** Some of the commands referenced below ship in tickets that have not yet landed on `main`. Those are flagged inline (e.g. *will ship via AGT-342*). The shape is settled; the exact UX may move slightly. Check the linked ticket if a command name has drifted.
+> **Scope.** stamp 2.0.1 is the current GA. All commands referenced below are
+> shipped. If you're upgrading from a 1.x install older than the bridge
+> release, run `stamp update` (or `npm i -g @openthink/stamp@latest`) first.
 
 ---
 
@@ -46,7 +48,7 @@ The day-to-day surface barely changes for operators who already deployed a stamp
 | **Reviewer features** | `tools:` + `mcp_servers:` per reviewer; Read/Grep/WebFetch allowlisted | Phase 1 reviewers are diff-only; `tools` / `mcp_servers` config is warned + ignored |
 | **`stamp review` (trusted mode)** | Runs LLM locally via Claude Agent SDK | Calls stamp-server's `stamp-review` SSH verb; server runs the LLM and signs the verdict |
 | **Trust anchor (`.stamp/**`) changes** | Gated by the same reviewer cycle as any other diff | Gated by `path_rules` requiring `admin`-capability signatures; reviewer cycle bypassed for these paths |
-| **`stamp review` with no `review_server`** | Runs locally and writes the verdict to `state.db` (gate-eligible) | Errors out with a pointer to this guide or to `--plan` / `--headless` ([`local-only-mode.md`](./local-only-mode.md)) — *enforcement lands in AGT-347* |
+| **`stamp review` with no `review_server`** | Runs locally and writes the verdict to `state.db` (gate-eligible) | Errors out with a pointer to this guide or to `--plan` / `--headless` ([`local-only-mode.md`](./local-only-mode.md)) |
 
 **What gets dropped:**
 
@@ -88,15 +90,24 @@ Go to [Local-only operators](#local-only-operators).
 
 ## Upgrade walkthrough — Shape 1 (stamp-server primary)
 
-### Step 0 — On the 1.x bridge release
+### Step 0 — Pin operator workstations on a 2.x-aware stamp
 
-Before flipping anything, upgrade your operator workstations to the **bridge release** (stamp 1.x final). The bridge release ships with deprecation notices pointing at this guide; both 1.x operator-trust and 2.x server-attested verification work side by side per-repo via `review_server` config.
+Before flipping anything, upgrade every operator workstation that interacts
+with the stamp-protected repos. If you've installed stamp before, the
+fastest path is `stamp update`; otherwise install fresh:
 
 ```sh
-npm install -g @openthink/stamp@1.x-final   # exact tag TBD by AGT-346
+stamp update                          # in-place upgrade of an existing install
+# OR
+npm i -g @openthink/stamp@latest      # fresh install of GA (2.0.1+)
 ```
 
-Existing repos keep working on operator-trust until you flip them.
+Operators who explicitly need to stay on the 1.x line can pin to
+`@openthink/stamp@legacy-1` once that dist-tag is published (the bridge
+release ships deprecation notices pointing at this guide and supports both
+1.x operator-trust and 2.x server-attested verification side by side
+per-repo via `review_server` config). Existing repos keep working on
+operator-trust until you flip them.
 
 ### Step 1 — Upgrade stamp-server to a 2.x-capable build
 
@@ -140,17 +151,32 @@ git checkout -b stamp-2x-migration
 mkdir -p .stamp/trusted-keys
 echo "<paste pubkey from step 2>" > .stamp/trusted-keys/review-server.pub
 
-# Scaffold the manifest + path_rules + config additions
-stamp init --migrate-to-server-attested   # _will ship via AGT-342_
+# Scaffold the manifest + path_rules
+stamp init --migrate-to-server-attested
+# (pass --dry-run first to preview what gets written)
 ```
 
-`stamp init --migrate-to-server-attested` (scaffolded in AGT-342) does:
+`stamp init --migrate-to-server-attested` does:
 
-1. Creates `.stamp/trusted-keys/manifest.yml` listing every existing `.pub` in `.stamp/trusted-keys/` with its fingerprint.
-2. Assigns `capabilities: [operator]` to every existing key by default (conservative — you promote selected human keys to `admin` interactively).
-3. Adds `capabilities: [server]` and `role_source: server` to the review-server entry.
-4. Adds `branches.<name>.review_server: ssh://git@<host>:<port>` and a `path_rules: ".stamp/**":` block to `.stamp/config.yml`.
-5. Prompts you to pick which existing operator keys should also gain `admin` capability for trust-anchor changes.
+1. Creates `.stamp/trusted-keys/manifest.yml` listing every existing `.pub` in `.stamp/trusted-keys/` with its fingerprint and `capabilities: [operator]` by default (conservative — keys are not auto-promoted to `admin` or `server`).
+2. Appends a default `path_rules: ".stamp/**":` block to `.stamp/config.yml` with `require_capability: admin`, `minimum_signatures: 2`, `bypass_review_cycle: true`.
+3. From a TTY, prompts you to pick which existing operator keys should also gain `admin` capability for trust-anchor changes. **From non-interactive stdin (agent migrations), no keys are promoted** — a `warning:` line surfaces this; you must hand-edit the manifest before any `.stamp/**` change can land.
+
+Two follow-up edits the command does NOT do for you (it can't infer the
+values) — you make them by hand before the migration commit lands:
+
+- **Promote the review-server entry to `[server]`.** Edit
+  `.stamp/trusted-keys/manifest.yml` to change the review-server pubkey's
+  entry to `capabilities: [server]` and add `role_source: server`.
+- **Add `review_server` to `.stamp/config.yml`.** Under your branch rule
+  (e.g. `branches.main`), add `review_server: ssh://git@<host>:<port>`
+  pointing at your stamp-server.
+
+**Single-trusted-key repos:** if your `.stamp/trusted-keys/` has only one
+pubkey, `minimum_signatures: 2` will block every future `.stamp/**` change
+(only one key can sign, two are required). Either set
+`minimum_signatures: 1` in the appended `path_rules` block or add a second
+admin key to the manifest before landing the migration commit.
 
 After the scaffold, `.stamp/trusted-keys/manifest.yml` looks something like:
 
@@ -248,10 +274,10 @@ In each repo:
 ```sh
 git checkout -b stamp-2x-migration
 
-# Same trust-anchor scaffold as Shape 1 — adds `review_server` to
-# .stamp/config.yml. Run this FIRST so the next step can substitute
-# host/port into the workflow template.
-stamp init --migrate-to-server-attested   # _will ship via AGT-342_
+# Same trust-anchor scaffold as Shape 1. Run this FIRST, then hand-add
+# `review_server` to .stamp/config.yml (so the next step can substitute
+# host/port into the workflow template).
+stamp init --migrate-to-server-attested
 
 # Scaffold the GitHub Action that mirrors every push to stamp-server.
 # Reads host/port from the `review_server` URL the previous step added,
@@ -264,7 +290,7 @@ stamp init --pr-mode
 - `.github/workflows/stamp-mirror.yml` — pushes the ref to stamp-server on every GitHub push, using `STAMP_MIRROR_KEY` (org-level secret). Host, port, org, repo are substituted from `review_server` + `origin`.
 - Prints a walkthrough to stdout covering keypair generation, the `stamp-mint-invite mirror --role member` step on stamp-server, and the GitHub org-secret registration URL.
 
-The PR-check workflow (`.github/workflows/stamp-verify.yml`) is dropped separately by the mode-aware default in `stamp init` (it lands automatically for forge-direct / local-only modes; opt out with `--no-pr-check`). The trust-anchor scaffold from AGT-342 is identical to Shape 1's step 3.
+The PR-check workflow (`.github/workflows/stamp-verify.yml`) is dropped separately by the mode-aware default in `stamp init` (it lands automatically for forge-direct / local-only modes; opt out with `--no-pr-check`). The trust-anchor scaffold from `--migrate-to-server-attested` is identical to Shape 1's step 3.
 
 > Running `--pr-mode` is idempotent — an existing `stamp-mirror.yml` is left in place so operator customizations (concurrency block, fork-PR gating, etc.) survive re-runs. Pass `--pr-mode-force` to overwrite (useful after configuring `review_server` so the host/port placeholders fill in).
 
@@ -287,7 +313,7 @@ The attestation is keyed on `git patch-id`, so it survives squash / rebase / mer
 
 #### v3 PR-attestation shape (verifier + producer, AGT-338 + AGT-355)
 
-The Action's verifier ships in 2.x at envelope `schema_version: 3`. v3 envelopes carry the same v4-trust fields the server-gated commit-trailer envelope does — per-approval server attestations (one per required reviewer, byte-canonical `ApprovalV4` shape), a top-level `diff_sha256` binding the operator's outer signature to the actual diff, the manifest snapshot hash for lenient revocation, and `trust_anchor_signatures` (admin counter-signatures) populated when the diff touches a `path_rules` glob. The same `verifyV4*` phase helpers the pre-receive hook runs against commit trailers verify the v3 PR-envelope's embedded fields — no logic divergence between server-gated and PR-mode trust checks.
+The Action's verifier ships in 2.x at envelope `schema_version: 3`. v3 envelopes carry the same v4-trust fields the server-gated commit-trailer envelope does — per-approval server attestations (one per required reviewer, byte-canonical `ApprovalV4` shape), a top-level `diff_sha256` binding the operator's outer signature to the actual diff, the manifest snapshot hash for lenient revocation, and `trust_anchor_signatures` (admin counter-signatures) populated when the diff touches a `path_rules` glob. The shared `verifyV4*` phase helpers in `src/lib/v4Trust.ts` run against both the v3 PR-envelope's embedded fields and the v4 commit-trailer envelope, but PR-mode runs a deliberate **subset** of the phases (`PR_MODE_PHASES_V4` omits `verifyV4MergeStructure` because PR-mode runs BEFORE a 2-parent merge commit exists). The shared phase logic is identical; the phase set differs.
 
 The verifier rejects v2 envelopes (produced by 1.x `stamp attest` or by 2.x `stamp attest` against a branch rule without `review_server`) with a "schema_version too old" actionable error. v2 envelopes pre-date the v4 trust model and cannot be upgraded in place — re-attestation against a 2.x stamp-server is required.
 
@@ -305,7 +331,7 @@ If your 1.x deployment is purely local-only (`stamp init --mode local-only`, no 
 
 **What changes:**
 
-- `stamp review` without a configured `review_server` now errors out instead of running the LLM locally and silently producing a verdict that looks like a trust gate ([AGT-347](#in-flight-references) finalizes this).
+- `stamp review` without a configured `review_server` now errors out instead of running the LLM locally and silently producing a verdict that looks like a trust gate.
 - Use `stamp review --plan` (AGT-339, shipped) or `stamp review --headless` (AGT-341, shipped) for the iteration loop.
 - No v4 attestation is produced. The "local-only attestation" of 1.x was operator-trust-only; 2.x is honest about it and does not pretend to offer one.
 
@@ -365,7 +391,22 @@ For most teams the per-merge cost is dwarfed by hosting (Railway / Fly / etc.). 
 - **`admin` capability keys:** Rotate when team membership changes (a departing admin's key should not stay trusted) or on compromise. Use multi-sig (`minimum_signatures: 2+`) so a single admin departure doesn't lock anyone out of trust-anchor changes.
 - **`operator` capability keys:** No required cadence. Rotate on machine compromise or workstation replacement; otherwise leave alone.
 
-The exact `stamp admin revoke-key <fingerprint>` flow is still being finalized — see the plan doc's open questions on revocation tooling.
+The operator surface for rotation lives under `stamp admin`:
+
+```
+stamp admin list-keys                                   # enumerate manifest entries
+stamp admin add-key <pubkey.pub> --name <n> --capabilities admin,operator
+stamp admin revoke <sha256:fingerprint>                 # remove a manifest entry
+stamp admin sign --pending [<sha>]                      # collect multi-admin counter-sigs
+```
+
+`add-key` and `revoke` mutate `.stamp/trusted-keys/manifest.yml`, so the
+resulting commits trip the `path_rules` gate and need admin counter-sigs
+collected via `stamp admin sign --pending <sha>` (notes-ref-backed) before
+they can land via `stamp merge`. The `add-key` command refuses any PEM
+that lacks `-----BEGIN PUBLIC KEY-----` — guards against a typo'd path to
+the private key file silently copying the secret into the trusted-keys
+directory.
 
 ### Do I have to commit `.stamp/trusted-keys/manifest.yml`?
 
@@ -383,13 +424,25 @@ This is deliberate. An automated promotion would conflate "this key can merge co
 
 ## Deprecation timeline
 
-The detailed timeline + deprecation messaging lands in **AGT-346**. Rough shape:
+- **Bridge release (1.x final, `@openthink/stamp@1.10.0`)** — ships with
+  deprecation notices wired into `stamp init` and `stamp merge` (one-line
+  stderr banner on each invocation), a README banner, and the operator-trust
+  caveat at the top of `DESIGN.md`'s security-model section. Both 1.x and
+  2.x verification work side by side, per-repo. The CLI banner is
+  suppressible with `STAMP_SUPPRESS_DEPRECATION=1` for CI / scripted
+  automation; interactive operators are expected to see it.
+- **stamp 2.0 GA (`@openthink/stamp@2.0.0`)** and **2.0.1** — `stamp review`
+  requires `review_server` configured (or `--plan` / `--headless` for
+  local-only). Old v2/v3 attestations on already-merged commits remain
+  verifiable indefinitely. Default `stamp init` scaffolds 2.x-aware config;
+  `--mode local-only` opts into no-trust mode with an explicit banner.
+- **2.x maintenance:** the 1.x line moves to security-patches-only after
+  2.0 GA. Operators who can't migrate immediately can pin to
+  `@openthink/stamp@legacy-1` (the 1.10.0 release) — the patch window is
+  per-issue rather than a fixed N-month commitment.
 
-- **Bridge release (stamp 1.x final):** ships with prominent deprecation notices wired into `stamp init` and `stamp merge` (one-line stderr banner on each invocation) plus a README banner and a louder operator-trust caveat at the top of `DESIGN.md`'s security-model section. Both 1.x and 2.x verification work side by side, per-repo. The CLI banner is suppressible with `STAMP_SUPPRESS_DEPRECATION=1` — intended for CI runs and scripted automations where the banner would just be noise; interactive operators are expected to see it.
-- **stamp 2.0 GA:** `stamp review` requires `review_server` configured (or `--plan` / `--headless` for local-only). Old v2/v3 attestations on already-merged commits remain verifiable indefinitely. Default `stamp init` scaffolds 2.x-aware config; `--local-only` flag opts into no-trust mode with an explicit banner.
-- **2.x maintenance:** 1.x receives security patches only for N months after 2.0 GA — exact window finalized by AGT-346.
-
-If your team has a long-running 1.x deployment that can't migrate immediately, the bridge release is your stable landing pad until AGT-346 publishes the patch window.
+If your team has a long-running 1.x deployment that can't migrate
+immediately, `@legacy-1` is your stable landing pad.
 
 ---
 
@@ -405,20 +458,30 @@ For the path-of-most-operators issues, see the expanded entries in [`troubleshoo
 
 ---
 
-## In-flight references
+## Implementation status
 
-This guide forward-points to several tickets that ship the migration commands. Status as of writing:
+All of the migration surface referenced in this guide is shipped on `main`
+and published to npm at `@openthink/stamp@2.0.1`:
 
-- **AGT-342** — `stamp init --migrate-to-server-attested` scaffolding. *In flight.* Until it ships, the scaffold steps can be done by hand following the manifest + path_rules examples above.
-- **AGT-346** — bridge-release deprecation messaging + the exact 1.x EOL window. *In flight.*
-- **AGT-347** — finalizes the `stamp review` no-`review_server` error path in 2.0 GA. *In flight.*
-- **AGT-355** — server-side v3 PR-attestation production (the stamp-server-emits-the-envelope half of PR mode). *Shipped in 2.0.1.* `stamp review` now persists the server-signed approval rows; `stamp attest` folds them into a v3 envelope when the branch rule declares `review_server`. The 1.x-action-pin bridge-window workaround documented in earlier drafts of this guide is no longer needed — the 2.x action accepts the production envelope directly. When the branch rule has no `review_server`, `stamp attest` continues to produce v2 envelopes (advisory-only path).
+- **Trust-anchor scaffold** — `stamp init --migrate-to-server-attested`
+  (with `--dry-run`).
+- **Bridge-release deprecation messaging** — `stamp init` / `stamp merge`
+  stderr banner, README banner, `DESIGN.md` operator-trust caveat
+  (suppressible via `STAMP_SUPPRESS_DEPRECATION=1`).
+- **`stamp review` enforcement** — errors when `review_server` is missing
+  in 2.x; falls through to `--plan` / `--headless` for local-only.
+- **Server-side v3 PR-attestation production** — stamp-server signs and
+  returns the v3 PR-attestation payload via the SSH `stamp-review` verb;
+  `stamp attest` folds the server-signed approvals into a v3 envelope
+  when the branch rule declares `review_server`. The 2.x action accepts
+  this envelope directly — no 1.x-action pin or bridge-window workaround
+  required.
+- **Trust-anchor administration** — `stamp admin list-keys`,
+  `stamp admin add-key`, `stamp admin revoke`, `stamp admin sign --pending`
+  for multi-admin counter-sig collection (notes-ref-backed).
 
-Already shipped on `main`:
-
-- **AGT-325 / AGT-326 / AGT-327 / AGT-329 / AGT-333 / AGT-339 / AGT-340 / AGT-341 / AGT-344 / AGT-350** — see [`plans/server-attested-reviews.md`](./plans/server-attested-reviews.md)'s "Implementation status" block for the per-ticket file references.
-
-When a command's exact UX is settled, this guide will be updated to drop the *will ship via AGT-XXX* annotations.
+See [`plans/server-attested-reviews.md`](./plans/server-attested-reviews.md)'s
+"Implementation status" block for the per-ticket file references.
 
 ---
 
