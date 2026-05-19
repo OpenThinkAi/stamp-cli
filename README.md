@@ -127,11 +127,10 @@ stamp attest --into main --push origin   # signs the v4 attestation envelope + a
 # Reviewer's check goes green → human clicks merge in the GitHub UI
 ```
 
-> **2.0.1 note:** producer-side production of the extended v3+ PR-attestation
-> blob (AGT-355) is queued for 2.0.1. The verifier ships in 2.0 so the
-> contract is locked; until the producer ships, pin the GitHub Action to a
-> 1.x `stamp-version` input. See the migration guide for the bridge-window
-> guidance.
+> **2.0.1:** server-side v3 PR-attestation production (AGT-355) ships in
+> this release. `stamp attest` now folds server-signed approvals into a
+> v3 envelope when the branch rule declares `review_server`; the GH
+> Action accepts the envelope directly with no 1.x-action pin needed.
 
 The attestation is keyed on the **content** of the diff (`git patch-id`), so
 it survives every GitHub merge strategy: squash, rebase, and merge-commit

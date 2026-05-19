@@ -208,6 +208,49 @@ export interface ReviewPipelineResult {
    *  the manifest-resolved pubkey; byte identity between server and
    *  client serialization is the contract. */
   signature: string;
+  /**
+   * AGT-355: server-produced v3 PR-attestation payload bytes for this
+   * reviewer. Base64-encoded canonical bytes of the per-approval inner
+   * payload (`canonicalSerializeApproval(approval)`) — the EXACT bytes
+   * the server's signature commits to.
+   *
+   * The SSH client (`requestServerReview`) uses these bytes for a
+   * canonicalizer-drift defense-in-depth check: it confirms
+   * `Buffer.from(this_b64, "base64")` equals the locally recomputed
+   * `canonicalSerializeApproval(parsed.approval)` before accepting the
+   * response. The wire bytes are NOT persisted past that check — the
+   * DB row stores `JSON.stringify(approval)` (per AGT-332), and
+   * `stamp attest`'s `buildV3Envelope` re-canonicalizes from the
+   * stored JSON when folding the approval into the v3 envelope. Byte
+   * identity at SSH-parse time guarantees byte identity at attest
+   * time because both call `canonicalSerializeApproval` on the same
+   * parsed approval.
+   *
+   * The presence of this field signals that the server can produce
+   * v3-shape PR-attestations (Shape 2 / PR-mode end-to-end). Older
+   * 2.0.0 servers without AGT-355's producer code omit the field; the
+   * 2.0.1 client treats absence as a no-op (the legacy `approval` +
+   * `signature` fields still flow through `recordReview` into the DB,
+   * and `stamp attest` still produces a v3 envelope because the
+   * server-signed approval row IS the v3 trust ingredient). Forward-
+   * compatible on both sides of the upgrade.
+   *
+   * Redundant-on-the-wire with `approval` + `signature` above
+   * (semantically the same data), but named explicitly with the
+   * `pr_attestation_v3_` prefix so the wire-format extension is
+   * grep-able and the canonicalizer-drift check is unambiguous.
+   */
+  pr_attestation_v3_payload_b64: string;
+  /**
+   * Base64 Ed25519 signature over `pr_attestation_v3_payload_b64`'s
+   * decoded bytes. Same signature as the top-level `signature` field
+   * (the server signed the canonical bytes once and surfaces them
+   * both as the legacy `signature` and the new
+   * `pr_attestation_v3_signature_b64`). Named with the
+   * `pr_attestation_v3_` prefix so the v3 PR-attestation contract is
+   * grep-able at the wire-format layer.
+   */
+  pr_attestation_v3_signature_b64: string;
 }
 
 /** Pipeline input. Kept as a single bag-of-args object so callers don't
@@ -555,11 +598,23 @@ export async function runReviewPipeline(
     "base64",
   );
 
+  // AGT-355: surface the canonical per-approval bytes + signature
+  // verbatim under the v3 PR-attestation field names so the client
+  // can run a canonicalizer-drift defense-in-depth check at SSH-parse
+  // time (confirming Buffer.from(b64, "base64") equals locally-
+  // recomputed canonicalSerializeApproval(parsed.approval)). The
+  // wire bytes are NOT persisted past that check — see the
+  // ReviewPipelineResult docstring for the full wire-format
+  // rationale and the relationship to the DB-persistence path.
+  const prAttestationV3PayloadB64 = canonical.toString("base64");
+
   return {
     verdict: parsed.verdict,
     prose: parsed.prose,
     approval,
     signature,
+    pr_attestation_v3_payload_b64: prAttestationV3PayloadB64,
+    pr_attestation_v3_signature_b64: signature,
   };
 }
 

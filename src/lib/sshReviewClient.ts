@@ -197,6 +197,44 @@ export interface ServerReviewResult {
    *  `reviews.server_approval_json` a parseable record of the approval
    *  body. AGT-334's merge folder also re-canonicalizes before checking. */
   approvalJson: string;
+  /**
+   * AGT-355: when the server surfaces the v3 PR-attestation payload
+   * fields (`pr_attestation_v3_payload_b64` + `_signature_b64`) we
+   * surface them on the result as forward-looking metadata. The
+   * actual canonicalizer-drift defense-in-depth check runs inside
+   * `requestServerReview` BEFORE this object is built: the wire bytes
+   * are compared against locally-recomputed
+   * `canonicalSerializeApproval(parsed.approval)` and the request
+   * rejects on mismatch. Past that point, the trust property is
+   * carried by the parsed approval + DB persistence path (AGT-332);
+   * `prAttestationV3` here is informational surface for callers that
+   * want to inspect the wire-format extension (e.g. logging,
+   * diagnostics, future use cases).
+   *
+   * `stamp attest`'s `buildV3Envelope` re-canonicalizes from the
+   * stored DB JSON when folding the approval — it does NOT consume
+   * this field. Byte identity is guaranteed because the SSH-time
+   * check already confirmed the parsed approval canonicalizes to
+   * the same bytes the server signed.
+   *
+   * `null` when the server's response omits these fields — i.e. an
+   * older 2.0.0 server that predates AGT-355's producer code. This
+   * case is benign: `stamp attest` still produces a v3 envelope
+   * because the legacy `approval` + `signature` fields (always
+   * present) carry the same data, and the DB-persistence path
+   * doesn't depend on this field.
+   */
+  prAttestationV3: {
+    /** Canonical bytes of `ApprovalV4` — exactly the bytes the
+     *  server's Ed25519 signature commits to. Same content as
+     *  `canonicalSerializeApproval(approval)` recomputed locally;
+     *  the wire-bytes equality is asserted at SSH-parse time. */
+    payloadBytes: Buffer;
+    /** Base64 Ed25519 signature over `payloadBytes`. Same value as the
+     *  legacy `signature` field; surfaced under the v3-flavored name
+     *  for grep-ability at the wire layer. */
+    signatureB64: string;
+  } | null;
 }
 
 /**
@@ -210,6 +248,15 @@ function parseResponseJson(raw: string): {
   prose: string;
   approval: ApprovalV4;
   signature: string;
+  /** AGT-355: present when the server surfaces the v3 PR-attestation
+   *  payload + signature fields. `null` when the server's response
+   *  omits them — i.e. an older 2.0.0 server. See the
+   *  `ServerReviewResult.prAttestationV3` docstring for forward-compat
+   *  dispatch semantics. */
+  prAttestationV3: {
+    payloadBytes: Buffer;
+    signatureB64: string;
+  } | null;
 } {
   let parsed: unknown;
   try {
@@ -277,11 +324,35 @@ function parseResponseJson(raw: string): {
         `(${a.verdict}) disagree`,
     );
   }
+  // AGT-355: extract the optional v3 PR-attestation fields. Both must
+  // be present together (all-or-nothing — a half-populated response
+  // would be a server bug). When absent, the result's prAttestationV3
+  // is null and the caller falls back to the legacy attest path.
+  let prAttestationV3: { payloadBytes: Buffer; signatureB64: string } | null = null;
+  const payloadB64 = obj["pr_attestation_v3_payload_b64"];
+  const sigB64 = obj["pr_attestation_v3_signature_b64"];
+  if (payloadB64 !== undefined || sigB64 !== undefined) {
+    if (typeof payloadB64 !== "string" || !payloadB64) {
+      throw new Error(
+        `review_server response.pr_attestation_v3_payload_b64 must be a non-empty string when present`,
+      );
+    }
+    if (typeof sigB64 !== "string" || !sigB64) {
+      throw new Error(
+        `review_server response.pr_attestation_v3_signature_b64 must be a non-empty string when present`,
+      );
+    }
+    prAttestationV3 = {
+      payloadBytes: Buffer.from(payloadB64, "base64"),
+      signatureB64: sigB64,
+    };
+  }
   return {
     verdict,
     prose: obj.prose,
     approval: approval as ApprovalV4,
     signature: obj.signature,
+    prAttestationV3,
   };
 }
 
@@ -570,6 +641,34 @@ export async function requestServerReview(
     );
   }
 
+  // AGT-355: when the server surfaced the v3 PR-attestation payload
+  // fields, defensively check that the canonical bytes ride agree with
+  // the bytes a fresh `canonicalSerializeApproval(parsed.approval)`
+  // produces. If the server's canonicalizer ever drifts from the
+  // client's, this catches it BEFORE `stamp attest` would build an
+  // envelope with mismatched inner bytes and produce an attestation
+  // the verifier would reject confusingly. The signature has already
+  // been verified above against the canonical bytes WE compute, so
+  // confirming the wire bytes match means we can ride them straight
+  // into the envelope.
+  if (parsed.prAttestationV3) {
+    const localCanonical = canonicalSerializeApproval(parsed.approval);
+    if (!parsed.prAttestationV3.payloadBytes.equals(localCanonical)) {
+      throw new Error(
+        `review_server returned pr_attestation_v3_payload_b64 bytes that do not match ` +
+          `canonicalSerializeApproval(approval) recomputed locally — refusing. ` +
+          `This indicates a server/client canonicalizer drift (server stamp version mismatch?). ` +
+          `Server bytes (first 80): ${JSON.stringify(parsed.prAttestationV3.payloadBytes.toString("utf8").slice(0, 80))}; ` +
+          `client bytes (first 80): ${JSON.stringify(localCanonical.toString("utf8").slice(0, 80))}.`,
+      );
+    }
+    if (parsed.prAttestationV3.signatureB64 !== parsed.signature) {
+      throw new Error(
+        `review_server returned pr_attestation_v3_signature_b64 that disagrees with the top-level signature — refusing.`,
+      );
+    }
+  }
+
   // Serialize the parsed approval body for DB persistence. This is a
   // re-stringification, NOT the raw wire bytes — JSON.parse + re-stringify
   // doesn't preserve key order. That's fine: downstream verifiers
@@ -582,6 +681,7 @@ export async function requestServerReview(
     approval: parsed.approval,
     signature: parsed.signature,
     approvalJson: JSON.stringify(parsed.approval),
+    prAttestationV3: parsed.prAttestationV3,
   };
 }
 

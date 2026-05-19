@@ -5,6 +5,49 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 2.0.1 — 2026-05-19
+
+Fast-follow for 2.0.0 GA: closes the Shape 2 (server-attested PR mode)
+end-to-end loop by shipping the server-side production of v3
+PR-attestation envelopes ([AGT-355](https://github.com/OpenThinkAi/stamp-cli/issues)).
+
+### What changed
+
+- **Server**: `stamp-review` SSH verb response now surfaces the
+  canonical per-approval bytes + signature as
+  `pr_attestation_v3_payload_b64` and `pr_attestation_v3_signature_b64`
+  alongside the existing `approval` + `signature` fields. The
+  `ReviewPipelineResult` docstring in
+  [`src/server/reviewPipeline.ts`](./src/server/reviewPipeline.ts)
+  documents the wire-format contract; the bytes are byte-identical to
+  `canonicalSerializeApproval(approval)` so the client never has to
+  re-canonicalize.
+- **Client**: `stamp attest` now dispatches on the branch rule's
+  `review_server` field — when set, folds the server-signed approval
+  rows from the local DB into a v3 PR-attestation envelope and
+  operator-signs the outer; when absent, continues to produce v2
+  (the 1.6.0 PR-check path). The dispatch mirrors `stamp merge`'s
+  v3/v4 dispatch verbatim.
+- **GitHub Action**: no change. The `stamp/verify-attestation@v1`
+  verifier shipped in 2.0 (AGT-338) accepts the production envelope
+  directly. The 1.x-action-pin bridge-window workaround documented in
+  the 2.0 migration guide is no longer needed.
+
+### Migration
+
+No action required for operators already on 2.0 Shape 2 (PR mode) —
+upgrade `stamp-cli` on both server and dev machines to 2.0.1, drop the
+`stamp-version: 1.x` pin from `.github/workflows/stamp-verify.yml` if
+one was added during the bridge window, and the next `stamp review` +
+`stamp attest` cycle produces a v3 envelope the Action accepts.
+Forward-compatible: 2.0.1 clients work against 2.0.0 servers (the new
+response fields are optional on parse); 2.0.1 servers work against
+2.0.0 clients (the new fields are additive). See
+[`docs/migration-1.x-to-2.x.md`](./docs/migration-1.x-to-2.x.md) for
+the updated walkthrough.
+
+---
+
 ## 2.0.0 — 2026-05-19
 
 stamp 2.0 ships **server-attested reviews**: the LLM call moves into
@@ -124,12 +167,11 @@ Three shapes supported (pick deliberately — guarantees differ):
 - `legacy-1` → `1.10.0` (final 1.x; security patches only going forward)
 - `next` — unused for this cut; reserved for future major prereleases
 
-### Known carry-forwards to 2.0.1
+### Carry-forwards (resolved in 2.0.1)
 
 - **AGT-355** — server-side production of the extended PR-attestation v3+
-  blob in Shape 2. The verifier (`stamp/verify-attestation@v1`) already
-  ships in 2.0; producer-side is queued. Operator bridge-window guidance:
-  pin the Action to a 1.x `stamp-version` input until 2.0.1.
+  blob in Shape 2. Shipped in 2.0.1; see the [2.0.1 entry](#201--2026-05-19)
+  above for the upgrade path.
 
 ---
 
