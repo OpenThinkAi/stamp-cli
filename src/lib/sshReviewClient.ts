@@ -200,25 +200,35 @@ export interface ServerReviewResult {
   /**
    * AGT-355: when the server surfaces the v3 PR-attestation payload
    * fields (`pr_attestation_v3_payload_b64` + `_signature_b64`) we
-   * propagate them up to the caller so `stamp attest` can fold the
-   * canonical per-approval bytes directly into the v3 envelope
-   * without re-canonicalizing the parsed approval (and risking a
-   * byte-disagreement with the server).
+   * surface them on the result as forward-looking metadata. The
+   * actual canonicalizer-drift defense-in-depth check runs inside
+   * `requestServerReview` BEFORE this object is built: the wire bytes
+   * are compared against locally-recomputed
+   * `canonicalSerializeApproval(parsed.approval)` and the request
+   * rejects on mismatch. Past that point, the trust property is
+   * carried by the parsed approval + DB persistence path (AGT-332);
+   * `prAttestationV3` here is informational surface for callers that
+   * want to inspect the wire-format extension (e.g. logging,
+   * diagnostics, future use cases).
+   *
+   * `stamp attest`'s `buildV3Envelope` re-canonicalizes from the
+   * stored DB JSON when folding the approval — it does NOT consume
+   * this field. Byte identity is guaranteed because the SSH-time
+   * check already confirmed the parsed approval canonicalizes to
+   * the same bytes the server signed.
    *
    * `null` when the server's response omits these fields — i.e. an
-   * older 2.0.0 server that predates AGT-355's producer code. The
-   * caller's dispatch then falls through to the legacy attest path
-   * (operator-signs-inner-payload, v2 envelope) which the 2.x
-   * verifier rejects with the schema-too-old actionable error. See
-   * the response-parse comment in `parseResponseJson` for the
-   * forward-compat shape contract.
+   * older 2.0.0 server that predates AGT-355's producer code. This
+   * case is benign: `stamp attest` still produces a v3 envelope
+   * because the legacy `approval` + `signature` fields (always
+   * present) carry the same data, and the DB-persistence path
+   * doesn't depend on this field.
    */
   prAttestationV3: {
     /** Canonical bytes of `ApprovalV4` — exactly the bytes the
      *  server's Ed25519 signature commits to. Same content as
-     *  `canonicalSerializeApproval(approval)` recomputed locally,
-     *  but ridden over the wire verbatim so the v3 envelope writer
-     *  never has to canonicalize. */
+     *  `canonicalSerializeApproval(approval)` recomputed locally;
+     *  the wire-bytes equality is asserted at SSH-parse time. */
     payloadBytes: Buffer;
     /** Base64 Ed25519 signature over `payloadBytes`. Same value as the
      *  legacy `signature` field; surfaced under the v3-flavored name
