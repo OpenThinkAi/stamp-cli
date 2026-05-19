@@ -208,6 +208,45 @@ export interface ReviewPipelineResult {
    *  the manifest-resolved pubkey; byte identity between server and
    *  client serialization is the contract. */
   signature: string;
+  /**
+   * AGT-355: server-produced v3 PR-attestation payload bytes for this
+   * reviewer. Base64-encoded canonical bytes of the per-approval inner
+   * payload (`canonicalSerializeApproval(approval)`) — the EXACT bytes
+   * the server's signature commits to. The client's `stamp attest`
+   * consumes these to assemble the v3 PR-attestation envelope at
+   * `refs/stamp/attestations/<patch-id>` with no risk of byte drift
+   * between server and client canonicalization.
+   *
+   * The presence of this field signals that the server can produce
+   * v3-shape PR-attestations (Shape 2 / PR-mode end-to-end). Older
+   * 2.0.0 servers without AGT-355's producer code omit the field; the
+   * client's `stamp attest` detects absence and falls back to the
+   * legacy v2 path (operator-signs-inner-payload, no per-approval
+   * server signature, rejected by the 2.x verifier with the
+   * actionable schema-too-old error documented in
+   * `docs/migration-1.x-to-2.x.md`).
+   *
+   * Redundant-on-the-wire with `approval` + `signature` above
+   * (semantically the same data), but named explicitly with the
+   * `pr_attestation_v3_` prefix so the wire-format extension is
+   * grep-able and the client's dispatch is unambiguous. The redundancy
+   * is intentional: the existing fields stay shaped for AGT-332's DB
+   * persistence (which writes `approval_json` via JSON.stringify, then
+   * re-canonicalizes at verify time), while the new fields ship the
+   * canonical bytes directly so the v3 envelope writer never has to
+   * re-canonicalize and risk a byte-disagreement with the server.
+   */
+  pr_attestation_v3_payload_b64: string;
+  /**
+   * Base64 Ed25519 signature over `pr_attestation_v3_payload_b64`'s
+   * decoded bytes. Same signature as the top-level `signature` field
+   * (the server signed the canonical bytes once and surfaces them
+   * both as the legacy `signature` and the new
+   * `pr_attestation_v3_signature_b64`). Named with the
+   * `pr_attestation_v3_` prefix so the v3 PR-attestation contract is
+   * grep-able at the wire-format layer.
+   */
+  pr_attestation_v3_signature_b64: string;
 }
 
 /** Pipeline input. Kept as a single bag-of-args object so callers don't
@@ -555,11 +594,23 @@ export async function runReviewPipeline(
     "base64",
   );
 
+  // AGT-355: surface the canonical per-approval bytes + signature
+  // verbatim under the v3 PR-attestation field names so `stamp attest`
+  // can fold them into a v3 envelope without re-canonicalizing (and
+  // risking a byte-disagreement with the server). The bytes here are
+  // the SAME bytes the `signature` above commits to — we just expose
+  // them explicitly rather than have the client re-derive via
+  // canonicalSerializeApproval(parsed_approval). See the
+  // ReviewPipelineResult docstring above for the wire-format rationale.
+  const prAttestationV3PayloadB64 = canonical.toString("base64");
+
   return {
     verdict: parsed.verdict,
     prose: parsed.prose,
     approval,
     signature,
+    pr_attestation_v3_payload_b64: prAttestationV3PayloadB64,
+    pr_attestation_v3_signature_b64: signature,
   };
 }
 
