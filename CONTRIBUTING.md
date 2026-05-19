@@ -97,17 +97,65 @@ See [`docs/personas.md`](./docs/personas.md) for prompt-writing guidance.
 
 ## Release process
 
+### Normal cuts (patch / minor)
+
 - Version in `package.json` is the source of truth.
 - Publishing is automated: `.github/workflows/publish.yml` fires on every push to `main` (including the stamp server's post-receive mirror) and publishes to npm **only if** `package.json` declares a version that isn't already on the registry. So the maintainer flow is:
   1. Bump `package.json` version in a branch.
   2. `stamp review → stamp merge → stamp push main` as usual.
-  3. The mirror carries the commit to GitHub; the publish workflow picks up the new version and runs `npm publish` + creates a `v<version>` git tag.
+  3. The mirror carries the commit to GitHub; the publish workflow picks up the new version and runs `npm publish --provenance` + creates a `v<version>` git tag.
 - Every non-bump merge safely no-ops the publish step.
-- Alpha/beta/rc versions (e.g., `0.2.0-alpha.0`) publish under the `alpha` dist-tag.
 
 Auth uses npm's [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) via OIDC — no long-lived `NPM_TOKEN` secret. The trust relationship is configured once on the npm side (package → Settings → Trusted Publishers → GitHub Actions) pointing at `OpenThinkAi/stamp-cli` and the `publish.yml` workflow. The workflow grants itself `id-token: write`, and `npm publish` exchanges a short-lived OIDC token at publish time. `--provenance` attaches an SLSA build attestation to the published tarball; anyone can verify with `npm audit signatures`.
 
-Current state: we are pre-1.0. Breaking changes are allowed between minor versions.
+### Major-version cuts
+
+stamp-cli is on SemVer. A major-version bump means breaking changes to the
+CLI surface, attestation envelope, config schema, or default behavior. Two
+shapes are supported:
+
+**Direct GA** — straight to `2.0.0` / `3.0.0` / etc. on the `latest` dist-tag.
+Reasonable when the work landed incrementally on `main` behind a flag or
+behind a config-gated code path, with comprehensive test coverage. **stamp 2.0
+shipped this way** because M3 / M4 / M5 / M6 all landed on `main` ahead of
+the cut, the AGT-354 v4 round-trip E2E harness covered the verifier chain,
+and the 1.x → 2.x bridge release was already in operators' hands.
+
+**Prerelease cadence** — `MAJOR.0.0-alpha.N` → `-beta.N` → `-rc.N` → `MAJOR.0.0`.
+Reasonable when the breaking surface is large enough to need operator
+field-testing before flipping `latest`. Each prerelease is published under
+the `next` dist-tag (or phase-specific `alpha` / `beta` / `rc` tags if you
+want stronger signal to opt-in installers). Semver excludes prereleases
+from `^MAJOR-1.x` ranges, so default `npm i @openthink/stamp` continues to
+resolve to the prior major until GA.
+
+### npm dist-tag policy
+
+- **`latest`** — current GA. Default for `npm i @openthink/stamp`.
+- **`next`** — major-version prereleases (alpha / beta / rc), when used.
+  Cleared once a corresponding GA flips `latest`.
+- **`legacy-N`** — pinned to the final release of major version N after the
+  next major ships. Lets operators staying on the old line do
+  `npm i @openthink/stamp@legacy-1` without typing a version. Currently:
+  `legacy-1` → `1.10.0`.
+
+### Cutting a new major version (runbook)
+
+1. **Draft the CHANGELOG.md entry first** — schema bumps, removed features,
+   new features, migration link. Use the 2.0.0 entry as a template.
+2. **Update README.md** to lead with the new model. Demote the prior major
+   to a "maintenance" link. Update Quick start examples + the shapes table.
+3. **Bump `package.json`** to `MAJOR.0.0` as the last commit on the branch
+   (so the merge is the clear "we're shipping MAJOR.0" marker).
+4. **Run the gate**: `stamp review --diff main..feature/... --allow-large`,
+   `stamp status`, `stamp merge`, `stamp push main`.
+5. **Verify the publish workflow** picked up the new version: check
+   `gh run list --workflow=publish.yml --limit 1`; confirm `npm view @openthink/stamp@MAJOR.0.0 version` resolves.
+6. **Pin the legacy tag**: `npm dist-tag add @openthink/stamp@<old-latest> legacy-N`.
+   The `latest` flip happens automatically when the new major version
+   publishes (npm's default behavior for the highest-versioned non-prerelease).
+7. **Optional**: announcement post (blog / suite landing page). Skipped for
+   2.0 by choice — the CHANGELOG + README cover it.
 
 ## Code of conduct
 
