@@ -10,6 +10,7 @@
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import {
   MANIFEST_RELATIVE_PATH,
@@ -17,6 +18,7 @@ import {
   parseManifest,
   resolveCapability,
   serializeManifestCanonical,
+  serializeManifestYaml,
   snapshotSha256,
   type Capability,
   type TrustedKeysManifest,
@@ -473,6 +475,129 @@ describe("resolveCapability", () => {
     caps.push("server");
     const fresh = resolveCapability(m, FP_ALICE)!;
     assert.deepEqual(fresh, ["admin"]);
+  });
+});
+
+describe("serializeManifestYaml — writer round-trip", () => {
+  it("round-trips through parse → serialize → parse (worked example)", () => {
+    const m = parseManifest(WORKED_EXAMPLE_YAML)!;
+    const yaml = serializeManifestYaml(m);
+    const reparsed = parseManifest(yaml);
+    assert.ok(reparsed, "serialized YAML must re-parse");
+    assert.deepEqual(reparsed, m);
+  });
+
+  it("snapshot hash is preserved by parse → serialize → parse", () => {
+    const m = parseManifest(WORKED_EXAMPLE_YAML)!;
+    const reparsed = parseManifest(serializeManifestYaml(m))!;
+    assert.equal(snapshotSha256(reparsed), snapshotSha256(m));
+  });
+
+  it("emits entries sorted by name regardless of source order", () => {
+    const yaml = serializeManifestYaml(
+      parseManifest(`
+keys:
+  zelda:
+    fingerprint: ${FP_BOB}
+    capabilities: [admin]
+  alice:
+    fingerprint: ${FP_ALICE}
+    capabilities: [admin]
+`)!,
+    );
+    const aliceIdx = yaml.indexOf("  alice:");
+    const zeldaIdx = yaml.indexOf("  zelda:");
+    assert.ok(aliceIdx >= 0 && zeldaIdx >= 0);
+    assert.ok(aliceIdx < zeldaIdx, "alice should come before zelda");
+  });
+
+  it("emits capabilities sorted within each entry", () => {
+    const m: TrustedKeysManifest = {
+      entries: [
+        {
+          name: "alice",
+          fingerprint: FP_ALICE,
+          capabilities: ["operator", "admin"] as Capability[],
+        },
+      ],
+    };
+    const yaml = serializeManifestYaml(m);
+    assert.ok(yaml.includes("capabilities: [admin, operator]"));
+  });
+
+  it("produces byte-identical output for two equivalent inputs", () => {
+    const yamlA = `
+keys:
+  alice:
+    fingerprint: ${FP_ALICE}
+    capabilities: [admin, operator]
+  bob:
+    fingerprint: ${FP_BOB}
+    capabilities: [admin]
+`;
+    const yamlB = `
+keys:
+  bob:
+    capabilities: [admin]
+    fingerprint: ${FP_BOB}
+  alice:
+    capabilities: [operator, admin]
+    fingerprint: ${FP_ALICE}
+`;
+    const a = serializeManifestYaml(parseManifest(yamlA)!);
+    const b = serializeManifestYaml(parseManifest(yamlB)!);
+    assert.equal(a, b);
+  });
+
+  it("preserves role_source: server when present (emits double-quoted)", () => {
+    const yaml = serializeManifestYaml(parseManifest(WORKED_EXAMPLE_YAML)!);
+    // Emitted double-quoted to neutralize YAML metacharacters in any
+    // future role_source value (see serializeManifestYaml docstring).
+    assert.ok(yaml.includes(`role_source: "server"`));
+    // And re-parse must surface the unquoted string on the right entry.
+    const m = parseManifest(yaml)!;
+    const srv = m.entries.find((e) => e.name === "review-server-prod")!;
+    assert.equal(srv.role_source, "server");
+  });
+
+  it("escapes a role_source containing YAML metacharacters", () => {
+    // Construct manually — the parser rejects funny role_source values
+    // today, but the writer must stay safe if that constraint loosens.
+    const m: TrustedKeysManifest = {
+      entries: [
+        {
+          name: "alice",
+          fingerprint: FP_ALICE,
+          capabilities: ["admin"],
+          role_source: `pwn"\ninjected: yes`,
+        },
+      ],
+    };
+    const yaml = serializeManifestYaml(m);
+    // The injected key MUST NOT appear as a top-level YAML key — that
+    // would mean the escaping failed and an attacker-controlled
+    // role_source value could rewrite the manifest structure.
+    const parsedRaw = parseYaml(yaml) as Record<string, unknown>;
+    assert.ok(parsedRaw && typeof parsedRaw === "object");
+    assert.ok(!("injected" in parsedRaw));
+    assert.deepEqual(Object.keys(parsedRaw), ["keys"]);
+  });
+
+  it("output ends with exactly one trailing newline", () => {
+    const yaml = serializeManifestYaml(parseManifest(WORKED_EXAMPLE_YAML)!);
+    assert.ok(yaml.endsWith("\n"));
+    assert.ok(!yaml.endsWith("\n\n"));
+  });
+
+  it("round-trips a single-entry manifest (boundary case)", () => {
+    const m = parseManifest(`
+keys:
+  solo-admin:
+    fingerprint: ${FP_ALICE}
+    capabilities: [admin]
+`)!;
+    const reparsed = parseManifest(serializeManifestYaml(m))!;
+    assert.deepEqual(reparsed, m);
   });
 });
 

@@ -312,6 +312,68 @@ export function snapshotSha256(manifest: TrustedKeysManifest): string {
 }
 
 /**
+ * Serialize a manifest as human-readable YAML matching the documented
+ * schema. Used by the admin rotation commands (`stamp admin add-key`,
+ * `stamp admin revoke`) when mutating `.stamp/trusted-keys/manifest.yml`
+ * in place.
+ *
+ * Determinism contract — TWO manifests with the same logical content
+ * MUST produce byte-identical YAML:
+ *   - entries sorted by name
+ *   - capabilities sorted within each entry
+ *   - field order within an entry: fingerprint, capabilities, role_source
+ *   - flow-style capability arrays (`[admin, operator]`) so a diff
+ *     stays single-line and matches the migration-guide style emitted
+ *     by `migrateServerAttested.ts:serializeManifest`
+ *   - single trailing newline (POSIX-clean)
+ *
+ * Round-trip contract — `parseManifest(serializeManifestYaml(m))` MUST
+ * equal `m` for any `m` that itself came out of `parseManifest`, and the
+ * snapshot hash MUST match. Tests in `trustedKeysManifest.test.ts`
+ * enforce both invariants.
+ *
+ * We emit YAML by hand rather than going through `yaml`'s stringifier
+ * for two reasons:
+ *   - the shape is small and fixed; the hand-rolled form is easier to
+ *     diff-review than the library's output (it's also what
+ *     `migrateServerAttested.ts:serializeManifest` already does, so the
+ *     codebase has one consistent hand-rolled style for manifest YAML)
+ *   - the library doesn't guarantee deterministic field order across
+ *     versions; hand-rolling pins the order, which matters because
+ *     these files get diff-reviewed by humans
+ */
+export function serializeManifestYaml(manifest: TrustedKeysManifest): string {
+  const sorted = [...manifest.entries].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+  );
+  const lines: string[] = ["keys:"];
+  for (const entry of sorted) {
+    const capsSorted = [...entry.capabilities].sort();
+    lines.push(`  ${entry.name}:`);
+    lines.push(`    fingerprint: ${entry.fingerprint}`);
+    lines.push(`    capabilities: [${capsSorted.join(", ")}]`);
+    if (entry.role_source !== undefined) {
+      // SECURITY: emit role_source double-quoted, with internal
+      // double-quotes + backslashes escaped, so a `role_source` value
+      // containing a newline or YAML metacharacter can't break the
+      // surrounding YAML structure. The parser currently constrains
+      // role_source to non-empty strings; if a future schema migration
+      // widens the accepted values to include arbitrary tokens, this
+      // guard keeps the writer safe without requiring a coordinated
+      // change. Using YAML's standard escape grammar (double-quoted
+      // scalars: `\\`, `\"`, `\n`) so the output stays YAML 1.2
+      // compliant.
+      const escaped = entry.role_source
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, "\\n");
+      lines.push(`    role_source: "${escaped}"`);
+    }
+  }
+  return lines.join("\n") + "\n";
+}
+
+/**
  * Look up the capabilities for a given fingerprint. Returns `null` if
  * no entry in the manifest matches — distinct from `[]` (which
  * `parseManifest` rejects at parse time, so it's not a valid manifest
