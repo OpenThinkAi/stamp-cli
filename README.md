@@ -1,20 +1,22 @@
 # stamp-cli
 
-> **Notice — stamp 1.x is in maintenance.** This is the operator-trust line.
-> The active line is **2.x (server-attested reviews)**, which closes the
-> structural gap where the operator constructs both sides of "what the
-> reviewer LLM saw" and "what the LLM said." See the
-> [**1.x → 2.x migration guide**](./docs/migration-1.x-to-2.x.md) for the
-> upgrade path. The bridge release (1.x final) ships the same surface plus
-> deprecation banners on `stamp init` / `stamp merge` (suppress with
-> `STAMP_SUPPRESS_DEPRECATION=1` for CI).
+> **stamp 2.0 — server-attested reviews.** The LLM call moves into stamp-server,
+> which holds its own signing key and signs every verdict. A forged review now
+> requires forging a server signature — the operator no longer constructs both
+> sides of "what the LLM saw" and "what the LLM said." On the 1.x line and
+> upgrading? See the [**1.x → 2.x migration guide**](./docs/migration-1.x-to-2.x.md).
+> 1.x receives security patches only; pin to `@openthink/stamp@legacy-1` if you
+> need to stay on it.
 
 Local, headless pull-request system for agent-to-agent code review workflows.
 
 An author-agent opens a diff, reviewer-agents consume it and return structured
 feedback, the author iterates until merge rules are satisfied, and the merge
 is pushed to a remote that cryptographically rejects any push that wasn't
-properly reviewed and signed.
+properly reviewed and signed. In 2.x, the reviewer LLM lives on stamp-server,
+the verdict carries a server signature, and trust-anchor changes (the
+reviewer prompts themselves, the trusted-key manifest, `path_rules`) require
+admin counter-signatures.
 
 **Not a GitHub replacement.** GitHub is for humans collaborating. stamp-cli
 is for agent fleets cycling fast while keeping `main` clean. No web UI, no
@@ -22,7 +24,7 @@ PR dashboard, no human comment threads in core. Just a CLI + a git hook.
 
 Part of the [OpenThink](https://openthink.dev) suite.
 
-**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [threat model](./docs/threat-model.md) (who attacks, how, what defends) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [local-only mode](./docs/local-only-mode.md) (no-trust iteration via stamp review --plan + Claude Code skill) · [1.x → 2.x migration](./docs/migration-1.x-to-2.x.md) (server-attested reviews upgrade guide) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy)
+**Docs:** [server quickstart](./docs/quickstart-server.md) (from-zero project on a stamp server) · [DESIGN](./DESIGN.md) (spec) · [server-attested reviews](./docs/plans/server-attested-reviews.md) (2.x design + threat model) · [threat model](./docs/threat-model.md) (who attacks, how, what defends) · [ROADMAP](./docs/ROADMAP.md) (what's shipped + what's next) · [personas](./docs/personas.md) (writing reviewer prompts) · [local-only mode](./docs/local-only-mode.md) (no-trust iteration via `stamp review --plan` + Claude Code skill) · [1.x → 2.x migration](./docs/migration-1.x-to-2.x.md) (upgrade guide) · [troubleshooting](./docs/troubleshooting.md) · [server](./server/README.md) (Railway deploy) · [CHANGELOG](./CHANGELOG.md)
 
 ## Install
 
@@ -44,17 +46,18 @@ npm audit signatures
 ## Quick start
 
 **Pick your deployment shape first** — it determines which command you run and
-what guarantees you actually get:
+what trust guarantees you actually get. In 2.x, the trust ladder is explicit:
 
-| Shape | Origin is… | Enforcement | Command to run |
+| Shape | Origin is… | Trust source | Enforcement |
 |---|---|---|---|
-| **Server-gated** | A stamp server you deployed | The server's pre-receive hook rejects any push without a valid stamped merge | `stamp bootstrap` on a clone of a server-provisioned repo |
-| **PR-check** (recommended for GitHub teams) | GitHub directly | A GitHub Action (`stamp/verify-attestation@v1.6.0`) runs on every PR; branch protection requires the green check before the GitHub merge button works | `stamp init` (defaults to PR-check on a github.com origin) |
-| **Local-only** (advisory) | GitHub / GitLab / etc. directly | None — direct `git push origin main` succeeds; the stamp config is documentation + a discipline aid | `stamp init --mode local-only --no-pr-check` |
+| **Server-gated** (Shape 1, recommended) | A stamp server you deployed | Server signs every verdict; admin-cap keys gate `.stamp/**` changes | Pre-receive hook rejects unstamped pushes; v4 envelope verified end-to-end |
+| **PR mode** (Shape 2) | GitHub directly | Mirror Action pushes to stamp-server for review; v3 PR-attestation signed by server | GitHub Action `stamp/verify-attestation@v1` runs on every PR as a required check |
+| **Local-only** (Shape 3, no trust) | Anywhere | None — `--plan` / `--headless` produce no attestation | Discipline-only; signs merges but the remote doesn't enforce anything |
 
-These are not interchangeable. Server-gated and PR-check both enforce the
-gate; local-only signs your merges with a verifiable attestation but the
-remote does not reject anything. Pick deliberately.
+Server-gated and PR mode both ride on server-attested verdicts and produce
+verifying v4 attestations. Local-only is for fast reviewer iteration when you
+haven't deployed a server — it makes no trust claim. **Pick deliberately**;
+they're not interchangeable.
 
 PR-check mode is the natural fit for teams that already merge through GitHub
 PRs. The reviewer flow stays local (`stamp review` runs your AI personas on
@@ -63,49 +66,72 @@ content-addressed (survives squash + rebase + merge-commit), and the PR's
 green-check requirement keeps the human in the merge loop. No server to
 host, no on-call, no separate trust root.
 
-### Server-gated path
+### Server-gated path (Shape 1)
 
-If you've deployed the stamp server (see [`docs/quickstart-server.md`](./docs/quickstart-server.md)
+If you've deployed a stamp server (see [`docs/quickstart-server.md`](./docs/quickstart-server.md)
 for the full Railway walkthrough), the from-zero flow is three commands:
 
 ```sh
 ssh stamp new-stamp-repo myproject              # provision bare repo + hook
 git clone ssh://stamp/srv/git/myproject.git
-cd myproject && stamp bootstrap                  # install real reviewers + push
+cd myproject && stamp bootstrap                  # install real reviewers + trusted-keys manifest, push
 ```
 
 `stamp bootstrap` detects the freshly-provisioned placeholder state, scaffolds
-the three starter reviewers (security, standards, product), and lands them on
-`main` via a single signed merge that the server hook accepts. From there it's
-the normal review/merge cycle.
+the three starter reviewers (security, standards, product) plus the
+`.stamp/trusted-keys/manifest.yml` declaring trust capabilities, and lands
+them on `main` via a single signed merge that the server hook accepts. From
+there `stamp review` calls the server's `stamp-review` SSH verb to fetch each
+verdict; verdicts come back signed and persist in the v4 attestation envelope
+the merge commit carries.
 
-### PR-check path
+Migrating an existing 1.x repo? Use `stamp init --migrate-to-server-attested`
+— it scaffolds the trusted-keys manifest, `path_rules`, and `review_server`
+config without touching your reviewer prompts. See the
+[migration guide](./docs/migration-1.x-to-2.x.md) for the full walkthrough.
 
-For teams that merge through GitHub PRs, `stamp init` (with no `--mode`
-flag against a github.com origin) drops a `.github/workflows/stamp-verify.yml`
-that runs the verifier on every PR. Wire it into branch protection and the
-gate is real:
+### PR mode (Shape 2)
+
+For teams whose source of truth is GitHub, `stamp init` against a github.com
+origin auto-scaffolds `.github/workflows/stamp-verify.yml` (the verifier that
+runs `stamp/verify-attestation@v1` on every PR). To get **server-attested**
+PR mode — verdicts signed by stamp-server, not just locally — also pass
+`--pr-mode` to install the mirror workflow that pushes every PR head to
+stamp-server for review:
 
 ```sh
 cd myproject
-stamp init                               # scaffolds .stamp/ + workflow file
-git add .stamp .github && git commit -m "stamp: scaffold + PR-check workflow"
+stamp init --pr-mode                     # scaffolds .stamp/ + stamp-verify.yml (auto)
+                                          # + stamp-mirror.yml (--pr-mode opt-in)
+git add .stamp .github && git commit -m "stamp: scaffold PR mode"
 git push origin main
 # In GitHub: Settings → Branches → main → Require status checks →
 # add `stamp verify` (the workflow's job name) as required
 ```
+
+Without `--pr-mode`, `stamp init` still wires the advisory PR-check from 1.x
+— the verifier runs but verdicts are produced locally rather than by
+stamp-server. The advisory path remains supported for teams that don't run a
+stamp-server but want the attestation audit trail in PR checks.
 
 Per-PR developer flow:
 
 ```sh
 git checkout -b feature
 # ...make changes, commit...
-stamp review --diff main..HEAD           # local AI reviewers run + verdicts land in DB
-stamp attest --into main --push origin   # signs the attestation + atomically pushes
-                                          # branch + refs/stamp/attestations/<patch-id>
+stamp review --diff main..HEAD           # calls stamp-server's stamp-review verb;
+                                          # verdicts come back signed by the server key
+stamp attest --into main --push origin   # signs the v4 attestation envelope + atomically
+                                          # pushes branch + refs/stamp/attestations/<patch-id>
 # Open the PR; the workflow runs stamp/verify-attestation against your branch
 # Reviewer's check goes green → human clicks merge in the GitHub UI
 ```
+
+> **2.0.1 note:** producer-side production of the extended v3+ PR-attestation
+> blob (AGT-355) is queued for 2.0.1. The verifier ships in 2.0 so the
+> contract is locked; until the producer ships, pin the GitHub Action to a
+> 1.x `stamp-version` input. See the migration guide for the bridge-window
+> guidance.
 
 The attestation is keyed on the **content** of the diff (`git patch-id`), so
 it survives every GitHub merge strategy: squash, rebase, and merge-commit
@@ -297,6 +323,28 @@ stamp keys export                          # print your public key
 stamp keys trust <pub-file>                # deposit a key into .stamp/trusted-keys/
 ```
 
+**Trust-anchor administration (2.x, server-gated mode):**
+
+```
+stamp admin list-keys                                # show manifest entries (name, fingerprint, capabilities)
+stamp admin add-key <pubkey.pub> --name <n> --capabilities admin,operator
+                                                     # add a key to .stamp/trusted-keys/manifest.yml +
+                                                     #   copy the pubkey into .stamp/trusted-keys/.
+                                                     #   refuses non-public-key PEMs.
+stamp admin revoke <sha256:fingerprint>              # remove entry from manifest.yml
+stamp admin sign --pending [<sha>]                   # list/collect admin counter-sigs for
+                                                     #   in-flight .stamp/** commits. Sigs land in
+                                                     #   refs/notes/stamp-trust-anchor-sigs, folded
+                                                     #   into the v4 envelope at merge time
+```
+
+`revoke` and `add-key` mutate `.stamp/trusted-keys/manifest.yml`, so the
+resulting commits trip the `path_rules` gate and need admin counter-sigs
+collected via `stamp admin sign --pending <sha>` before they can land.
+Revocation is **lenient**: past attestations remain valid (they reference
+the manifest snapshot as it was at attestation time); only future merges
+are blocked.
+
 **Maintenance:**
 
 ```
@@ -349,6 +397,45 @@ matches the committed config.
 
 Optional: `.stamp/mirror.yml` enables GitHub mirroring via the post-receive
 hook. See [`server/README.md`](./server/README.md).
+
+### 2.x: server-attested config
+
+In 2.x server-gated mode, three additional config surfaces apply:
+
+```yaml
+# .stamp/config.yml — review_server tells stamp where to fetch signed verdicts
+review_server:
+  host: stamp                                # ssh alias for your stamp-server
+  pubkey_fingerprint: sha256:abc...          # the server's review-signing key fingerprint
+  trusted_keys_snapshot_sha256: sha256:def... # optional pin; verifier recomputes if absent
+
+branches:
+  main:
+    required: [security, standards, product]
+    path_rules:
+      - pattern: ".stamp/**"
+        require_capability: admin
+        minimum_signatures: 2
+        bypass_review_cycle: true            # reviewers can't approve their own prompt changes
+```
+
+```yaml
+# .stamp/trusted-keys/manifest.yml — declares each key's capabilities
+keys:
+  alice:
+    fingerprint: sha256:aaa...
+    capabilities: [admin, operator]
+  review-server-prod:
+    fingerprint: sha256:ddd...
+    capabilities: [server]
+    role_source: server                      # auto-published by stamp-server; don't hand-edit
+```
+
+The manifest's canonical-JSON snapshot hash is bound into every attestation
+as `trusted_keys_snapshot_sha256` — that's the load-bearing primitive behind
+lenient revocation. Hand-edit by running `stamp admin add-key` /
+`stamp admin revoke` (see the [Trust-anchor administration](#trust-anchor-administration-2x-server-gated-mode)
+commands above), not by editing the YAML directly.
 
 ### Per-user reviewer-model selection
 
@@ -610,26 +697,33 @@ content you're not free to share.
 **What this protects against.** Author-agents cannot merge unreviewed code,
 cannot forge merges (the signing key isn't on disk anywhere they can
 exfiltrate without the operator's explicit consent), and cannot bypass the
-remote's verification.
+remote's verification. In 2.x server-gated mode, the operator also cannot
+forge a reviewer verdict without compromising stamp-server's signing key
+or stealing it from the server — the operator's machine never sees the
+prompt the server used, and the server signs the verdict, prompt hash, and
+diff hash together.
 
-**What this doesn't protect against (in 1.x local-only mode).** You, the
-human holding the signing key, can still produce a valid signed merge for
-arbitrary content. That's inherent to any local-first system. What signing
-gives you is **non-repudiation** — every merge on `main` is permanently
-attributed to a specific key's owner, provable from git history alone. For
-the agent-can't-bypass threat model this is exactly right.
+**What this doesn't protect against:**
 
-The 2.x server-attested design closes the operator-substitution gap by
-moving the LLM call to stamp-server with its own signing key — the operator
-holds only the outer envelope key, not the per-review signature. See
+- **Server compromise.** If stamp-server's review-signing key is stolen,
+  forged verdicts verify cleanly until rotation. Mitigated by standard
+  infra hygiene plus lenient revocation: revoking the compromised key
+  via `stamp admin revoke` blocks future merges without invalidating past
+  ones. Rotate by adding the new key first, collecting admin sigs on the
+  manifest change, then revoking the old key in a follow-up commit.
+- **Local-only mode (Shape 3).** Produces no attestation by design — `--plan`
+  and `--headless` are iteration aids, not trust claims. Anything producible
+  without a server can be forged by the operator. See
+  [`docs/local-only-mode.md`](./docs/local-only-mode.md).
+- **The human holding the operator key in 1.x.** 1.x operator-trust mode
+  still relies on convention to bind verdict to model invocation. The 2.x
+  upgrade closes this gap structurally; the
+  [migration guide](./docs/migration-1.x-to-2.x.md) walks the upgrade per-repo.
+
+For the full threat model, deferred-to-Phase-2 list, and the cryptographic
+guarantees behind the v4 envelope, see
 [`docs/plans/server-attested-reviews.md`](./docs/plans/server-attested-reviews.md)
-for the full design and
-[`DESIGN.md#security-model`](./DESIGN.md#security-model) for the
-cryptographic guarantees and threat-model table.
-
-See [`DESIGN.md`](./DESIGN.md) for the full bootstrap, key-management, and
-verification-rule details, including the security model around user-configured
-pre-merge checks.
+and [`DESIGN.md#security-model`](./DESIGN.md#security-model).
 
 ## License
 
