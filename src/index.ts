@@ -38,6 +38,11 @@ import {
   keysTrust,
 } from "./commands/keys.js";
 import { runAdminSign } from "./commands/adminSign.js";
+import {
+  runAdminAddKey,
+  runAdminListKeys,
+  runAdminRevoke,
+} from "./commands/adminRotate.js";
 import { runLog } from "./commands/log.js";
 import { runAttest } from "./commands/attest.js";
 import { runMerge } from "./commands/merge.js";
@@ -835,6 +840,63 @@ admin
         signerKeyId: opts.signerKeyId,
         json: opts.json,
       });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+admin
+  .command("add-key <pubkey-path>")
+  .description(
+    "add a new trusted-keys entry, copy the pub file into .stamp/trusted-keys/, and commit (path_rules gate applies)",
+  )
+  .requiredOption(
+    "--name <name>",
+    "short name for the manifest entry (ASCII letters/digits/'.','-','_')",
+  )
+  .requiredOption(
+    "--capabilities <list>",
+    "comma-separated capabilities — one or more of admin, operator, server (e.g. 'admin,operator')",
+  )
+  .action(
+    (
+      pubkeyPath: string,
+      opts: { name: string; capabilities: string },
+    ) => {
+      try {
+        runAdminAddKey({
+          pubkeyPath,
+          name: opts.name,
+          capabilities: opts.capabilities,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
+
+admin
+  .command("revoke <fingerprint>")
+  .description(
+    "remove the given fingerprint from the trusted-keys manifest and commit (path_rules gate applies)",
+  )
+  .action((fingerprint: string) => {
+    try {
+      runAdminRevoke({ fingerprint });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+admin
+  .command("list-keys")
+  .description(
+    "list every entry in .stamp/trusted-keys/manifest.yml (name, fingerprint, capabilities)",
+  )
+  .option("--json", "emit the manifest as JSON instead of the human table")
+  .action((opts: { json?: boolean }) => {
+    try {
+      runAdminListKeys({ json: opts.json });
     } catch (err) {
       handleCliError(err);
     }
