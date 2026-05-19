@@ -92,19 +92,27 @@ config without touching your reviewer prompts. See the
 
 ### PR mode (Shape 2)
 
-For teams whose source of truth is GitHub, `stamp init --pr-mode` installs
-the mirror workflow that pushes every PR head to stamp-server for review,
-plus the verifier workflow that runs `stamp/verify-attestation@v1` on every
-PR. Wire it into branch protection and the gate is real:
+For teams whose source of truth is GitHub, `stamp init` against a github.com
+origin auto-scaffolds `.github/workflows/stamp-verify.yml` (the verifier that
+runs `stamp/verify-attestation@v1` on every PR). To get **server-attested**
+PR mode — verdicts signed by stamp-server, not just locally — also pass
+`--pr-mode` to install the mirror workflow that pushes every PR head to
+stamp-server for review:
 
 ```sh
 cd myproject
-stamp init --pr-mode                     # scaffolds .stamp/ + mirror + verify workflows
+stamp init --pr-mode                     # scaffolds .stamp/ + stamp-verify.yml (auto)
+                                          # + stamp-mirror.yml (--pr-mode opt-in)
 git add .stamp .github && git commit -m "stamp: scaffold PR mode"
 git push origin main
 # In GitHub: Settings → Branches → main → Require status checks →
 # add `stamp verify` (the workflow's job name) as required
 ```
+
+Without `--pr-mode`, `stamp init` still wires the advisory PR-check from 1.x
+— the verifier runs but verdicts are produced locally rather than by
+stamp-server. The advisory path remains supported for teams that don't run a
+stamp-server but want the attestation audit trail in PR checks.
 
 Per-PR developer flow:
 

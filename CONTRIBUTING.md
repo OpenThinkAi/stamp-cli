@@ -148,7 +148,10 @@ resolve to the prior major until GA.
 3. **Bump `package.json`** to `MAJOR.0.0` as the last commit on the branch
    (so the merge is the clear "we're shipping MAJOR.0" marker).
 4. **Run the gate**: `stamp review --diff main..feature/... --allow-large`,
-   `stamp status`, `stamp merge`, `stamp push main`.
+   `stamp status`, `stamp merge`, `stamp push main`. (`--allow-large`
+   bypasses the per-reviewer 200KB diff cap; a major-version cut almost
+   always exceeds it because CHANGELOG + README rewrites are large.
+   See "Reviewer execution budgets" in the README for the full knob.)
 5. **Verify the publish workflow** picked up the new version: check
    `gh run list --workflow=publish.yml --limit 1`; confirm `npm view @openthink/stamp@MAJOR.0.0 version` resolves.
 6. **Pin the legacy tag**: `npm dist-tag add @openthink/stamp@<old-latest> legacy-N`.
