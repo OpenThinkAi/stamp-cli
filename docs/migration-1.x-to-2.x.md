@@ -109,6 +109,10 @@ release ships deprecation notices pointing at this guide and supports both
 per-repo via `review_server` config). Existing repos keep working on
 operator-trust until you flip them.
 
+`stamp update` itself is a stable 1.x+2.x command (see
+[README "Maintenance"](../README.md#commands)) — operators on any 1.x
+release ≥ 0.7.x can use it to step forward to 2.0.1.
+
 ### Step 1 — Upgrade stamp-server to a 2.x-capable build
 
 ```sh
