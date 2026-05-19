@@ -336,8 +336,52 @@ describe("stamp admin add-key", () => {
               capabilities: "admin",
             }),
           ),
-        /not a valid public key PEM/,
+        /does not look like a public key PEM/,
       );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("rejects a PKCS8 PRIVATE key PEM (would otherwise leak the secret)", () => {
+    // Mint a real Ed25519 keypair and try to pass the PRIVATE half to
+    // add-key. Node's createPublicKey() will happily accept the PKCS8
+    // private PEM and derive the public key, so without the explicit
+    // header guard this would copy the private key file into
+    // .stamp/trusted-keys/ and commit it. Guard MUST fire before any
+    // file write or commit.
+    const h = setupHarness();
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const privPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+      const privPath = path.join(h.repo, "ed25519");
+      writeFileSync(privPath, privPem);
+
+      const headBefore = git(h.repo, ["rev-parse", "HEAD"]).trim();
+      assert.throws(
+        () =>
+          runFromRepo(h.repo, () =>
+            runAdminAddKey({
+              pubkeyPath: privPath,
+              name: "leaked",
+              capabilities: "admin",
+            }),
+          ),
+        /does not look like a public key PEM/,
+      );
+      // No commit produced; manifest unchanged.
+      const headAfter = git(h.repo, ["rev-parse", "HEAD"]).trim();
+      assert.equal(headBefore, headAfter);
+      const m = readManifest(h.repo);
+      assert.equal(m.entries.find((e) => e.name === "leaked"), undefined);
+      // Most importantly: no .pub file was created in trusted-keys
+      // pointing at the private key's content.
+      const trustedDir = path.join(h.repo, ".stamp", "trusted-keys");
+      const allPubs = readFileSync(
+        path.join(trustedDir, "manifest.yml"),
+        "utf8",
+      );
+      assert.ok(!allPubs.includes("leaked"));
     } finally {
       h.cleanup();
     }

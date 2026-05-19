@@ -134,6 +134,26 @@ export function runAdminAddKey(opts: AdminAddKeyOptions): void {
     throw new Error(`pubkey file not found: ${opts.pubkeyPath}`);
   }
   const pem = readFileSync(opts.pubkeyPath, "utf8");
+
+  // SECURITY: explicitly require a SPKI public-key PEM header before
+  // we touch this file. Node's `createPublicKey()` — which
+  // `fingerprintFromPem` calls under the hood — happily accepts PKCS8
+  // PRIVATE key PEM and derives the public key from it; that means a
+  // typo like `stamp admin add-key ~/.stamp/keys/ed25519` (pointing at
+  // the private half) would silently succeed and then `copyFileSync`
+  // below would commit the PRIVATE key file into .stamp/trusted-keys/.
+  // Rejecting any input that doesn't carry the public-key armor closes
+  // that path and stays correct even if `fingerprintFromPem`'s
+  // implementation later changes.
+  if (!pem.includes("-----BEGIN PUBLIC KEY-----")) {
+    throw new Error(
+      `${opts.pubkeyPath} does not look like a public key PEM ` +
+        `(no "-----BEGIN PUBLIC KEY-----" header). Refusing to import — ` +
+        `did you accidentally pass the private key path? ` +
+        `Public keys live at ~/.stamp/keys/ed25519.pub (note the .pub suffix).`,
+    );
+  }
+
   let fingerprint: string;
   try {
     fingerprint = fingerprintFromPem(pem);
@@ -142,14 +162,9 @@ export function runAdminAddKey(opts: AdminAddKeyOptions): void {
       `${opts.pubkeyPath} is not a valid public key PEM: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  // Defensive — fingerprintFromPem always returns this shape, but a
-  // future change to that helper shouldn't silently let a malformed
-  // fingerprint into the manifest.
-  if (!FINGERPRINT_PATTERN.test(fingerprint)) {
-    throw new Error(
-      `computed fingerprint ${JSON.stringify(fingerprint)} doesn't match the expected sha256:<64-hex> shape — refusing to write a malformed manifest.`,
-    );
-  }
+  // Note: no defensive recheck of `fingerprint` shape — the parser
+  // re-checks at the round-trip self-test below, and `fingerprintFromPem`
+  // is the single source of truth for that shape across the codebase.
 
   // Read existing manifest. If the file is missing entirely the
   // operator is on a pre-manifest repo and the right answer is "run
@@ -190,10 +205,12 @@ export function runAdminAddKey(opts: AdminAddKeyOptions): void {
     fingerprint,
     capabilities: caps,
   };
+  // No pre-sort here — `serializeManifestYaml` re-sorts entries by
+  // name internally (it has to, for callers that construct manifests
+  // by hand). Sorting twice would be wasteful and would invite the
+  // future-maintainer confusion of "which sort is authoritative".
   const updated: TrustedKeysManifest = {
-    entries: [...existing.entries, newEntry].sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-    ),
+    entries: [...existing.entries, newEntry],
   };
   const yamlText = serializeManifestYaml(updated);
 
@@ -479,6 +496,3 @@ function printPostCommitBanner(input: PostCommitBannerInput): void {
   console.log("the target branch to land this change.");
 }
 
-// Re-export the path for tests + downstream tools that want to know
-// where the file lives without re-importing from the manifest module.
-export { MANIFEST_RELATIVE_PATH };

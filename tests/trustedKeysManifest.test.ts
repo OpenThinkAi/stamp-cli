@@ -10,6 +10,7 @@
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
+import { parse as parseYaml } from "yaml";
 
 import {
   MANIFEST_RELATIVE_PATH,
@@ -548,13 +549,38 @@ keys:
     assert.equal(a, b);
   });
 
-  it("preserves role_source: server when present", () => {
+  it("preserves role_source: server when present (emits double-quoted)", () => {
     const yaml = serializeManifestYaml(parseManifest(WORKED_EXAMPLE_YAML)!);
-    assert.ok(yaml.includes("role_source: server"));
-    // And re-parse must surface it on the right entry.
+    // Emitted double-quoted to neutralize YAML metacharacters in any
+    // future role_source value (see serializeManifestYaml docstring).
+    assert.ok(yaml.includes(`role_source: "server"`));
+    // And re-parse must surface the unquoted string on the right entry.
     const m = parseManifest(yaml)!;
     const srv = m.entries.find((e) => e.name === "review-server-prod")!;
     assert.equal(srv.role_source, "server");
+  });
+
+  it("escapes a role_source containing YAML metacharacters", () => {
+    // Construct manually — the parser rejects funny role_source values
+    // today, but the writer must stay safe if that constraint loosens.
+    const m: TrustedKeysManifest = {
+      entries: [
+        {
+          name: "alice",
+          fingerprint: FP_ALICE,
+          capabilities: ["admin"],
+          role_source: `pwn"\ninjected: yes`,
+        },
+      ],
+    };
+    const yaml = serializeManifestYaml(m);
+    // The injected key MUST NOT appear as a top-level YAML key — that
+    // would mean the escaping failed and an attacker-controlled
+    // role_source value could rewrite the manifest structure.
+    const parsedRaw = parseYaml(yaml) as Record<string, unknown>;
+    assert.ok(parsedRaw && typeof parsedRaw === "object");
+    assert.ok(!("injected" in parsedRaw));
+    assert.deepEqual(Object.keys(parsedRaw), ["keys"]);
   });
 
   it("output ends with exactly one trailing newline", () => {

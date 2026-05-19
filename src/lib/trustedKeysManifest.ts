@@ -353,7 +353,21 @@ export function serializeManifestYaml(manifest: TrustedKeysManifest): string {
     lines.push(`    fingerprint: ${entry.fingerprint}`);
     lines.push(`    capabilities: [${capsSorted.join(", ")}]`);
     if (entry.role_source !== undefined) {
-      lines.push(`    role_source: ${entry.role_source}`);
+      // SECURITY: emit role_source double-quoted, with internal
+      // double-quotes + backslashes escaped, so a `role_source` value
+      // containing a newline or YAML metacharacter can't break the
+      // surrounding YAML structure. The parser currently constrains
+      // role_source to non-empty strings; if a future schema migration
+      // widens the accepted values to include arbitrary tokens, this
+      // guard keeps the writer safe without requiring a coordinated
+      // change. Using YAML's standard escape grammar (double-quoted
+      // scalars: `\\`, `\"`, `\n`) so the output stays YAML 1.2
+      // compliant.
+      const escaped = entry.role_source
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, "\\n");
+      lines.push(`    role_source: "${escaped}"`);
     }
   }
   return lines.join("\n") + "\n";
