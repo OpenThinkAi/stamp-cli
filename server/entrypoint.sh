@@ -350,16 +350,33 @@ write_env_var GITHUB_BOT_TOKEN
 # it. The persist-to-/etc/stamp/env pattern above doesn't help here —
 # hooks read that file, but stamp-mint-invite doesn't.
 #
-# Why append (not prepend like the build-time hardening directives): the
-# build-time block uses first-match-wins to override stock Alpine defaults
-# for keys like PasswordAuthentication. SetEnv has additive semantics —
-# multiple lines accumulate — so position doesn't matter and we avoid
-# touching the prepended hardening block at runtime.
+# Security — validate before writing. `printf '%s'` does not sanitize, so
+# an embedded newline in $STAMP_PUBLIC_URL would be passed through and
+# create a new sshd directive (PermitRootLogin yes, AuthorizedKeysFile
+# override, etc.). The value is operator-supplied via the container env,
+# which sits downstream of Railway/Helm/Terraform/CI secret stores — all
+# realistic injection vectors. The accepted charset is the minimum
+# needed for the HTTP(S) host + path that mint-invite.ts pulls via
+# `new URL(value).host`; anything outside it is never a legitimate value
+# and is rejected with a clear error.
 #
-# sshd reads sshd_config at fork-per-connection time, so appending here
-# (before exec sshd) means every subsequent SSH session sees the var.
+# Idempotent across container restarts AND value changes — filter any
+# prior `SetEnv STAMP_PUBLIC_URL=` line out before appending. Without
+# this, in-place restarts accumulate stale lines (OpenSSH takes first
+# match for duplicate SetEnv, so correctness is preserved but the file
+# grows), and changing STAMP_PUBLIC_URL between deploys would leave the
+# OLD value in effect forever (the OLD first-match wins over the new
+# appended line).
 if [ -n "$STAMP_PUBLIC_URL" ]; then
-  printf 'SetEnv STAMP_PUBLIC_URL=%s\n' "$STAMP_PUBLIC_URL" >> /etc/ssh/sshd_config
+  if ! printf '%s' "$STAMP_PUBLIC_URL" | grep -qxE 'https?://[A-Za-z0-9.:/_-]+'; then
+    echo "error: STAMP_PUBLIC_URL contains illegal characters or shape; refusing to inject into sshd_config" >&2
+    exit 1
+  fi
+  { grep -v '^SetEnv STAMP_PUBLIC_URL=' /etc/ssh/sshd_config || true; \
+    printf 'SetEnv STAMP_PUBLIC_URL=%s\n' "$STAMP_PUBLIC_URL"; \
+  } > /etc/ssh/sshd_config.new
+  mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config
+  chmod 0644 /etc/ssh/sshd_config
 fi
 
 # Refresh stamp hooks in every existing bare repo before accepting connections.
