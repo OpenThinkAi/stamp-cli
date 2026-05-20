@@ -5,6 +5,27 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 2.0.2 — 2026-05-19
+
+Three setup-friction bug fixes surfaced from a real Anglepoint-Inc/hivedb
+operator onboarding session. No protocol or trust changes.
+
+### Fixed
+
+- **`stamp init --dry-run` outside `--migrate-to-server-attested` now errors loudly** instead of silently no-op'ing. The flag previously only applied to the migration code path; pairing it with `--pr-mode` (or any other init shape) ignored the flag and executed the real scaffold, including remote GitHub Ruleset creation. The error message names two resolution paths: pair with the migration flag, or drop `--dry-run`.
+- **1.x deprecation banner no longer fires on 2.x+ installs.** `maybePrintDeprecationNotice` now reads the installed `package.json` version and emits the bridge-release banner only when major < 2. Operators on 2.0+ stop seeing the misleading "stamp 1.x is in maintenance" line on every `stamp init` / `stamp merge`. Suppression via `STAMP_SUPPRESS_DEPRECATION=1` is unchanged.
+- **`stamp init --action-source <org/repo>`** added so operators consuming a fork can scaffold `.github/workflows/stamp-verify.yml` against their fork instead of the default upstream. Default remains `OpenThinkAi/stamp-cli`; pass `--action-source Anglepoint-Inc/anglepoint-stamp-server` (or similar) to track a fork. The constant is exported as `DEFAULT_ACTION_SOURCE` from `src/commands/init.ts`.
+
+### Known remaining setup-friction gaps (not fixed in this release)
+
+Surfaced from the same smoke test, filed as follow-up issues:
+
+- [#35](https://github.com/OpenThinkAi/stamp-cli/issues/35) — non-interactive `--migrate-to-server-attested` produces unusable repo (no admin keys promoted)
+- [#36](https://github.com/OpenThinkAi/stamp-cli/issues/36) — `minimum_signatures: 2` default breaks single-trusted-key repos
+- [#37](https://github.com/OpenThinkAi/stamp-cli/issues/37) — proposed `stamp migrate status` for batch-migration visibility
+
+---
+
 ## 2.0.1 — 2026-05-19
 
 Fast-follow for 2.0.0 GA: closes the Shape 2 (server-attested PR mode)
