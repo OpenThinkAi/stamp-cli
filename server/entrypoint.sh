@@ -344,6 +344,56 @@ write_env_var() {
 
 write_env_var GITHUB_BOT_TOKEN
 
+# SSH sessions strip env vars by default; sshd_config's SetEnv bypasses
+# that for explicitly-listed vars. Inject STAMP_PUBLIC_URL so SSH-invoked
+# commands like stamp-mint-invite (which reads process.env directly) see
+# it. The persist-to-/etc/stamp/env pattern above doesn't help here —
+# hooks read that file, but stamp-mint-invite doesn't.
+#
+# Security — validate before writing. `printf '%s'` does not sanitize, so
+# an embedded newline in $STAMP_PUBLIC_URL would be passed through and
+# create a new sshd directive (PermitRootLogin yes, AuthorizedKeysFile
+# override, etc.). The value is operator-supplied via the container env,
+# which sits downstream of Railway/Helm/Terraform/CI secret stores — all
+# realistic injection vectors. The accepted charset is the minimum
+# needed for the HTTP(S) host + path that mint-invite.ts pulls via
+# `new URL(value).host`; anything outside it is never a legitimate value
+# and is rejected with a clear error.
+#
+# Idempotent across container restarts AND value changes — filter any
+# prior `SetEnv STAMP_PUBLIC_URL=` line out before appending. Without
+# this, in-place restarts accumulate stale lines (OpenSSH takes first
+# match for duplicate SetEnv, so correctness is preserved but the file
+# grows), and changing STAMP_PUBLIC_URL between deploys would leave the
+# OLD value in effect forever (the OLD first-match wins over the new
+# appended line).
+if [ -n "$STAMP_PUBLIC_URL" ]; then
+  # Validation runs on the raw bytes, not on lines. `grep -qxE` exits 0
+  # on the FIRST matching line, so a newline-bearing value whose first
+  # line happens to be a valid URL would pass a line-anchored regex and
+  # still inject arbitrary sshd directives on the trailing lines. The
+  # tr-based whole-stream check below is immune: it strips every allowed
+  # byte and rejects if anything (newline, space, semicolon, &, etc.)
+  # remains. Combined with the http(s):// prefix check, this matches the
+  # original regex's INTENT without inheriting its multi-line surprise.
+  if [ -n "$(printf '%s' "$STAMP_PUBLIC_URL" | tr -d 'A-Za-z0-9.:/_-')" ]; then
+    echo "error: STAMP_PUBLIC_URL contains illegal characters (allowed: [A-Za-z0-9.:/_-]); refusing to inject into sshd_config" >&2
+    exit 1
+  fi
+  case "$STAMP_PUBLIC_URL" in
+    http://*|https://*) ;;
+    *)
+      echo "error: STAMP_PUBLIC_URL must start with http:// or https://; refusing to inject into sshd_config" >&2
+      exit 1
+      ;;
+  esac
+  { grep -v '^SetEnv STAMP_PUBLIC_URL=' /etc/ssh/sshd_config || true; \
+    printf 'SetEnv STAMP_PUBLIC_URL=%s\n' "$STAMP_PUBLIC_URL"; \
+  } > /etc/ssh/sshd_config.new
+  mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config
+  chmod 0644 /etc/ssh/sshd_config
+fi
+
 # Refresh stamp hooks in every existing bare repo before accepting connections.
 #
 # When setup-repo.sh provisioned each repo, it COPIED /etc/stamp/*.cjs into
