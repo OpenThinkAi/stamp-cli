@@ -344,6 +344,24 @@ write_env_var() {
 
 write_env_var GITHUB_BOT_TOKEN
 
+# SSH sessions strip env vars by default; sshd_config's SetEnv bypasses
+# that for explicitly-listed vars. Inject STAMP_PUBLIC_URL so SSH-invoked
+# commands like stamp-mint-invite (which reads process.env directly) see
+# it. The persist-to-/etc/stamp/env pattern above doesn't help here —
+# hooks read that file, but stamp-mint-invite doesn't.
+#
+# Why append (not prepend like the build-time hardening directives): the
+# build-time block uses first-match-wins to override stock Alpine defaults
+# for keys like PasswordAuthentication. SetEnv has additive semantics —
+# multiple lines accumulate — so position doesn't matter and we avoid
+# touching the prepended hardening block at runtime.
+#
+# sshd reads sshd_config at fork-per-connection time, so appending here
+# (before exec sshd) means every subsequent SSH session sees the var.
+if [ -n "$STAMP_PUBLIC_URL" ]; then
+  printf 'SetEnv STAMP_PUBLIC_URL=%s\n' "$STAMP_PUBLIC_URL" >> /etc/ssh/sshd_config
+fi
+
 # Refresh stamp hooks in every existing bare repo before accepting connections.
 #
 # When setup-repo.sh provisioned each repo, it COPIED /etc/stamp/*.cjs into
