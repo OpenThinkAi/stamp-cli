@@ -138,6 +138,10 @@ program
     "--pr-mode-force",
     "with --pr-mode, overwrite an existing .github/workflows/stamp-mirror.yml (useful when re-running after configuring review_server so the host/port placeholders fill in)",
   )
+  .option(
+    "--action-source <org/repo>",
+    "GitHub repo that hosts the stamp/verify-attestation action used by .github/workflows/stamp-verify.yml. Default 'OpenThinkAi/stamp-cli'. Override when consuming a fork (e.g. 'Anglepoint-Inc/anglepoint-stamp-server') so the workflow tracks your fork's updates instead of the upstream.",
+  )
   .action(
     (opts: {
       minimal?: boolean;
@@ -153,6 +157,7 @@ program
       dryRun?: boolean;
       prMode?: boolean;
       prModeForce?: boolean;
+      actionSource?: string;
     }) => {
       try {
         // The migration flag short-circuits the normal init flow: an
@@ -165,6 +170,20 @@ program
           runMigrateToServerAttested({ dryRun: opts.dryRun === true });
           return;
         }
+        // `--dry-run` is migration-path-only — the other init code
+        // paths (mode auto-detection, PR-mode scaffold, GitHub Ruleset
+        // application) write files and call out to `gh` unconditionally.
+        // Silently ignoring `--dry-run` outside the migration was a
+        // footgun: agents (and humans) reasonably expect "preview only"
+        // semantics universally. Error loudly instead so the operator
+        // gets a clear signal before the scaffold runs.
+        if (opts.dryRun === true) {
+          throw new Error(
+            "--dry-run is supported only with --migrate-to-server-attested. " +
+              "Re-run with --migrate-to-server-attested to preview the migration scaffold, " +
+              "or drop --dry-run to run the requested init operation.",
+          );
+        }
         let mode: "server-gated" | "local-only" | undefined;
         if (opts.mode === undefined) {
           mode = undefined;
@@ -174,6 +193,15 @@ program
           throw new Error(
             `--mode must be 'server-gated' or 'local-only' (got "${opts.mode}")`,
           );
+        }
+        // Validate --action-source shape (org/repo). Reject early so we
+        // don't write a workflow that GitHub will reject at lookup time.
+        if (opts.actionSource !== undefined) {
+          if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(opts.actionSource)) {
+            throw new Error(
+              `--action-source must be of the form 'org/repo' (got "${opts.actionSource}")`,
+            );
+          }
         }
         runInit({
           minimal: opts.minimal,
@@ -191,6 +219,7 @@ program
           prCheck: opts.prCheck === false ? false : undefined,
           prMode: opts.prMode === true,
           prModeForce: opts.prModeForce === true,
+          actionSource: opts.actionSource,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

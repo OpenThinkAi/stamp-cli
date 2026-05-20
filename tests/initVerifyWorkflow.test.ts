@@ -22,6 +22,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  DEFAULT_ACTION_SOURCE,
   maybeWriteVerifyWorkflow,
   renderVerifyWorkflow,
   VERIFY_ACTION_REF,
@@ -195,6 +196,60 @@ describe("renderVerifyWorkflow — pinned content", () => {
       body.includes("${VERIFY_ACTION_REF}"),
       false,
       `rendered workflow has a literal \${VERIFY_ACTION_REF} placeholder — template-literal regression`,
+    );
+  });
+});
+
+describe("renderVerifyWorkflow — --action-source override", () => {
+  it("DEFAULT_ACTION_SOURCE is OpenThinkAi/stamp-cli", () => {
+    // Pin the default — bumping it is a breaking change for anyone
+    // who relies on the bare `stamp init` shape, so the constant
+    // change should require an explicit test edit.
+    assert.equal(DEFAULT_ACTION_SOURCE, "OpenThinkAi/stamp-cli");
+  });
+
+  it("substitutes a fork's org/repo into the `uses:` line", () => {
+    const body = renderVerifyWorkflow("Anglepoint-Inc/anglepoint-stamp-server");
+    assert.match(
+      body,
+      new RegExp(
+        `uses:\\s*Anglepoint-Inc/anglepoint-stamp-server/\\.github/actions/verify-attestation@${VERIFY_ACTION_REF.replace(/\./g, "\\.")}`,
+      ),
+    );
+    // Default upstream MUST NOT appear when override is in use — that
+    // would indicate a partial substitution (one occurrence missed).
+    assert.equal(
+      body.includes("OpenThinkAi/stamp-cli/.github/actions/verify-attestation"),
+      false,
+      "override should replace ALL `uses:` references to the default upstream",
+    );
+  });
+
+  it("threads override through maybeWriteVerifyWorkflow → on-disk file", () => {
+    const r = tmpRepo();
+    try {
+      maybeWriteVerifyWorkflow(
+        r.path,
+        true,
+        "forge-direct",
+        "Anglepoint-Inc/anglepoint-stamp-server",
+      );
+      const body = readFileSync(path.join(r.path, WORKFLOW_PATH), "utf8");
+      assert.match(body, /uses:\s*Anglepoint-Inc\/anglepoint-stamp-server/);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  it("default invocation still emits the upstream `uses:` line", () => {
+    // Belt-and-suspenders: re-prove the default after the override
+    // tests, so an accidental change to renderVerifyWorkflow's default
+    // arg can't slip past the upstream-pin test above (which uses the
+    // module-load-time `body`).
+    const body = renderVerifyWorkflow();
+    assert.match(
+      body,
+      /uses:\s*OpenThinkAi\/stamp-cli\/\.github\/actions\/verify-attestation/,
     );
   });
 });

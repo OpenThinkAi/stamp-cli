@@ -149,7 +149,23 @@ export interface InitOptions {
    * `review_server` so the host/port placeholders get filled in.
    */
   prModeForce?: boolean;
+  /**
+   * GitHub `org/repo` that hosts the `stamp/verify-attestation` action
+   * referenced from `.github/workflows/stamp-verify.yml`. Default
+   * `OpenThinkAi/stamp-cli` — set when consuming a fork so the workflow
+   * tracks the fork instead of the upstream. Caller is responsible for
+   * shape validation; this code path only string-substitutes it into
+   * the template.
+   */
+  actionSource?: string;
 }
+
+/**
+ * Upstream source of the `stamp/verify-attestation` action. Operators
+ * consuming a fork override via `--action-source <org/repo>`. Exported
+ * so tests + the workflow renderer agree on the default.
+ */
+export const DEFAULT_ACTION_SOURCE = "OpenThinkAi/stamp-cli";
 
 export function runInit(opts: InitOptions = {}): void {
   // Bridge-release deprecation banner (AGT-346). Printed to stderr before
@@ -247,6 +263,7 @@ export function runInit(opts: InitOptions = {}): void {
     repoRoot,
     opts.prCheck,
     effectiveMode,
+    opts.actionSource ?? DEFAULT_ACTION_SOURCE,
   );
 
   // PR-mode auto-mirror workflow (Shape 2 of the server-attested-reviews
@@ -836,6 +853,7 @@ export function maybeWriteVerifyWorkflow(
   repoRoot: string,
   prCheckOpt: boolean | undefined,
   effectiveMode: AgentsMdMode,
+  actionSource: string = DEFAULT_ACTION_SOURCE,
 ): { action: "wrote" | "exists" | "skipped"; path: string } {
   const path = ".github/workflows/stamp-verify.yml";
   const fullPath = join(repoRoot, path);
@@ -857,7 +875,7 @@ export function maybeWriteVerifyWorkflow(
   }
 
   ensureDir(dirname(fullPath));
-  writeFileSync(fullPath, renderVerifyWorkflow());
+  writeFileSync(fullPath, renderVerifyWorkflow(actionSource));
   return { action: "wrote", path };
 }
 
@@ -1262,7 +1280,9 @@ function printPrModeWalkthrough(result: PrModeMirrorResult): void {
  * file-loaded because the template is short and version-bound to this
  * release.
  */
-export function renderVerifyWorkflow(): string {
+export function renderVerifyWorkflow(
+  actionSource: string = DEFAULT_ACTION_SOURCE,
+): string {
   return [
     "name: stamp verify",
     "",
@@ -1295,7 +1315,7 @@ export function renderVerifyWorkflow(): string {
     "          # would force per-step refetches.",
     "          fetch-depth: 0",
     "      - name: stamp/verify-attestation",
-    `        uses: OpenThinkAi/stamp-cli/.github/actions/verify-attestation@${VERIFY_ACTION_REF}`,
+    `        uses: ${actionSource}/.github/actions/verify-attestation@${VERIFY_ACTION_REF}`,
     "",
   ].join("\n");
 }
