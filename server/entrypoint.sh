@@ -368,10 +368,25 @@ write_env_var GITHUB_BOT_TOKEN
 # OLD value in effect forever (the OLD first-match wins over the new
 # appended line).
 if [ -n "$STAMP_PUBLIC_URL" ]; then
-  if ! printf '%s' "$STAMP_PUBLIC_URL" | grep -qxE 'https?://[A-Za-z0-9.:/_-]+'; then
-    echo "error: STAMP_PUBLIC_URL contains illegal characters or shape; refusing to inject into sshd_config" >&2
+  # Validation runs on the raw bytes, not on lines. `grep -qxE` exits 0
+  # on the FIRST matching line, so a newline-bearing value whose first
+  # line happens to be a valid URL would pass a line-anchored regex and
+  # still inject arbitrary sshd directives on the trailing lines. The
+  # tr-based whole-stream check below is immune: it strips every allowed
+  # byte and rejects if anything (newline, space, semicolon, &, etc.)
+  # remains. Combined with the http(s):// prefix check, this matches the
+  # original regex's INTENT without inheriting its multi-line surprise.
+  if [ -n "$(printf '%s' "$STAMP_PUBLIC_URL" | tr -d 'A-Za-z0-9.:/_-')" ]; then
+    echo "error: STAMP_PUBLIC_URL contains illegal characters (allowed: [A-Za-z0-9.:/_-]); refusing to inject into sshd_config" >&2
     exit 1
   fi
+  case "$STAMP_PUBLIC_URL" in
+    http://*|https://*) ;;
+    *)
+      echo "error: STAMP_PUBLIC_URL must start with http:// or https://; refusing to inject into sshd_config" >&2
+      exit 1
+      ;;
+  esac
   { grep -v '^SetEnv STAMP_PUBLIC_URL=' /etc/ssh/sshd_config || true; \
     printf 'SetEnv STAMP_PUBLIC_URL=%s\n' "$STAMP_PUBLIC_URL"; \
   } > /etc/ssh/sshd_config.new
