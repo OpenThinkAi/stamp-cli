@@ -743,4 +743,84 @@ describe("runReviewPipeline — env-var caps", () => {
       else process.env.STAMP_PROMPTS_DIR = saved;
     }
   });
+
+  // ─── AGT-373: STAMP_PROMPTS_REPO_URL toggle (Phase B) ─────────────
+  //
+  // Four-path matrix per the ticket's AC #4:
+  //
+  //   (a) REPO_URL set, override file hit  — covered in
+  //       tests/promptFetch.test.ts (the override-vs-default decision
+  //       happens INSIDE the resolver, not at resolvePromptCacheRoot).
+  //       resolvePromptCacheRoot itself just picks the root path; the
+  //       hit/miss decision belongs to getPromptPath.
+  //   (b) REPO_URL set, override file miss — same: covered by the
+  //       resolver test, since the root pick is identical and the
+  //       miss/fallback branch is a getPromptPath concern.
+  //   (c) REPO_URL unset, STAMP_PROMPTS_DIR set       — Phase A path.
+  //   (d) REPO_URL unset, STAMP_PROMPTS_DIR unset     — Phase A default.
+  //
+  // The block below covers (c), (d), AND the new Phase B root pick
+  // ((a) + (b) at the root-pick layer). The override hit/miss
+  // BEHAVIOR (a) + (b) is in promptFetch.test.ts's "AGT-373 widened
+  // (reviewer, org?, repo?)" block, where the actual file-on-disk
+  // fixtures exist.
+  it("AGT-373: resolvePromptCacheRoot honors STAMP_PROMPTS_REPO_URL → Phase B cache root", async () => {
+    const { resolvePromptCacheRoot, PHASE_B_CACHE_ROOT } = await import(
+      "../src/server/reviewPipeline.ts"
+    );
+    const savedRepoUrl = process.env.STAMP_PROMPTS_REPO_URL;
+    const savedDir = process.env.STAMP_PROMPTS_DIR;
+    try {
+      // (a + b at root-pick layer): REPO_URL set → Phase B path,
+      // regardless of whether STAMP_PROMPTS_DIR is also set. The
+      // override hit/miss decision happens downstream in getPromptPath.
+      process.env.STAMP_PROMPTS_REPO_URL = "git@github.com:acme/stamp-prompts.git";
+      delete process.env.STAMP_PROMPTS_DIR;
+      assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
+      assert.equal(PHASE_B_CACHE_ROOT, "/srv/git/.prompts-cache");
+
+      // REPO_URL set takes precedence even when DIR is also set —
+      // setting the URL is the operator's signal that they're on
+      // the Phase B provisioning channel.
+      process.env.STAMP_PROMPTS_DIR = "/tmp/should-be-ignored";
+      assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
+
+      // (c): REPO_URL unset, DIR set → Phase A path honors DIR.
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      process.env.STAMP_PROMPTS_DIR = "/tmp/custom-phase-a";
+      assert.equal(resolvePromptCacheRoot(), "/tmp/custom-phase-a");
+
+      // (d): REPO_URL unset, DIR unset → Phase A default.
+      delete process.env.STAMP_PROMPTS_DIR;
+      assert.equal(resolvePromptCacheRoot(), "/etc/stamp/reviewers");
+    } finally {
+      if (savedRepoUrl === undefined) delete process.env.STAMP_PROMPTS_REPO_URL;
+      else process.env.STAMP_PROMPTS_REPO_URL = savedRepoUrl;
+      if (savedDir === undefined) delete process.env.STAMP_PROMPTS_DIR;
+      else process.env.STAMP_PROMPTS_DIR = savedDir;
+    }
+  });
+
+  it("AGT-373: empty STAMP_PROMPTS_REPO_URL falls through to Phase A (treats unset === empty string)", async () => {
+    const { resolvePromptCacheRoot } = await import(
+      "../src/server/reviewPipeline.ts"
+    );
+    const savedRepoUrl = process.env.STAMP_PROMPTS_REPO_URL;
+    const savedDir = process.env.STAMP_PROMPTS_DIR;
+    try {
+      // An operator who clears the var with `STAMP_PROMPTS_REPO_URL=`
+      // (empty string) should see Phase A behavior, not the Phase B
+      // path with an empty url that would later fail to clone. The
+      // `if (process.env[...])` truthiness check handles this
+      // because empty string is falsy.
+      process.env.STAMP_PROMPTS_REPO_URL = "";
+      delete process.env.STAMP_PROMPTS_DIR;
+      assert.equal(resolvePromptCacheRoot(), "/etc/stamp/reviewers");
+    } finally {
+      if (savedRepoUrl === undefined) delete process.env.STAMP_PROMPTS_REPO_URL;
+      else process.env.STAMP_PROMPTS_REPO_URL = savedRepoUrl;
+      if (savedDir === undefined) delete process.env.STAMP_PROMPTS_DIR;
+      else process.env.STAMP_PROMPTS_DIR = savedDir;
+    }
+  });
 });

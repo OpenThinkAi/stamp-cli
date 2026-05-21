@@ -64,21 +64,47 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 
+// Circular-by-name import (prompts-cache.ts re-exports REVIEWER_NAME_RE
+// from this module): safe because `getPromptPath` is only invoked
+// inside the resolver closure at request time, never at module-load
+// time. ESM resolves the binding lazily — both modules' top-level
+// initialization completes before any closure body runs. See AGT-373
+// for the design rationale (single source of truth for path layout
+// lives in prompts-cache.ts).
+import { getPromptPath } from "./prompts-cache.js";
+
 /**
- * Resolves a `(reviewer)` name to the absolute path of the prompt file
- * on this server's filesystem. Synchronous, pure — no I/O, no async,
- * no thrown errors for "not found" (an absent path surfaces naturally
- * as `no_such_file` from the read).
+ * Resolves a `(reviewer, org?, repo?)` tuple to the absolute path of
+ * the prompt file on this server's filesystem.
  *
- * The default `defaultPromptCacheResolver` maps `reviewer` to
- * `<cacheRoot>/<reviewer>.md` after validating the reviewer name
- * against the same regex `src/commands/reviewers.ts` enforces.
+ * AGT-373 (Phase B) widened the signature from `(reviewer) => path` to
+ * `(reviewer, org?, repo?) => path` so per-repo prompt overrides
+ * (`<cacheRoot>/<org>/<repo>/<reviewer>.md`) can take precedence over
+ * the cache-root-level default (`<cacheRoot>/<reviewer>.md`) when both
+ * exist. `org` and `repo` are optional so existing Phase A callsites
+ * that don't carry repo context still compile — a single-arg call
+ * gets the fallback path.
+ *
+ * Synchronous — but NOT strictly pure under AGT-373: the default
+ * resolver calls `existsSync` once to decide between the override and
+ * the fallback path. Multi-tenant resolvers MAY remain pure if their
+ * tenancy model doesn't need a stat. No thrown errors for "not
+ * found" — an absent path surfaces naturally as `no_such_file` from
+ * the read in `fetchCanonicalPrompt`.
+ *
+ * The default `defaultPromptCacheResolver` delegates to `getPromptPath`
+ * from `prompts-cache.ts`, which validates the reviewer name against
+ * `REVIEWER_NAME_RE` (the same regex `src/commands/reviewers.ts`
+ * enforces) and the org/repo slugs against a slightly broader shape.
  * Multi-tenant resolvers do whatever path layout their tenancy model
- * requires; they MUST validate inputs that get interpolated into a
- * filesystem path. The default resolver is conservative: it rejects
- * any reviewer name not matching `REVIEWER_NAME_RE`.
+ * requires; they MUST validate any input that gets interpolated into
+ * a filesystem path.
  */
-export type PromptResolver = (reviewer: string) => string;
+export type PromptResolver = (
+  reviewer: string,
+  org?: string,
+  repo?: string,
+) => string;
 
 /**
  * The successful fetch result. `bytes` is the raw `.md` file content as
@@ -150,13 +176,22 @@ export const REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
 /**
  * Build the default single-tenant resolver. `cacheRoot` is the
- * directory holding the reviewer prompt files (e.g. `/etc/stamp/reviewers`).
- * The resolver returns `<cacheRoot>/<reviewer>.md` after validating the
- * reviewer name against `REVIEWER_NAME_RE`.
+ * directory holding the reviewer prompt files (e.g. `/etc/stamp/reviewers`
+ * for Phase A, or `/srv/git/.prompts-cache` once Phase B's
+ * `STAMP_PROMPTS_REPO_URL` is set).
  *
  * `cacheRoot` is taken at resolver-construction time, not at each call,
- * so the verb handler can build the resolver once at startup from
- * `STAMP_PROMPTS_DIR` and inject it into every request.
+ * so the verb handler can build the resolver once at startup from the
+ * env-resolved cache root and inject it into every request.
+ *
+ * AGT-373 (Phase B) widened the returned resolver from
+ * `(reviewer) => path` to `(reviewer, org?, repo?) => path` and
+ * delegates the path-construction logic to `getPromptPath` from
+ * `prompts-cache.ts`. The override-vs-default decision (`<cacheRoot>/<org>/<repo>/<reviewer>.md`
+ * when that file exists, else `<cacheRoot>/<reviewer>.md`) lives in
+ * `getPromptPath` so the resolver and the prompts-cache module agree
+ * on layout by construction. Phase A callsites that omit org/repo get
+ * the fallback path — they keep compiling, they keep working.
  *
  * AGT-370: replaces the old `defaultRepoResolver` (which mapped `(org,
  * repo)` to a bare-repo path on disk and then used `git show` to read
@@ -164,24 +199,22 @@ export const REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
  * to maintain a clone of every reviewed repo, blocking private/internal
  * repos whose code must never leave its git host. The filesystem-cache
  * source decouples the prompt provisioning channel from the review
- * channel — HiveDB (or whichever upstream owns the prompts) writes
- * canonical prompts directly into the cache out-of-band.
+ * channel — HiveDB (Phase A) / a github prompts repo via webhook
+ * (Phase B, AGT-374) writes canonical prompts into the cache
+ * out-of-band.
  */
 export function defaultPromptCacheResolver(cacheRoot: string): PromptResolver {
   if (!cacheRoot || typeof cacheRoot !== "string") {
     throw new Error("defaultPromptCacheResolver: cacheRoot must be a non-empty string");
   }
-  // Strip exactly one trailing slash so `<cacheRoot>/<reviewer>.md`
-  // doesn't produce `//`.
-  const normalized = cacheRoot.endsWith("/") ? cacheRoot.slice(0, -1) : cacheRoot;
-  return (reviewer: string): string => {
-    if (!REVIEWER_NAME_RE.test(reviewer)) {
-      throw new Error(
-        `defaultPromptCacheResolver: invalid reviewer name '${reviewer}' (must match ${REVIEWER_NAME_RE.source})`,
-      );
-    }
-    return `${normalized}/${reviewer}.md`;
-  };
+  // The closure captures `cacheRoot` and forwards every call to
+  // `getPromptPath`, which owns the trailing-slash normalization, the
+  // reviewer-name regex check, the override-vs-fallback decision, and
+  // the org/repo slug validation. One source of truth for "which file
+  // do I read for this triple?" lives in `prompts-cache.ts`; this
+  // function only wires the resolver's cacheRoot in.
+  return (reviewer: string, org?: string, repo?: string): string =>
+    getPromptPath(cacheRoot, reviewer, org, repo);
 }
 
 /**
@@ -204,16 +237,19 @@ export function defaultPromptCacheResolver(cacheRoot: string): PromptResolver {
  * provisioning script that drops a multi-megabyte file at the prompt
  * path.
  *
- * AGT-370 note: the function signature accepts ONLY a `reviewerName` —
- * no `baseSha`, no `org`, no `repo`. The server is manifest-blind and
- * repo-blind under the new shape. `base_sha` still flows over the SSH
- * wire (used to populate `ApprovalV4.base_sha`) but is irrelevant to
- * prompt resolution. The wire protocol is unchanged; only the
- * server's internal handling drops the bare-repo dependency.
+ * AGT-370 + AGT-373 note: `base_sha` is NOT a prompt-resolution input
+ * (server is manifest-blind and base-sha-blind for prompts). It still
+ * flows over the SSH wire to populate `ApprovalV4.base_sha`. `org` and
+ * `repo` ARE now resolution inputs (AGT-373 Phase B) so the default
+ * resolver can pick a `<cacheRoot>/<org>/<repo>/<reviewer>.md`
+ * override when one exists. Both are optional — Phase A callsites
+ * that omit them keep working, falling back to `<cacheRoot>/<reviewer>.md`.
  */
 export async function fetchCanonicalPrompt(
   promptResolver: PromptResolver,
   reviewerName: string,
+  org?: string,
+  repo?: string,
 ): Promise<PromptFetchResult> {
   if (!REVIEWER_NAME_RE.test(reviewerName)) {
     return {
@@ -224,7 +260,14 @@ export async function fetchCanonicalPrompt(
 
   let promptPath: string;
   try {
-    promptPath = promptResolver(reviewerName);
+    // Forward org/repo to the resolver. The default resolver
+    // (defaultPromptCacheResolver → getPromptPath) consults the
+    // override path `<cacheRoot>/<org>/<repo>/<reviewer>.md` if both
+    // are present and the file exists, else falls back to
+    // `<cacheRoot>/<reviewer>.md`. Custom (multi-tenant) resolvers
+    // may ignore the extra args entirely — the wider signature is
+    // covariant so older one-arg resolvers stay assignable.
+    promptPath = promptResolver(reviewerName, org, repo);
   } catch (err) {
     return {
       kind: "invalid_input",
