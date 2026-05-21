@@ -661,10 +661,14 @@ program
     "--push [remote]",
     "after attesting locally, push the current branch + the attestation ref to <remote> in one atomic git push (default remote: origin)",
   )
+  .option(
+    "--migrate-existing",
+    "Shape 4 migration bootstrap (AGT-398): attest a narrowly-scoped diff that ADDS `review_server:` + `[server]`-capability trust-anchor entries (the chicken-and-egg PR that activates server-attested reviews on an existing repo). Produces a v3 envelope with empty server_signatures, a migration-bootstrap marker in the operator-signed payload, and exactly one operator-self admin counter-signature in `trust_anchor_signatures`. The flag is REFUSED on any diff outside the narrow Shape-4-activation whitelist (no files outside .stamp/, no modifications to existing trust-anchor entries, no removals). Requires the operator's local key to have `admin` capability in the working-tree manifest and `path_rules` to cover the activated paths with `bypass_review_cycle: true` and `minimum_signatures: 1`. See docs/migration-1.x-to-2.x.md for the full Shape 4 bootstrap walkthrough.",
+  )
   .action(
     (
       branch: string | undefined,
-      opts: { into: string; push?: string | boolean },
+      opts: { into: string; push?: string | boolean; migrateExisting?: boolean },
     ) => {
       try {
         // commander gives us:
@@ -678,7 +682,12 @@ program
             : typeof opts.push === "string"
               ? opts.push
               : undefined;
-        runAttest({ branch, into: opts.into, pushTo });
+        runAttest({
+          branch,
+          into: opts.into,
+          pushTo,
+          migrateExisting: opts.migrateExisting === true,
+        });
       } catch (err) {
         handleCliError(err);
       }

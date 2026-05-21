@@ -56,11 +56,14 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { parse as parseYaml } from "yaml";
 import { type Approval } from "../lib/attestation.js";
 import {
   canonicalSerializeApproval,
   type ApprovalEntryV4,
   type ApprovalV4,
+  type AttestationPayloadV4,
+  type TrustAnchorSignatureV4,
 } from "../lib/attestationV4.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
 import { latestReviews, openDb, serverApprovalsFor } from "../lib/db.js";
@@ -102,6 +105,12 @@ import {
   resolveCapability,
   snapshotSha256,
 } from "../lib/trustedKeysManifest.js";
+import {
+  bootstrapAdminSigningBytes,
+  validateShape4ActivationDiff,
+  type MigrationBootstrapMarker,
+} from "../lib/migrationBootstrap.js";
+import { parsePathRules, pathMatchesAny, type PathRule } from "../lib/v4Trust.js";
 
 export interface AttestOptions {
   /** Feature branch to attest. Defaults to current HEAD. */
@@ -117,6 +126,19 @@ export interface AttestOptions {
    * leave the operator to do it manually.
    */
   pushTo?: string;
+  /**
+   * AGT-398: when true, produce a Shape 4 migration-bootstrap envelope
+   * (empty `server_signatures`, bootstrap marker in the operator-signed
+   * payload, admin-capability counter-signature in
+   * `trust_anchor_signatures`). The flag is only valid on a narrow
+   * Shape-4-activation diff (adding `review_server:` to a branch rule
+   * + adding `[server]`+`role_source:server` trust-anchor entries +
+   * adding the corresponding `*.pub` files). Refused on any other diff.
+   *
+   * See `src/lib/migrationBootstrap.ts` for the rationale and the
+   * verifier acceptance conditions.
+   */
+  migrateExisting?: boolean;
 }
 
 export function runAttest(opts: AttestOptions): void {
@@ -160,14 +182,22 @@ export function runAttest(opts: AttestOptions): void {
 
   const { keypair } = ensureUserKeypair();
 
-  // Dispatch — v3 (server-attested) vs. v2 (legacy / operator-only).
+  // Dispatch — bootstrap (AGT-398) vs. v3 (server-attested) vs. v2
+  // (legacy / operator-only).
   //
-  // Same trigger as `stamp merge`'s v4/v3 dispatch: the branch rule's
-  // `review_server` field is the operator's declared intent to use
-  // server-attested reviews. When set, we MUST fold real server-signed
-  // approvals into a v3 PR-attestation envelope; missing/stale server
-  // signatures fail loudly rather than silently degrading to v2 (which
-  // the 2.x verifier rejects).
+  // `--migrate-existing` short-circuits the normal dispatch: the
+  // Shape 4 migration commit can't have server signatures (review at
+  // base_sha runs locally because base doesn't yet have `review_server`).
+  // The bootstrap envelope captures the operator's intent + an
+  // admin-capability counter-signature to compensate. See
+  // `src/lib/migrationBootstrap.ts` for the trust model.
+  //
+  // Same trigger as `stamp merge`'s v4/v3 dispatch otherwise: the
+  // branch rule's `review_server` field is the operator's declared
+  // intent to use server-attested reviews. When set, we MUST fold real
+  // server-signed approvals into a v3 PR-attestation envelope;
+  // missing/stale server signatures fail loudly rather than silently
+  // degrading to v2 (which the 2.x verifier rejects).
   //
   // When `review_server` is absent, this is the 1.6.0 PR-check-mode
   // flow: produce a v2 envelope with bare `Approval[]`, operator-signs-
@@ -176,8 +206,8 @@ export function runAttest(opts: AttestOptions): void {
   // path; the v2 path remains for repos pinning the GH Action to a
   // 1.x stamp-version during the bridge window. AGT-355 ships the
   // producer side so post-2.0.1 the bridge window is no longer needed.
-  const result = rule.review_server
-    ? buildV3Envelope({
+  const result = opts.migrateExisting
+    ? buildBootstrapEnvelope({
         repoRoot,
         revspec,
         baseSha: resolved.base_sha,
@@ -186,22 +216,36 @@ export function runAttest(opts: AttestOptions): void {
         targetBranch: opts.into,
         targetBranchTipSha: target_branch_tip_sha,
         patchId: patch_id,
-        requiredReviewers: rule.required,
         operatorPrivateKeyPem: keypair.privateKeyPem,
+        operatorPublicKeyPem: keypair.publicKeyPem,
         operatorFingerprint: keypair.fingerprint,
       })
-    : buildV2Envelope({
-        repoRoot,
-        revspec,
-        baseSha: resolved.base_sha,
-        headSha: resolved.head_sha,
-        targetBranch: opts.into,
-        targetBranchTipSha: target_branch_tip_sha,
-        patchId: patch_id,
-        requiredReviewers: rule.required,
-        operatorPrivateKeyPem: keypair.privateKeyPem,
-        operatorFingerprint: keypair.fingerprint,
-      });
+    : rule.review_server
+      ? buildV3Envelope({
+          repoRoot,
+          revspec,
+          baseSha: resolved.base_sha,
+          headSha: resolved.head_sha,
+          diff: resolved.diff,
+          targetBranch: opts.into,
+          targetBranchTipSha: target_branch_tip_sha,
+          patchId: patch_id,
+          requiredReviewers: rule.required,
+          operatorPrivateKeyPem: keypair.privateKeyPem,
+          operatorFingerprint: keypair.fingerprint,
+        })
+      : buildV2Envelope({
+          repoRoot,
+          revspec,
+          baseSha: resolved.base_sha,
+          headSha: resolved.head_sha,
+          targetBranch: opts.into,
+          targetBranchTipSha: target_branch_tip_sha,
+          patchId: patch_id,
+          requiredReviewers: rule.required,
+          operatorPrivateKeyPem: keypair.privateKeyPem,
+          operatorFingerprint: keypair.fingerprint,
+        });
 
   const { ref, blob_sha } = writeAttestationRef(
     { payload: result.payload, signature: result.signature },
@@ -217,10 +261,13 @@ export function runAttest(opts: AttestOptions): void {
     `  base→head:  ${resolved.base_sha.slice(0, 8)} → ${resolved.head_sha.slice(0, 8)}`,
   );
   console.log(`  signed by:  ${keypair.fingerprint}`);
-  console.log(`  approvals:  ${result.reviewerNames.join(", ")}`);
-  console.log(
-    `  schema:     v${result.payload.schema_version}${result.payload.schema_version === PR_ATTESTATION_SCHEMA_VERSION ? " (server-attested)" : " (legacy)"}`,
-  );
+  console.log(`  approvals:  ${result.reviewerNames.length > 0 ? result.reviewerNames.join(", ") : "(none — bootstrap envelope)"}`);
+  const schemaLabel = result.payload.migration_bootstrap
+    ? " (Shape 4 migration bootstrap)"
+    : result.payload.schema_version === PR_ATTESTATION_SCHEMA_VERSION
+      ? " (server-attested)"
+      : " (legacy)";
+  console.log(`  schema:     v${result.payload.schema_version}${schemaLabel}`);
   console.log(`  ref:        ${ref}`);
   console.log(`  blob:       ${blob_sha.slice(0, 12)}`);
   console.log(bar);
@@ -694,6 +741,333 @@ function buildV2Envelope(input: V2BuildInput): EnvelopeBuildResult {
     signature,
     reviewerNames: approvals.map((a) => a.reviewer),
   };
+}
+
+interface BootstrapBuildInput {
+  repoRoot: string;
+  revspec: string;
+  baseSha: string;
+  headSha: string;
+  diff: string;
+  targetBranch: string;
+  targetBranchTipSha: string;
+  patchId: string;
+  operatorPrivateKeyPem: string;
+  operatorPublicKeyPem: string;
+  operatorFingerprint: string;
+}
+
+/**
+ * AGT-398: build a Shape 4 migration-bootstrap envelope.
+ *
+ * Constraints enforced at attest time (re-validated at verify time):
+ *
+ *   1. The diff matches the Shape 4 activation whitelist (per
+ *      `validateShape4ActivationDiff`). Anything outside the whitelist
+ *      — file outside `.stamp/`, modified-not-added trust-anchor entry,
+ *      branch-rule change other than `review_server:` addition — fails
+ *      with an actionable error.
+ *
+ *   2. The WORKING TREE config has `path_rules` covering every touched
+ *      path with `bypass_review_cycle: true`. Without this gate, the
+ *      bootstrap path would let a Shape 4 migration sneak through a
+ *      reviewer cycle that hasn't actually run.
+ *
+ *   3. The operator's local stamp key carries `admin` capability per
+ *      the WORKING TREE manifest. The operator's signature over the
+ *      bootstrap signing-bytes lands in `trust_anchor_signatures` —
+ *      same machinery the existing path_rules admin-sig flow uses.
+ *
+ *   4. The working-tree `path_rules`' `minimum_signatures` for the
+ *      matched path-rule must be 1 (this bootstrap path collects a
+ *      single self-admin signature; multi-admin collection for an
+ *      envelope is outside the scope of this surface — operators with
+ *      `minimum_signatures > 1` should temporarily relax that to 1 for
+ *      the migration PR or use the standard admin-sign flow against
+ *      the eventual landed commit).
+ *
+ * The marker is part of the operator-signed payload bytes via
+ * `serializePayload(payload)`, so the operator's outer signature
+ * commits to "this is a bootstrap envelope".
+ */
+function buildBootstrapEnvelope(
+  input: BootstrapBuildInput,
+): EnvelopeBuildResult {
+  // (1) — diff whitelist.
+  const validation = validateShape4ActivationDiff({
+    repoRoot: input.repoRoot,
+    baseSha: input.baseSha,
+    headSha: input.headSha,
+  });
+  if (!validation.ok) {
+    throw new Error(
+      `--migrate-existing refused: ${validation.reason}\n\n` +
+        `The bootstrap flag accepts ONLY a narrow Shape 4 activation diff: adding ` +
+        `\`review_server:\` to a branch rule in .stamp/config.yml, adding new ` +
+        `[server]+role_source:server entries to .stamp/trusted-keys/manifest.yml, ` +
+        `and adding the corresponding new .pub files. Land any unrelated changes ` +
+        `through the normal \`stamp attest\` flow AFTER the bootstrap PR merges.`,
+    );
+  }
+  const activatedPaths = validation.activatedPaths;
+
+  // (2) — base path_rules coverage. We deliberately read BASE here
+  // (not the working tree) for two reasons:
+  //   - the whitelist (validateShape4ActivationDiff) refuses any change
+  //     to path_rules, so working-tree path_rules ≡ base path_rules by
+  //     construction;
+  //   - reading base aligns the attest-time check with the verifier-time
+  //     check (which MUST read base — see `verifyBootstrapEnvelope`
+  //     and the AC: "path_rules at BASE SHA's .stamp/config.yml").
+  //     Single source of truth keeps attest-side and verifier-side
+  //     from drifting on this check.
+  const baseConfigYaml = readAtBaseSha(
+    input.repoRoot,
+    input.baseSha,
+    ".stamp/config.yml",
+  );
+  if (baseConfigYaml === null) {
+    throw new Error(
+      `--migrate-existing refused: .stamp/config.yml is missing at base ` +
+        `${input.baseSha.slice(0, 8)}. Bootstrap requires the config file in the ` +
+        `merge-base tree (the activation diff modifies it).`,
+    );
+  }
+  const baseRules = extractPathRulesFromYaml(baseConfigYaml);
+  if (baseRules.length === 0) {
+    throw new Error(
+      `--migrate-existing refused: no \`path_rules\` configured at base ` +
+        `${input.baseSha.slice(0, 8)}. The bootstrap path needs a path_rules entry ` +
+        `covering the activated paths with \`bypass_review_cycle: true\` so the ` +
+        `verifier knows the reviewer cycle is intentionally skipped for this PR. ` +
+        `Add a \`path_rules\` entry for \`.stamp/**\` in a separate prior PR ` +
+        `before bootstrapping.`,
+    );
+  }
+  const matchedRule = matchAnyCoveringRule(activatedPaths, baseRules);
+  if (!matchedRule) {
+    throw new Error(
+      `--migrate-existing refused: \`path_rules\` at base ${input.baseSha.slice(0, 8)} ` +
+        `does not cover every activated path. Activated: ${activatedPaths.join(", ")}. ` +
+        `Configured patterns: ${baseRules.map((r) => `"${r.pattern}"`).join(", ")}. ` +
+        `Add or widen a path_rules entry that matches these paths (in a separate ` +
+        `prior PR — the bootstrap diff cannot modify path_rules).`,
+    );
+  }
+  if (!matchedRule.bypass_review_cycle) {
+    throw new Error(
+      `--migrate-existing refused: matched path_rule "${matchedRule.pattern}" at base ` +
+        `has \`bypass_review_cycle: false\` — bootstrap requires the rule to ` +
+        `\`bypass_review_cycle: true\` (otherwise the reviewer cycle is still ` +
+        `nominally required and the bootstrap envelope is structurally invalid).`,
+    );
+  }
+  if (matchedRule.minimum_signatures > 1) {
+    throw new Error(
+      `--migrate-existing refused: matched path_rule "${matchedRule.pattern}" at base ` +
+        `requires \`minimum_signatures: ${matchedRule.minimum_signatures}\` admin signatures, ` +
+        `but the bootstrap path only collects a single operator-self admin signature today. ` +
+        `Options: (a) temporarily lower the rule to \`minimum_signatures: 1\` in a ` +
+        `prior PR; (b) for the migration commit only, use the standard \`stamp admin sign\` ` +
+        `flow against the eventual landed commit.`,
+    );
+  }
+
+  // (3) — operator must hold admin capability per the WORKING TREE
+  // manifest. (Base may not yet have the right entry — that's the
+  // point of bootstrap. We check working tree at attest time, base at
+  // verify time per the verifier's lenient-revocation policy.)
+  const workingTreeManifestYaml = readWorkingTreeManifestYaml(input.repoRoot);
+  if (workingTreeManifestYaml === null) {
+    throw new Error(
+      `--migrate-existing refused: .stamp/trusted-keys/manifest.yml is missing from ` +
+        `the working tree. Bootstrap requires the working-tree manifest to bind the ` +
+        `operator's local stamp key to the \`admin\` capability.`,
+    );
+  }
+  const workingTreeManifest = parseManifest(workingTreeManifestYaml);
+  if (!workingTreeManifest) {
+    throw new Error(
+      `--migrate-existing refused: .stamp/trusted-keys/manifest.yml in the working tree ` +
+        `failed to parse (bad YAML, duplicate fingerprint, unknown capability, etc.).`,
+    );
+  }
+  const operatorCaps = resolveCapability(workingTreeManifest, input.operatorFingerprint);
+  if (operatorCaps === null) {
+    throw new Error(
+      `--migrate-existing refused: your local stamp key (${input.operatorFingerprint}) ` +
+        `is not listed in the working-tree .stamp/trusted-keys/manifest.yml. ` +
+        `Add your key with \`capabilities: [admin]\` (in a separate prior PR) before ` +
+        `bootstrapping the Shape 4 migration.`,
+    );
+  }
+  if (!operatorCaps.includes("admin")) {
+    throw new Error(
+      `--migrate-existing refused: your local stamp key (${input.operatorFingerprint}) ` +
+        `has capabilities [${operatorCaps.join(", ")}] in the working-tree manifest — needs ` +
+        `\`admin\` for bootstrap. Either grant your key admin capability (in a separate ` +
+        `prior PR) or have a different admin run \`stamp attest --migrate-existing\`.`,
+    );
+  }
+
+  // ── Construct the v3 envelope ─────────────────────────────────────
+  // Base-sha manifest snapshot — the operator signs over this just like
+  // a normal v3 envelope, so the verifier's
+  // `verifyV4ManifestSnapshot` phase still holds. The marker is added
+  // BELOW so the operator's outer signature covers it.
+  const baseManifestYaml = readAtBaseSha(
+    input.repoRoot,
+    input.baseSha,
+    ".stamp/trusted-keys/manifest.yml",
+  );
+  if (baseManifestYaml === null) {
+    throw new Error(
+      `--migrate-existing refused: .stamp/trusted-keys/manifest.yml is missing at ` +
+        `base ${input.baseSha.slice(0, 8)}. Bootstrap requires the manifest in the ` +
+        `merge-base tree (the operator's outer signature commits to its snapshot ` +
+        `hash). Run \`stamp init --migrate-to-server-attested\` first to seed the ` +
+        `manifest.`,
+    );
+  }
+  const baseManifest = parseManifest(baseManifestYaml);
+  if (!baseManifest) {
+    throw new Error(
+      `--migrate-existing refused: .stamp/trusted-keys/manifest.yml at base ` +
+        `${input.baseSha.slice(0, 8)} failed to parse.`,
+    );
+  }
+  const manifestSnapshot = snapshotSha256(baseManifest);
+
+  // Diff sha256 — same byte computation `verifyV4DiffHash` performs.
+  const diffBytes = Buffer.from(input.diff, "utf8");
+  const diffSha256 = createHash("sha256").update(diffBytes).digest("hex");
+
+  const marker: MigrationBootstrapMarker = {
+    activated_paths: activatedPaths,
+  };
+
+  // Build the v4-view payload the admin's signing bytes will be
+  // computed over (we keep the v3 PR-payload type for storage but
+  // construct an equivalent v4 view for canonical serialization).
+  const payloadV4Shape: AttestationPayloadV4 = {
+    schema_version: PR_ATTESTATION_SCHEMA_VERSION,
+    base_sha: input.baseSha,
+    head_sha: input.headSha,
+    target_branch: input.targetBranch,
+    diff_sha256: diffSha256,
+    manifest_snapshot_sha256: manifestSnapshot,
+    approvals: [], // bootstrap: no server signatures
+    checks: [],
+    trust_anchor_signatures: [],
+    signer_key_id: input.operatorFingerprint,
+  };
+
+  // Admin-capability counter-signature over the canonical
+  // bootstrap-signing-bytes (payload-with-marker, trust_anchor_signatures: []).
+  // Self-verify before persisting so a key/serialization bug surfaces
+  // here rather than at verify time.
+  const adminSigningBytes = bootstrapAdminSigningBytes({
+    payloadV4: payloadV4Shape,
+    marker,
+  });
+  const adminSignatureB64 = signBytes(input.operatorPrivateKeyPem, adminSigningBytes);
+  const selfOk = verifyBytes(
+    input.operatorPublicKeyPem,
+    adminSigningBytes,
+    adminSignatureB64,
+  );
+  if (!selfOk) {
+    throw new Error(
+      `internal error: just-produced bootstrap admin signature failed self-verification. ` +
+        `Refusing to write a bad envelope. File a bug at ` +
+        `https://github.com/OpenThinkAi/stamp-cli/issues.`,
+    );
+  }
+  const trustAnchorSignatures: TrustAnchorSignatureV4[] = [
+    {
+      signer_key_id: input.operatorFingerprint,
+      signature: adminSignatureB64,
+    },
+  ];
+
+  const payload: PrAttestationPayload = {
+    schema_version: PR_ATTESTATION_SCHEMA_VERSION,
+    patch_id: input.patchId,
+    base_sha: input.baseSha,
+    head_sha: input.headSha,
+    target_branch: input.targetBranch,
+    target_branch_tip_sha: input.targetBranchTipSha,
+    diff_sha256: diffSha256,
+    manifest_snapshot_sha256: manifestSnapshot,
+    approvals: [],
+    checks: [],
+    trust_anchor_signatures: trustAnchorSignatures,
+    signer_key_id: input.operatorFingerprint,
+    migration_bootstrap: marker,
+  };
+
+  // Operator-signs-outer-envelope: covers the bootstrap marker via
+  // `serializePayload(payload)` (plain JSON.stringify includes the
+  // marker field). The verifier re-derives the same bytes from the
+  // parsed envelope.
+  const signature = signBytes(input.operatorPrivateKeyPem, serializePayload(payload));
+
+  return {
+    payload,
+    signature,
+    reviewerNames: [],
+  };
+}
+
+/** Read the working-tree `.stamp/trusted-keys/manifest.yml`. */
+function readWorkingTreeManifestYaml(repoRoot: string): string | null {
+  try {
+    return showAtRef("HEAD", ".stamp/trusted-keys/manifest.yml", repoRoot);
+  } catch {
+    return null;
+  }
+}
+
+/** Read a file from a specific ref (base sha). Returns null on absence. */
+function readAtBaseSha(
+  repoRoot: string,
+  baseSha: string,
+  relPath: string,
+): string | null {
+  try {
+    return showAtRef(baseSha, relPath, repoRoot);
+  } catch {
+    return null;
+  }
+}
+
+/** Parse `path_rules` out of a YAML blob. */
+function extractPathRulesFromYaml(yamlText: string): PathRule[] {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(yamlText);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const { rules } = parsePathRules((parsed as { path_rules?: unknown }).path_rules);
+  return rules;
+}
+
+/** Return the first `path_rule` that covers every activated path, or
+ *  null if no single rule covers all of them. (We intentionally require
+ *  ONE rule to cover ALL paths — if the operator has multiple rules,
+ *  the bootstrap path picks the most-permissive that covers everything,
+ *  to keep the verifier check straightforward.) */
+function matchAnyCoveringRule(
+  activatedPaths: string[],
+  rules: PathRule[],
+): PathRule | null {
+  for (const rule of rules) {
+    const allMatch = activatedPaths.every((p) => pathMatchesAny(p, [rule.pattern]));
+    if (allMatch) return rule;
+  }
+  return null;
 }
 
 /**
