@@ -685,6 +685,289 @@ async function handleWebhookPrompts(
   });
 }
 
+// ─── Periodic-poll backstop (AGT-376, Phase B) ───────────────────────
+
+/**
+ * Default poll interval in seconds. One hour matches the project README's
+ * "optional periodic-poll fallback (every ~hour) as backstop" line and is
+ * the default named in the AGT-376 acceptance criteria. The whole point of
+ * the backstop is to recover from a missed webhook within a bounded window
+ * without adding meaningful load — github webhook deliveries cover the
+ * common case sub-second; the poll only matters when a delivery was
+ * missed/delayed.
+ *
+ * Operators tune via `STAMP_PROMPTS_POLL_INTERVAL_SEC`. Set to `0` to
+ * disable polling entirely (e.g. in test deploys where the webhook is
+ * the only source and an hourly fetch would clutter logs). Negative or
+ * non-integer values fall back to the default.
+ */
+export const DEFAULT_PROMPTS_POLL_INTERVAL_SEC = 3600;
+
+/**
+ * Floor on the poll interval. Five seconds matches the webhook-route
+ * coalescing window — a poll that fires more often than the webhook can
+ * coalesce its own bursts would be pointless overhead. Tests set values
+ * below this (via the test-only override) to keep fake-timer runs fast,
+ * but production values are clamped.
+ */
+const MIN_PROMPTS_POLL_INTERVAL_SEC = 5;
+
+/**
+ * Poll-worker state, module-scoped so it survives across the request
+ * handlers without leaking into the request itself. Two pieces:
+ *
+ *   - `handle` — the `setInterval` timer handle, or null when polling is
+ *                disabled / not yet started. Cleared on `stopPromptsPollWorker`.
+ *   - `inflight` — set to true while a poll-triggered refresh is awaiting
+ *                  the cache module. Skips the next tick if a previous
+ *                  refresh is still running (defensive — the cache module
+ *                  has its own in-process coalescing, but firing two
+ *                  parallel ticks is wasted work and produces confusing
+ *                  log lines).
+ */
+interface PollWorkerState {
+  handle: ReturnType<typeof setInterval> | null;
+  inflight: boolean;
+  /**
+   * Bumped on every poll-triggered refresh attempt (successful or not).
+   * Test-only — production code doesn't read this. Lets the test assert
+   * "advancing fake time by N intervals fired the refresh fn N times"
+   * without spelunking the cache module's internal counters.
+   */
+  tickCount: number;
+}
+
+const pollState: PollWorkerState = {
+  handle: null,
+  inflight: false,
+  tickCount: 0,
+};
+
+/**
+ * Resolve the poll interval from env. Returns 0 when polling should be
+ * disabled (env value `"0"`, exactly) and a positive integer otherwise.
+ * Defensive parsing: a typo'd value falls back to the default rather
+ * than silently disabling — only the literal `"0"` disables.
+ *
+ * Exported so operator-docs / diagnostic tools can mirror the same
+ * resolution shape without re-parsing the env var.
+ */
+export function resolvePromptsPollIntervalSec(): number {
+  const raw = process.env["STAMP_PROMPTS_POLL_INTERVAL_SEC"];
+  if (raw === undefined || raw === null || raw === "") {
+    return DEFAULT_PROMPTS_POLL_INTERVAL_SEC;
+  }
+  // Exact "0" is the documented opt-out signal.
+  if (raw === "0") return 0;
+  // Require an explicit integer shape. `Number("   ")` and `Number("\n")`
+  // both return 0, which would otherwise sneak through as "disable
+  // polling" — silent disable on whitespace is exactly the failure mode
+  // the AC explicitly avoids ("setting interval to 0 prevents fetches").
+  // Operators get the disable behavior ONLY by writing the literal "0".
+  if (!/^-?\d+$/.test(raw)) {
+    logLine(
+      "warn",
+      `STAMP_PROMPTS_POLL_INTERVAL_SEC=${JSON.stringify(raw)} is not a non-negative integer; falling back to default ${DEFAULT_PROMPTS_POLL_INTERVAL_SEC}s`,
+    );
+    return DEFAULT_PROMPTS_POLL_INTERVAL_SEC;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    // Operator typo (e.g. "3600s" or "1h"). Log once at start; fall
+    // back to the default rather than silently disabling — silent
+    // disable would mask a stale-cache symptom for hours.
+    logLine(
+      "warn",
+      `STAMP_PROMPTS_POLL_INTERVAL_SEC=${JSON.stringify(raw)} is not a non-negative integer; falling back to default ${DEFAULT_PROMPTS_POLL_INTERVAL_SEC}s`,
+    );
+    return DEFAULT_PROMPTS_POLL_INTERVAL_SEC;
+  }
+  // Clamp tiny non-zero values to the floor. Operators who want polling
+  // disabled use 0 explicitly; values like 1 or 2 are almost certainly
+  // a mistake (the cache module's lock file would still serialize them,
+  // but the resulting log noise has no diagnostic value).
+  if (n > 0 && n < MIN_PROMPTS_POLL_INTERVAL_SEC) {
+    logLine(
+      "warn",
+      `STAMP_PROMPTS_POLL_INTERVAL_SEC=${n} is below the floor of ${MIN_PROMPTS_POLL_INTERVAL_SEC}s; clamping to floor`,
+    );
+    return MIN_PROMPTS_POLL_INTERVAL_SEC;
+  }
+  return n;
+}
+
+/**
+ * Run one poll tick: invoke the shared `refreshFn` (same DI seam the
+ * webhook route uses; production = `cloneOrFetchPromptsCache`). Errors are
+ * caught and logged — the next tick will retry, so a transient network
+ * failure doesn't crash the worker.
+ *
+ * `inflight` guards against the case where a prior tick's refresh hasn't
+ * settled yet (e.g. operator set a 10s interval and the first git fetch
+ * over a slow link took 12s). The cache module would coalesce internally,
+ * but skipping at this layer avoids the second log line entirely.
+ *
+ * Exported (`__runPollTickForTests`) so tests can fire a tick without
+ * having to drive `setInterval` directly — fake timers + an async tick
+ * handler is a known-finicky combination, and a direct invocation keeps
+ * each test's intent crisp.
+ */
+async function runPollTick(opts: CloneOrFetchOpts): Promise<void> {
+  if (pollState.inflight) {
+    logLine(
+      "info",
+      "prompts-poll: skipping tick — previous refresh still in flight",
+    );
+    return;
+  }
+  pollState.inflight = true;
+  pollState.tickCount += 1;
+  try {
+    const result = await refreshFn(opts);
+    logLine(
+      "info",
+      `prompts-poll: refresh ok sha=${result.commitSha} at=${result.refreshedAt}`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logLine("error", `prompts-poll: refresh failed: ${msg}`);
+  } finally {
+    pollState.inflight = false;
+  }
+}
+
+/**
+ * Start the periodic-poll backstop. Idempotent — calling twice without an
+ * intervening stop is a no-op (logs a warning so the duplicate call is
+ * visible during refactoring but doesn't double-arm the interval).
+ *
+ * Gating logic per AGT-376 ACs:
+ *
+ *   1. `STAMP_PROMPTS_REPO_URL` unset → no-op. The whole feature is opt-in;
+ *      Phase A deployments (bundled prompts at `/etc/stamp/reviewers/`)
+ *      don't need a polling worker.
+ *   2. `STAMP_PROMPTS_POLL_INTERVAL_SEC=0` → no-op. Explicit operator
+ *      opt-out — typical when the webhook is the only source and an
+ *      hourly fetch would clutter logs.
+ *   3. Otherwise → arm `setInterval` against `runPollTick`. The handle is
+ *      `unref()`'d so an idle daemon (no traffic, no webhooks) can still
+ *      exit cleanly under SIGTERM; the listener's `close` callback calls
+ *      `stopPromptsPollWorker` for symmetric shutdown.
+ *
+ * The poll worker shares the `refreshFn` DI seam with the webhook route,
+ * so tests that override `refreshFn` via `__setRefreshFnForTests` see
+ * both surfaces drive the same stub. Production callers get
+ * `cloneOrFetchPromptsCache` which has its own lock + coalescing — a poll
+ * tick that races a webhook-triggered refresh collapses to a single
+ * fetch without further coordination at this layer.
+ */
+export function startPromptsPollWorker(): void {
+  if (pollState.handle !== null) {
+    logLine("warn", "prompts-poll: already started — ignoring duplicate start");
+    return;
+  }
+
+  // AC bullet 4: only run when STAMP_PROMPTS_REPO_URL is set.
+  const opts = buildRefreshOpts();
+  if (!opts) {
+    // Phase A deployment — Phase B feature isn't engaged. Don't even log;
+    // the bootstrap binary's silent no-op shape (AGT-375) is the
+    // precedent here.
+    return;
+  }
+
+  // AC bullet 2: STAMP_PROMPTS_POLL_INTERVAL_SEC=0 disables.
+  const intervalSec = resolvePromptsPollIntervalSec();
+  if (intervalSec === 0) {
+    logLine(
+      "info",
+      "prompts-poll: disabled (STAMP_PROMPTS_POLL_INTERVAL_SEC=0)",
+    );
+    return;
+  }
+
+  const intervalMs = intervalSec * 1000;
+  const handle = setInterval(() => {
+    // Don't propagate the rejection — runPollTick already catches and
+    // logs. The void cast keeps eslint/tsc happy about the unhandled
+    // promise from an async callback.
+    void runPollTick(opts);
+  }, intervalMs);
+  // unref so the daemon can still exit cleanly when nothing else is
+  // keeping the event loop alive (CI, ephemeral test harnesses).
+  handle.unref();
+  pollState.handle = handle;
+
+  logLine(
+    "info",
+    `prompts-poll: started (interval=${intervalSec}s, url=${opts.url}, ref=${opts.ref}, cacheRoot=${opts.cacheRoot})`,
+  );
+}
+
+/**
+ * Stop the periodic-poll backstop. Safe to call when not started (no-op).
+ * Production callers invoke from `server.close()` for clean shutdown;
+ * tests call between cases to reset state.
+ */
+export function stopPromptsPollWorker(): void {
+  if (pollState.handle === null) return;
+  clearInterval(pollState.handle);
+  pollState.handle = null;
+  pollState.inflight = false;
+}
+
+/**
+ * Test-only reset of the poll-worker state. Tests fire back-to-back
+ * intervals from one test case to the next, and a stale `tickCount` /
+ * `inflight` flag would otherwise leak across cases. Production code
+ * never calls this — the daemon starts with a fresh state object.
+ */
+export function __resetPollStateForTests(): void {
+  if (pollState.handle !== null) {
+    clearInterval(pollState.handle);
+  }
+  pollState.handle = null;
+  pollState.inflight = false;
+  pollState.tickCount = 0;
+}
+
+/**
+ * Test-only direct fire of one poll tick. Fake timers + an async
+ * `setInterval` callback is a known-finicky combination — driving the
+ * tick directly keeps each test's intent crisp. Returns the same promise
+ * the interval callback would have awaited.
+ *
+ * Returns `null` when polling would be a no-op (URL unset). Tests that
+ * exercise the disabled paths assert on `pollState.tickCount` staying
+ * at 0 across `tick()` advances rather than calling this.
+ */
+export async function __runPollTickForTests(): Promise<void | null> {
+  const opts = buildRefreshOpts();
+  if (!opts) return null;
+  await runPollTick(opts);
+  return;
+}
+
+/**
+ * Test-only introspection of the poll worker's state. Lets tests assert
+ * "the interval was armed" / "tickCount bumped after N ticks" without
+ * mutating module-private state. Returns a snapshot, not the live
+ * object, so callers can't accidentally mutate it.
+ */
+export function __getPollStateForTests(): {
+  armed: boolean;
+  inflight: boolean;
+  tickCount: number;
+} {
+  return {
+    armed: pollState.handle !== null,
+    inflight: pollState.inflight,
+    tickCount: pollState.tickCount,
+  };
+}
+
+// ─── Server lifecycle ─────────────────────────────────────────────────
+
 export const HTTP_DEFAULT_PORT = DEFAULT_PORT;
 
 export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer> {
@@ -706,6 +989,20 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
   });
   server.listen(port, () => {
     logLine("info", `listening on :${port}`);
+    // Arm the periodic-poll backstop AFTER the listen-success callback
+    // — keeps the boot ordering predictable (listener up, then the
+    // worker that depends on the same env-var fan-out). The worker is
+    // a no-op when STAMP_PROMPTS_REPO_URL is unset, so Phase A
+    // deployments see no behavior change.
+    startPromptsPollWorker();
+  });
+  // Symmetric shutdown: when the server closes (operator-driven or test
+  // cleanup), stop the poll worker so the interval doesn't leak into
+  // the next listener instance. `unref` already lets the process exit;
+  // this is belt-and-suspenders for test reuse + future graceful-
+  // shutdown supervisors.
+  server.once("close", () => {
+    stopPromptsPollWorker();
   });
   return server;
 }
