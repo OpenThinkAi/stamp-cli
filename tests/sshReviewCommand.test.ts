@@ -354,3 +354,180 @@ describe("runReview — server-attested SSH transport", () => {
     }
   });
 });
+
+// AGT-397: Shape 4 (server-attested without code transfer). Reviewers are
+// declared in `.stamp/config.yml` WITHOUT a `prompt:` path — the stamp-
+// server resolves the prompt from its bundled filesystem cache (AGT-370)
+// by reviewer name. `stamp review` must route through the SSH transport
+// and never try to read prompt bytes from the merge-base tree.
+
+/**
+ * Variant of `setupRepoWithReviewServer` where the reviewer entry has
+ * NO `prompt:` field. Otherwise identical (same trusted-keys manifest +
+ * .pub file + origin pointing at the stamp server).
+ */
+function setupRepoShape4(): Fixture {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "stamp-ssh-shape4-")));
+  const repo = join(tmp, "repo");
+  mkdirSync(repo);
+  git(["init", "-q", "-b", "main", repo], tmp);
+  git(["config", "user.email", "t@t.t"], repo);
+  git(["config", "user.name", "t"], repo);
+  git(["config", "commit.gpgsign", "false"], repo);
+  git(
+    ["remote", "add", "origin", "ssh://git@stamp.example.com:22/srv/git/acme/widget.git"],
+    repo,
+  );
+
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const serverKeyPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+  const serverFp = fingerprintFromPem(serverKeyPem);
+
+  mkdirSync(join(repo, ".stamp", "trusted-keys"), { recursive: true });
+  // No `.stamp/reviewers/` directory at all — Shape 4's defining trait.
+  writeFileSync(
+    join(repo, ".stamp", "config.yml"),
+    [
+      "branches:",
+      "  main:",
+      "    required: [security]",
+      "    review_server: ssh://git@stamp.example.com:22",
+      "reviewers:",
+      "  security: {}",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(repo, ".stamp", "trusted-keys", "manifest.yml"),
+    [
+      "keys:",
+      "  review-server-prod:",
+      `    fingerprint: ${serverFp}`,
+      "    capabilities: [server]",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(repo, ".stamp", "trusted-keys", "server-prod.pub"),
+    serverKeyPem,
+  );
+  writeFileSync(join(repo, "README.md"), "# fixture\n");
+  git(["add", "-A"], repo);
+  git(["commit", "-q", "-m", "init"], repo);
+  git(["checkout", "-q", "-b", "feature"], repo);
+  writeFileSync(join(repo, "src.txt"), "hello\n");
+  git(["add", "src.txt"], repo);
+  git(["commit", "-q", "-m", "add src"], repo);
+
+  const prevCwd = process.cwd();
+  process.chdir(repo);
+  return {
+    repo,
+    serverKeyPem,
+    signServerApproval: (approval) => {
+      return sign(null, canonicalSerializeApproval(approval), privateKey).toString("base64");
+    },
+    restoreCwd: () => process.chdir(prevCwd),
+  };
+}
+
+describe("runReview — Shape 4: reviewers without prompt: (AGT-397)", () => {
+  let cleanup: (() => void) | null = null;
+  let fx: Fixture | null = null;
+
+  beforeEach(() => {
+    fx = setupRepoShape4();
+    const repo = fx.repo;
+    const restoreCwd = fx.restoreCwd;
+    cleanup = () => {
+      restoreCwd();
+      rmSync(repo, { recursive: true, force: true });
+    };
+  });
+
+  afterEach(() => {
+    if (cleanup) cleanup();
+    cleanup = null;
+    fx = null;
+  });
+
+  it("routes through SSH and persists the signed row even with `prompt:` omitted from config", async () => {
+    const baseSha = git(["rev-parse", "main"], fx!.repo).trim();
+    const headSha = git(["rev-parse", "HEAD"], fx!.repo).trim();
+    const diff = git(["diff", "main..HEAD"], fx!.repo);
+    const diffSha256 = createHash("sha256").update(diff, "utf8").digest("hex");
+
+    const serverFp = fingerprintFromPem(fx!.serverKeyPem);
+    const approval: ApprovalV4 = {
+      reviewer: "security",
+      verdict: "approved",
+      prompt_sha256: "a".repeat(64),
+      diff_sha256: diffSha256,
+      base_sha: baseSha,
+      head_sha: headSha,
+      trusted_keys_snapshot_sha256: "sha256:" + "b".repeat(64),
+      issued_at: "2026-05-17T18:42:13Z",
+      server_key_id: serverFp,
+    };
+    const signature = fx!.signServerApproval(approval);
+
+    const sshFake: SshSpawnFn = async () => ({
+      stdout:
+        JSON.stringify({
+          verdict: "approved" as const,
+          prose: "no findings",
+          approval,
+          signature,
+        }) + "\n",
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+    });
+
+    const cap = captureStreams();
+    try {
+      await runReview({
+        diff: "main..feature",
+        _sshSpawnForTest: sshFake,
+      });
+    } finally {
+      cap.restore();
+    }
+
+    // The SSH path must have run (the local-LLM branch would have errored
+    // out on the missing prompt path with the AGT-397 message — its
+    // absence in stderr is the load-bearing assertion).
+    assert.match(cap.stdout, /\[server-attested\]/);
+    assert.match(cap.stdout, /verdict: approved/);
+    assert.equal(
+      cap.stderr.includes('no `prompt:` configured'),
+      false,
+      `local-only prompt-missing error must NOT fire in server-attested mode; stderr was: ${cap.stderr}`,
+    );
+
+    const db = new DatabaseSync(stampStateDbPath(fx!.repo));
+    try {
+      const row = db
+        .prepare(
+          `SELECT verdict, server_approval_json, server_signature_b64,
+                  server_key_id, schema_version
+             FROM reviews
+            WHERE reviewer = ? AND base_sha = ? AND head_sha = ?`,
+        )
+        .get("security", baseSha, headSha) as {
+        verdict: string;
+        server_approval_json: string;
+        server_signature_b64: string;
+        server_key_id: string;
+        schema_version: number;
+      };
+      assert.ok(row, "expected a server-attested row to be inserted");
+      assert.equal(row.verdict, "approved");
+      assert.equal(row.schema_version, REVIEW_ROW_SCHEMA_V4);
+      assert.equal(row.server_key_id, serverFp);
+      assert.equal(row.server_signature_b64, signature);
+    } finally {
+      db.close();
+    }
+  });
+});
