@@ -5,6 +5,43 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 2.1.0 — 2026-05-21
+
+Adds **Shape 4** as a documented and supported deployment topology: GitHub primary + server-attested reviews + no code transfer to stamp-server. Driven by the [shape-2-topology-correction](https://github.com/OpenThinkAi/stamp-cli/blob/main/docs/migration-1.x-to-2.x.md#shape-4--github-primary-server-attested-without-code-transfer-private-repos) project — the topology lets private/internal repos keep code on its git host while still getting server-attested verdicts. Includes a v4→v5 envelope schema bump (breaking; v4 envelopes are rejected with a clear "schema too old" error) and a config validator change that's backward-compatible for Shape 1/2 deployments but unlocks the cleaner Shape 4 config shape.
+
+### Added
+
+- **Shape 4 deployment shape.** New section in [`docs/migration-1.x-to-2.x.md`](docs/migration-1.x-to-2.x.md) describing GitHub primary + server-attested + no code mirror. The stamp-server reads canonical reviewer prompts from `/etc/stamp/reviewers/<name>.md` bundled into its Docker image at build time; the operator's repo never carries `.stamp/reviewers/*.md`. Trust property is identical to Shape 2 (server controls prompt bytes), but without the bare-repo dependency that forced operators to mirror their full source.
+- **Server-side prompt cache.** `src/server/promptFetch.ts` replaces the bare-repo `git show base_sha:.stamp/reviewers/<name>.md` fetch with `readFileSync(${STAMP_PROMPTS_DIR:-/etc/stamp/reviewers}/<name>.md)`. The server no longer maintains a bare clone of every reviewed repo for prompt resolution.
+- **Image-bundled reviewer prompts.** `server/reviewers/{security,standards,product}.md` are now part of the repo and the `server/Dockerfile` copies them into `/etc/stamp/reviewers/` at build time (mode `0644` root:root). `server/entrypoint.sh` emits a one-line stderr boot inventory of the prompt files for ops visibility. New [`server/README.md#reviewer-prompts`](server/README.md#reviewer-prompts) documents the editing/rebuild workflow.
+- **Optional `reviewers.<name>.prompt`.** `src/lib/config.ts` accepts a `reviewers:` block where `prompt:` is omitted on a per-reviewer basis. In server-attested mode the omitted field is fine — the server is the canonical source. In local-only modes (`stamp review --plan`, `--headless`, or `stamp review` against a branch rule without `review_server:`), the command errors with a clear "no `prompt:` configured for reviewer X" message naming both resolution paths (add `prompt:` or add `review_server:`).
+
+### Changed (breaking)
+
+- **v4 envelope → v5 envelope.** `CURRENT_V4_SCHEMA_VERSION` and `MIN_ACCEPTED_V4_SCHEMA_VERSION` both bump from 4 to 5. The manifest-snapshot binding (`manifest_snapshot_sha256`) moves from per-approval (`ApprovalV4.trusted_keys_snapshot_sha256`, removed) to the outer envelope (`AttestationPayloadV4.manifest_snapshot_sha256`, signed by the operator). `verifyV4ManifestSnapshot` runs once per envelope; the per-approval check is gone. v4 envelopes are rejected by the v5 verifier with the actionable error `v4 attestation schema_version 4 is below minimum 5 — re-create the merge with a current stamp-cli build`. No live v4 envelopes exist in production (HiveDB had rolled back to operator-attested in May 2026), so the breaking bump is consequence-free for known deployments.
+- **Verifier no longer recomputes `prompt_sha256` from the merge-base tree.** With Shape 4 in scope, the prompts aren't in the operator's repo — there's nothing to recompute against. The server-signed `prompt_sha256` inside each approval body is now trusted by transitivity: manifest (at `base_sha`) → server key with `server` capability → signed approval body → `prompt_sha256`. The tree-recompute was a belt-and-suspenders second-line defense, not the trust anchor; documented in `src/lib/v4Trust.ts`'s `verifyV4ApprovalSignatures` docstring with explicit "do not re-introduce without re-opening the topology decision" guidance.
+
+### Removed
+
+- `ApprovalV4.trusted_keys_snapshot_sha256` field (moved to outer envelope as `manifest_snapshot_sha256`).
+- `defaultRepoResolver` and `fetchManifestAtBaseSha` from `src/server/promptFetch.ts` (replaced by `defaultPromptCacheResolver`).
+- `STAMP_REPO_ROOT` env var on the server-attested path (replaced by `STAMP_PROMPTS_DIR`, default `/etc/stamp/reviewers`). `src/server/reviewPipeline.ts` emits a one-time stderr warning at boot if `STAMP_REPO_ROOT` is set, naming the rename and the new default.
+
+### Migration notes for operators
+
+- **Shape 2 (mirror) deployments**: no action required. Server-attested mode continues to work; the new validator accepts your existing `reviewers:` block with `prompt:` paths unchanged.
+- **Shape 4 deployments** (GitHub primary + server-attested + no mirror): see the new `docs/migration-1.x-to-2.x.md` Shape 4 walkthrough. Re-key is NOT required — the server review-signing key persists across the upgrade.
+- **Self-hosted forks of stamp-server**: rebuild the Docker image from the 2.1.0 source so `/etc/stamp/reviewers/` is populated. Without this, server-attested reviews return `no_such_file` errors on every request.
+
+### Provenance
+
+- AGT-370 (envelope reshape + prompt-cache resolver + verifier updates): commits `84bd1f7`, `1cb08d8`, `298c15c`, `7abd8cf`, `e3555d0`, `3e7bc69`.
+- AGT-371 (Docker image prompt bundle): commits `a179c71`, `4a918bb`.
+- AGT-372 (Shape 4 docs): commit `dc74d68`.
+- AGT-397 (validator relax for optional `prompt:`): commits `815c9f8`, `09531b9`.
+
+---
+
 ## 2.0.2 — 2026-05-19
 
 Three setup-friction bug fixes surfaced from a real Anglepoint-Inc/hivedb
