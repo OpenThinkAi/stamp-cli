@@ -356,6 +356,7 @@ describe("runVerifyPr v3 — rejection modes", () => {
         head_sha: env.payload.head_sha,
         target_branch: env.payload.target_branch,
         diff_sha256: env.payload.diff_sha256!,
+        manifest_snapshot_sha256: env.payload.manifest_snapshot_sha256!,
         approvals: env.payload.approvals as ApprovalEntryV4[],
         checks: env.payload.checks as CheckAttestationV4[],
         trust_anchor_signatures: [],

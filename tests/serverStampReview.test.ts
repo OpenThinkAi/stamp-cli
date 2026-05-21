@@ -56,17 +56,16 @@ const HEAD_SHA = "fedcba9876543210fedcba9876543210fedcba98";
 interface Harness {
   dbPath: string;
   authPath: string;
-  /** Server's bare-repo root (`STAMP_REPO_ROOT`). Optional —
-   *  populated only by setups that need a fixture bare repo. */
-  repoRoot?: string;
-  /** SHA the fixture bare repo's prompt was committed at. Useful for
-   *  tests that need to send a matching `--base-sha`. */
-  fixtureBaseSha?: string;
+  /** AGT-370: server's filesystem prompt cache root
+   *  (`STAMP_PROMPTS_DIR`). Replaces the v4-era bare-repo root
+   *  (`STAMP_REPO_ROOT`, removed). Populated only by setups that need
+   *  the pipeline's prompt fetch to succeed. */
+  promptCacheRoot?: string;
   /** Absolute path to a fixture review-signing key minted for the test
    *  (mode 0600, sibling .pub written). Wired into the verb's env as
    *  `REVIEW_SIGNING_KEY_PATH` so the pipeline's signing-key loader
    *  resolves to this file instead of `/srv/git/.stamp-state/...`. Only
-   *  populated by `setupWithFixtureBare`. */
+   *  populated by `setupWithFixturePromptCache`. */
   signingKeyPath?: string;
   /** Fingerprint (sha256:<hex>) of the fixture review-signing key.
    *  Used by tests to assert that the signed approval names this key. */
@@ -104,28 +103,28 @@ function setup(callerRole: "owner" | "admin" | "member" | "none"): Harness {
 }
 
 /**
- * Build a fixture bare repo at `<harness.repoRoot>/widget-co.git`
- * containing `.stamp/reviewers/security.md` AND
- * `.stamp/trusted-keys/manifest.yml` at a real commit, plus a fixture
- * Ed25519 review-signing key minted at the harness path. Returns the
- * commit SHA, the signing-key path, and the key's fingerprint so the
- * test can wire them into the verb's env and assert against the signed
- * response.
+ * Provision a fixture filesystem prompt cache (AGT-370 — replaces the
+ * bare-repo fixture) plus a fixture Ed25519 review-signing key.
  *
- * AGT-331 added the manifest + signing-key dependencies: the pipeline's
- * structural-error order is prompt → manifest → signing-key → anthropic.
- * Without all three on disk the verb can't reach the API-key check
- * (which is the verb-to-pipeline wiring this fixture exists to exercise).
+ * The cache holds `<promptCacheRoot>/security.md` so the pipeline's
+ * prompt fetch resolves. The signing-key file is minted at mode 0600
+ * (required by `loadReviewSigningKey`) and the path is exported as
+ * `REVIEW_SIGNING_KEY_PATH` for the verb subprocess.
+ *
+ * After AGT-370 the pipeline's structural-error order is just:
+ * prompt → signing-key → anthropic. The manifest fetch is gone
+ * (the server no longer reads it).
  */
-function setupWithFixtureBare(
+function setupWithFixturePromptCache(
   callerRole: "owner" | "admin" | "member",
 ): Harness {
   const h = setup(callerRole);
-  const repoRoot = path.join(path.dirname(h.dbPath), "srv-git");
-  mkdirSync(repoRoot);
-  const work = path.join(path.dirname(h.dbPath), "work");
-  mkdirSync(work);
-  const bare = path.join(repoRoot, "widget-co.git");
+  const promptCacheRoot = path.join(path.dirname(h.dbPath), "prompts");
+  mkdirSync(promptCacheRoot, { recursive: true });
+  writeFileSync(
+    path.join(promptCacheRoot, "security.md"),
+    "# security reviewer\n",
+  );
 
   // Mint a fixture review-signing key in the harness state dir. The
   // pipeline's loader will read this from REVIEW_SIGNING_KEY_PATH at
@@ -140,56 +139,12 @@ function setupWithFixtureBare(
     format: "pem",
   }) as string;
   const publicPem = publicKey.export({ type: "spki", format: "pem" }) as string;
-  // `writeFileSync` honors the mode option on creation, which is what
-  // we're doing here (fresh tmp file). A follow-up chmodSync is the
-  // production defensive-pattern for files that may already exist on
-  // disk (see `mintNewKey` in reviewSigningKey.ts), but it's redundant
-  // for a one-shot test fixture write — the mode bits are already
-  // 0600 after writeFileSync returns.
   writeFileSync(signingKeyPath, privatePem, { mode: 0o600 });
   const signingKeyFingerprint = fingerprintFromPem(publicPem);
 
-  // Commit the matching manifest entry so the pipeline's manifest fetch
-  // resolves and the snapshot hash binds to a manifest that trusts this
-  // key for `server` capability. The fixture's manifest is byte-stable
-  // (sorted keys, no comments) so the snapshot hash test stays
-  // deterministic.
-  const manifestYaml = [
-    `keys:`,
-    `  review-server-test:`,
-    `    fingerprint: ${signingKeyFingerprint}`,
-    `    capabilities: [server]`,
-    ``,
-  ].join("\n");
-
-  const run = (args: string[], cwd: string) => {
-    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
-    return r.stdout.trim();
-  };
-  run(["init", "-q", "-b", "main"], work);
-  run(["config", "user.email", "test@example.com"], work);
-  run(["config", "user.name", "Test"], work);
-  run(["config", "commit.gpgsign", "false"], work);
-  mkdirSync(path.join(work, ".stamp", "reviewers"), { recursive: true });
-  writeFileSync(
-    path.join(work, ".stamp", "reviewers", "security.md"),
-    "# security reviewer\n",
-  );
-  mkdirSync(path.join(work, ".stamp", "trusted-keys"), { recursive: true });
-  writeFileSync(
-    path.join(work, ".stamp", "trusted-keys", "manifest.yml"),
-    manifestYaml,
-  );
-  run(["add", "-A"], work);
-  run(["commit", "-q", "-m", "fixture"], work);
-  const baseSha = run(["rev-parse", "HEAD"], work);
-  run(["clone", "-q", "--bare", work, bare], path.dirname(h.dbPath));
-
   return {
     ...h,
-    repoRoot,
-    fixtureBaseSha: baseSha,
+    promptCacheRoot,
     signingKeyPath,
     signingKeyFingerprint,
   };
@@ -211,8 +166,8 @@ function runStampReview(
     STAMP_SERVER_DB_PATH: harness.dbPath,
     SSH_USER_AUTH: harness.authPath,
   };
-  if (harness.repoRoot) {
-    env.STAMP_REPO_ROOT = harness.repoRoot;
+  if (harness.promptCacheRoot) {
+    env.STAMP_PROMPTS_DIR = harness.promptCacheRoot;
   }
   if (harness.signingKeyPath) {
     env.REVIEW_SIGNING_KEY_PATH = harness.signingKeyPath;
@@ -267,10 +222,14 @@ describe("stamp-review — verb reaches pipeline (AGT-330 wiring)", () => {
     // clear stderr message. This pins the verb-to-pipeline wiring AND
     // confirms the pipeline's typed-error path crosses the SSH boundary
     // cleanly.
-    const h = setupWithFixtureBare("member");
+    const h = setupWithFixturePromptCache("member");
     try {
       const diff = Buffer.from("diff --git a/foo b/foo\n");
-      const r = runStampReview(h, argvFor(diff, { "--base-sha": h.fixtureBaseSha! }), {
+      // base_sha is opaque to the pipeline after AGT-370 (it's just
+      // baked into the signed approval body; the server never resolves
+      // it back to a real commit). The verb still validates it as a
+      // 40-hex SHA per the wire protocol.
+      const r = runStampReview(h, argvFor(diff, { "--base-sha": BASE_SHA }), {
         stdin: diff,
         envOverrides: { ANTHROPIC_API_KEY: undefined },
       });

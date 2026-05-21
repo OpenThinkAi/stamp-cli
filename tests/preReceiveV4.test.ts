@@ -63,6 +63,7 @@ import {
   verifyV4Approvals,
   verifyV4Checks,
   verifyV4DiffHash,
+  verifyV4ManifestSnapshot,
   verifyV4MergeStructure,
   verifyV4OuterSignature,
   verifyV4SignerTrust,
@@ -75,7 +76,11 @@ import {
 // Schema version constant used when building test payloads. The
 // dispatch-threshold test imports the real constants from
 // attestation.ts / attestationV4.ts to assert the contract.
-const SCHEMA_V4 = 4;
+// Schema version produced by stamp 2.x post-AGT-370 (per-approval
+// trusted_keys_snapshot_sha256 removed; outer manifest_snapshot_sha256
+// added). Keeping the SCHEMA_V4 constant name for grep-locality with
+// the v4Trust pipeline name — the integer moved, the surface didn't.
+const SCHEMA_V4 = 5;
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -342,7 +347,6 @@ function buildSignedApproval(args: {
     diff_sha256: args.diffSha256,
     base_sha: args.baseSha,
     head_sha: args.headSha,
-    trusted_keys_snapshot_sha256: args.manifestSnapshot,
     issued_at: "2026-05-17T12:34:56Z",
     server_key_id: args.serverKey.fingerprint,
   };
@@ -375,6 +379,7 @@ function buildPayload(h: Harness, overrides?: Partial<AttestationPayloadV4>): At
     head_sha: h.headSha,
     target_branch: "main",
     diff_sha256: h.diffSha256,
+    manifest_snapshot_sha256: h.manifestSnapshot,
     approvals: [approvalEntry],
     checks: [],
     trust_anchor_signatures: [],
@@ -395,6 +400,7 @@ function runAllPhases(input: PhaseInputV4): string | null {
     verifyV4TargetBranch,
     verifyV4SignerTrust,
     verifyV4OuterSignature,
+    verifyV4ManifestSnapshot,
     verifyV4Approvals,
     verifyV4DiffHash,
     verifyV4ApprovalSignatures,
@@ -540,14 +546,29 @@ describe("pre-receive v4 — rejection modes", () => {
     assert.match(reason!, /v4 diff_sha256 mismatch/);
   });
 
-  it("rejects when an approval's prompt_sha256 doesn't match the prompt at base_sha", () => {
+  it("AGT-370: accepts server-signed prompt_sha256 without re-hashing the merge-base tree", () => {
+    // AGT-370 reshape: the verifier no longer recomputes prompt_sha256
+    // from the merge-base tree. The server-signed value is trusted
+    // because the server's signature over canonicalSerializeApproval()
+    // is validated by `verifyV4ApprovalSignatures` and the server's
+    // key is anchored to the manifest at base_sha. The trust chain is
+    // manifest → server key → signed approval → prompt_sha256.
+    //
+    // Concretely: an approval that claims a "wrong" prompt hash (one
+    // that doesn't match anything in the merge-base tree) still
+    // verifies — provided the SERVER signed that claim. The chain
+    // commits to "the server claimed prompt_sha256 = X"; the operator
+    // can validate the server's claim against their own prompt cache
+    // if they want, but the verifier doesn't do tree-side recompute
+    // anymore.
     h = setupHarness();
     process.chdir(h.repo);
 
-    // Sign an approval that claims a wrong prompt hash; the inner
-    // signature is over the wrong-hash approval body so it self-
-    // verifies — but the verifier then re-hashes the prompt file at
-    // base_sha and the comparison fails.
+    // Sign an approval claiming a prompt hash that doesn't match the
+    // committed `.stamp/reviewers/security.md` content. Pre-AGT-370
+    // this would reject at `verifyV4ApprovalSignatures` with a
+    // "prompt_sha256 mismatch" error. Post-AGT-370 the verifier
+    // accepts.
     const approval = buildSignedApproval({
       reviewer: "security",
       baseSha: h.baseSha,
@@ -561,29 +582,62 @@ describe("pre-receive v4 — rejection modes", () => {
     const sig = signOuter(h, payload);
     const input = h.inputFor(payload, sig);
     const reason = runAllPhases(input);
-    assert.match(reason!, /prompt_sha256 mismatch/);
+    assert.equal(
+      reason,
+      null,
+      `verifier must accept server-signed prompt_sha256 without tree recompute; got: ${reason}`,
+    );
   });
 
-  it("dispatcher threshold: only schema_version >= 4 enters the v4 pipeline (regression on the integer comparison)", async () => {
+  it("AGT-370: still rejects when the server's signature over the approval doesn't verify (tampering guard)", () => {
+    // Sanity check that AGT-370's removal of the prompt recompute
+    // didn't loosen the per-approval signature check. If someone
+    // tampers with the inner signed body OR the signature itself,
+    // `verifyV4ApprovalSignatures` rejects via Ed25519 failure —
+    // independent of any tree-side check.
+    h = setupHarness();
+    process.chdir(h.repo);
+
+    const approval = buildSignedApproval({
+      reviewer: "security",
+      baseSha: h.baseSha,
+      headSha: h.headSha,
+      diffSha256: h.diffSha256,
+      promptSha256: sha256Hex(REVIEWER_PROMPT),
+      manifestSnapshot: h.manifestSnapshot,
+      serverKey: h.serverKey,
+    });
+    // Tamper: replace the prompt_sha256 on the inner body AFTER the
+    // server signed it. The server's signature was over the original
+    // hash; the post-tamper body re-canonicalizes to different bytes
+    // and Ed25519 verification fails.
+    approval.approval.prompt_sha256 = sha256Hex("tampered after signing");
+    const payload = buildPayload(h, { approvals: [approval] });
+    const sig = signOuter(h, payload);
+    const input = h.inputFor(payload, sig);
+    const reason = runAllPhases(input);
+    assert.match(reason!, /server signature does not verify/);
+  });
+
+  it("dispatcher threshold: only schema_version >= 5 enters the v4-trust pipeline (AGT-370 bump)", async () => {
     // The dispatcher in verifyCommit uses `>= MIN_ACCEPTED_V4_SCHEMA_VERSION`
-    // to decide whether a payload goes through the v4 pipeline. v3
-    // payloads (schema_version: 3) must continue to route to the
-    // legacy v3 path — both verifiers coexist in the bridge era. This
-    // test pins the dispatch contract: the constants must satisfy a
-    // strict ordering so v3 traffic can never accidentally cross into
-    // v4 verification or vice-versa.
+    // to decide whether a payload goes through the v4-trust pipeline.
+    // v3 payloads (schema_version: 3) continue to route to the
+    // legacy v3 path. AGT-370 bumped the v4-axis floor from 4 to 5 —
+    // pre-AGT-370 v4 envelopes (lacking the outer
+    // `manifest_snapshot_sha256` field) now reject at the dispatcher.
     const v3 = await import("../src/lib/attestation.ts");
     const v4 = await import("../src/lib/attestationV4.ts");
-    // v3 floor below v4 floor: schema 3 routes to v3, schema 4 routes to v4.
+    // v3 floor below v4-trust floor.
     assert.ok(v3.MIN_ACCEPTED_PAYLOAD_VERSION < v4.MIN_ACCEPTED_V4_SCHEMA_VERSION);
-    assert.equal(v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, 4);
-    // Anything strictly less than the v4 floor must NOT be considered
-    // a v4 payload by the dispatcher.
-    for (const tooLow of [1, 2, 3]) {
+    assert.equal(v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, 5);
+    // Anything strictly less than the v4-trust floor must NOT be
+    // considered a v4-trust payload by the dispatcher.
+    for (const tooLow of [1, 2, 3, 4]) {
       assert.equal(tooLow >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, false);
     }
-    // Anything >= the v4 floor is a v4 payload.
-    for (const v4Ish of [4, 5, 99]) {
+    // Anything >= the v4-trust floor is in scope.
+    for (const v4Ish of [5, 6, 99]) {
       assert.equal(v4Ish >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, true);
     }
   });
@@ -609,24 +663,22 @@ describe("pre-receive v4 — rejection modes", () => {
     assert.match(reason!, /missing required approvals — security/);
   });
 
-  it("rejects when the trusted_keys_snapshot_sha256 doesn't match the manifest at base_sha", () => {
+  it("rejects when the envelope's manifest_snapshot_sha256 doesn't match the manifest at base_sha (AGT-370)", () => {
+    // AGT-370: the manifest binding moved from per-approval (server-
+    // signed) to outer envelope (operator-signed). The verifier's
+    // check is now a single `verifyV4ManifestSnapshot` phase. We build
+    // a valid envelope, override the outer manifest_snapshot_sha256
+    // to a fake value, re-sign the outer, and assert rejection.
     h = setupHarness();
     process.chdir(h.repo);
 
-    const approval = buildSignedApproval({
-      reviewer: "security",
-      baseSha: h.baseSha,
-      headSha: h.headSha,
-      diffSha256: h.diffSha256,
-      promptSha256: sha256Hex(REVIEWER_PROMPT),
-      manifestSnapshot: "sha256:" + "0".repeat(64),
-      serverKey: h.serverKey,
+    const payload = buildPayload(h, {
+      manifest_snapshot_sha256: "sha256:" + "0".repeat(64),
     });
-    const payload = buildPayload(h, { approvals: [approval] });
     const sig = signOuter(h, payload);
     const input = h.inputFor(payload, sig);
     const reason = runAllPhases(input);
-    assert.match(reason!, /trusted_keys_snapshot_sha256/);
+    assert.match(reason!, /manifest_snapshot_sha256/);
   });
 
   it("rejects when the operator's signer_key_id is missing 'admin' or 'operator' capability", () => {
@@ -1495,16 +1547,19 @@ describe("pre-receive v3 — regression: existing v3 path still works", () => {
   // integer comparison; this test pins the version constants so a
   // future renumber doesn't silently re-route v3 traffic into the
   // v4 verifier.
-  it("v3 schema_version 3 is BELOW the v4 dispatch threshold (sanity check on dispatch constants)", async () => {
+  it("v3 schema_version 3 is BELOW the v4-trust dispatch threshold (sanity check on dispatch constants)", async () => {
     const v3 = await import("../src/lib/attestation.ts");
     const v4 = await import("../src/lib/attestationV4.ts");
     assert.equal(v3.CURRENT_PAYLOAD_VERSION, 3);
     assert.equal(v3.MIN_ACCEPTED_PAYLOAD_VERSION, 3);
-    assert.equal(v4.CURRENT_V4_SCHEMA_VERSION, 4);
-    assert.equal(v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, 4);
+    // AGT-370 bumped both v4-axis constants from 4 to 5.
+    assert.equal(v4.CURRENT_V4_SCHEMA_VERSION, 5);
+    assert.equal(v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, 5);
     // The dispatcher uses `>= MIN_ACCEPTED_V4_SCHEMA_VERSION` so a v3
-    // payload (schema_version === 3) routes to the v3 path.
+    // payload (schema_version === 3) routes to the v3 path; v4
+    // payloads (pre-AGT-370) also now reject.
     assert.equal(3 >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, false);
-    assert.equal(4 >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, true);
+    assert.equal(4 >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, false);
+    assert.equal(5 >= v4.MIN_ACCEPTED_V4_SCHEMA_VERSION, true);
   });
 });

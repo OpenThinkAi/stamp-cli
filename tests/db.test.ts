@@ -297,7 +297,6 @@ describe("AGT-333: server-attested row round-trip", () => {
         diff_sha256: "d".repeat(64),
         base_sha: "a".repeat(40),
         head_sha: "b".repeat(40),
-        trusted_keys_snapshot_sha256: "t".repeat(64),
         issued_at: "2026-05-17T18:42:13Z",
         server_key_id: `sha256:${"e".repeat(64)}`,
       };
@@ -351,7 +350,6 @@ describe("AGT-333: server-attested row round-trip", () => {
         diff_sha256: "d".repeat(64),
         base_sha: base,
         head_sha: head,
-        trusted_keys_snapshot_sha256: "t".repeat(64),
         issued_at: "2026-05-17T18:42:13Z",
         server_key_id: `sha256:${"e".repeat(64)}`,
       };
@@ -404,7 +402,6 @@ describe("AGT-333: server-attested row round-trip", () => {
         diff_sha256: "d".repeat(64),
         base_sha: base,
         head_sha: head,
-        trusted_keys_snapshot_sha256: "t".repeat(64),
         issued_at: "2026-05-17T18:42:13Z",
         server_key_id: `sha256:${"e".repeat(64)}`,
       };
@@ -537,7 +534,6 @@ describe("AGT-333: stamp log --reviews SIGNED-BY marker", () => {
         diff_sha256: "d".repeat(64),
         base_sha: "a".repeat(40),
         head_sha: "c".repeat(40),
-        trusted_keys_snapshot_sha256: "t".repeat(64),
         issued_at: "2026-05-17T18:42:13Z",
         server_key_id: `sha256:${"e".repeat(64)}`,
       };

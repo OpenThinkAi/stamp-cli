@@ -54,7 +54,6 @@ import {
   LEGACY_CLIENT_PR_ATTESTATION_SCHEMA_VERSION,
 } from "../src/lib/prAttestation.ts";
 import { signBytes, verifyBytes } from "../src/lib/signing.ts";
-import { parseManifest, snapshotSha256 } from "../src/lib/trustedKeysManifest.ts";
 import { runVerifyPr } from "../src/commands/verifyPr.ts";
 
 // Tests run `stamp attest` against a real repo + fabricated server
@@ -228,13 +227,6 @@ function setupHarness(args?: { includeReviewServer?: boolean }): Harness {
   };
 }
 
-function manifestSnapshotAtBase(repo: string, baseSha: string): string {
-  const yaml = git(repo, ["show", `${baseSha}:.stamp/trusted-keys/manifest.yml`]);
-  const parsed = parseManifest(yaml);
-  assert.ok(parsed, "manifest must parse at base_sha");
-  return snapshotSha256(parsed);
-}
-
 /**
  * Seed a server-signed approval row at (base, head). Mirrors the
  * shape `requestServerReview` writes after a successful SSH review:
@@ -248,7 +240,6 @@ function seedServerSignedReview(args: {
   headSha: string;
   diffSha256: string;
   serverKey: ServerKey;
-  manifestSnapshot: string;
   verdict?: ApprovalV4["verdict"];
 }): { approval: ApprovalV4; signatureB64: string } {
   const approval: ApprovalV4 = {
@@ -258,7 +249,6 @@ function seedServerSignedReview(args: {
     diff_sha256: args.diffSha256,
     base_sha: args.baseSha,
     head_sha: args.headSha,
-    trusted_keys_snapshot_sha256: args.manifestSnapshot,
     issued_at: "2026-05-17T18:42:13Z",
     server_key_id: args.serverKey.fingerprint,
   };
@@ -329,7 +319,6 @@ describe("runAttest — v3 server-attested PR mode (AGT-355)", () => {
       const head = shaOf(h.repo, "feature");
       const diff = git(h.repo, ["diff", `${base}...${head}`]);
       const diffSha256 = sha256Hex(diff);
-      const manifestSnapshot = manifestSnapshotAtBase(h.repo, base);
 
       const { approval, signatureB64 } = seedServerSignedReview({
         repo: h.repo,
@@ -338,7 +327,6 @@ describe("runAttest — v3 server-attested PR mode (AGT-355)", () => {
         headSha: head,
         diffSha256,
         serverKey: h.serverKey,
-        manifestSnapshot,
       });
 
       runFromRepo(h.repo, () => runAttest({ into: "main", branch: "feature" }));
@@ -421,7 +409,6 @@ describe("runAttest — v3 server-attested PR mode (AGT-355)", () => {
       const head = shaOf(h.repo, "feature");
       const diff = git(h.repo, ["diff", `${base}...${head}`]);
       const diffSha256 = sha256Hex(diff);
-      const manifestSnapshot = manifestSnapshotAtBase(h.repo, base);
 
       seedServerSignedReview({
         repo: h.repo,
@@ -430,7 +417,6 @@ describe("runAttest — v3 server-attested PR mode (AGT-355)", () => {
         headSha: head,
         diffSha256,
         serverKey: h.serverKey,
-        manifestSnapshot,
       });
 
       runFromRepo(h.repo, () => runAttest({ into: "main", branch: "feature" }));

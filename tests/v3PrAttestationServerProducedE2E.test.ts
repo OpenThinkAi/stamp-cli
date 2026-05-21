@@ -154,10 +154,10 @@ interface Harness {
   root: string;
   /** Operator's working repo (where `stamp attest` runs). */
   repo: string;
-  /** Bare repo the server side reads `.stamp/` artifacts from. Same
-   *  base SHA as the operator's repo — we clone working → bare to set
-   *  up. */
-  bareDir: string;
+  /** Server-side filesystem prompt cache (AGT-370 replacement for the
+   *  bare git repo the server used to read prompts from). The pipeline
+   *  reads `<promptCacheRoot>/security.md`. */
+  promptCacheRoot: string;
   home: string;
   prevHome: string | undefined;
   serverKey: ServerSigningMaterial;
@@ -237,18 +237,14 @@ function setupHarness(): Harness {
   git(repo, ["add", "-A"]);
   git(repo, ["commit", "-q", "-m", "initial: seed .stamp/ config"]);
 
-  // Clone to a bare for the server-side resolver. Done BEFORE the
-  // feature branch is created so server-side reads at base_sha hit
-  // the seeded .stamp/ artifacts.
-  const bareDir = path.join(root, "widget-co.git");
-  const cloneResult = spawnSync(
-    "git",
-    ["clone", "-q", "--bare", repo, bareDir],
-    { encoding: "utf8" },
-  );
-  if (cloneResult.status !== 0) {
-    throw new Error(`bare clone failed: ${cloneResult.stderr}`);
-  }
+  // AGT-370: provision the server-side prompt cache. Replaces the
+  // bare-clone fixture that the v4 server used as a prompt source.
+  // The contents are independent of the operator's git history — the
+  // server doesn't read the manifest at all and only needs the
+  // reviewer's prompt text.
+  const promptCacheRoot = path.join(root, "prompts");
+  mkdirSync(promptCacheRoot, { recursive: true });
+  writeFileSync(path.join(promptCacheRoot, "security.md"), REVIEWER_PROMPT);
 
   // Now feature branch with a small change.
   git(repo, ["checkout", "-q", "-b", "feature"]);
@@ -259,7 +255,7 @@ function setupHarness(): Harness {
   return {
     root,
     repo,
-    bareDir,
+    promptCacheRoot,
     home,
     prevHome,
     serverKey,
@@ -308,7 +304,8 @@ async function runRealServerPipeline(args: {
     },
     caller: FIXTURE_USER,
     deps: {
-      repoResolver: () => args.h.bareDir,
+      promptResolver: (reviewer) =>
+        path.join(args.h.promptCacheRoot, `${reviewer}.md`),
       anthropic: approvedMockClient(),
       signingKey: {
         privateKey: args.h.serverKey.privateKey,
@@ -483,9 +480,19 @@ describe("v3 PR-attestation — server-produced end-to-end (AGT-355)", () => {
       assert.equal(entry.approval.diff_sha256, serverApproval.diff_sha256);
       assert.equal(entry.approval.base_sha, serverApproval.base_sha);
       assert.equal(entry.approval.head_sha, serverApproval.head_sha);
+      // AGT-370: the per-approval `trusted_keys_snapshot_sha256` field
+      // is gone; the manifest snapshot binding lives on the outer
+      // envelope (`manifest_snapshot_sha256`, operator-signed). Check
+      // it survives the round-trip through `stamp attest`.
       assert.equal(
-        entry.approval.trusted_keys_snapshot_sha256,
-        serverApproval.trusted_keys_snapshot_sha256,
+        (entry.approval as Record<string, unknown>).trusted_keys_snapshot_sha256,
+        undefined,
+        "per-approval trusted_keys_snapshot_sha256 must be absent post-AGT-370",
+      );
+      assert.match(
+        envelope.payload.manifest_snapshot_sha256!,
+        /^sha256:[0-9a-f]{64}$/,
+        "outer manifest_snapshot_sha256 must be present",
       );
       assert.equal(entry.approval.issued_at, serverApproval.issued_at);
     } finally {

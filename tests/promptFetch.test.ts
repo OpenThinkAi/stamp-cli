@@ -1,27 +1,28 @@
 /**
  * Tests for the server-side canonical-prompt fetch (src/server/promptFetch.ts).
  *
- * Coverage walks the security-critical contract spelled out in AGT-329:
+ * AGT-370 reshape: the prompt source moved from a bare git repo + `git
+ * show` at `base_sha` to a filesystem cache. Coverage walks the new
+ * security-critical contract:
  *   - happy path returns bytes + correct sha256 (bare hex, matching the
  *     ApprovalV4.prompt_sha256 convention)
  *   - every documented failure mode maps to its typed PromptFetchError.kind
- *     (no_such_repo, no_such_ref, no_such_file, ambiguous_sha,
- *      invalid_input, git_error)
- *   - the discriminated-union return shape — no thrown errors for runtime
- *     conditions, only for caller bugs (invalid resolver input)
- *   - hash determinism: identical bytes hash identically across calls and
- *     match a hand-computed sha256 via Node `crypto.createHash`
+ *     (no_such_file, io_error, invalid_input)
+ *   - the discriminated-union return shape — no thrown errors for
+ *     runtime conditions, only for caller bugs (invalid resolver input)
+ *   - hash determinism: identical bytes hash identically across calls
+ *     and match a hand-computed sha256 via Node `crypto.createHash`
  *   - resolver injection: a custom resolver routes the fetch to a
- *     different bare repo, and the default resolver maps single-tenant
- *     `(org, repo)` to `<baseDir>/<repo>.git` while ignoring org
- *   - no fallback: a missing file or missing ref ALWAYS errors, never
- *     returns content from HEAD or any other ref
+ *     different cache path, and the default resolver maps `reviewer`
+ *     to `<cacheRoot>/<reviewer>.md`
+ *   - no fallback: a missing file ALWAYS errors, never returns content
+ *     from some other path
  */
 
 import { strict as assert } from "node:assert";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -33,66 +34,18 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import {
-  defaultRepoResolver,
+  defaultPromptCacheResolver,
   fetchCanonicalPrompt,
-  fetchManifestAtBaseSha,
-  type FetchedManifest,
   type FetchedPrompt,
-  type ManifestFetchResult,
   type PromptFetchError,
-  type RepoResolver,
+  type PromptResolver,
 } from "../src/server/promptFetch.ts";
-
-function git(args: string[], cwd: string): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" });
-}
-
-/**
- * Build a bare repo at `<baseDir>/<name>.git` whose initial commit
- * contains `.stamp/reviewers/<reviewer>.md` with the given content.
- * Returns the bare path + the initial commit SHA so tests can pass it
- * as `baseSha`. Uses a temp working clone for the seed commit, then
- * mirror-pushes into the bare — same pattern as `server/new-stamp-repo`
- * but compressed for tests.
- */
-function buildSeededBareRepo(
-  baseDir: string,
-  name: string,
-  reviewer: string,
-  promptBody: string,
-): { barePath: string; baseSha: string } {
-  const barePath = join(baseDir, `${name}.git`);
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", barePath], {
-    stdio: "pipe",
-  });
-
-  const workDir = mkdtempSync(join(tmpdir(), "stamp-promptfetch-seed-"));
-  try {
-    git(["init", "-q", "-b", "main"], workDir);
-    git(["config", "user.email", "t@example.com"], workDir);
-    git(["config", "user.name", "Test"], workDir);
-    git(["config", "commit.gpgsign", "false"], workDir);
-
-    mkdirSync(join(workDir, ".stamp", "reviewers"), { recursive: true });
-    writeFileSync(join(workDir, ".stamp", "reviewers", `${reviewer}.md`), promptBody);
-    git(["add", "."], workDir);
-    git(["commit", "-q", "-m", "seed"], workDir);
-
-    git(["remote", "add", "origin", barePath], workDir);
-    git(["push", "-q", "origin", "main"], workDir);
-
-    const baseSha = git(["rev-parse", "HEAD"], workDir).trim();
-    return { barePath, baseSha };
-  } finally {
-    rmSync(workDir, { recursive: true, force: true });
-  }
-}
 
 /**
  * Assertion narrowing helper: fail the test loudly if the result isn't
  * the expected discriminant, so the rest of the test body type-checks
- * against `FetchedPrompt`. Easier to read than `if (result.kind !== "ok")`
- * scattered across every test.
+ * against `FetchedPrompt`. Easier to read than scattering `if
+ * (result.kind !== "ok")` across every test.
  */
 function assertOk(
   result: FetchedPrompt | PromptFetchError,
@@ -118,82 +71,70 @@ function assertError(
   }
 }
 
-describe("defaultRepoResolver", () => {
-  it("maps (org, repo) to <baseDir>/<repo>.git, ignoring org in Phase 1", () => {
-    const r = defaultRepoResolver("/srv/git");
-    assert.equal(r("acme", "widget-co"), "/srv/git/widget-co.git");
-    // Different org, same repo → same path (Phase 1 is single-tenant).
-    assert.equal(r("other-org", "widget-co"), "/srv/git/widget-co.git");
+describe("defaultPromptCacheResolver", () => {
+  it("maps reviewer to <cacheRoot>/<reviewer>.md", () => {
+    const r = defaultPromptCacheResolver("/etc/stamp/reviewers");
+    assert.equal(r("security"), "/etc/stamp/reviewers/security.md");
+    assert.equal(r("standards"), "/etc/stamp/reviewers/standards.md");
   });
 
-  it("strips exactly one trailing slash from baseDir", () => {
-    const r = defaultRepoResolver("/srv/git/");
-    assert.equal(r("acme", "widget-co"), "/srv/git/widget-co.git");
+  it("strips exactly one trailing slash from cacheRoot", () => {
+    const r = defaultPromptCacheResolver("/etc/stamp/reviewers/");
+    assert.equal(r("security"), "/etc/stamp/reviewers/security.md");
   });
 
-  it("throws on missing baseDir", () => {
-    assert.throws(() => defaultRepoResolver(""), /baseDir/);
+  it("throws on missing cacheRoot", () => {
+    assert.throws(() => defaultPromptCacheResolver(""), /cacheRoot/);
   });
 
-  it("throws on a repo name containing a path separator", () => {
-    const r = defaultRepoResolver("/srv/git");
-    assert.throws(() => r("acme", "../escape"), /invalid repo name/);
-    assert.throws(() => r("acme", "sub/path"), /invalid repo name/);
+  it("throws on a reviewer name containing a path separator", () => {
+    const r = defaultPromptCacheResolver("/etc/stamp/reviewers");
+    assert.throws(() => r("../escape"), /invalid reviewer name/);
+    assert.throws(() => r("sub/path"), /invalid reviewer name/);
   });
 
-  it("throws on a repo name with a leading dot or dash", () => {
-    const r = defaultRepoResolver("/srv/git");
-    assert.throws(() => r("acme", ".hidden"), /invalid repo name/);
-    assert.throws(() => r("acme", "-flag"), /invalid repo name/);
+  it("throws on a reviewer name with a leading dash", () => {
+    const r = defaultPromptCacheResolver("/etc/stamp/reviewers");
+    assert.throws(() => r("-flag"), /invalid reviewer name/);
   });
 
-  it("throws on an org name with path metacharacters", () => {
-    const r = defaultRepoResolver("/srv/git");
-    assert.throws(() => r("../escape", "widget"), /invalid org name/);
+  it("throws on a reviewer name that's too long", () => {
+    const r = defaultPromptCacheResolver("/etc/stamp/reviewers");
+    // REVIEWER_NAME_RE cap is 64 chars (1 leading + 63 follow). 65 must reject.
+    assert.throws(() => r("a".repeat(65)), /invalid reviewer name/);
   });
 
-  it("accepts the Phase-1 single-tenant convention shape repo names", () => {
-    const r = defaultRepoResolver("/srv/git");
-    assert.equal(r("acme", "widget_co.v2-beta"), "/srv/git/widget_co.v2-beta.git");
+  it("accepts the documented reviewer-name shapes", () => {
+    const r = defaultPromptCacheResolver("/etc/stamp/reviewers");
+    assert.equal(r("security"), "/etc/stamp/reviewers/security.md");
+    assert.equal(r("product_review"), "/etc/stamp/reviewers/product_review.md");
+    assert.equal(r("v2-beta"), "/etc/stamp/reviewers/v2-beta.md");
   });
 });
 
 describe("fetchCanonicalPrompt — happy path", () => {
-  let tmpRoot: string;
-  let baseSha: string;
+  let cacheRoot: string;
   const promptBody = "You are a security reviewer.\n\nReject all hardcoded secrets.\n";
 
   beforeEach(() => {
-    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-")));
-    ({ baseSha } = buildSeededBareRepo(
-      tmpRoot,
-      "widget-co",
-      "security",
-      promptBody,
-    ));
+    cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-")));
+    writeFileSync(join(cacheRoot, "security.md"), promptBody);
   });
 
   afterEach(() => {
-    rmSync(tmpRoot, { recursive: true, force: true });
+    rmSync(cacheRoot, { recursive: true, force: true });
   });
 
-  it("returns bytes + bare-hex sha256 of the prompt at base_sha", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "widget-co",
-      baseSha,
-      "security",
-    );
+  it("returns bytes + bare-hex sha256 of the prompt at the cache path", async () => {
+    const resolver = defaultPromptCacheResolver(cacheRoot);
+    const result = await fetchCanonicalPrompt(resolver, "security");
     assertOk(result);
 
-    // Bytes are exactly what's in the tree.
     assert.equal(result.bytes.toString("utf8"), promptBody);
 
     // sha256 is bare hex (no `sha256:` prefix), matches the
-    // ApprovalV4.prompt_sha256 convention in src/lib/attestationV4.ts,
-    // and matches a hand-computed Node hash over the same bytes.
+    // ApprovalV4.prompt_sha256 convention, and matches a hand-computed
+    // Node hash over the same bytes.
     assert.match(result.sha256, /^[0-9a-f]{64}$/);
     assert.equal(
       result.sha256,
@@ -203,9 +144,9 @@ describe("fetchCanonicalPrompt — happy path", () => {
   });
 
   it("returns the SAME hash for identical bytes across repeated calls", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    const a = await fetchCanonicalPrompt(resolver, "acme", "widget-co", baseSha, "security");
-    const b = await fetchCanonicalPrompt(resolver, "acme", "widget-co", baseSha, "security");
+    const resolver = defaultPromptCacheResolver(cacheRoot);
+    const a = await fetchCanonicalPrompt(resolver, "security");
+    const b = await fetchCanonicalPrompt(resolver, "security");
     assertOk(a);
     assertOk(b);
     assert.equal(a.sha256, b.sha256);
@@ -214,23 +155,12 @@ describe("fetchCanonicalPrompt — happy path", () => {
 
   it("preserves byte-exact content (no whitespace normalization)", async () => {
     // Seed a prompt with CRLF + trailing whitespace + a final-no-newline
-    // edge case to confirm git show returns bytes verbatim.
+    // edge case to confirm fs.readFileSync returns bytes verbatim.
     const oddBody = "line one\r\nline two   \nfinal-no-newline";
-    const { baseSha: oddSha } = buildSeededBareRepo(
-      tmpRoot,
-      "odd-repo",
-      "standards",
-      oddBody,
-    );
+    writeFileSync(join(cacheRoot, "standards.md"), oddBody);
 
-    const resolver = defaultRepoResolver(tmpRoot);
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "odd-repo",
-      oddSha,
-      "standards",
-    );
+    const resolver = defaultPromptCacheResolver(cacheRoot);
+    const result = await fetchCanonicalPrompt(resolver, "standards");
     assertOk(result);
     assert.equal(result.bytes.toString("utf8"), oddBody);
     assert.equal(
@@ -241,400 +171,149 @@ describe("fetchCanonicalPrompt — happy path", () => {
 });
 
 describe("fetchCanonicalPrompt — error paths", () => {
-  let tmpRoot: string;
-  let barePath: string;
-  let baseSha: string;
+  let cacheRoot: string;
 
   beforeEach(() => {
-    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-err-")));
-    ({ barePath, baseSha } = buildSeededBareRepo(
-      tmpRoot,
-      "widget-co",
-      "security",
-      "prompt body\n",
-    ));
+    cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-err-")));
+    writeFileSync(join(cacheRoot, "security.md"), "prompt body\n");
   });
 
   afterEach(() => {
-    rmSync(tmpRoot, { recursive: true, force: true });
+    // Restore mode if we chmod'd anything before deleting.
+    try {
+      chmodSync(cacheRoot, 0o755);
+    } catch {
+      // best-effort
+    }
+    rmSync(cacheRoot, { recursive: true, force: true });
   });
 
-  it("no_such_repo: resolver points at a path with no bare repo", async () => {
-    const resolver: RepoResolver = () => join(tmpRoot, "does-not-exist.git");
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "anything",
-      baseSha,
-      "security",
-    );
-    assertError(result, "no_such_repo");
-    // Detail surfaces server-side context (path) — log-only, do not
-    // reflect this back to the SSH caller verbatim.
-    assert.match(result.detail, /does-not-exist\.git/);
+  it("no_such_file: prompt file is absent from the cache", async () => {
+    const resolver = defaultPromptCacheResolver(cacheRoot);
+    // The seeded cache has security.md but not standards.md.
+    const result = await fetchCanonicalPrompt(resolver, "standards");
+    assertError(result, "no_such_file");
+    assert.match(result.detail, /standards\.md/);
   });
 
-  it("no_such_repo: resolver points at a directory that isn't a git repo", async () => {
-    const notARepo = join(tmpRoot, "plain-dir");
-    mkdirSync(notARepo);
-    const resolver: RepoResolver = () => notARepo;
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "anything",
-      baseSha,
-      "security",
-    );
-    assertError(result, "no_such_repo");
-  });
-
-  it("no_such_ref: base_sha doesn't exist in the bare repo", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    // Valid-shape SHA that won't resolve in this repo (all-zeros except
-    // last char to avoid any zero-object special-case).
-    const fakeSha = "0".repeat(39) + "1";
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "widget-co",
-      fakeSha,
-      "security",
-    );
-    assertError(result, "no_such_ref");
-  });
-
-  it("no_such_file: base_sha resolves but reviewer file is absent at that ref", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    // The seeded repo has security.md but not standards.md.
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "widget-co",
-      baseSha,
-      "standards",
-    );
+  it("no_such_file: cacheRoot itself doesn't exist", async () => {
+    const missingRoot = join(cacheRoot, "does-not-exist");
+    const resolver = defaultPromptCacheResolver(missingRoot);
+    const result = await fetchCanonicalPrompt(resolver, "security");
     assertError(result, "no_such_file");
   });
 
-  it("invalid_input: baseSha is not a full 40-char hex SHA (rejects abbreviations)", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    // Abbreviated SHAs would otherwise trigger git's own ambiguity check.
-    // We reject upstream so the verb handler gets a clean signal.
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "widget-co",
-      baseSha.slice(0, 12),
-      "security",
-    );
-    assertError(result, "invalid_input");
-    assert.match(result.detail, /40-char/);
-  });
-
-  it("invalid_input: baseSha contains non-hex characters", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "widget-co",
-      "Z".repeat(40),
-      "security",
-    );
-    assertError(result, "invalid_input");
-  });
-
   it("invalid_input: reviewer name with path separator (security check)", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
+    const resolver = defaultPromptCacheResolver(cacheRoot);
     // The exact attempted traversal a hostile caller would try if the
     // verb handler forgot to validate reviewerName. Must NOT escape to
-    // an arbitrary file under .stamp/.
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "widget-co",
-      baseSha,
-      "../../etc/passwd",
-    );
+    // an arbitrary file under the cache root.
+    const result = await fetchCanonicalPrompt(resolver, "../../etc/passwd");
     assertError(result, "invalid_input");
   });
 
   it("invalid_input: reviewer name starting with a dash (would be confused with a flag)", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "widget-co",
-      baseSha,
-      "-flag",
-    );
+    const resolver = defaultPromptCacheResolver(cacheRoot);
+    const result = await fetchCanonicalPrompt(resolver, "-flag");
     assertError(result, "invalid_input");
   });
 
-  it("invalid_input: resolver throws on bad repo name → surfaces as invalid_input (not crash)", async () => {
-    const resolver = defaultRepoResolver(tmpRoot);
-    // defaultRepoResolver throws on a bad repo name; fetchCanonicalPrompt
-    // must catch the throw and convert it to a typed error so the verb
-    // handler doesn't have to wrap the call in try/catch.
-    const result = await fetchCanonicalPrompt(
-      resolver,
-      "acme",
-      "../escape",
-      baseSha,
-      "security",
-    );
+  it("invalid_input: empty reviewer name", async () => {
+    const resolver = defaultPromptCacheResolver(cacheRoot);
+    const result = await fetchCanonicalPrompt(resolver, "");
+    assertError(result, "invalid_input");
+  });
+
+  it("invalid_input: resolver throws on bad reviewer name → surfaces as invalid_input (not crash)", async () => {
+    // The default resolver throws when its inner validation fails;
+    // fetchCanonicalPrompt's own outer validation catches it first,
+    // but a custom resolver that throws after a non-default validation
+    // path must still surface as invalid_input rather than crashing.
+    const throwingResolver: PromptResolver = (reviewer) => {
+      if (reviewer === "tenant-security") {
+        throw new Error("multi-tenant resolver rejected: tenant not provisioned");
+      }
+      return join(cacheRoot, `${reviewer}.md`);
+    };
+    const result = await fetchCanonicalPrompt(throwingResolver, "tenant-security");
     assertError(result, "invalid_input");
     assert.match(result.detail, /resolver rejected/);
+    assert.match(result.detail, /tenant not provisioned/);
   });
 
-  it("NO FALLBACK: missing file at base_sha never returns the file at HEAD", async () => {
-    // Security property: if a later commit added the standards.md file
-    // but the caller asks at the original baseSha, the fetch MUST error.
-    // Regressing this would let an attacker claim a permissive prompt
-    // existed at their base when it didn't.
-    const workDir = mkdtempSync(join(tmpdir(), "stamp-promptfetch-second-"));
+  it("io_error: prompt file is unreadable (permission denied)", async () => {
+    // chmod a file 000 so readFileSync hits EACCES. Skip on Windows
+    // where unix-mode semantics don't apply, but on darwin/linux this
+    // exercises the io_error branch deterministically.
+    if (process.platform === "win32") return;
+    if (process.getuid?.() === 0) return; // root bypasses mode bits
+    const path = join(cacheRoot, "noaccess.md");
+    writeFileSync(path, "secret\n");
+    chmodSync(path, 0o000);
+    const resolver = defaultPromptCacheResolver(cacheRoot);
     try {
-      git(["clone", "-q", barePath, workDir], "/");
-      git(["config", "user.email", "t@example.com"], workDir);
-      git(["config", "user.name", "Test"], workDir);
-      git(["config", "commit.gpgsign", "false"], workDir);
-      writeFileSync(
-        join(workDir, ".stamp", "reviewers", "standards.md"),
-        "added in second commit\n",
-      );
-      git(["add", "."], workDir);
-      git(["commit", "-q", "-m", "add standards reviewer"], workDir);
-      git(["push", "-q", "origin", "main"], workDir);
-
-      const resolver = defaultRepoResolver(tmpRoot);
-      // Ask for `standards` at the ORIGINAL baseSha — must fail with
-      // no_such_file, NOT silently return the second-commit version.
-      const result = await fetchCanonicalPrompt(
-        resolver,
-        "acme",
-        "widget-co",
-        baseSha,
-        "standards",
-      );
-      assertError(result, "no_such_file");
+      const result = await fetchCanonicalPrompt(resolver, "noaccess");
+      assertError(result, "io_error");
     } finally {
-      rmSync(workDir, { recursive: true, force: true });
+      chmodSync(path, 0o644); // restore so afterEach cleanup can rm
     }
+  });
+
+  it("NO FALLBACK: missing file at the cache path never returns content from anywhere else", async () => {
+    // Security property: if the cache has security.md but the caller
+    // asks for standards, the fetch MUST error. Regressing this would
+    // let an attacker claim a permissive prompt existed for a reviewer
+    // it didn't.
+    const resolver = defaultPromptCacheResolver(cacheRoot);
+    const result = await fetchCanonicalPrompt(resolver, "standards");
+    assertError(result, "no_such_file");
   });
 });
 
 describe("fetchCanonicalPrompt — resolver injection", () => {
-  let tmpRoot: string;
+  let cacheRoot: string;
 
   beforeEach(() => {
-    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-inj-")));
+    cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-inj-")));
   });
 
   afterEach(() => {
-    rmSync(tmpRoot, { recursive: true, force: true });
+    rmSync(cacheRoot, { recursive: true, force: true });
   });
 
   it("uses the path the injected resolver returns (multi-tenant Phase 2 shape)", async () => {
-    // Phase 2 SaaS resolver shape: `<root>/<org>/<repo>.git`. Build a
-    // bare at the non-default path and confirm fetchCanonicalPrompt
-    // hits it.
-    const orgDir = join(tmpRoot, "acme");
-    mkdirSync(orgDir);
-    const { baseSha } = buildSeededBareRepo(orgDir, "widget-co", "security", "tenant prompt\n");
+    // Phase 2 SaaS resolver shape: `<root>/<tenant>/<reviewer>.md`.
+    // Build the file at the non-default path and confirm
+    // fetchCanonicalPrompt hits it.
+    const tenantDir = join(cacheRoot, "acme");
+    mkdirSync(tenantDir);
+    writeFileSync(join(tenantDir, "security.md"), "tenant prompt\n");
 
-    const saasResolver: RepoResolver = (org, repo) =>
-      join(tmpRoot, org, `${repo}.git`);
+    const saasResolver: PromptResolver = (reviewer) =>
+      join(cacheRoot, "acme", `${reviewer}.md`);
 
-    const result = await fetchCanonicalPrompt(
-      saasResolver,
-      "acme",
-      "widget-co",
-      baseSha,
-      "security",
-    );
+    const result = await fetchCanonicalPrompt(saasResolver, "security");
     assertOk(result);
     assert.equal(result.bytes.toString("utf8"), "tenant prompt\n");
   });
 
-  it("different orgs route to different bare repos under a multi-tenant resolver", async () => {
-    mkdirSync(join(tmpRoot, "acme"));
-    mkdirSync(join(tmpRoot, "globex"));
-    const a = buildSeededBareRepo(
-      join(tmpRoot, "acme"),
-      "shared-name",
-      "security",
-      "acme prompt\n",
-    );
-    const g = buildSeededBareRepo(
-      join(tmpRoot, "globex"),
-      "shared-name",
-      "security",
-      "globex prompt\n",
-    );
+  it("different tenants route to different paths under a multi-tenant resolver", async () => {
+    mkdirSync(join(cacheRoot, "acme"));
+    mkdirSync(join(cacheRoot, "globex"));
+    writeFileSync(join(cacheRoot, "acme", "security.md"), "acme prompt\n");
+    writeFileSync(join(cacheRoot, "globex", "security.md"), "globex prompt\n");
 
-    const saasResolver: RepoResolver = (org, repo) =>
-      join(tmpRoot, org, `${repo}.git`);
+    const acmeResolver: PromptResolver = (reviewer) =>
+      join(cacheRoot, "acme", `${reviewer}.md`);
+    const globexResolver: PromptResolver = (reviewer) =>
+      join(cacheRoot, "globex", `${reviewer}.md`);
 
-    const acmeResult = await fetchCanonicalPrompt(
-      saasResolver,
-      "acme",
-      "shared-name",
-      a.baseSha,
-      "security",
-    );
-    const globexResult = await fetchCanonicalPrompt(
-      saasResolver,
-      "globex",
-      "shared-name",
-      g.baseSha,
-      "security",
-    );
+    const acmeResult = await fetchCanonicalPrompt(acmeResolver, "security");
+    const globexResult = await fetchCanonicalPrompt(globexResolver, "security");
     assertOk(acmeResult);
     assertOk(globexResult);
     assert.equal(acmeResult.bytes.toString("utf8"), "acme prompt\n");
     assert.equal(globexResult.bytes.toString("utf8"), "globex prompt\n");
     assert.notEqual(acmeResult.sha256, globexResult.sha256);
-  });
-});
-
-// ─── AGT-331: fetchManifestAtBaseSha ─────────────────────────────────
-
-/** Narrowing helper that fails the test if the fetch returned an
- *  error result. Mirror of `assertOk` for the prompt fetcher. */
-function assertManifestOk(
-  result: ManifestFetchResult,
-): asserts result is FetchedManifest {
-  if (result.kind !== "ok") {
-    assert.fail(
-      `expected manifest fetch ok, got error kind=${result.kind} detail=${result.detail}`,
-    );
-  }
-}
-
-/** Build a bare repo whose initial commit includes the given manifest
- *  bytes at `.stamp/trusted-keys/manifest.yml`. */
-function buildBareWithManifest(
-  baseDir: string,
-  name: string,
-  manifestYaml: string | null,
-): { barePath: string; baseSha: string } {
-  const barePath = join(baseDir, `${name}.git`);
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", barePath], {
-    stdio: "pipe",
-  });
-
-  const workDir = mkdtempSync(join(tmpdir(), "stamp-manifestfetch-seed-"));
-  try {
-    git(["init", "-q", "-b", "main"], workDir);
-    git(["config", "user.email", "t@example.com"], workDir);
-    git(["config", "user.name", "Test"], workDir);
-    git(["config", "commit.gpgsign", "false"], workDir);
-
-    // Always seed SOMETHING so the commit isn't empty (an empty initial
-    // commit would still resolve but the test reads more clearly with a
-    // marker file).
-    mkdirSync(join(workDir, ".stamp"), { recursive: true });
-    writeFileSync(join(workDir, ".stamp", "marker.txt"), "seed\n");
-    if (manifestYaml !== null) {
-      mkdirSync(join(workDir, ".stamp", "trusted-keys"), { recursive: true });
-      writeFileSync(
-        join(workDir, ".stamp", "trusted-keys", "manifest.yml"),
-        manifestYaml,
-      );
-    }
-    git(["add", "."], workDir);
-    git(["commit", "-q", "-m", "seed"], workDir);
-
-    git(["remote", "add", "origin", barePath], workDir);
-    git(["push", "-q", "origin", "main"], workDir);
-
-    const baseSha = git(["rev-parse", "HEAD"], workDir).trim();
-    return { barePath, baseSha };
-  } finally {
-    rmSync(workDir, { recursive: true, force: true });
-  }
-}
-
-describe("fetchManifestAtBaseSha — happy path", () => {
-  let baseDir: string;
-  beforeEach(() => {
-    baseDir = realpathSync(mkdtempSync(join(tmpdir(), "stamp-manifest-fetch-")));
-  });
-  afterEach(() => {
-    rmSync(baseDir, { recursive: true, force: true });
-  });
-
-  it("returns the manifest bytes when present at base_sha", async () => {
-    const manifest =
-      "keys:\n  alice:\n    fingerprint: sha256:" +
-      "a".repeat(64) +
-      "\n    capabilities: [admin]\n";
-    const seed = buildBareWithManifest(baseDir, "widget-co", manifest);
-    const resolver = defaultRepoResolver(baseDir);
-    const result = await fetchManifestAtBaseSha(
-      resolver,
-      "acme",
-      "widget-co",
-      seed.baseSha,
-    );
-    assertManifestOk(result);
-    assert.equal(result.bytes.toString("utf8"), manifest);
-  });
-});
-
-describe("fetchManifestAtBaseSha — error categories", () => {
-  let baseDir: string;
-  beforeEach(() => {
-    baseDir = realpathSync(mkdtempSync(join(tmpdir(), "stamp-manifest-fetch-")));
-  });
-  afterEach(() => {
-    rmSync(baseDir, { recursive: true, force: true });
-  });
-
-  it("returns no_such_file when the manifest is missing from base_sha's tree", async () => {
-    const seed = buildBareWithManifest(baseDir, "widget-co", null);
-    const resolver = defaultRepoResolver(baseDir);
-    const result = await fetchManifestAtBaseSha(
-      resolver,
-      "acme",
-      "widget-co",
-      seed.baseSha,
-    );
-    assert.equal(result.kind, "no_such_file");
-  });
-
-  it("returns no_such_ref when base_sha doesn't resolve in the bare", async () => {
-    // Seed a bare with one commit, then ask for a different sha that
-    // doesn't exist in this repo.
-    buildBareWithManifest(baseDir, "widget-co", "keys: {}\n");
-    const resolver = defaultRepoResolver(baseDir);
-    const result = await fetchManifestAtBaseSha(
-      resolver,
-      "acme",
-      "widget-co",
-      "0".repeat(40),
-    );
-    assert.equal(result.kind, "no_such_ref");
-  });
-
-  it("returns no_such_repo when the resolved path isn't a git repo", async () => {
-    const resolver: RepoResolver = () => join(baseDir, "no-such.git");
-    const result = await fetchManifestAtBaseSha(
-      resolver,
-      "acme",
-      "widget-co",
-      "a".repeat(40),
-    );
-    assert.equal(result.kind, "no_such_repo");
-  });
-
-  it("returns invalid_input for a non-40-hex base_sha", async () => {
-    const resolver: RepoResolver = () => join(baseDir, "anything.git");
-    const result = await fetchManifestAtBaseSha(
-      resolver,
-      "acme",
-      "widget-co",
-      "shortsha",
-    );
-    assert.equal(result.kind, "invalid_input");
   });
 });

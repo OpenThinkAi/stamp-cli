@@ -57,7 +57,6 @@ function makeApproval(overrides: Partial<ApprovalV4> = {}): ApprovalV4 {
     diff_sha256: "b".repeat(64),
     base_sha: "c".repeat(40),
     head_sha: "d".repeat(40),
-    trusted_keys_snapshot_sha256: "e".repeat(64),
     issued_at: "2026-05-17T18:42:13Z",
     server_key_id: "sha256:" + "f".repeat(64),
     ...overrides,
@@ -84,6 +83,7 @@ function makePayload(
     head_sha: "d".repeat(40),
     target_branch: "main",
     diff_sha256: "b".repeat(64),
+    manifest_snapshot_sha256: "sha256:" + "e".repeat(64),
     approvals: [makeApprovalEntry()],
     checks: [],
     trust_anchor_signatures: [],
@@ -102,12 +102,18 @@ function makeEnvelope(
 }
 
 describe("v4 schema constants", () => {
-  it("locks the schema integer to 4 — distinct from legacy v3 in attestation.ts", () => {
+  it("locks the schema integer to 5 — bumped in AGT-370 (manifest binding lifted to outer envelope)", () => {
     // Hard-coded asserts on both constants so a future bump consciously
     // updates both this test and the dispatcher logic that routes
     // by schema_version. Silent drift is the failure mode we're guarding.
-    assert.equal(CURRENT_V4_SCHEMA_VERSION, 4);
-    assert.equal(MIN_ACCEPTED_V4_SCHEMA_VERSION, 4);
+    //
+    // The v4 → v5 bump is breaking by design: per-approval
+    // `trusted_keys_snapshot_sha256` removed, top-level
+    // `manifest_snapshot_sha256` added. Verifiers reject v4 envelopes
+    // because they lack the new outer field; the floor moves in
+    // lockstep with the current version.
+    assert.equal(CURRENT_V4_SCHEMA_VERSION, 5);
+    assert.equal(MIN_ACCEPTED_V4_SCHEMA_VERSION, 5);
   });
 
   it("caps envelope size at 64 KB to match legacy v3 DoS rationale", () => {
@@ -144,7 +150,6 @@ describe("canonicalSerializeApproval — byte determinism", () => {
       // Intentionally reversed insertion order vs makeApproval.
       server_key_id: original.server_key_id,
       issued_at: original.issued_at,
-      trusted_keys_snapshot_sha256: original.trusted_keys_snapshot_sha256,
       head_sha: original.head_sha,
       base_sha: original.base_sha,
       diff_sha256: original.diff_sha256,
@@ -188,7 +193,6 @@ describe("canonicalSerializePayload — byte determinism", () => {
         approval: {
           server_key_id: e.approval.server_key_id,
           issued_at: e.approval.issued_at,
-          trusted_keys_snapshot_sha256: e.approval.trusted_keys_snapshot_sha256,
           head_sha: e.approval.head_sha,
           base_sha: e.approval.base_sha,
           diff_sha256: e.approval.diff_sha256,
@@ -197,6 +201,7 @@ describe("canonicalSerializePayload — byte determinism", () => {
           reviewer: e.approval.reviewer,
         },
       })),
+      manifest_snapshot_sha256: base.manifest_snapshot_sha256,
       diff_sha256: base.diff_sha256,
       target_branch: base.target_branch,
       head_sha: base.head_sha,
@@ -296,6 +301,16 @@ describe("parseEnvelope — rejection", () => {
     assert.equal(parseEnvelope(Buffer.from(JSON.stringify(env))), null);
   });
 
+  it("rejects pre-AGT-370 v4 envelopes (schema_version=4) — the manifest-binding reshape is breaking", () => {
+    // v4 envelopes lack `manifest_snapshot_sha256` and carry the
+    // (now-removed) per-approval `trusted_keys_snapshot_sha256`. The
+    // verifier refuses them with the same null-return as any other
+    // below-floor schema. Operators see a "schema_version too old"
+    // surface in the dispatcher.
+    const env = { payload: { ...makePayload(), schema_version: 4 }, signature: "x" };
+    assert.equal(parseEnvelope(Buffer.from(JSON.stringify(env))), null);
+  });
+
   it("rejects payload missing required top-level fields", () => {
     // Each test drops one required field; all should return null.
     const required: Array<keyof AttestationPayloadV4> = [
@@ -303,6 +318,7 @@ describe("parseEnvelope — rejection", () => {
       "head_sha",
       "target_branch",
       "diff_sha256",
+      "manifest_snapshot_sha256",
       "approvals",
       "checks",
       "trust_anchor_signatures",
@@ -430,33 +446,45 @@ describe("worked example: merge touching .stamp/** with trust_anchor_signatures"
   });
 });
 
-describe("worked example: trusted_keys_snapshot_sha256 round-trips intact", () => {
-  it("preserves the snapshot hash through serialize → parse → canonicalize", () => {
+describe("worked example: manifest_snapshot_sha256 round-trips intact (AGT-370)", () => {
+  it("preserves the outer envelope snapshot hash through serialize → parse → canonicalize", () => {
     // The lenient revocation property hinges on this field surviving
     // intact through the wire. A bit-flip or silent normalization
-    // here would break the manifest-at-base_sha lookup the verifier
-    // does to grandfather older verdicts past key rotation.
-    const snapshot = "deadbeef".repeat(8); // 64 hex chars
-    const approval = makeApproval({ trusted_keys_snapshot_sha256: snapshot });
+    // here would break the manifest-at-base_sha check the verifier
+    // does to grandfather older verdicts past key rotation. AGT-370
+    // moved the binding from per-approval (server-signed) to the
+    // outer payload (operator-signed) so the server no longer needs
+    // to read the manifest.
+    const snapshot = "sha256:" + "deadbeef".repeat(8); // 64 hex chars
     const env = makeEnvelope(
-      makePayload({
-        approvals: [
-          {
-            approval,
-            server_attestation: {
-              server_key_id: approval.server_key_id,
-              signature: "snap-sig==",
-            },
-          },
-        ],
-      }),
+      makePayload({ manifest_snapshot_sha256: snapshot }),
     );
 
     const parsed = parseEnvelope(serializeEnvelope(env));
     assert.ok(parsed);
-    assert.equal(
-      parsed.payload.approvals[0]!.approval.trusted_keys_snapshot_sha256,
-      snapshot,
+    assert.equal(parsed.payload.manifest_snapshot_sha256, snapshot);
+  });
+
+  it("manifest_snapshot_sha256 participates in canonical key ordering", () => {
+    // The new field must sort lexicographically with the rest of the
+    // payload's keys. Two payloads with the field inserted in
+    // different positions must serialize identically.
+    const base = makePayload({ manifest_snapshot_sha256: "sha256:" + "ab".repeat(32) });
+    const reordered: AttestationPayloadV4 = {
+      manifest_snapshot_sha256: base.manifest_snapshot_sha256,
+      signer_key_id: base.signer_key_id,
+      schema_version: base.schema_version,
+      base_sha: base.base_sha,
+      head_sha: base.head_sha,
+      target_branch: base.target_branch,
+      diff_sha256: base.diff_sha256,
+      approvals: base.approvals,
+      checks: base.checks,
+      trust_anchor_signatures: base.trust_anchor_signatures,
+    };
+    assert.deepEqual(
+      canonicalSerializePayload(base),
+      canonicalSerializePayload(reordered),
     );
   });
 });
