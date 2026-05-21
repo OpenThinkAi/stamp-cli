@@ -435,6 +435,192 @@ Same as Shape 2 step 6. Mix-and-match across the org is supported — some repos
 
 ---
 
+## Phase A → Phase B (external reviewer prompts)
+
+stamp-server 2.1+ supports sourcing reviewer prompts from a separate github repo instead of (or in addition to) the prompts baked into the Docker image. This is **Phase B** in the project's roll-out. The trust property is unchanged — the server still controls which prompt bytes get fed to the LLM and still signs the resulting verdict against `prompt_sha256` — but the storage layer for those bytes is virtualized so you can iterate on reviewer prompts via `git push` instead of an image rebuild + redeploy.
+
+This section is the **migration narrative**. The full configuration reference — env vars, deploy-key flow, webhook setup, first-boot expectations, troubleshooting matrix, threat-model table — lives in [`server/README.md`'s "Phase B — external prompts via webhook" section](../server/README.md#phase-b--external-prompts-via-webhook). Read this section first to decide *whether* and *when* to opt in; jump to the server README for the *how*.
+
+### Phase B is opt-in. Doing nothing is a valid migration path.
+
+Phase B is layered on top of Phase A, not a replacement. If you don't set `STAMP_PROMPTS_REPO_URL` on the stamp-server, you stay on the image-bundled `/etc/stamp/reviewers/*.md` path with zero behavior change:
+
+- No prompt-cache populate runs at boot.
+- No webhook listener accepts deliveries (the route returns `503 prompts_repo_url_unconfigured`).
+- No periodic-poll worker arms.
+- Boot logs look identical to a 2.0.x deployment — no new `prompts-cache:` or `prompts-poll:` lines.
+- Per-review path resolution is exactly Phase A: `${STAMP_PROMPTS_DIR:-/etc/stamp/reviewers}/<reviewer>.md`.
+
+If your team is happy with the redeploy-to-edit-a-prompt cycle, ignore this section. The Phase B code paths are gated entirely on `STAMP_PROMPTS_REPO_URL`; they sit dark until you opt in.
+
+### When to opt in
+
+Opt into Phase B when **any** of the following starts hurting:
+
+- **Prompt iteration cadence > image-rebuild cadence.** You're tweaking reviewer prompts every few days but the server rebuilds on a weekly or monthly schedule, so prompt changes pile up behind unrelated infra changes.
+- **Prompts are owned by a different team than the server image.** Security wants to edit `security.md` without filing a server-deploy ticket.
+- **You operate multiple stamp-server deployments** (staging + prod, multiple regions, per-tenant) that should share a single source of truth for reviewer prompts.
+- **You want per-repo overrides.** Phase B's optional `<org>/<repo>/<reviewer>.md` layer lets a specific repo opt out of a fleet-wide default without touching the server image.
+
+If none of these bite, stay on Phase A. The bundled-prompts path is simpler, has fewer moving parts (no webhook, no deploy key, no cache directory), and is the design's "secure by default" stance.
+
+### Step-by-step opt-in
+
+Each step links into [`server/README.md`'s Phase B section](../server/README.md#phase-b--external-prompts-via-webhook) for the configuration detail; the narrative below sequences them.
+
+#### Step 1 — Create the prompts repo
+
+A new github repo (e.g. `your-org/stamp-reviewers`). Public or private; both work. The server fetches read-only — it never pushes — so the access posture is "anything that lets the server clone."
+
+Seed the repo with copies of the prompts you currently maintain at `server/reviewers/*.md` in your stamp-cli fork. **Lay them out flat at the repo root** — `security.md`, `standards.md`, `product.md` at the top level — NOT under a `default/` directory. This is the single most common first-boot gotcha (see "The `default/` layout gotcha" below).
+
+#### Step 2 — (Private repos only) Register a deploy key
+
+Generate an ed25519 keypair locally. Register the **public** half as a read-only deploy key on the prompts repo. Drop the **private** half onto the stamp-server's persistent volume at `/srv/git/.ssh-client-keys/prompts_repo_key` (mode `0600`, git-owned). Full flow in [`server/README.md`'s "Private-repo deploy-key flow"](../server/README.md#private-repo-deploy-key-flow).
+
+For HTTPS URLs to public repos, skip this step — `STAMP_PROMPTS_DEPLOY_KEY_PATH` can stay unset and github's TLS handles host verification.
+
+#### Step 3 — Configure the github webhook
+
+On the prompts repo: Settings → Webhooks → Add webhook. Payload URL `https://<your-stamp-server-host>/webhook/prompts`, content type `application/json`, generate a shared secret with `openssl rand -hex 32` (you'll need this string in step 4), events "Just the `push` event." Full webhook field-by-field in [`server/README.md`'s "Webhook configuration"](../server/README.md#webhook-configuration-on-the-prompts-repo).
+
+#### Step 4 — Set env vars on the stamp-server deployment
+
+In Railway (Settings → Variables) or your platform's equivalent:
+
+| Var | Value |
+|---|---|
+| `STAMP_PROMPTS_REPO_URL` | `git@github.com:your-org/stamp-reviewers.git` (SSH for private repos) or `https://github.com/your-org/stamp-reviewers.git` (HTTPS for public) |
+| `STAMP_PROMPTS_REPO_REF` | Defaults to `main`; override only if you track a different branch/tag |
+| `STAMP_PROMPTS_WEBHOOK_SECRET` | Paste the same string you typed into the github webhook config in step 3 |
+| `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Defaults to `/srv/git/.ssh-client-keys/prompts_repo_key`; override only if you stored the key elsewhere |
+
+Optional tuning:
+
+| Var | When to set |
+|---|---|
+| `STAMP_PROMPTS_POLL_INTERVAL_SEC` | Defaults to `3600` (one hour). Lower it during a webhook-secret rotation window (see "Webhook secret rotation" below); set the literal string `"0"` (and only `"0"`) to disable polling entirely for webhook-only mode. |
+| `STAMP_PROMPTS_CACHE_ROOT` | Defaults to `/srv/git/.prompts-cache`. Only override if your volume layout differs. |
+| `STAMP_PROMPTS_KNOWN_HOSTS_PATH` | Only for self-hosted github enterprise. |
+
+The full env-var reference table is in [`server/README.md`'s "Env-var reference"](../server/README.md#env-var-reference).
+
+#### Step 5 — Redeploy
+
+Trigger a redeploy on Railway (or `docker restart` / equivalent). Confirm the first boot via container logs — you should see:
+
+```
+prompts-cache: populating cache at /srv/git/.prompts-cache from git@github.com:your-org/stamp-reviewers.git@main (deploy key: /srv/git/.ssh-client-keys/prompts_repo_key)
+prompts-cache: ready (cacheRoot=/srv/git/.prompts-cache sha=<40-hex> files=product.md,security.md,standards.md)
+prompts-poll: started (interval=3600s, url=..., ref=main, cacheRoot=/srv/git/.prompts-cache)
+```
+
+The `files=<comma-list>.md` is the verification step: it enumerates the `*.md` files the cache module sees at the cache root. If it shows `files=<none>`, your prompts repo's layout doesn't match what `getPromptPath` expects — see the next subsection.
+
+From here on, edits to the prompts repo trigger webhook deliveries that refresh the local cache within seconds. `stamp review` against any reviewed repo reads from the cache; behavior at review time is identical to Phase A — the difference is only in how the prompt bytes got there.
+
+### The `default/` layout gotcha
+
+The project README and `server/README.md` both document an *example* prompts-repo layout that uses a `default/` directory:
+
+```
+default/security.md
+default/standards.md
+default/product.md
+your-org/your-repo/security.md       # optional per-repo override
+```
+
+`getPromptPath` in [`src/server/prompts-cache.ts`](../src/server/prompts-cache.ts) does NOT honor the `default/` prefix. It resolves prompts in this order:
+
+1. `<cacheRoot>/<org>/<repo>/<reviewer>.md` (per-repo override, when the SSH verb supplies org + repo context)
+2. `<cacheRoot>/<reviewer>.md` (flat default — what gets used for everyone else)
+
+If you literally copy the project README's example and end up with `default/security.md` etc. at the cache root, the lookup will return `<none>` files because `<cacheRoot>/security.md` does not exist — only `<cacheRoot>/default/security.md` does. The boot log shows this as `files=<none>` despite a populated prompts repo.
+
+The fix is to **lay your prompts repo out flat at the root** — `security.md`, `standards.md`, `product.md` directly at the top level of the prompts repo, with per-repo overrides under `<org>/<repo>/` siblings. The cache module clones the prompts repo verbatim into the cache root, so flat-at-repo-root = flat-at-cache-root = lookup hit.
+
+If you've already populated a prompts repo with the `default/` convention and don't want to restructure it, the workaround is a one-line `mv default/* . && rmdir default` rewrite in the prompts repo. The webhook fires on push as usual; the next boot's `files=` line should enumerate the reviewer files at the cache root.
+
+### Rollback to Phase A
+
+If Phase B doesn't work out — flaky webhook deliveries, the prompts repo's branch protection is blocking the team, you want to roll back during an incident — the rollback is a single env-var unset:
+
+1. **Unset `STAMP_PROMPTS_REPO_URL`** in your platform's env-var config (delete the var; do not set it to empty string — the gate checks for the var being defined). Optionally leave the other Phase B vars (`_WEBHOOK_SECRET`, `_DEPLOY_KEY_PATH`, `_REPO_REF`) set; they're inert when `_REPO_URL` is unset.
+2. **Redeploy.** Boot will skip the cache populate, skip arming the poll worker, and the webhook route will 503 any incoming deliveries.
+3. **Per-review path resolution reverts to `${STAMP_PROMPTS_DIR:-/etc/stamp/reviewers}/<reviewer>.md`** — the bundled image path, exactly as before opting in.
+
+No data migration is needed. The `/srv/git/.prompts-cache/` directory remains on the volume but is no longer consulted (the env-var gate in `resolvePromptCacheRoot` short-circuits to the Phase A path). You can leave it in place against a future re-enable, or `rm -rf` it from a container shell to reclaim disk — neither affects correctness.
+
+The Phase A bundled prompts at `/etc/stamp/reviewers/*.md` remain in the image regardless of which mode you're in — Phase B never modifies them, never overwrites them, and never deletes them. They're inert during a Phase B opt-in (the resolver shifts to the cache root) and load-bearing the moment you opt back out. You do not need to "restore" anything on rollback; they were always there.
+
+### Webhook secret rotation
+
+There's no special tooling for rotating the webhook secret — operators rotate by editing the github webhook config + the `STAMP_PROMPTS_WEBHOOK_SECRET` env var on the server. The order matters but the consequence of getting it wrong is bounded.
+
+**Recommended order:**
+
+1. Generate a fresh secret (`openssl rand -hex 32`).
+2. **Update the github webhook config first.** Settings → Webhooks → click the prompts webhook → paste the new secret → Save. Github does NOT accept two secrets simultaneously, so from this moment until step 3 lands, any inbound delivery to the server will fail HMAC validation against the *old* secret the server still holds.
+3. **Update `STAMP_PROMPTS_WEBHOOK_SECRET` on the server, redeploy.** On the first boot after the redeploy, the server starts validating against the new secret. Deliveries that arrived during the rotation window are visible as `401 invalid_signature` in the container logs — they're lost from the webhook channel but recoverable on the next periodic-poll tick (default 3600s).
+
+**For high-throughput repos**, lower `STAMP_PROMPTS_POLL_INTERVAL_SEC` temporarily during the rotation (e.g. `60` or `30`) so the backstop catches up faster after the secret swap. Revert to the default after the rotation completes.
+
+**The periodic-poll backstop is the safety net.** Even if every webhook delivery in the rotation window 401s, the next poll-tick refreshes the cache from origin. The webhook is an optimization for "prompt edit → review uses the new prompt" latency; the poll is the correctness guarantee.
+
+### Threat-model footnote (signed commits on the prompts repo)
+
+The stamp-server does NOT verify commit signatures on the prompts repo at refresh time. This is an explicit deferred item in the Phase B scope — `cloneOrFetchPromptsCache` performs a `git fetch + checkout` against the configured ref and trusts whatever's at HEAD. There's no equivalent of pre-receive verification on the prompts-repo side.
+
+If your threat model depends on tamper-evident prompt history, **enforce signed commits via the prompts repo's branch protection** (github → Settings → Rules → Rulesets → require signed commits on the tracked branch). The same rule pattern documented in [`docs/github-ruleset-setup.md`](./github-ruleset-setup.md) for the code-mirror case applies here.
+
+This is a deliberate layer-shift relative to Phase A. In Phase A, the trust chain for prompt bytes is "operator controls the image build → image controls the prompts → server reads from `/etc/stamp/reviewers/` → server signs verdict against `prompt_sha256`." Every link in that chain is enforced inside stamp-server (or its image-build pipeline) and verifiable post-hoc by the verifier. In Phase B, the chain extends one link outward: "operator controls the prompts repo → server clones from prompts repo → server reads from cache → server signs verdict against `prompt_sha256`." That new first link — *operator controls the prompts repo* — is not enforced by stamp-server code. It's enforced by github (branch protection, signed commits, audit log) at the operator's discretion.
+
+This is the explicit operator-responsibility line. The trust property is "operator controls prompt bytes" in both phases; the *mechanism* by which the operator exercises that control shifts from "image build pipeline" to "github branch-protected repo." Pick a Phase B posture deliberately, not by accident.
+
+### What signing & topology don't change
+
+Phase B does NOT touch the v4 attestation envelope, the signing-key trust anchors, the `path_rules` gate, the SSH verb wire protocol, the mirror workflow, or the pre-receive hook's verification logic. From the verifier's perspective the only thing that changes is *where the bytes the server signed against came from* — and even that's invisible, because `prompt_sha256` in the signed envelope is computed from the in-memory bytes the LLM received, not from the upstream source.
+
+Concretely:
+- **Operator signing key, admin key, server-attestation key:** unchanged.
+- **`.stamp/trusted-keys/manifest.yml`** on each reviewed repo: unchanged. The server's review-signing key entry has the same `[server]` capability + `role_source: server`; it does NOT need a new capability for Phase B.
+- **`path_rules` for `.stamp/**`:** unchanged. Trust-anchor changes still require admin counter-sigs; Phase B does not introduce a new gated path.
+- **`stamp/verify-attestation@v1` Action:** unchanged. The verifier resolves `prompt_sha256` against the server-signed approval body; the storage layer behind the server is opaque to it.
+- **Shape selection (1/2/4):** unchanged. Phase B sits orthogonally to topology — you can run Phase B on any of Shape 1, Shape 2, or Shape 4. Shape 4 is the most common pairing (since both reach for "the prompts are server-owned, not repo-owned"), but nothing about the trust model requires it.
+
+If you had a working v4 setup before opting into Phase B, you have a working v4 setup after. The migration is purely on the server's prompt-storage layer.
+
+### Per-repo opt-in is unchanged
+
+A reviewed repo's `.stamp/config.yml` does NOT change between Phase A and Phase B. The Shape 4 convention — empty-object reviewer entries that defer prompt bytes to the server — applies identically:
+
+```yaml
+reviewers:
+  security: {}
+  standards: {}
+  product: {}
+required_reviewers:
+  - security
+  - standards
+```
+
+The repo doesn't know or care which prompt-storage backend the server is using. Mix-and-match across an org is supported: server X can be Phase A while server Y is Phase B, and a reviewed repo that pushes to either gets the appropriate prompt bytes for that server's mode.
+
+### Dead-weight in the image after opt-in
+
+The bundled `server/reviewers/*.md` files in your stamp-cli fork remain in the image after a Phase B opt-in, but become inert. The `resolvePromptCacheRoot()` dispatch in [`src/server/reviewPipeline.ts`](../src/server/reviewPipeline.ts) shifts the cache root to `/srv/git/.prompts-cache/` the moment `STAMP_PROMPTS_REPO_URL` is set — the bundled files at `/etc/stamp/reviewers/` exist but are never consulted by the review path.
+
+**No rush to remove them.** They're harmless dead-weight, and they're load-bearing again the moment you roll back to Phase A. A future major release of your fork can clean them up if you're certain you're never rolling back; for the migration commit itself, leave them alone — the cleanup adds risk of merge conflicts during the rollout for no operational benefit.
+
+### See also (Phase B specifics)
+
+- [`server/README.md`'s "Phase B — external prompts via webhook"](../server/README.md#phase-b--external-prompts-via-webhook) — the configuration reference: env vars, deploy-key flow, webhook setup, first-boot expectations, periodic-poll log lines, troubleshooting matrix, threat-model table.
+- [`server/README.md`'s "Migrating bundled prompts (Phase A → Phase B)"](../server/README.md#migrating-bundled-prompts-phase-a--phase-b) — the seed-the-prompts-repo-from-`server/reviewers/` recipe.
+- [`src/server/prompts-cache.ts`](../src/server/prompts-cache.ts) — `cloneOrFetchPromptsCache` (atomic refresh) and `getPromptPath` (lookup order including the `default/` gotcha).
+- [`src/server/reviewPipeline.ts`](../src/server/reviewPipeline.ts) — `resolvePromptCacheRoot()` env-var dispatch and the `PHASE_B_CACHE_ROOT` export shared by the webhook + poll workers.
+
+---
+
 ## FAQ
 
 ### Will my old (1.x v2/v3) attestations still verify?
@@ -580,4 +766,4 @@ See [`plans/server-attested-reviews.md`](./plans/server-attested-reviews.md)'s
 - [`quickstart-server.md`](./quickstart-server.md) — from-zero server setup walkthrough
 - [`local-only-mode.md`](./local-only-mode.md) — `--plan` / `--headless` iteration paths
 - [`troubleshooting.md`](./troubleshooting.md) — common failures with concrete fixes
-- [`../server/README.md`](../server/README.md) — stamp-server deployment guide
+- [`../server/README.md`](../server/README.md) — stamp-server deployment guide; the [Phase B — external prompts via webhook](../server/README.md#phase-b--external-prompts-via-webhook) section is the configuration reference paired with the [Phase A → Phase B](#phase-a--phase-b-external-reviewer-prompts) migration narrative above
