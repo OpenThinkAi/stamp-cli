@@ -160,17 +160,24 @@ const LOCK_STALE_MS = 5 * 60 * 1000;
  * has something to verify against without falling back to the user's
  * `~/.ssh/known_hosts`. Tests override via `GIT_SSH_KNOWN_HOSTS`.
  *
- * Module-level — resolved once — but we read the file (or check existence)
- * lazily inside `buildGitSshCommand` so a dev run without the server/
- * directory checked out doesn't crash the import.
+ * Deferred to a function (rather than a module-level constant) so the
+ * `import.meta.url` lookup doesn't run at module load. AGT-375's
+ * boot-time bootstrap binary consumes this module from a CJS bundle
+ * (tsup `format: "cjs"`), where `import.meta.url` is undefined and an
+ * eager `fileURLToPath(undefined)` would crash the bundle's entry. The
+ * lookup is only ever needed inside `buildGitEnv` for SSH URLs, so
+ * deferring is both correct and free; ESM consumers see the identical
+ * result the first call computes.
  */
-const DEFAULT_KNOWN_HOSTS_PATH = pathResolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "server",
-  "github-known-hosts",
-);
+function defaultKnownHostsPath(): string {
+  return pathResolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "server",
+    "github-known-hosts",
+  );
+}
 
 // ─── In-process coalescing map ────────────────────────────────────────
 
@@ -509,7 +516,7 @@ function buildGitEnv(deployKeyPath: string | undefined): NodeJS.ProcessEnv {
     );
   }
 
-  const knownHostsPath = process.env["GIT_SSH_KNOWN_HOSTS"] || DEFAULT_KNOWN_HOSTS_PATH;
+  const knownHostsPath = process.env["GIT_SSH_KNOWN_HOSTS"] || defaultKnownHostsPath();
   if (!existsSync(knownHostsPath)) {
     throw new Error(
       `prompts-cache: known-hosts file ${knownHostsPath} does not exist — image build is missing server/github-known-hosts`,

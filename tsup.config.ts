@@ -37,6 +37,12 @@ export default defineConfig([
       "server/users-cli": "src/server/users-cli.ts",
       "server/bootstrap-review-key": "src/server/bootstrap-review-key.ts",
       "server/stamp-review": "src/server/stamp-review.ts",
+      // Boot-time prompts-cache populator. Invoked by entrypoint.sh as
+      // root, after stamp-bootstrap-review-key and before the HTTP
+      // server / sshd launch. No-op when STAMP_PROMPTS_REPO_URL is
+      // unset (Phase A bundled-prompts path); clones/fetches the
+      // external prompts repo into /srv/git/.prompts-cache otherwise.
+      "server/prompts-cache-bootstrap": "src/server/prompts-cache-bootstrap.ts",
     },
     format: ["cjs"],
     target: "node22",

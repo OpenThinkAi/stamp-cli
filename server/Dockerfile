@@ -181,6 +181,15 @@ COPY --from=builder /build/dist/server/seed-users.cjs /usr/local/sbin/stamp-seed
 # fingerprint loudly to stdout (operator-instruction prose, not an
 # error); subsequent boots reuse it.
 COPY --from=builder /build/dist/server/bootstrap-review-key.cjs /usr/local/sbin/stamp-bootstrap-review-key
+# Boot-time prompts-cache populator (AGT-375). Invoked by entrypoint.sh
+# as root after stamp-bootstrap-review-key. No-ops when
+# STAMP_PROMPTS_REPO_URL is unset (Phase A bundled-prompts path); when
+# set, clones/fetches the external prompts repo into the cache root
+# (default /srv/git/.prompts-cache) before sshd / the HTTP listener
+# launch, so the cache is populated before any review request can land.
+# Failures abort the boot — Phase B operators must fix the
+# misconfiguration before traffic resumes.
+COPY --from=builder /build/dist/server/prompts-cache-bootstrap.cjs /usr/local/sbin/stamp-prompts-cache-bootstrap
 # Invite-mint SSH command. Invoked as `git@server stamp-mint-invite <name>`
 # via git-shell command dispatch (symlinked below). Binds to the
 # authenticated SSH key via SSH_USER_AUTH (ExposeAuthInfo).
@@ -256,6 +265,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/sbin/stamp-seed-users \
              /usr/local/sbin/stamp-http-server \
              /usr/local/sbin/stamp-bootstrap-review-key \
+             /usr/local/sbin/stamp-prompts-cache-bootstrap \
              /entrypoint.sh \
  && chown root:root /usr/local/sbin/stamp-authorized-keys \
  && chmod 0755     /usr/local/sbin/stamp-authorized-keys

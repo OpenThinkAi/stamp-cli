@@ -175,6 +175,51 @@ else
   exit 1
 fi
 
+# External-prompt-storage-via-webhook (Phase B / AGT-375): populate the
+# prompts cache from an external github repo on boot, BEFORE sshd or the
+# HTTP listener accept any traffic. Three cases:
+#
+#   - STAMP_PROMPTS_REPO_URL unset → Phase A path stays in effect; the
+#     bundled prompts at /etc/stamp/reviewers/ logged above remain the
+#     only source. The bootstrap binary itself no-ops; we skip the
+#     deploy-key gate too because there's nothing to clone.
+#
+#   - STAMP_PROMPTS_REPO_URL set + STAMP_PROMPTS_DEPLOY_KEY_PATH set but
+#     the key file doesn't exist on the persistent volume → fail fast
+#     with an error: line naming the missing path, exit non-zero. This
+#     mirrors the stamp-ensure-repo-key UX (operators upload the
+#     private half of the deploy key into the volume themselves; we
+#     NEVER auto-generate). The prompts-cache module would also throw
+#     on the same condition from buildGitEnv, but failing here gives a
+#     cleaner one-line boot-log error before any git-network attempt.
+#
+#   - STAMP_PROMPTS_REPO_URL set + deploy key present (or HTTPS URL, no
+#     key needed) → invoke the bootstrap binary, which clones/fetches
+#     the cache and logs the SHA + file inventory. Failure aborts the
+#     boot via the explicit `if !` below; we don't rely on `set -e`
+#     interaction with subshells.
+#
+# GIT_SSH_KNOWN_HOSTS points at the bundled /etc/ssh/ssh_known_hosts
+# (COPY'd from server/github-known-hosts in the Dockerfile) so the
+# prompts-cache module's GIT_SSH_COMMAND wiring resolves to a real file
+# inside the runtime image. Without this, the module's default-path
+# resolution (relative to the .cjs bundle location) would look at
+# /server/github-known-hosts which doesn't exist on this image layout.
+# Operators can override via STAMP_PROMPTS_KNOWN_HOSTS_PATH if they
+# want to pin a different known-hosts file (e.g. self-hosted github
+# enterprise). Empty → fall back to the image default.
+if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
+  if [ -n "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ] && [ ! -f "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ]; then
+    echo "error: STAMP_PROMPTS_DEPLOY_KEY_PATH=$STAMP_PROMPTS_DEPLOY_KEY_PATH does not exist on the volume; provision the private SSH key (mirroring the stamp-ensure-repo-key flow) and redeploy. Never auto-generated." >&2
+    exit 1
+  fi
+  export GIT_SSH_KNOWN_HOSTS="${STAMP_PROMPTS_KNOWN_HOSTS_PATH:-${GIT_SSH_KNOWN_HOSTS:-/etc/ssh/ssh_known_hosts}}"
+  if ! /usr/local/sbin/stamp-prompts-cache-bootstrap; then
+    echo "error: stamp-prompts-cache-bootstrap failed; aborting startup" >&2
+    exit 1
+  fi
+fi
+
 # Launch the HTTP server in the background as the git user, BEFORE
 # sshd's exec replaces this shell. Once exec runs, sshd inherits PID 1
 # and the HTTP server becomes its child via re-parenting. Stdout/stderr
