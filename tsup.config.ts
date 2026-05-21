@@ -45,7 +45,24 @@ export default defineConfig([
     shims: false,
     splitting: false,
     banner: { js: "#!/usr/bin/env node" },
-    noExternal: ["yaml"],
+    // Bundle runtime deps the server-image .cjs scripts need at execution
+    // time. The Docker runtime stage copies just the built .cjs files to
+    // /usr/local/{bin,sbin}/ — no package.json or node_modules sit next to
+    // them, so any require() that resolves to a node_modules package fails
+    // with "Cannot find module 'X'". `noExternal` instructs tsup to inline
+    // the listed packages (plus their transitive deps) into the bundle so
+    // the .cjs is fully self-contained.
+    //
+    //   - yaml: parsed in hooks (pre-receive reads .stamp/config.yml)
+    //     and several server scripts.
+    //   - @anthropic-ai/sdk: invoked by stamp-review for server-attested
+    //     verdicts (AGT-330). Discovered missing during the HiveDB Shape 2
+    //     smoke test — `Cannot find module '@anthropic-ai/sdk'` from
+    //     /usr/local/bin/stamp-review on the deployed Railway image.
+    //
+    // CLI (ESM) build above intentionally leaves these external — the CLI
+    // ships via npm install so node_modules is present alongside dist/.
+    noExternal: ["yaml", "@anthropic-ai/sdk"],
     outExtension: () => ({ js: ".cjs" }),
   },
 ]);
