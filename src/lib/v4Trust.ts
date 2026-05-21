@@ -436,6 +436,18 @@ export function verifyV4ManifestSnapshot(input: PhaseInputV4): PhaseResultV4 {
  *  because tampering the signed bytes still fails the Ed25519 check
  *  (test: "tampering the signed bytes still fails signature
  *  verification" in `tests/v4Roundtrip.test.ts`).
+ *
+ *  Anticipated objection: "the verifier still has the operator's tree,
+ *  so the recompute could be independent of the server." Correct in the
+ *  abstract — but AGT-370's deployment shape (project [shape-2-
+ *  topology-correction]) removes `.stamp/reviewers/*.md` from reviewed
+ *  repos entirely. The merge-base tree has nothing for the verifier to
+ *  hash. Restoring the recompute would require keeping prompts in the
+ *  repo, which is the bare-repo dependency this project removes. The
+ *  trust shift is the design, not an oversight: prompt bytes are now
+ *  anchored at the server's signing key (governed by the manifest),
+ *  not at the operator's working tree. Do not re-introduce the
+ *  tree-side recompute without re-opening the topology decision.
  */
 export function verifyV4ApprovalSignatures(input: PhaseInputV4): PhaseResultV4 {
   const { sha, payload, manifest, pubkeyByFingerprint } = input;

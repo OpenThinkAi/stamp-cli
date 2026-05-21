@@ -154,6 +154,15 @@ export function resolveReviewTimeoutMs(): number {
  * (or whichever upstream owns the prompts) writes reviewer prompts
  * directly into `STAMP_PROMPTS_DIR` out-of-band.
  *
+ * Expected permissions on the cache directory: `0755` on the dir,
+ * `0644` on the `*.md` files inside, owned `root:root` (the upstream
+ * Docker image bundles them at build time at these modes). World-
+ * readable is required because the git-shell user that runs
+ * stamp-review needs read access without elevation. Do not mount this
+ * path from a host volume in production — the trust property "the
+ * server controls prompt bytes" depends on the prompts being baked
+ * into the image, not supplied at runtime by an unprivileged actor.
+ *
  * Read each call (not module-load) so tests that exercise the SSH verb
  * with different fixtures don't have to restart the module graph.
  *
@@ -162,7 +171,33 @@ export function resolveReviewTimeoutMs(): number {
  * resolution shape without spelunking through the pipeline internals.
  */
 export function resolvePromptCacheRoot(): string {
+  warnIfLegacyRepoRootSet();
   return process.env["STAMP_PROMPTS_DIR"] || "/etc/stamp/reviewers";
+}
+
+let legacyRepoRootWarned = false;
+
+/**
+ * AGT-370 renamed `STAMP_REPO_ROOT` → `STAMP_PROMPTS_DIR` and changed
+ * the default from `/srv/git` to `/etc/stamp/reviewers`. Operators
+ * upgrading from <2.1 with `STAMP_REPO_ROOT` set in their systemd
+ * unit / Docker Compose / shell env would otherwise see the var
+ * silently ignored and get an opaque `no_such_file` error on every
+ * review request. Emit a single startup warning naming both vars so
+ * the failure mode is self-diagnosing. Once-only — subsequent
+ * `resolvePromptCacheRoot()` calls within the same process don't
+ * re-log.
+ */
+function warnIfLegacyRepoRootSet(): void {
+  if (legacyRepoRootWarned) return;
+  legacyRepoRootWarned = true;
+  if (process.env["STAMP_REPO_ROOT"] !== undefined) {
+    process.stderr.write(
+      "warning: STAMP_REPO_ROOT is set but no longer read — " +
+        "stamp 2.1 uses STAMP_PROMPTS_DIR instead " +
+        "(default /etc/stamp/reviewers, was /srv/git in 2.0).\n",
+    );
+  }
 }
 
 /**
