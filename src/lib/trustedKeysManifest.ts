@@ -10,13 +10,14 @@
  * hook + verifier) consumes `resolveCapability` to decide whether a
  * signer is competent to attest to a given payload.
  *
- * The manifest hash is bound into each per-approval slot of a v4
- * attestation as `trusted_keys_snapshot_sha256` so the verifier can
- * implement lenient revocation: revoking a `server` key by editing the
- * manifest blocks FUTURE merges (their snapshot hash references the
- * post-revocation manifest) without retroactively invalidating PAST
- * merges (whose snapshot hash references the manifest as it stood at
- * attestation time).
+ * The manifest hash is bound into the outer envelope of a v4/v5
+ * attestation as `AttestationPayloadV4.manifest_snapshot_sha256`
+ * (operator-signed; lifted from the per-approval slot in AGT-370). The
+ * verifier uses it to implement lenient revocation: revoking a `server`
+ * key by editing the manifest blocks FUTURE merges (their snapshot
+ * hash references the post-revocation manifest) without retroactively
+ * invalidating PAST merges (whose snapshot hash references the
+ * manifest as it stood at attestation time).
  *
  * --- Schema (informal) ---
  *
@@ -299,11 +300,12 @@ export function serializeManifestCanonical(
 
 /**
  * `sha256:<hex>` of the canonical serialization of `manifest`. This is
- * the value bound into a v4 attestation as
- * `approval.trusted_keys_snapshot_sha256`. Matches the existing
- * fingerprint prefix convention so downstream code can treat all stamp
- * hashes (key fingerprints, manifest snapshots, future per-payload
- * digests) uniformly.
+ * the value bound into a v4/v5 attestation envelope as
+ * `AttestationPayloadV4.manifest_snapshot_sha256` (AGT-370 — lifted
+ * from the per-approval slot in v4). Matches the existing fingerprint
+ * prefix convention so downstream code can treat all stamp hashes (key
+ * fingerprints, manifest snapshots, future per-payload digests)
+ * uniformly.
  */
 export function snapshotSha256(manifest: TrustedKeysManifest): string {
   const bytes = serializeManifestCanonical(manifest);

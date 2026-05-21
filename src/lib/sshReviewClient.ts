@@ -298,7 +298,6 @@ function parseResponseJson(raw: string): {
     "diff_sha256",
     "base_sha",
     "head_sha",
-    "trusted_keys_snapshot_sha256",
     "issued_at",
     "server_key_id",
   ]) {

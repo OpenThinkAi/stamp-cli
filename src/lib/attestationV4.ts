@@ -47,24 +47,40 @@
  * Version history:
  *   v4 — initial server-attested envelope: per-approval
  *        `server_attestation` (server's Ed25519 over verdict + hashes),
- *        `trusted_keys_snapshot_sha256` for lenient revocation,
- *        top-level `trust_anchor_signatures` populated when the diff
- *        touches `.stamp/**`, dropped `tools_sha256` / `mcp_sha256` /
- *        `tool_calls` (no tools in Phase 1).
+ *        per-approval `trusted_keys_snapshot_sha256` for lenient
+ *        revocation, top-level `trust_anchor_signatures` populated when
+ *        the diff touches `.stamp/**`, dropped `tools_sha256` /
+ *        `mcp_sha256` / `tool_calls` (no tools in Phase 1).
+ *   v5 — server-side bare-repo dependency removed (AGT-370). The
+ *        manifest-snapshot binding moved OFF each `ApprovalV4`
+ *        (`trusted_keys_snapshot_sha256` dropped) and ONTO the outer
+ *        `AttestationPayloadV4` as `manifest_snapshot_sha256`, signed
+ *        by the operator. The verifier no longer re-hashes
+ *        `prompt_sha256` from the merge-base tree — it trusts the
+ *        server-signed value via the chain manifest → server key →
+ *        signed approval. Server no longer reads the manifest at all.
+ *        Breaking shape: v4 envelopes are rejected with a clear
+ *        "schema too old, re-attest with stamp ≥ 2.1" error.
  */
-export const CURRENT_V4_SCHEMA_VERSION = 4;
+export const CURRENT_V4_SCHEMA_VERSION = 5;
 
 /**
  * Minimum v4 schema version a v4-aware verifier will accept. Distinct
- * from `CURRENT_V4_SCHEMA_VERSION` so a future v5 verifier can choose
- * whether to still accept v4 envelopes or refuse them outright.
+ * from `CURRENT_V4_SCHEMA_VERSION` so a future v6 verifier can choose
+ * whether to still accept v5 envelopes or refuse them outright.
+ *
+ * Bumped to 5 with AGT-370: v4 envelopes carry per-approval
+ * `trusted_keys_snapshot_sha256` and lack an outer
+ * `manifest_snapshot_sha256`. The reshape is breaking by design — no
+ * backward-compat shim — so the floor moves in lockstep with the
+ * current version.
  *
  * NOTE: this floor is independent of `MIN_ACCEPTED_PAYLOAD_VERSION = 3`
  * in `attestation.ts`. The two envelopes live on different version
  * axes — the dispatcher routes to one or the other based on the raw
  * `schema_version` integer (≤3 → legacy `attestation.ts`, ≥4 → here).
  */
-export const MIN_ACCEPTED_V4_SCHEMA_VERSION = 4;
+export const MIN_ACCEPTED_V4_SCHEMA_VERSION = 5;
 
 /**
  * Hard cap on the base64 trailer value AND its decoded bytes. Mirrors
@@ -102,15 +118,6 @@ export interface ApprovalV4 {
   diff_sha256: string;
   base_sha: string;
   head_sha: string;
-  /** `sha256:<hex>` of `.stamp/trusted-keys/manifest.yml` as it existed
-   *  at `base_sha`, in the same prefixed form as fingerprints. Matches
-   *  the value `snapshotSha256()` in `src/lib/trustedKeysManifest.ts`
-   *  returns — the docstring was previously under-specified (just "hex
-   *  sha256") and is tightened here to pin the prefixed convention the
-   *  helper + tests already enforce. Enables lenient revocation: a
-   *  verdict signed by a later-revoked server key remains valid for
-   *  merges whose snapshot predates the revocation. */
-  trusted_keys_snapshot_sha256: string;
   /** ISO-8601 UTC timestamp the server assigned at signing time. Part
    *  of the signed bytes; the verifier reads it for audit-log surface
    *  but does not enforce a freshness window in Phase 1. */
@@ -210,6 +217,25 @@ export interface AttestationPayloadV4 {
    *  the operator signature binds to the whole diff, not just the
    *  per-approval `diff_sha256` values (which the server signed). */
   diff_sha256: string;
+  /** `sha256:<hex>` of `.stamp/trusted-keys/manifest.yml` as it
+   *  existed at `base_sha`, in the same prefixed form
+   *  `snapshotSha256()` in `src/lib/trustedKeysManifest.ts` returns.
+   *
+   *  Operator-signed at envelope-construction time (see
+   *  `buildV4Trailers` in `src/commands/merge.ts` and `buildV3Envelope`
+   *  in `src/commands/attest.ts`); the verifier checks it once per
+   *  envelope against the manifest the verifier reads at `base_sha`.
+   *
+   *  Lifted from the per-approval slot in v4 (AGT-370): in v4 the
+   *  binding was `ApprovalV4.trusted_keys_snapshot_sha256`, signed by
+   *  the SERVER. That required the server to read the manifest at
+   *  `base_sha`, which forced the server to maintain a bare clone of
+   *  every reviewed repo — a non-starter for private/internal repos.
+   *  Moving the binding to the outer envelope lets the operator
+   *  (who already has the repo checked out) supply the value and lets
+   *  the server stay manifest-blind. The trust chain manifest →
+   *  server key → signed approval → prompt_sha256 is unchanged. */
+  manifest_snapshot_sha256: string;
   approvals: ApprovalEntryV4[];
   checks: CheckAttestationV4[];
   /** Empty array unless the diff touches a path matching any
@@ -392,6 +418,7 @@ export function parseEnvelope(bytes: Buffer): AttestationEnvelopeV4 | null {
     typeof p.head_sha !== "string" ||
     typeof p.target_branch !== "string" ||
     typeof p.diff_sha256 !== "string" ||
+    typeof p.manifest_snapshot_sha256 !== "string" ||
     !Array.isArray(p.approvals) ||
     !Array.isArray(p.checks) ||
     !Array.isArray(p.trust_anchor_signatures) ||
@@ -428,7 +455,6 @@ function isApprovalEntry(value: unknown): value is ApprovalEntryV4 {
     typeof a.diff_sha256 !== "string" ||
     typeof a.base_sha !== "string" ||
     typeof a.head_sha !== "string" ||
-    typeof a.trusted_keys_snapshot_sha256 !== "string" ||
     typeof a.issued_at !== "string" ||
     typeof a.server_key_id !== "string"
   ) {

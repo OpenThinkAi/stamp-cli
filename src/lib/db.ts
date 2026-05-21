@@ -20,7 +20,7 @@ export type Verdict = "approved" | "changes_requested" | "denied";
  * doc comment instead, and a guard test in `tests/db.test.ts` asserts
  * they match so a future bump to one drags the other along.
  */
-export const REVIEW_ROW_SCHEMA_V4 = 4;
+export const REVIEW_ROW_SCHEMA_V4 = 5;
 
 export interface ReviewRow {
   id: number;
