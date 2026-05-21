@@ -73,6 +73,7 @@ export {
   verifyV4TargetBranch,
   verifyV4SignerTrust,
   verifyV4OuterSignature,
+  verifyV4ManifestSnapshot,
   verifyV4Approvals,
   verifyV4DiffHash,
   verifyV4ApprovalSignatures,
