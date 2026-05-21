@@ -131,7 +131,22 @@ export function parseToolsLoose(input: unknown[]): ToolSpec[] {
 }
 
 export interface ReviewerDef {
-  prompt: string;
+  /**
+   * Path to the reviewer's prompt file, repo-root-relative
+   * (e.g. `.stamp/reviewers/security.md`). OPTIONAL since Shape 4
+   * (server-attested without code transfer, AGT-370/372): when the
+   * active branch rule declares a `review_server`, the stamp-server
+   * resolves the prompt from its bundled cache by reviewer name and
+   * the client never reads prompt bytes — so a Shape 4 `.stamp/config.yml`
+   * names reviewers without a `prompt:` field at all.
+   *
+   * When this field is omitted and a local-only path needs the bytes
+   * (`stamp review --plan`, `stamp review --headless`, or `stamp review`
+   * against a branch rule with no `review_server:`), the command errors
+   * out naming the reviewer and the missing field. See `reviewPlan.ts`
+   * and `runReview` for the call sites.
+   */
+  prompt?: string;
   /**
    * Claude Agent SDK built-in tools the reviewer may call during review.
    * The set of permitted tool names is constrained at invocation time to
@@ -321,8 +336,18 @@ function validateConfig(input: unknown): StampConfig {
       throw new Error(`config.reviewers.${name} must be an object`);
     }
     const d = def as Record<string, unknown>;
-    if (typeof d.prompt !== "string") {
-      throw new Error(`config.reviewers.${name}.prompt must be a string`);
+    // `prompt` became optional in Shape 4 (server-attested without code
+    // transfer): when the active branch rule has a `review_server:` the
+    // server-side prompt cache is the canonical source and the client
+    // never needs the bytes. If present, it must still be a string;
+    // omitted is fine and downstream local-only paths surface a clear
+    // error if they actually need the bytes.
+    let prompt: string | undefined;
+    if (d.prompt !== undefined) {
+      if (typeof d.prompt !== "string") {
+        throw new Error(`config.reviewers.${name}.prompt must be a string`);
+      }
+      prompt = d.prompt;
     }
     const tools = parseTools(d.tools, name);
     const mcp_servers = parseMcpServers(d.mcp_servers, name);
@@ -347,7 +372,7 @@ function validateConfig(input: unknown): StampConfig {
     );
 
     reviewers[name] = {
-      prompt: d.prompt,
+      ...(prompt !== undefined ? { prompt } : {}),
       ...(tools ? { tools } : {}),
       ...(mcp_servers ? { mcp_servers } : {}),
       ...(enforce_reads_on_dotstamp !== undefined

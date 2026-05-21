@@ -405,27 +405,6 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     );
   }
 
-  // Pre-load each reviewer's prompt bytes from the merge-base tree (NOT the
-  // working tree). This is the security-critical step: if the prompt came
-  // from the working tree, a feature branch could ship a modified prompt
-  // and have it review its own introduction. Sourcing from base_sha pins
-  // the reviewer to the version that existed at branch-divergence point.
-  const promptBytesByReviewer = new Map<string, string>();
-  for (const name of reviewerNames) {
-    const def = config.reviewers[name]!;
-    let bytes: string;
-    try {
-      bytes = showAtRef(resolved.base_sha, def.prompt, repoRoot);
-    } catch (err) {
-      throw new Error(
-        `failed to read prompt for reviewer "${name}" from base ${resolved.base_sha.slice(0, 8)}: ` +
-          `${err instanceof Error ? err.message : String(err)}. ` +
-          `(The reviewer is configured at the base but its prompt file is missing there.)`,
-      );
-    }
-    promptBytesByReviewer.set(name, bytes);
-  }
-
   // Stamp 2.x server-attested transport (AGT-332). When `review_server`
   // is configured on the target branch's rule, route each reviewer
   // through the SSH verb instead of the local LLM. The branch rule is
@@ -439,17 +418,55 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   const targetBranch = opts.into ?? inferTargetBranch(opts.diff);
   const branchRule = targetBranch ? findBranchRule(config.branches, targetBranch) : undefined;
   if (branchRule?.review_server) {
+    // Server-attested mode: the stamp-server resolves each reviewer's
+    // prompt from its bundled cache (AGT-370 filesystem cache). We do
+    // not need local prompt bytes here. `prompt:` may legitimately be
+    // omitted from `.stamp/config.yml` in this mode (Shape 4 / AGT-372),
+    // and even when it IS set the client is no longer the source of
+    // truth — passing empty bytes to the SSH transport's DB-index
+    // helper is fine because the index keys aren't load-bearing for
+    // server-attested rows.
     await runServerAttestedReviews({
       opts,
       config,
       reviewerNames,
-      promptBytesByReviewer,
+      promptBytesByReviewer: new Map<string, string>(),
       resolved,
       repoRoot,
       reviewServerUrl: branchRule.review_server,
       targetBranch: targetBranch!,
     });
     return;
+  }
+
+  // Local-LLM path: pre-load each reviewer's prompt bytes from the
+  // merge-base tree (NOT the working tree). This is the security-critical
+  // step: if the prompt came from the working tree, a feature branch
+  // could ship a modified prompt and have it review its own introduction.
+  // Sourcing from base_sha pins the reviewer to the version that existed
+  // at branch-divergence point. A reviewer with no `prompt:` is a Shape 4
+  // entry — refuse cleanly with the actionable next step (set the prompt
+  // path or configure a review_server).
+  const promptBytesByReviewer = new Map<string, string>();
+  for (const name of reviewerNames) {
+    const def = config.reviewers[name]!;
+    if (def.prompt === undefined) {
+      throw new Error(
+        `reviewer "${name}": no \`prompt:\` configured and no \`review_server:\` on branch rule — ` +
+          `set \`reviewers.${name}.prompt\` in .stamp/config.yml or configure a \`review_server:\` for server-attested mode.`,
+      );
+    }
+    let bytes: string;
+    try {
+      bytes = showAtRef(resolved.base_sha, def.prompt, repoRoot);
+    } catch (err) {
+      throw new Error(
+        `failed to read prompt for reviewer "${name}" from base ${resolved.base_sha.slice(0, 8)}: ` +
+          `${err instanceof Error ? err.message : String(err)}. ` +
+          `(The reviewer is configured at the base but its prompt file is missing there.)`,
+      );
+    }
+    promptBytesByReviewer.set(name, bytes);
   }
 
   // Per-repo, one-time LLM data-flow disclosure (suppress with

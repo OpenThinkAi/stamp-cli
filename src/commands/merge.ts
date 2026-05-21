@@ -395,6 +395,19 @@ function buildV3Trailers(input: {
           `Merge rolled back.`,
       );
     }
+    if (def.prompt === undefined) {
+      // v3 trailers are produced for the LEGACY (no review_server) merge
+      // path. A reviewer with no `prompt:` is a Shape 4 entry that should
+      // be paired with `review_server:` on the branch rule — in which
+      // case `buildV4Trailers` would have run instead. Reaching here
+      // means the operator configured Shape 4 reviewers but no
+      // review_server on the branch rule, which is incoherent.
+      throw new Error(
+        `reviewer "${a.reviewer}": no \`prompt:\` configured and no \`review_server:\` on branch rule — ` +
+          `set \`reviewers.${a.reviewer}.prompt\` in .stamp/config.yml or configure a \`review_server:\` for server-attested mode. ` +
+          `Merge rolled back.`,
+      );
+    }
     const promptText = showAtRef(input.baseSha, def.prompt, input.repoRoot);
     const source = readReviewerSource(a.reviewer, input.repoRoot);
     return {

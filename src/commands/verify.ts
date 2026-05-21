@@ -223,6 +223,12 @@ function verifyReviewerHashes(
         `v2 attestation: reviewer "${approval.reviewer}" is in payload but not defined in config.reviewers at the merge commit`,
       );
     }
+    if (def.prompt === undefined) {
+      fail(
+        sha,
+        `v2 attestation: reviewer "${approval.reviewer}" has no \`prompt:\` in .stamp/config.yml at the merge commit. v2 attestations cite prompt_sha256 over the on-tree prompt file, but the producer flow for server-bundled prompts is v4 (server-attested) — the envelope and config shape are inconsistent.`,
+      );
+    }
     const promptBytes = tryGitShow(`${sha}:${def.prompt}`, repoRoot);
     if (promptBytes === null) {
       fail(
