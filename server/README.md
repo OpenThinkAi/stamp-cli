@@ -9,10 +9,29 @@ protected branches defined in each repo's committed `.stamp/config.yml`.
 
 - `git` + `openssh-server` + `nodejs` (Alpine-based, ~200 MB)
 - `/etc/stamp/pre-receive` — the built hook
+- `/etc/stamp/reviewers/` — canonical reviewer prompts (`security.md`, `standards.md`, `product.md`), bundled at build time from `server/reviewers/` in the repo
 - `/usr/local/bin/setup-repo.sh` — bootstrap script
 - `/usr/local/bin/new-stamp-repo <name>` — one-line repo provisioner
 - `/entrypoint.sh` — sets up `authorized_keys` + operator pub key from env,
   then boots sshd
+
+## Reviewer prompts
+
+The Docker image bundles canonical reviewer prompts at `/etc/stamp/reviewers/<name>.md`. The SSH-invoked `stamp-review` command reads them from this path at review time, computes `sha256(bytes)`, and includes that hash in the signed verdict. The hash is what gives the server its "operator controls prompt bytes" trust property — substituting a prompt at runtime would change the hash and break downstream verification.
+
+**Path resolution.** The pipeline reads `${STAMP_PROMPTS_DIR:-/etc/stamp/reviewers}/<reviewer>.md`. The reviewer name is validated against `REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/` before path construction (`src/server/promptFetch.ts`), so `--reviewer` cannot be used to traverse out of the configured directory.
+
+> **Do not set `STAMP_PROMPTS_DIR` in production deployments.** The Shape 4 verifier does NOT recompute `prompt_sha256` from the operator's repo tree — the only trust anchor for prompt bytes is the server's own signature over those bytes. An operator who can set this env var to point at an attacker-writable directory can substitute prompts at review time while attestations continue to verify cleanly downstream. Treat the env override as test-only: use it in CI / fixture runs that compute non-binding `--plan` output, never on the SSH verb that signs verdicts. Configuration-management owners should refuse PRs that set this var on production stamp-server deployments. Code-level enforcement that fails startup when this var is non-default in production is on the follow-up list (a known weakening that this README treats explicitly so it isn't silently load-bearing).
+
+**Expected permissions.** `0755` on the directory, `0644` root:root on the `*.md` files. World-readable is required so the `git-shell` user that runs `stamp-review` can read without elevation; the `chmod` is enforced by the Dockerfile at build time. Do not mount this path from a host volume in production — the trust property depends on the prompts being baked into the image, not supplied at runtime by an unprivileged actor.
+
+**Boot inventory.** `entrypoint.sh` emits a one-line stderr inventory at startup listing which `*.md` files are present in `/etc/stamp/reviewers/` (visible via `docker logs` / Railway logs). Helpful for confirming an image variant shipped the expected prompt set without `exec`'ing into the container.
+
+**Changing prompts.** Edit `server/reviewers/<name>.md` in your fork of this repo, then rebuild the image and redeploy. The committed source is what every container of a given image tag has — prompts are part of the image tag's identity. There is no live-edit / hot-reload path on purpose; live editing would let a server operator modify what the LLM sees AFTER an attestation was signed against a different prompt, defeating the verifier's ability to bind a verdict to a specific prompt hash.
+
+**Adding a new reviewer.** Add `server/reviewers/<newname>.md` (the file's basename is the reviewer's name as referenced in per-repo `.stamp/config.yml`). Per-repo configs reference the reviewer by name only — there is no `prompt:` path field; the server's bundled prompt is the canonical source. Rebuild + redeploy so the image carries the new file.
+
+**Versus the per-repo `.stamp/reviewers/` path.** In Shape 1 and Shape 2 deployments (see [`docs/migration-1.x-to-2.x.md`](../docs/migration-1.x-to-2.x.md)), reviewer prompts live in each reviewed repo under `.stamp/reviewers/<name>.md` and stamp-server fetches them from its bare clone of the repo at base_sha. In Shape 4 deployments (no code transfer), the prompts in `/etc/stamp/reviewers/` are the canonical source and the reviewed repo does NOT carry `.stamp/reviewers/*.md`. The two paths are deliberately separate file trees — operators don't mount Shape-1/2-style per-repo prompts into `/etc/stamp/reviewers/`.
 
 ## Build locally
 
