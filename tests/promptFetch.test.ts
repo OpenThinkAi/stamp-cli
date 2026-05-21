@@ -112,6 +112,149 @@ describe("defaultPromptCacheResolver", () => {
   });
 });
 
+// ─── AGT-373: widened (reviewer, org?, repo?) resolver ─────────────
+//
+// Phase A tests above exercise the single-arg call shape — they
+// continue to pass unmodified because `org` / `repo` are optional
+// (AC #5). The block below covers the Phase B widening:
+// per-repo override file present → resolver returns the override
+// path; absent or missing slug → resolver falls back to the
+// `<cacheRoot>/<reviewer>.md` default. The path-construction logic
+// itself lives in `getPromptPath` (AGT-372) and has its own coverage
+// in tests/promptsCache.test.ts; these tests exist to prove the
+// resolver wiring forwards correctly.
+
+describe("defaultPromptCacheResolver — AGT-373 widened (reviewer, org?, repo?)", () => {
+  let cacheRoot: string;
+
+  beforeEach(() => {
+    cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-373-")));
+    // Default reviewer prompts at the cache-root level.
+    writeFileSync(join(cacheRoot, "security.md"), "default security prompt\n");
+    writeFileSync(join(cacheRoot, "standards.md"), "default standards prompt\n");
+    // Per-repo override for security — but NOT for standards.
+    mkdirSync(join(cacheRoot, "acme", "widgets"), { recursive: true });
+    writeFileSync(
+      join(cacheRoot, "acme", "widgets", "security.md"),
+      "ACME-widgets security prompt\n",
+    );
+  });
+
+  afterEach(() => {
+    rmSync(cacheRoot, { recursive: true, force: true });
+  });
+
+  it("returns the override path when <cacheRoot>/<org>/<repo>/<reviewer>.md exists", () => {
+    const r = defaultPromptCacheResolver(cacheRoot);
+    const overridePath = r("security", "acme", "widgets");
+    assert.equal(overridePath, join(cacheRoot, "acme", "widgets", "security.md"));
+  });
+
+  it("falls back to the default when org+repo are passed but the override file is absent", () => {
+    const r = defaultPromptCacheResolver(cacheRoot);
+    // standards.md exists at root but NOT under acme/widgets/.
+    const fallback = r("standards", "acme", "widgets");
+    assert.equal(fallback, join(cacheRoot, "standards.md"));
+  });
+
+  it("falls back to the default when org/repo are omitted entirely (Phase A shape)", () => {
+    const r = defaultPromptCacheResolver(cacheRoot);
+    assert.equal(r("security"), join(cacheRoot, "security.md"));
+  });
+
+  it("ignores org/repo when only one of the two is supplied (resolver expects a complete tuple)", () => {
+    const r = defaultPromptCacheResolver(cacheRoot);
+    // Just org, no repo → fallback (the override path needs both).
+    assert.equal(
+      r("security", "acme"),
+      join(cacheRoot, "security.md"),
+      "single-org without repo should not consult the override",
+    );
+    assert.equal(
+      r("security", undefined, "widgets"),
+      join(cacheRoot, "security.md"),
+      "single-repo without org should not consult the override",
+    );
+  });
+
+  it("falls back to the default when org/repo are malformed (does not throw)", () => {
+    const r = defaultPromptCacheResolver(cacheRoot);
+    // A malformed slug from upstream is much more likely to be
+    // "verb didn't carry repo context" than "attacker forged a slug".
+    // getPromptPath silently falls through; the read decides what's
+    // actually available.
+    assert.equal(r("security", "../bad", "widgets"), join(cacheRoot, "security.md"));
+  });
+});
+
+describe("fetchCanonicalPrompt — AGT-373 org/repo threading", () => {
+  let cacheRoot: string;
+
+  beforeEach(() => {
+    cacheRoot = realpathSync(mkdtempSync(join(tmpdir(), "stamp-promptfetch-373fc-")));
+    writeFileSync(join(cacheRoot, "security.md"), "default-bytes\n");
+    mkdirSync(join(cacheRoot, "acme", "widgets"), { recursive: true });
+    writeFileSync(
+      join(cacheRoot, "acme", "widgets", "security.md"),
+      "override-bytes\n",
+    );
+  });
+
+  afterEach(() => {
+    rmSync(cacheRoot, { recursive: true, force: true });
+  });
+
+  it("returns the override bytes when (reviewer, org, repo) maps to an existing override file", async () => {
+    const r = defaultPromptCacheResolver(cacheRoot);
+    const result = await fetchCanonicalPrompt(r, "security", "acme", "widgets");
+    assertOk(result);
+    assert.equal(result.bytes.toString("utf8"), "override-bytes\n");
+  });
+
+  it("returns the default bytes when the override file is absent for this (org, repo)", async () => {
+    const r = defaultPromptCacheResolver(cacheRoot);
+    // globex/anvils has no override → fall through to <cacheRoot>/security.md.
+    const result = await fetchCanonicalPrompt(r, "security", "globex", "anvils");
+    assertOk(result);
+    assert.equal(result.bytes.toString("utf8"), "default-bytes\n");
+  });
+
+  it("forwards (reviewer, org, repo) verbatim to a custom resolver", async () => {
+    const calls: Array<{ reviewer: string; org?: string; repo?: string }> = [];
+    // Custom resolver records the args and returns the default path.
+    const spyResolver: PromptResolver = (reviewer, org, repo) => {
+      calls.push({ reviewer, org, repo });
+      return join(cacheRoot, `${reviewer}.md`);
+    };
+    const result = await fetchCanonicalPrompt(
+      spyResolver,
+      "security",
+      "acme",
+      "widgets",
+    );
+    assertOk(result);
+    assert.deepEqual(calls, [{ reviewer: "security", org: "acme", repo: "widgets" }]);
+  });
+
+  it("an older one-arg resolver remains assignable and is called with the wider signature (variance check)", async () => {
+    // Phase A resolvers that ignore org/repo MUST keep working.
+    // Variance: `(r: string) => string` is assignable to
+    // `(r: string, org?: string, repo?: string) => string` — the
+    // narrower resolver discards extra args.
+    const narrowResolver: PromptResolver = (reviewer: string): string =>
+      join(cacheRoot, `${reviewer}.md`);
+    const result = await fetchCanonicalPrompt(
+      narrowResolver,
+      "security",
+      "acme",
+      "widgets",
+    );
+    assertOk(result);
+    // No override consulted (the narrow resolver ignores org/repo).
+    assert.equal(result.bytes.toString("utf8"), "default-bytes\n");
+  });
+});
+
 describe("fetchCanonicalPrompt — happy path", () => {
   let cacheRoot: string;
   const promptBody = "You are a security reviewer.\n\nReject all hardcoded secrets.\n";

@@ -147,24 +147,62 @@ export function resolveReviewTimeoutMs(): number {
 }
 
 /**
+ * Phase B (AGT-373) cache-root path used when `STAMP_PROMPTS_REPO_URL`
+ * is set. The webhook-driven prompts-cache module (AGT-372) maintains
+ * a git clone at this fixed path inside the stamp-server image; the
+ * post-receive webhook (AGT-374) and the boot-time clone step
+ * (AGT-375) both write here. Operators don't override this path —
+ * setting the URL is enough to opt in.
+ *
+ * Exported so AGT-374 (webhook route) and AGT-376 (periodic-poll
+ * backstop) can pin the same path the resolver picks without
+ * duplicating the literal, and so tests can assert the toggle's
+ * landing site without spelunking the resolver internals.
+ */
+export const PHASE_B_CACHE_ROOT = "/srv/git/.prompts-cache";
+
+/**
  * Resolve the server-side prompt-cache directory from env or fall back
- * to the stamp-server default. AGT-370 moved the prompt source from a
- * bare git repo (`STAMP_REPO_ROOT`, removed) to a filesystem cache so
- * the server no longer needs a clone of the operator's repo. HiveDB
- * (or whichever upstream owns the prompts) writes reviewer prompts
- * directly into `STAMP_PROMPTS_DIR` out-of-band.
+ * to the stamp-server default.
+ *
+ * Two-mode resolution (AGT-373):
+ *
+ *   1. If `STAMP_PROMPTS_REPO_URL` is set, return the Phase B cache
+ *      root (`/srv/git/.prompts-cache`). The prompts-cache module
+ *      (AGT-372) populates this path via webhook-driven
+ *      `cloneOrFetchPromptsCache`. `STAMP_PROMPTS_DIR` is IGNORED in
+ *      this mode — setting the URL is the operator's signal that
+ *      they're on the Phase B provisioning channel, and silently
+ *      reading both vars would create an ambiguous failure mode
+ *      ("the URL is set but the cache is empty, did the webhook fire?"
+ *      vs "the URL is set but I'm secretly reading from a stale
+ *      STAMP_PROMPTS_DIR").
+ *   2. Otherwise honor Phase A's `STAMP_PROMPTS_DIR` env var,
+ *      defaulting to `/etc/stamp/reviewers`. This is the Phase A
+ *      fallback — existing deployments that haven't opted into Phase
+ *      B keep working with no reconfig.
+ *
+ * AGT-370 moved the prompt source from a bare git repo
+ * (`STAMP_REPO_ROOT`, removed) to a filesystem cache so the server
+ * no longer needs a clone of the operator's repo. AGT-373 layers the
+ * Phase B webhook channel on top while keeping Phase A's path as the
+ * fallback.
  *
  * Expected permissions on the cache directory: `0755` on the dir,
- * `0644` on the `*.md` files inside, owned `root:root` (the upstream
- * Docker image bundles them at build time at these modes). World-
- * readable is required because the git-shell user that runs
- * stamp-review needs read access without elevation. Do not mount this
- * path from a host volume in production — the trust property "the
- * server controls prompt bytes" depends on the prompts being baked
- * into the image, not supplied at runtime by an unprivileged actor.
+ * `0644` on the `*.md` files inside. World-readable is required
+ * because the git-shell user that runs stamp-review needs read
+ * access without elevation. Do not mount the Phase A path from a
+ * host volume in production — the trust property "the server
+ * controls prompt bytes" depends on the prompts being baked into the
+ * image, not supplied at runtime by an unprivileged actor. The Phase
+ * B path is populated from a git clone whose pubkey/HTTPS-verifier
+ * the operator controls, so the trust property is preserved
+ * structurally (it's not a host-mounted volume; it's a git working
+ * tree under stamp-server's control).
  *
- * Read each call (not module-load) so tests that exercise the SSH verb
- * with different fixtures don't have to restart the module graph.
+ * Read each call (not module-load) so tests that exercise the SSH
+ * verb with different fixtures don't have to restart the module
+ * graph.
  *
  * Exported so the SSH verb (and a future HTTP verb) can pin the same
  * default the pipeline documents, and so tests can assert the env
@@ -172,6 +210,9 @@ export function resolveReviewTimeoutMs(): number {
  */
 export function resolvePromptCacheRoot(): string {
   warnIfLegacyRepoRootSet();
+  if (process.env["STAMP_PROMPTS_REPO_URL"]) {
+    return PHASE_B_CACHE_ROOT;
+  }
   return process.env["STAMP_PROMPTS_DIR"] || "/etc/stamp/reviewers";
 }
 
@@ -332,8 +373,10 @@ export interface ReviewSigningMaterial {
  * code path constructs these from env, tests inject mocks.
  *
  * Default behavior when each field is omitted:
- *   - `promptResolver`: `defaultPromptCacheResolver(STAMP_PROMPTS_DIR ||
- *     "/etc/stamp/reviewers")` — AGT-370.
+ *   - `promptResolver`: `defaultPromptCacheResolver(resolvePromptCacheRoot())`
+ *     — AGT-370 + AGT-373. Cache root is `/srv/git/.prompts-cache`
+ *     when `STAMP_PROMPTS_REPO_URL` is set (Phase B), else
+ *     `STAMP_PROMPTS_DIR || /etc/stamp/reviewers` (Phase A fallback).
  *   - `anthropic`: `new Anthropic({apiKey: process.env.ANTHROPIC_API_KEY})`
  *   - `timeoutMs`: `resolveReviewTimeoutMs()`
  *   - `signingKey`: `loadReviewSigningKey({privateKeyPath:
@@ -505,9 +548,21 @@ export async function runReviewPipeline(
   // Stage 1: fetch canonical prompt from the server's filesystem
   // cache. This is the load-bearing security property — the operator
   // does NOT send the prompt; the server reads it from its own
-  // filesystem (populated out-of-band by HiveDB / similar). See
+  // filesystem (populated out-of-band by HiveDB in Phase A / by the
+  // webhook-driven prompts-cache module in Phase B). See
   // promptFetch.ts header for the substitution-attack rationale.
-  const prompt = await fetchCanonicalPrompt(resolver, input.params.reviewer);
+  //
+  // AGT-373: thread `org` and `repo` from the verb's parsed request
+  // through to the resolver so the default Phase B resolver can pick
+  // a `<cacheRoot>/<org>/<repo>/<reviewer>.md` per-repo override when
+  // one exists. The SSH verb already validates `org`/`repo` shape
+  // upstream; here we just forward.
+  const prompt = await fetchCanonicalPrompt(
+    resolver,
+    input.params.reviewer,
+    input.params.org,
+    input.params.repo,
+  );
   if (prompt.kind !== "ok") {
     // Convert the typed error result to a throw so the verb's
     // top-level handler can map it to stderr+exit. The verb's logs
