@@ -78,6 +78,14 @@ Best fit if your team already lives in GitHub PRs and you don't want to migrate 
 
 Go to [Upgrade walkthrough — Shape 2](#upgrade-walkthrough--shape-2-pr-mode).
 
+### Shape 3 — Local-only (iteration feedback, no trust)
+
+No server. `stamp review --plan` emits a structured plan for a parent Claude Code session to dispatch, or `stamp review --headless` calls Anthropic directly with `ANTHROPIC_API_KEY`. **Produces no attestation in 2.x** — verdicts are advisory.
+
+If your 1.x deployment was already operator-trust-only without a server, this is your natural landing shape. The functional behavior doesn't change; the framing does ("no trust" is now explicit rather than implicit-and-unfortunate).
+
+Go to [Local-only operators](#local-only-operators).
+
 ### Shape 4 — GitHub primary, server-attested without code transfer (private repos)
 
 GitHub holds the source of truth and runs the PR UI. **stamp-server never receives a clone** — `stamp review` SSHes only the diff plus identifying metadata; the server reads its own bundled reviewer prompts from `/etc/stamp/reviewers/` (baked into the Docker image at build time), hashes them, runs the LLM, and signs the verdict. The signed verdict travels back over SSH; the operator folds it into a v4 envelope locally and `stamp/verify-attestation@v1` validates it as a required PR check.
@@ -87,14 +95,6 @@ Best fit if your code must not leave its git host — private/internal codebases
 Trust model is identical to Shape 2: the server's review-signing key still controls the prompt bytes (because prompts are image-baked, not host-mounted), and the verifier validates the server's signature against the manifest at base_sha. The only thing missing relative to Shape 2 is the mirror workflow and the bare-repo clone on stamp-server.
 
 Go to [Upgrade walkthrough — Shape 4](#upgrade-walkthrough--shape-4-server-attested-without-code-transfer).
-
-### Shape 3 — Local-only (iteration feedback, no trust)
-
-No server. `stamp review --plan` emits a structured plan for a parent Claude Code session to dispatch, or `stamp review --headless` calls Anthropic directly with `ANTHROPIC_API_KEY`. **Produces no attestation in 2.x** — verdicts are advisory.
-
-If your 1.x deployment was already operator-trust-only without a server, this is your natural landing shape. The functional behavior doesn't change; the framing does ("no trust" is now explicit rather than implicit-and-unfortunate).
-
-Go to [Local-only operators](#local-only-operators).
 
 ---
 
@@ -339,6 +339,28 @@ Each repo independently opts in via its own `review_server` config and mirror wo
 
 ---
 
+## Local-only operators
+
+If your 1.x deployment is purely local-only (`stamp init --mode local-only`, no server, attestations signed but no remote enforcement), 2.x changes very little for you functionally — and clarifies the framing.
+
+**What changes:**
+
+- `stamp review` without a configured `review_server` now errors out instead of running the LLM locally and silently producing a verdict that looks like a trust gate.
+- Use `stamp review --plan` (AGT-339, shipped) or `stamp review --headless` (AGT-341, shipped) for the iteration loop.
+- No v4 attestation is produced. The "local-only attestation" of 1.x was operator-trust-only; 2.x is honest about it and does not pretend to offer one.
+
+**What stays:**
+
+- `stamp review --plan` emits the structured plan a parent Claude Code session can dispatch to subagents. Fast feedback loop preserved.
+- `stamp review --headless` calls the Anthropic API directly via `@anthropic-ai/sdk` — billed against your `ANTHROPIC_API_KEY`, no parent agent required. Suitable for cron, git hooks, CI.
+- The signing key, the git surface, and `stamp verify` against any v2/v3 commit all continue to work.
+
+See [`local-only-mode.md`](./local-only-mode.md) for the full local-only contract, the security boundary, and the headless billing caveat.
+
+If you later decide you want the trust property, you can flip the same repo into Shape 1 or Shape 2 by deploying stamp-server and adding `review_server` — there's nothing to undo on the local-only side.
+
+---
+
 ## Upgrade walkthrough — Shape 4 (server-attested without code transfer)
 
 For repos that need server-attested reviews but cannot mirror their code to stamp-server. Same trust properties as Shape 2; no mirror workflow, no bare repo on the server, no per-repo deploy key. The server reads canonical reviewer prompts from its bundled image directory; the operator's repo never carries `.stamp/reviewers/*.md`.
@@ -378,7 +400,7 @@ stamp attest --into main --push origin  # signs envelope, pushes branch + attest
 # green check → merge in GitHub UI
 ```
 
-The wire protocol is identical to Shape 2 — `stamp review` sends `--reviewer`, `--org`, `--repo`, `--base-sha`, `--head-sha`, `--diff-sha256` plus the diff on stdin. The only difference is that the server uses `--reviewer` to look up its bundled prompt (not to fetch from a bare repo at `--base-sha`). No mirror workflow runs because none exists.
+The wire protocol is identical to Shape 2 — `stamp review` sends `--reviewer`, `--org`, `--repo`, `--base-sha`, `--head-sha`, `--diff-sha256` plus the diff on stdin. The only difference is that the server uses `--reviewer` to look up its bundled prompt (not to fetch from a bare repo at `--base-sha`). The reviewer name is validated against `REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/` before path construction (see `src/server/promptFetch.ts`) so `--reviewer` cannot be used to traverse out of `/etc/stamp/reviewers/`. No mirror workflow runs because none exists.
 
 ### Step 5 — Repeat for each repo
 
@@ -387,28 +409,6 @@ Same as Shape 2 step 6. Mix-and-match across the org is supported — some repos
 ### Verifier behavior (Shape 4 specifics)
 
 `stamp/verify-attestation@v1` validates each approval's signature against the server key resolved from the manifest at base_sha, and re-runs the envelope-level `manifest_snapshot_sha256` check. It does NOT recompute `prompt_sha256` from the merge-base tree — in Shape 4 the prompts are not in the operator's repo, so there's nothing to recompute against. The trust chain for prompt bytes is: manifest (at base_sha) → server key with `server` capability → signed approval body → `prompt_sha256`. The recompute step that Shape 1/2 ran was a belt-and-suspenders second-line defense; in Shape 4 it's structurally impossible and the signed chain is the trust anchor. See [`src/lib/v4Trust.ts`](../src/lib/v4Trust.ts) `verifyV4ApprovalSignatures` for the in-code rationale.
-
----
-
-## Local-only operators
-
-If your 1.x deployment is purely local-only (`stamp init --mode local-only`, no server, attestations signed but no remote enforcement), 2.x changes very little for you functionally — and clarifies the framing.
-
-**What changes:**
-
-- `stamp review` without a configured `review_server` now errors out instead of running the LLM locally and silently producing a verdict that looks like a trust gate.
-- Use `stamp review --plan` (AGT-339, shipped) or `stamp review --headless` (AGT-341, shipped) for the iteration loop.
-- No v4 attestation is produced. The "local-only attestation" of 1.x was operator-trust-only; 2.x is honest about it and does not pretend to offer one.
-
-**What stays:**
-
-- `stamp review --plan` emits the structured plan a parent Claude Code session can dispatch to subagents. Fast feedback loop preserved.
-- `stamp review --headless` calls the Anthropic API directly via `@anthropic-ai/sdk` — billed against your `ANTHROPIC_API_KEY`, no parent agent required. Suitable for cron, git hooks, CI.
-- The signing key, the git surface, and `stamp verify` against any v2/v3 commit all continue to work.
-
-See [`local-only-mode.md`](./local-only-mode.md) for the full local-only contract, the security boundary, and the headless billing caveat.
-
-If you later decide you want the trust property, you can flip the same repo into Shape 1 or Shape 2 by deploying stamp-server and adding `review_server` — there's nothing to undo on the local-only side.
 
 ---
 
