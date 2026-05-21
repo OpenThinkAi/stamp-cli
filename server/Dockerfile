@@ -222,6 +222,24 @@ RUN chown root:root /etc/sudoers.d/stamp-server \
  && chmod 0440 /etc/sudoers.d/stamp-server \
  && visudo -c -f /etc/sudoers.d/stamp-server
 
+# Canonical reviewer prompts (security/standards/product). The SSH-invoked
+# stamp-review command resolves these at review time from
+# ${STAMP_PROMPTS_DIR:-/etc/stamp/reviewers}/<reviewer>.md and includes a
+# content hash in the signed verdict — so substituting prompts at runtime
+# would invalidate downstream verification. Bundling them in the image
+# (rather than mounting from the host) is what gives the server its
+# "operator controls the prompt bytes" trust property. See
+# server/reviewers/README.md for the editing/rebuild workflow.
+#
+# Mode 0644 root:root: world-readable so the git-shell user that runs
+# stamp-review can read without elevation. The chmod is explicit (rather
+# than relying on --chmod= on COPY) because this Dockerfile has no
+# `# syntax=docker/dockerfile:1.4+` directive enabling that COPY flag.
+COPY server/reviewers/ /etc/stamp/reviewers/
+RUN chown -R root:root /etc/stamp/reviewers \
+ && chmod 0755 /etc/stamp/reviewers \
+ && chmod 0644 /etc/stamp/reviewers/*.md
+
 RUN chmod +x /etc/stamp/pre-receive.cjs \
              /etc/stamp/post-receive.cjs \
              /usr/local/bin/setup-repo.sh \

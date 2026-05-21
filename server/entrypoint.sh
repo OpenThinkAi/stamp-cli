@@ -10,6 +10,16 @@
 #
 set -e
 
+# Reviewer-prompt inventory. The image bundles canonical prompts at
+# /etc/stamp/reviewers/<name>.md (see server/reviewers/README.md). The
+# defensive mkdir -p covers image variants that didn't bundle the dir —
+# without it, the SSH-time resolver would hard-fail on opendir() rather
+# than degrade to "no server-bundled prompt available." Log the file list
+# at boot so operators can confirm what shipped without exec'ing into the
+# container.
+mkdir -p /etc/stamp/reviewers
+echo "reviewer prompts available: $(ls /etc/stamp/reviewers/*.md 2>/dev/null | xargs -n1 basename 2>/dev/null | paste -sd ',' - || echo none)" >&2
+
 # Platform volume mounts (Railway, Fly, etc.) come up root-owned, overriding
 # any build-time chown. Fix at boot so the git user can write its own repos.
 chown -R git:git /srv/git 2>/dev/null || true
