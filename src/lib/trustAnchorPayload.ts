@@ -103,13 +103,10 @@ export interface TrustAnchorPayloadInput {
    *  signature produced for v4 commit-trailer mode would fail to
    *  verify against a v3 PR envelope of the same diff (and vice versa);
    *  the field is the smallest change that lets both envelopes share
-   *  this builder without divergence.
-   *
-   *  WS1 follow-up: `stamp admin sign --pending` defaults to v4 and
-   *  produces sigs that work for `stamp merge` but NOT for `stamp
-   *  attest` PR-mode. Admins coordinating a PR-mode-only repo need a
-   *  way to sign for that path explicitly. Tracked as a follow-up to
-   *  this WS. */
+   *  this builder without divergence. `stamp admin sign` resolves
+   *  envelope mode at the command level (auto-detect from
+   *  `review_server` at base_sha, override via `--mode`); see
+   *  `detectEnvelopeModeAtBase` in `src/commands/adminSign.ts`. */
   schemaVersion?: number;
 }
 

@@ -150,7 +150,7 @@ export function collectTrustAnchorSignatures(
       matchingRules[0]!,
     );
     throw new Error(
-      `v4 path_rules["${worst.pattern}"] requires ${worst.minimum_signatures} admin signature(s) with capability '${worst.require_capability}', ` +
+      `path_rules["${worst.pattern}"] requires ${worst.minimum_signatures} admin signature(s) with capability '${worst.require_capability}', ` +
         `but no signatures are recorded on ${TRUST_ANCHOR_NOTES_REF} for ${input.headSha.slice(0, 12)}. ` +
         `Collect them with \`stamp admin sign --pending ${input.headSha.slice(0, 12)}\` (run by each admin), ` +
         `then re-run \`${command}\`.`,
@@ -236,7 +236,7 @@ export function collectTrustAnchorSignatures(
           ? ` Note signatures rejected: ${failures.join("; ")}.`
           : "";
       throw new Error(
-        `v4 path_rules["${rule.pattern}"] requires ${rule.minimum_signatures} admin signature(s) with capability '${rule.require_capability}', ` +
+        `path_rules["${rule.pattern}"] requires ${rule.minimum_signatures} admin signature(s) with capability '${rule.require_capability}', ` +
           `but only ${qualifying} verifying signature(s) are present on ${TRUST_ANCHOR_NOTES_REF} for ${input.headSha.slice(0, 12)}.${failSummary} ` +
           `Collect more with \`stamp admin sign --pending ${input.headSha.slice(0, 12)}\` (and have admins re-sign if previously stale), then re-run \`${command}\`.`,
       );

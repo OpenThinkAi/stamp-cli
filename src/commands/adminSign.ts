@@ -609,6 +609,11 @@ function signPending(
       (requestedMode === "auto" ? " (auto-detected)" : " (--mode override)") +
       ` — schema_version ${resolvedSchemaVersion}`,
   );
+  if (requestedMode === "auto" && resolvedMode === "pr") {
+    console.log(
+      `  note:              prior to WS1 this command always produced v4 signatures; auto-detect picked PR-mode here because the target branch rule has review_server set. Pass --mode v4 if you intend to use \`stamp merge\` on this repo.`,
+    );
+  }
   console.log(
     `  signatures:        ${updated.signatures.length}/${matchedRule.minimum_signatures}` +
       (updated.signatures.length >= matchedRule.minimum_signatures ? " — threshold met" : ""),

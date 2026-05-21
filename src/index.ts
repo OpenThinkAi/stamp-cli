@@ -864,7 +864,7 @@ admin
   )
   .option(
     "--mode <mode>",
-    "envelope mode the signature must satisfy: 'auto' (default — detect from review_server at base_sha), 'pr' (Shape 4 PR-mode, schema_version 3), or 'v4' (commit-trailer, schema_version 5). Force a mode for debugging or staged migrations.",
+    "envelope format to produce the signature for: 'auto' (default — detect from review_server at base_sha), 'pr' (Shape 4 PR-mode, schema_version 3), or 'v4' (commit-trailer, schema_version 5). Force a mode for debugging or staged migrations.",
     "auto",
   )
   .option("--json", "(list mode only) emit pending commits as JSON")
