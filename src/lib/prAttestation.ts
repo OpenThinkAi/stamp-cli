@@ -98,6 +98,7 @@ import type {
   CheckAttestationV4,
   TrustAnchorSignatureV4,
 } from "./attestationV4.js";
+import type { MigrationBootstrapMarker } from "./migrationBootstrap.js";
 
 /**
  * Current PR attestation schema version produced by 2.x server-side
@@ -218,6 +219,18 @@ export interface PrAttestationPayload {
    *  uses for server-gated mode. Absent on v2 envelopes. */
   trust_anchor_signatures?: TrustAnchorSignatureV4[];
   signer_key_id: string;
+  /** AGT-398: Shape 4 migration-bootstrap marker. When present, the
+   *  envelope is a "bootstrap" envelope produced by
+   *  `stamp attest --migrate-existing`: server signatures are absent
+   *  (the migration commit hasn't yet activated server-attested mode at
+   *  base), but the diff is structurally constrained to a Shape 4
+   *  activation and an admin counter-signature compensates for the
+   *  missing server-side trust. See `src/lib/migrationBootstrap.ts`.
+   *
+   *  Part of the operator-signed payload bytes (`serializePayload`
+   *  covers it via plain `JSON.stringify`), so a non-bootstrap envelope
+   *  cannot tamper itself into the bootstrap-acceptance path. */
+  migration_bootstrap?: MigrationBootstrapMarker;
 }
 
 export interface PrAttestationEnvelope {
@@ -298,6 +311,19 @@ export function parseEnvelope(bytes: Buffer): PrAttestationEnvelope | null {
   if (typeof p.manifest_snapshot_sha256 !== "string") return null;
   if (!Array.isArray(p.trust_anchor_signatures)) return null;
   if (typeof p.target_branch_tip_sha !== "string") return null;
+  // AGT-398 bootstrap marker (optional): when present, MUST be a
+  // well-shaped `{ activated_paths: string[] }`. A malformed marker
+  // rejects outright — we won't let an attacker probe the verifier's
+  // bootstrap acceptance with a half-formed marker.
+  if (p.migration_bootstrap !== undefined) {
+    const m = p.migration_bootstrap as { activated_paths?: unknown };
+    if (!m || typeof m !== "object" || Array.isArray(m)) return null;
+    if (!Array.isArray(m.activated_paths)) return null;
+    if (m.activated_paths.length === 0) return null;
+    for (const ap of m.activated_paths) {
+      if (typeof ap !== "string" || ap.length === 0) return null;
+    }
+  }
   return env as PrAttestationEnvelope;
 }
 
