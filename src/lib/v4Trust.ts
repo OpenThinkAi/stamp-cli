@@ -448,6 +448,28 @@ export function verifyV4ManifestSnapshot(input: PhaseInputV4): PhaseResultV4 {
  *  anchored at the server's signing key (governed by the manifest),
  *  not at the operator's working tree. Do not re-introduce the
  *  tree-side recompute without re-opening the topology decision.
+ *
+ *  Refined objection considered and rejected: "make the recompute
+ *  topology-conditional — keep it for Shape 1/2 where prompts ARE in
+ *  the repo, skip it for Shape 4 where they aren't." This was a
+ *  defense-in-depth ask raised during the 2.1.0 stamp review (May
+ *  2026). Decision: keep the trust shift uniform across topologies.
+ *  Rationale: (a) the topology indicator from config
+ *  (`reviewers.<name>.prompt` set vs omitted) is operator-controlled
+ *  — a malicious operator could omit `prompt:` to opt their repo into
+ *  signature-only validation; the conditional adds a config-driven
+ *  bypass that defeats the defense it's supposed to provide; (b) a
+ *  uniform trust model is auditable in a way conditional logic is
+ *  not — the verifier's security argument now reduces to "the manifest
+ *  → server-key → signature chain holds", with one threat surface
+ *  instead of two; (c) Shape 1/2 deployments that still want the
+ *  belt-and-suspenders check can run a separate offline auditor that
+ *  re-hashes `<base_sha>:.stamp/reviewers/<name>.md` and compares
+ *  against the signed `prompt_sha256`, without complicating the
+ *  in-band verifier. If the threat model shifts (e.g. evidence of
+ *  server key compromise as a meaningful attack vector), revisit
+ *  here — but the conditional shape sketched in this objection is
+ *  not the right answer.
  */
 export function verifyV4ApprovalSignatures(input: PhaseInputV4): PhaseResultV4 {
   const { sha, payload, manifest, pubkeyByFingerprint } = input;
