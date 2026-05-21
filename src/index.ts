@@ -862,8 +862,13 @@ admin
     "--signer-key-id <fingerprint>",
     "override the predicted operator fingerprint baked into the signing target — required for non-operator co-signers in multi-admin workflows (form: sha256:<64-hex>)",
   )
+  .option(
+    "--mode <mode>",
+    "envelope format to produce the signature for: 'auto' (default — detect from review_server at base_sha), 'pr' (Shape 4 PR-mode, schema_version 3), or 'v4' (commit-trailer, schema_version 5). Force a mode for debugging or staged migrations.",
+    "auto",
+  )
   .option("--json", "(list mode only) emit pending commits as JSON")
-  .action((opts: { pending?: string | boolean; targetBranch?: string; signerKeyId?: string; json?: boolean }) => {
+  .action((opts: { pending?: string | boolean; targetBranch?: string; signerKeyId?: string; mode?: string; json?: boolean }) => {
     try {
       // commander returns `true` when --pending is passed without a value
       // (the [sha] form). Map that to undefined → list mode. A real string
@@ -872,10 +877,17 @@ admin
       // shape for `stamp admin sign` today.
       const pendingArg =
         typeof opts.pending === "string" ? opts.pending : undefined;
+      const mode = opts.mode ?? "auto";
+      if (mode !== "auto" && mode !== "pr" && mode !== "v4") {
+        throw new Error(
+          `--mode must be one of: auto, pr, v4 (got ${JSON.stringify(mode)})`,
+        );
+      }
       runAdminSign({
         pending: pendingArg,
         targetBranch: opts.targetBranch,
         signerKeyId: opts.signerKeyId,
+        mode,
         json: opts.json,
       });
     } catch (err) {

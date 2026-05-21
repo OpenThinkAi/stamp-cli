@@ -110,6 +110,7 @@ import {
   validateShape4ActivationDiff,
   type MigrationBootstrapMarker,
 } from "../lib/migrationBootstrap.js";
+import { collectTrustAnchorSignatures } from "../lib/trustAnchorCollection.js";
 import { parsePathRules, pathMatchesAny, type PathRule } from "../lib/v4Trust.js";
 
 export interface AttestOptions {
@@ -555,32 +556,44 @@ function buildV3Envelope(input: V3BuildInput): EnvelopeBuildResult {
     db.close();
   }
 
-  // Trust-anchor signatures (AGT-337). For the v3 PR-attestation, the
-  // path-rules guard is structurally identical to server-gated mode:
-  // when the diff touches `.stamp/**`, the matched path_rule's
-  // `minimum_signatures` count of admin counter-signatures must be
-  // present. This path is OUT OF SCOPE for AGT-355 (the producer-side
-  // happy path for path-touching diffs lands in a follow-up: today's
-  // `stamp attest` doesn't collect admin signatures from the
-  // notes-ref the way `stamp merge` does). For non-`.stamp/**` diffs
-  // — the overwhelmingly common case — this is correctly empty and
-  // the verifier's `verifyV4StampPathsGuard` no-ops.
-  //
-  // If the operator's diff touches `.stamp/**`, the verifier will
-  // reject the envelope at `verifyV4StampPathsGuard` with the same
-  // actionable "needs N admin signatures" error stamp merge surfaces.
-  // The operator's recovery is: collect admin signatures via
-  // `stamp admin sign` (AGT-337's tooling), then re-run `stamp
-  // attest` — once the AGT-355 follow-up wires the collection path
-  // into attest.
-  const trustAnchorSignatures: never[] = [];
-
   // AGT-370: operator-side manifest snapshot binding. The server no
   // longer reads the manifest; the operator (who already has the repo
   // checked out) computes this from the manifest at base_sha and the
   // verifier checks it once against snapshotSha256() of the manifest
-  // it reads at the same ref.
+  // it reads at the same ref. Computed BEFORE the trust-anchor
+  // collection so admin sigs and the operator's outer sig commit to
+  // the same value through the shared `trustAnchorSigningBytes` builder.
   const manifestSnapshot = snapshotSha256(manifest);
+
+  // Trust-anchor signatures (AGT-337 / WS1). Collected from
+  // `refs/notes/stamp-trust-anchor-sigs` via the shared
+  // `collectTrustAnchorSignatures` helper — the same call site
+  // `stamp merge` uses, so PR-mode and commit-trailer mode agree
+  // byte-for-byte on the signing target. For non-`.stamp/**` diffs
+  // (the overwhelmingly common case) this is correctly empty and the
+  // verifier's `verifyV4StampPathsGuard` no-ops. When the diff
+  // touches a path_rules glob, the helper throws an actionable
+  // "needs N admin signature(s)" error pointing at `stamp admin sign
+  // --pending <head>` for the recovery path.
+  const trustAnchorSignatures = collectTrustAnchorSignatures({
+    repoRoot: input.repoRoot,
+    baseSha: input.baseSha,
+    headSha: input.headSha,
+    targetBranch: input.targetBranch,
+    diffSha256,
+    manifestSnapshotSha256: manifestSnapshot,
+    approvals: entries,
+    checks: [], // PR-mode is checks-less by design — see file-level comment.
+    operatorFingerprint: input.operatorFingerprint,
+    manifest,
+    pubkeyByFingerprint,
+    errorContext: { command: "stamp attest" },
+    // PR-mode envelope's payload carries schema_version=3; the verifier
+    // reconstructs admin signing bytes from that wire value. Without
+    // matching it here the signing target diverges between producer
+    // and verifier. See trustAnchorPayload.ts on the schemaVersion field.
+    signingSchemaVersion: PR_ATTESTATION_SCHEMA_VERSION,
+  });
 
   const payload: PrAttestationPayload = {
     schema_version: PR_ATTESTATION_SCHEMA_VERSION,

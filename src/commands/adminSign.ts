@@ -29,9 +29,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   canonicalSerializeApproval,
+  CURRENT_V4_SCHEMA_VERSION,
   type ApprovalEntryV4,
   type ApprovalV4,
 } from "../lib/attestationV4.js";
+import { findBranchRule, parseConfigFromYaml } from "../lib/config.js";
 import { openDb, serverApprovalsFor } from "../lib/db.js";
 import {
   listFilesAtRef,
@@ -43,6 +45,7 @@ import {
   stampStateDbPath,
 } from "../lib/paths.js";
 import { parsePathRules } from "../hooks/pre-receive.js";
+import { PR_ATTESTATION_SCHEMA_VERSION } from "../lib/prAttestation.js";
 import { signBytes, verifyBytes } from "../lib/signing.js";
 import { buildPubkeyMap } from "../lib/sshReviewClient.js";
 import {
@@ -97,10 +100,27 @@ export interface AdminSignOptions {
    *  is the operational coordination point the multi-admin flow turns
    *  on; surface it loudly. */
   signerKeyId?: string;
+  /** Envelope mode the produced signature must satisfy. `auto`
+   *  (default) inspects `.stamp/config.yml` at base_sha and picks `pr`
+   *  iff the matching branch rule has `review_server` set, otherwise
+   *  `v4`. Explicit `pr` / `v4` force the choice for debugging or
+   *  staged migrations. The PR (`schema_version: 3`) and v4 trailer
+   *  (`schema_version: 5`) verifiers reconstruct the admin-signing
+   *  target with their OWN envelope's `schema_version` baked in, so an
+   *  admin signature produced for one mode will not verify in the
+   *  other — getting this right at producer-time is required for the
+   *  Shape 4 (PR-mode) flow. See `src/lib/trustAnchorPayload.ts`'s
+   *  `schemaVersion` field for the two-axes rationale. */
+  mode?: "auto" | "pr" | "v4";
   /** When true, list mode emits machine-readable JSON instead of the
    *  human table. */
   json?: boolean;
 }
+
+/** Resolved envelope-mode value: the wire-format the admin signature
+ *  will be verified against. Single integer space (`pr` ↔ schema 3,
+ *  `v4` ↔ schema 5) per `trustAnchorPayload.ts`. */
+type ResolvedMode = "pr" | "v4";
 
 /** Default horizon for list mode. Bounded so a repo with millions of
  *  commits doesn't pay an unbounded `git log` cost. 100 is comfortable
@@ -483,6 +503,20 @@ function signPending(
   // canonical bytes.
   const manifestSnapshotSha256 = snapshotSha256(manifest);
 
+  // Resolve which envelope this signature will be verified against.
+  // PR-mode (`schema_version: 3`) and v4 trailer (`schema_version: 5`)
+  // sign different bytes for the same diff; the wrong choice surfaces
+  // as "0 verifying signatures" at attest/merge time on someone else's
+  // machine. `auto` reads the branch rule at base_sha and picks `pr`
+  // iff `review_server` is set, mirroring `stamp attest`'s dispatch.
+  const requestedMode: "auto" | "pr" | "v4" = opts.mode ?? "auto";
+  const resolvedMode: ResolvedMode =
+    requestedMode === "auto"
+      ? detectEnvelopeModeAtBase(repoRoot, baseSha, targetBranch)
+      : requestedMode;
+  const schemaVersionForMode =
+    resolvedMode === "pr" ? PR_ATTESTATION_SCHEMA_VERSION : undefined;
+
   const signingBytes = trustAnchorSigningBytes({
     baseSha,
     headSha,
@@ -492,6 +526,9 @@ function signPending(
     approvals,
     checks: [], // see trustAnchorPayload.ts "Operational caveat"
     signerKeyId: predictedSigner,
+    ...(schemaVersionForMode !== undefined
+      ? { schemaVersion: schemaVersionForMode }
+      : {}),
   });
 
   const signatureB64 = signBytes(keypair.privateKeyPem, signingBytes);
@@ -565,6 +602,18 @@ function signPending(
   console.log(`  base:              ${baseSha.slice(0, 12)}`);
   console.log(`  diff_sha256:       ${diffSha256.slice(0, 12)}…`);
   console.log(`  rule:              ${matchedRule.pattern} (require_capability=${matchedRule.require_capability})`);
+  const resolvedSchemaVersion =
+    resolvedMode === "pr" ? PR_ATTESTATION_SCHEMA_VERSION : CURRENT_V4_SCHEMA_VERSION;
+  console.log(
+    `  envelope mode:     ${resolvedMode}` +
+      (requestedMode === "auto" ? " (auto-detected)" : " (--mode override)") +
+      ` — schema_version ${resolvedSchemaVersion}`,
+  );
+  if (requestedMode === "auto" && resolvedMode === "pr") {
+    console.log(
+      `  note:              prior to WS1 this command always produced v4 signatures; auto-detect picked PR-mode here because the target branch rule has review_server set. Pass --mode v4 if you intend to use \`stamp merge\` on this repo.`,
+    );
+  }
   console.log(
     `  signatures:        ${updated.signatures.length}/${matchedRule.minimum_signatures}` +
       (updated.signatures.length >= matchedRule.minimum_signatures ? " — threshold met" : ""),
@@ -752,5 +801,42 @@ function gitDiffBetween(repoRoot: string, base: string, head: string): string {
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+/** Detect which envelope the admin signature is being produced for by
+ *  reading `.stamp/config.yml` at base_sha and checking whether the
+ *  matching branch rule has `review_server` set. Mirrors `stamp
+ *  attest`'s dispatch: `review_server` present → Shape 4 PR-mode (v3
+ *  envelope, schema_version 3); absent → v4 commit-trailer envelope
+ *  (schema_version 5). Any read/parse failure (no config, no matching
+ *  rule, malformed YAML) falls back to `v4` — the safe default that
+ *  preserves prior behavior for repos not yet on Shape 4. */
+function detectEnvelopeModeAtBase(
+  repoRoot: string,
+  baseSha: string,
+  targetBranch: string,
+): ResolvedMode {
+  let yaml: string;
+  try {
+    yaml = showAtRef(baseSha, ".stamp/config.yml", repoRoot);
+  } catch {
+    return "v4";
+  }
+  let config: ReturnType<typeof parseConfigFromYaml>;
+  try {
+    config = parseConfigFromYaml(yaml);
+  } catch {
+    return "v4";
+  }
+  let rule: ReturnType<typeof findBranchRule>;
+  try {
+    rule = findBranchRule(config.branches, targetBranch);
+  } catch {
+    // Ambiguous glob match — be conservative and fall back to v4
+    // rather than guess. The operator can pass --mode explicitly.
+    return "v4";
+  }
+  if (!rule) return "v4";
+  return rule.review_server ? "pr" : "v4";
 }
 

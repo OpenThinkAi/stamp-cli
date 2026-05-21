@@ -92,6 +92,22 @@ export interface TrustAnchorPayloadInput {
   /** Operator's fingerprint at merge time — `sha256:<hex>`. Admins
    *  predict this using the local user's stamp key. */
   signerKeyId: string;
+  /** Envelope-format schema_version baked into the canonical signing
+   *  bytes. Default = `CURRENT_V4_SCHEMA_VERSION` (the v4 commit-
+   *  trailer envelope's version). PR-mode callers pass
+   *  `PR_ATTESTATION_SCHEMA_VERSION` so the producer-side bytes match
+   *  what the v3 PR-mode verifier will reconstruct (it reads
+   *  `schema_version` from the wire envelope, which carries 3 — see
+   *  `src/lib/prAttestation.ts` lines 81-91 on why the two envelopes
+   *  hold distinct version-lines). Without this override, an admin
+   *  signature produced for v4 commit-trailer mode would fail to
+   *  verify against a v3 PR envelope of the same diff (and vice versa);
+   *  the field is the smallest change that lets both envelopes share
+   *  this builder without divergence. `stamp admin sign` resolves
+   *  envelope mode at the command level (auto-detect from
+   *  `review_server` at base_sha, override via `--mode`); see
+   *  `detectEnvelopeModeAtBase` in `src/commands/adminSign.ts`. */
+  schemaVersion?: number;
 }
 
 /**
@@ -108,7 +124,7 @@ export function buildTrustAnchorPayload(
   input: TrustAnchorPayloadInput,
 ): AttestationPayloadV4 {
   return {
-    schema_version: CURRENT_V4_SCHEMA_VERSION,
+    schema_version: input.schemaVersion ?? CURRENT_V4_SCHEMA_VERSION,
     base_sha: input.baseSha,
     head_sha: input.headSha,
     target_branch: input.targetBranch,

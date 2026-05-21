@@ -43,18 +43,30 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
+import { parse as parseYaml } from "yaml";
+
 import { runAdminSign } from "../src/commands/adminSign.ts";
+import { runAttest } from "../src/commands/attest.ts";
 import { runMerge } from "../src/commands/merge.ts";
 import {
   canonicalSerializeApproval,
   trailerValueToPayloadBytes,
+  type ApprovalEntryV4,
   type ApprovalV4,
   type AttestationPayloadV4,
+  type CheckAttestationV4,
+  type TrustAnchorSignatureV4,
 } from "../src/lib/attestationV4.ts";
 import { openDb, recordReview, serverApprovalsFor } from "../src/lib/db.ts";
 import { ensureUserKeypair, fingerprintFromPem } from "../src/lib/keys.ts";
 import { stampStateDbPath } from "../src/lib/paths.ts";
-import { signBytes } from "../src/lib/signing.ts";
+import {
+  parseEnvelope,
+  PR_ATTESTATION_SCHEMA_VERSION,
+  readAttestationBlobBytes,
+} from "../src/lib/prAttestation.ts";
+import { signBytes, verifyBytes } from "../src/lib/signing.ts";
+import { buildPubkeyMap } from "../src/lib/sshReviewClient.ts";
 import {
   readNote,
   writeNote,
@@ -66,6 +78,11 @@ import {
   trustAnchorSigningBytes,
 } from "../src/lib/trustAnchorPayload.ts";
 import { parseManifest, snapshotSha256 } from "../src/lib/trustedKeysManifest.ts";
+import {
+  parsePathRules,
+  verifyV4StampPathsGuard,
+  verifyV4TrustAnchorSignatures,
+} from "../src/lib/v4Trust.ts";
 
 /** Compute the manifest-snapshot binding admins must commit to in their
  *  trust-anchor signature. AGT-370 lifted this field to the outer
@@ -171,6 +188,15 @@ function setupHarness(opts?: {
   /** When true, the operator's key is NOT given the admin capability
    *  in the manifest. Used to test "your key isn't admin" path. */
   operatorIsNotAdmin?: boolean;
+  /** When true, omit `review_server` from the branch rule — the
+   *  signal `stamp admin sign`'s auto-detect uses to pick v4 vs. PR
+   *  mode. Default keeps `review_server` set (the existing behavior). */
+  omitReviewServer?: boolean;
+  /** Override the path_rules minimum_signatures. Defaults to 2. The
+   *  new mode-detection tests use 1 so they can exercise the full
+   *  attest-and-verify flow without minting a second admin via the
+   *  external-signer dance. */
+  minimumSignatures?: number;
 }): Harness {
   const root = mkdtempSync(path.join(os.tmpdir(), "stamp-adminsign-"));
   const repo = path.join(root, "repo");
@@ -196,27 +222,33 @@ function setupHarness(opts?: {
   mkdirSync(path.join(repo, ".stamp", "reviewers"), { recursive: true });
   mkdirSync(path.join(repo, ".stamp", "trusted-keys"), { recursive: true });
 
-  // Config: main requires the security reviewer + has review_server +
-  // a path_rules entry gating .stamp/** at minimum_signatures: 2.
-  writeFileSync(
-    path.join(repo, ".stamp", "config.yml"),
-    [
-      "branches:",
-      "  main:",
-      "    required: [security]",
-      "    review_server: ssh://git@stamp.test.invalid:22",
-      "reviewers:",
-      "  security:",
-      "    prompt: .stamp/reviewers/security.md",
-      "    tools: []",
-      "path_rules:",
-      "  .stamp/**:",
-      "    require_capability: admin",
-      "    minimum_signatures: 2",
-      "    bypass_review_cycle: true",
-      "",
-    ].join("\n"),
+  // Config: main requires the security reviewer + (by default) a
+  // review_server + a path_rules entry gating .stamp/**. `review_server`
+  // can be omitted via opts.omitReviewServer to exercise v4-mode auto-
+  // detect. `minimum_signatures` defaults to 2 to match the existing
+  // multi-admin tests.
+  const minSigs = opts?.minimumSignatures ?? 2;
+  const configLines = [
+    "branches:",
+    "  main:",
+    "    required: [security]",
+  ];
+  if (!opts?.omitReviewServer) {
+    configLines.push("    review_server: ssh://git@stamp.test.invalid:22");
+  }
+  configLines.push(
+    "reviewers:",
+    "  security:",
+    "    prompt: .stamp/reviewers/security.md",
+    "    tools: []",
+    "path_rules:",
+    "  .stamp/**:",
+    "    require_capability: admin",
+    `    minimum_signatures: ${minSigs}`,
+    "    bypass_review_cycle: true",
+    "",
   );
+  writeFileSync(path.join(repo, ".stamp", "config.yml"), configLines.join("\n"));
   writeFileSync(
     path.join(repo, ".stamp", "reviewers", "security.md"),
     REVIEWER_PROMPT,
@@ -640,7 +672,7 @@ function bobSigns(h: Harness, baseSha: string, headSha: string, targetBranch: st
   // projection helper so this test stays in sync with the production
   // query shape automatically.
   const db = openDb(stampStateDbPath(h.repo));
-  let approvals: import("../src/lib/attestationV4.ts").ApprovalEntryV4[];
+  let approvals: ApprovalEntryV4[];
   try {
     approvals = serverApprovalsFor(db, baseSha, headSha).map((r) => ({
       approval: JSON.parse(r.approval_json) as ApprovalV4,
@@ -693,8 +725,10 @@ describe("end-to-end: 2 admin signatures → stamp merge produces v4 envelope wi
       // Seed the server-signed reviewer row (admin sigs predict approvals=[that row]).
       seedV4Review(h, base, featureHead, diffSha);
 
-      // Alice signs via the command.
-      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead }));
+      // Alice signs via the command. Explicit --mode v4 because the
+      // harness sets review_server (auto-detect would pick PR mode);
+      // this test verifies through `stamp merge`'s v4 envelope path.
+      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead, mode: "v4" }));
       // Bob signs externally (different key, same predicted payload bytes).
       bobSigns(h, base, featureHead, "main");
 
@@ -732,7 +766,7 @@ describe("end-to-end: 2 admin signatures → stamp merge produces v4 envelope wi
       seedV4Review(h, base, featureHead, sha256Hex(diff));
 
       // Only Alice signs.
-      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead }));
+      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead, mode: "v4" }));
 
       const beforeMain = shaOf(h.repo, "main");
       assert.throws(
@@ -744,6 +778,338 @@ describe("end-to-end: 2 admin signatures → stamp merge produces v4 envelope wi
       );
       // Rollback: main hasn't moved.
       assert.equal(shaOf(h.repo, "main"), beforeMain);
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+// ─── Mode resolution (auto-detect + explicit override) ─────────────
+
+/** Reconstruct the canonical signing-target bytes for a given envelope
+ *  mode and verify the note's signature against the operator's public
+ *  key. Returns true iff the signature verifies. Mirrors the same
+ *  reconstruction `stamp attest` (PR mode) and `stamp merge` (v4 mode)
+ *  perform at verify time — proving the signature bytes match the
+ *  wire-envelope's expectations. */
+function noteSignatureVerifiesUnderMode(args: {
+  repo: string;
+  baseSha: string;
+  headSha: string;
+  targetBranch: string;
+  diffSha256: string;
+  manifestSnapshotSha256: string;
+  approvals: ApprovalEntryV4[];
+  signerKeyId: string;
+  signerPublicPem: string;
+  mode: "pr" | "v4";
+}): boolean {
+  const note = readNote(args.repo, args.headSha);
+  if (!note) return false;
+  const sig = note.signatures.find((s) => s.signer_key_id === args.signerKeyId);
+  if (!sig) return false;
+  const signingBytes = trustAnchorSigningBytes({
+    baseSha: args.baseSha,
+    headSha: args.headSha,
+    targetBranch: args.targetBranch,
+    diffSha256: args.diffSha256,
+    manifestSnapshotSha256: args.manifestSnapshotSha256,
+    approvals: args.approvals,
+    checks: [],
+    signerKeyId: args.signerKeyId,
+    ...(args.mode === "pr"
+      ? { schemaVersion: PR_ATTESTATION_SCHEMA_VERSION }
+      : {}),
+  });
+  return verifyBytes(args.signerPublicPem, signingBytes, sig.signature);
+}
+
+describe("stamp admin sign --mode — envelope mode resolution", () => {
+  it("auto-detect picks pr-mode when branch rule has review_server, signature verifies under PR-mode target", () => {
+    const h = setupHarness({ minimumSignatures: 1 });
+    try {
+      const base = shaOf(h.repo, "main");
+      const featureHead = shaOf(h.repo, "feature");
+      const diff = diffBetween(h.repo, base, featureHead);
+      const diffSha = sha256Hex(diff);
+      seedV4Review(h, base, featureHead, diffSha);
+
+      // No --mode → auto. The harness sets review_server, so auto → pr.
+      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead }));
+
+      const { keypair } = ensureUserKeypair();
+      const approvals = approvalsFromDb(h.repo, base, featureHead);
+      assert.ok(
+        noteSignatureVerifiesUnderMode({
+          repo: h.repo,
+          baseSha: base,
+          headSha: featureHead,
+          targetBranch: "main",
+          diffSha256: diffSha,
+          manifestSnapshotSha256: manifestSnapshotAtBase(h.repo, base),
+          approvals,
+          signerKeyId: h.operatorFingerprint,
+          signerPublicPem: keypair.publicKeyPem,
+          mode: "pr",
+        }),
+        "auto-detected PR-mode signature must verify against PR-mode target",
+      );
+      // And it should NOT verify under the v4 target — the two envelope
+      // modes produce distinct signing bytes, so one signature can only
+      // satisfy one verifier.
+      assert.ok(
+        !noteSignatureVerifiesUnderMode({
+          repo: h.repo,
+          baseSha: base,
+          headSha: featureHead,
+          targetBranch: "main",
+          diffSha256: diffSha,
+          manifestSnapshotSha256: manifestSnapshotAtBase(h.repo, base),
+          approvals,
+          signerKeyId: h.operatorFingerprint,
+          signerPublicPem: keypair.publicKeyPem,
+          mode: "v4",
+        }),
+        "PR-mode signature must NOT verify against v4 target (axes are distinct)",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("auto-detect picks v4-mode when no review_server, signature verifies under v4 target", () => {
+    const h = setupHarness({ minimumSignatures: 1, omitReviewServer: true });
+    try {
+      const base = shaOf(h.repo, "main");
+      const featureHead = shaOf(h.repo, "feature");
+      const diff = diffBetween(h.repo, base, featureHead);
+      const diffSha = sha256Hex(diff);
+      seedV4Review(h, base, featureHead, diffSha);
+
+      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead }));
+
+      const { keypair } = ensureUserKeypair();
+      const approvals = approvalsFromDb(h.repo, base, featureHead);
+      assert.ok(
+        noteSignatureVerifiesUnderMode({
+          repo: h.repo,
+          baseSha: base,
+          headSha: featureHead,
+          targetBranch: "main",
+          diffSha256: diffSha,
+          manifestSnapshotSha256: manifestSnapshotAtBase(h.repo, base),
+          approvals,
+          signerKeyId: h.operatorFingerprint,
+          signerPublicPem: keypair.publicKeyPem,
+          mode: "v4",
+        }),
+        "auto-detected v4-mode signature must verify against v4 target",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("--mode pr override forces PR-mode even when the branch rule has no review_server", () => {
+    const h = setupHarness({ minimumSignatures: 1, omitReviewServer: true });
+    try {
+      const base = shaOf(h.repo, "main");
+      const featureHead = shaOf(h.repo, "feature");
+      const diff = diffBetween(h.repo, base, featureHead);
+      const diffSha = sha256Hex(diff);
+      seedV4Review(h, base, featureHead, diffSha);
+
+      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead, mode: "pr" }));
+
+      const { keypair } = ensureUserKeypair();
+      const approvals = approvalsFromDb(h.repo, base, featureHead);
+      assert.ok(
+        noteSignatureVerifiesUnderMode({
+          repo: h.repo,
+          baseSha: base,
+          headSha: featureHead,
+          targetBranch: "main",
+          diffSha256: diffSha,
+          manifestSnapshotSha256: manifestSnapshotAtBase(h.repo, base),
+          approvals,
+          signerKeyId: h.operatorFingerprint,
+          signerPublicPem: keypair.publicKeyPem,
+          mode: "pr",
+        }),
+        "--mode pr override must produce a PR-mode signature",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("--mode v4 override forces v4-mode even when the branch rule has review_server", () => {
+    const h = setupHarness({ minimumSignatures: 1 });
+    try {
+      const base = shaOf(h.repo, "main");
+      const featureHead = shaOf(h.repo, "feature");
+      const diff = diffBetween(h.repo, base, featureHead);
+      const diffSha = sha256Hex(diff);
+      seedV4Review(h, base, featureHead, diffSha);
+
+      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead, mode: "v4" }));
+
+      const { keypair } = ensureUserKeypair();
+      const approvals = approvalsFromDb(h.repo, base, featureHead);
+      assert.ok(
+        noteSignatureVerifiesUnderMode({
+          repo: h.repo,
+          baseSha: base,
+          headSha: featureHead,
+          targetBranch: "main",
+          diffSha256: diffSha,
+          manifestSnapshotSha256: manifestSnapshotAtBase(h.repo, base),
+          approvals,
+          signerKeyId: h.operatorFingerprint,
+          signerPublicPem: keypair.publicKeyPem,
+          mode: "v4",
+        }),
+        "--mode v4 override must produce a v4-mode signature",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+// ─── End-to-end Shape 4: admin sign → attest → verifier roundtrip ───
+
+/** Pull server-signed approvals from the test DB in the exact shape
+ *  `stamp admin sign` and `stamp merge` consume — used by both the
+ *  mode-resolution tests above and the Shape 4 roundtrip below to keep
+ *  payload predictions byte-identical with what runAdminSign produced. */
+function approvalsFromDb(
+  repo: string,
+  base: string,
+  head: string,
+): ApprovalEntryV4[] {
+  const db = openDb(stampStateDbPath(repo));
+  try {
+    return serverApprovalsFor(db, base, head).map((r) => ({
+      approval: JSON.parse(r.approval_json) as ApprovalV4,
+      server_attestation: {
+        server_key_id: r.server_key_id,
+        signature: r.signature_b64,
+      },
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+describe("end-to-end Shape 4: stamp admin sign (auto) → stamp attest → verifier accepts", () => {
+  it("auto-detect produces a PR-mode signature that the v3 envelope verifier accepts", () => {
+    const h = setupHarness({ minimumSignatures: 1 });
+    try {
+      const base = shaOf(h.repo, "main");
+      const featureHead = shaOf(h.repo, "feature");
+      const diff = diffBetween(h.repo, base, featureHead);
+      const diffSha = sha256Hex(diff);
+      seedV4Review(h, base, featureHead, diffSha);
+
+      // The producer: auto-detect → PR mode because review_server is
+      // set on `main`.
+      runFromRepo(h.repo, () => runAdminSign({ pending: featureHead }));
+
+      // The consumer: `stamp attest` rolls the admin sig into the v3
+      // envelope it writes to refs/stamp/attestations.
+      runFromRepo(h.repo, () => runAttest({ into: "main", branch: "feature" }));
+
+      // Locate the produced envelope and parse it.
+      const attestRefs = git(h.repo, [
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/stamp/attestations",
+      ])
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      assert.equal(attestRefs.length, 1, "exactly one attestation ref expected");
+      const patchId = attestRefs[0]!.replace(/^refs\/stamp\/attestations\//, "");
+      const blob = readAttestationBlobBytes(patchId, h.repo);
+      assert.ok(blob, "attestation blob must read");
+      const envelope = parseEnvelope(blob);
+      assert.ok(envelope, "envelope must parse");
+      assert.equal(envelope.payload.schema_version, PR_ATTESTATION_SCHEMA_VERSION);
+      assert.equal(envelope.payload.trust_anchor_signatures.length, 1);
+      assert.equal(
+        envelope.payload.trust_anchor_signatures[0]!.signer_key_id,
+        h.operatorFingerprint,
+      );
+
+      // Drive the same verifier phases the GH Action runs — the
+      // signature-bytes parity check this whole workstream is about.
+      const manifestYaml = git(h.repo, [
+        "show",
+        `${base}:.stamp/trusted-keys/manifest.yml`,
+      ]);
+      const manifest = parseManifest(manifestYaml);
+      assert.ok(manifest);
+      const pubFiles = git(h.repo, [
+        "ls-tree",
+        "--name-only",
+        base,
+        ".stamp/trusted-keys/",
+      ])
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => l.replace(/^\.stamp\/trusted-keys\//, ""))
+        .filter((n) => n.endsWith(".pub"));
+      const pubkeyByFingerprint = buildPubkeyMap(pubFiles, (relPath) =>
+        git(h.repo, ["show", `${base}:${relPath}`]),
+      );
+      const configYaml = git(h.repo, ["show", `${base}:.stamp/config.yml`]);
+      const rawCfg = parseYaml(configYaml) as { path_rules?: unknown } | null;
+      const pathRules = rawCfg && typeof rawCfg === "object"
+        ? parsePathRules(rawCfg.path_rules).rules
+        : [];
+      const changedFiles = git(h.repo, [
+        "diff",
+        "--name-only",
+        "-z",
+        `${base}...${featureHead}`,
+      ])
+        .split("\0")
+        .filter((s) => s.length > 0);
+
+      const phaseInput = {
+        sha: featureHead,
+        branch: "main",
+        rule: { required: ["security"] },
+        payload: {
+          schema_version: envelope.payload.schema_version,
+          base_sha: envelope.payload.base_sha,
+          head_sha: envelope.payload.head_sha,
+          target_branch: envelope.payload.target_branch,
+          diff_sha256: envelope.payload.diff_sha256!,
+          manifest_snapshot_sha256: envelope.payload.manifest_snapshot_sha256!,
+          approvals: envelope.payload.approvals as ApprovalEntryV4[],
+          checks: envelope.payload.checks as CheckAttestationV4[],
+          trust_anchor_signatures: envelope.payload.trust_anchor_signatures as TrustAnchorSignatureV4[],
+          signer_key_id: envelope.payload.signer_key_id,
+        },
+        payloadBytes: Buffer.alloc(0),
+        signatureBase64: envelope.signature,
+        manifest,
+        pubkeyByFingerprint,
+        pathRules,
+        changedFiles,
+      };
+      const trustResult = verifyV4TrustAnchorSignatures(phaseInput);
+      assert.ok(
+        trustResult.ok,
+        `verifyV4TrustAnchorSignatures: ${"reason" in trustResult ? trustResult.reason : ""}`,
+      );
+      const guardResult = verifyV4StampPathsGuard(phaseInput);
+      assert.ok(
+        guardResult.ok,
+        `verifyV4StampPathsGuard: ${"reason" in guardResult ? guardResult.reason : ""}`,
+      );
     } finally {
       h.cleanup();
     }
