@@ -137,8 +137,14 @@ const MAX_PROMPT_BYTES = 1024 * 1024;
 
 /** Reviewer-name shape; mirrors `VALID_REVIEWER_NAME` in
  *  `src/commands/reviewers.ts` so a name that round-trips through the
- *  client `reviewers add` UI also round-trips through the server fetch. */
-const REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+ *  client `reviewers add` UI also round-trips through the server fetch.
+ *
+ *  Exported (AGT-372) so the Phase B `prompts-cache` module can reuse the
+ *  same canonical source rather than redefining it. The regex is the one
+ *  thing both modules MUST agree on — a divergence would let a name
+ *  validate at one layer and reject at the other, opening a confused-deputy
+ *  path. Keep the export; do not inline a copy. */
+export const REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
 // ─── Public surface ─────────────────────────────────────────────────
 
