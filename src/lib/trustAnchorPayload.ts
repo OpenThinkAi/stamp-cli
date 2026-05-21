@@ -74,6 +74,14 @@ export interface TrustAnchorPayloadInput {
   headSha: string;
   targetBranch: string;
   diffSha256: string;
+  /** `sha256:<hex>` of the trusted-keys manifest at base_sha — same
+   *  prefixed form `snapshotSha256()` returns. AGT-370 lifted this
+   *  binding from the per-approval slot to the outer payload, so admin
+   *  trust-anchor signatures must commit to it just like the operator's
+   *  outer signature does. Admins predict the value the same way
+   *  `stamp merge` will at merge time (parse the manifest at base_sha,
+   *  apply `snapshotSha256`). */
+  manifestSnapshotSha256: string;
   approvals: ApprovalEntryV4[];
   /** Mirrors `stamp merge`'s pre-checks state — empty when called from
    *  `stamp admin sign` (admins sign before checks run), populated at
@@ -105,6 +113,7 @@ export function buildTrustAnchorPayload(
     head_sha: input.headSha,
     target_branch: input.targetBranch,
     diff_sha256: input.diffSha256,
+    manifest_snapshot_sha256: input.manifestSnapshotSha256,
     approvals: input.approvals,
     checks: input.checks,
     trust_anchor_signatures: [],

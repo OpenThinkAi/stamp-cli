@@ -48,6 +48,7 @@ import { buildPubkeyMap } from "../lib/sshReviewClient.js";
 import {
   parseManifest,
   resolveCapability,
+  snapshotSha256,
   type TrustedKeysManifest,
 } from "../lib/trustedKeysManifest.js";
 import {
@@ -476,11 +477,18 @@ function signPending(
     predictedSigner = opts.signerKeyId;
   }
 
+  // AGT-370: admin sigs commit to the manifest_snapshot_sha256 just
+  // like the operator's outer signature does. Compute it the same way
+  // `stamp merge` will at merge time so all signers produce identical
+  // canonical bytes.
+  const manifestSnapshotSha256 = snapshotSha256(manifest);
+
   const signingBytes = trustAnchorSigningBytes({
     baseSha,
     headSha,
     targetBranch,
     diffSha256,
+    manifestSnapshotSha256,
     approvals,
     checks: [], // see trustAnchorPayload.ts "Operational caveat"
     signerKeyId: predictedSigner,

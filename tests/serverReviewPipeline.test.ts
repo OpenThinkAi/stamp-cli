@@ -1,10 +1,11 @@
 /**
  * Unit tests for `src/server/reviewPipeline.ts` — the AGT-330 Anthropic
- * integration body + AGT-331 verdict-signing layer. Mirrors the strategy
- * of `tests/headlessReviewer.test.ts`: inject a mock
- * `AnthropicClientShape` + a stub `RepoResolver` pointing at a tmp bare
- * repo + a synthetic Ed25519 signing key so the tests run with zero
- * network and no ANTHROPIC_API_KEY / on-disk-keypair dependency.
+ * integration body + AGT-331 verdict-signing layer + AGT-370 prompt
+ * filesystem-cache reshape. Mirrors the strategy of
+ * `tests/headlessReviewer.test.ts`: inject a mock `AnthropicClientShape`
+ * + a stub `PromptResolver` pointing at a tmp cache dir + a synthetic
+ * Ed25519 signing key so the tests run with zero network and no
+ * ANTHROPIC_API_KEY / on-disk-keypair dependency.
  *
  * Scope:
  *   - happy path (submit_verdict tool_use → real verdict + prose +
@@ -16,17 +17,17 @@
  *     error, still signed (operators can persist the verdict)
  *   - signature round-trip: client-side verify against
  *     canonicalSerializeApproval matches the server's signature
- *   - trusted_keys_snapshot_sha256 matches snapshotSha256() of the
- *     manifest committed at base_sha (lenient-revocation contract)
  *   - server_key_id matches the fingerprint of the signing key
  *   - signing failure modes: missing signing key throws
- *     SigningKeyUnavailableError; missing/malformed manifest at
- *     base_sha throws ManifestFetchFailedError
+ *     SigningKeyUnavailableError
  *   - missing ANTHROPIC_API_KEY → throws ServerMissingApiKeyError
- *   - PromptFetchError (no_such_repo) → throws PromptFetchFailedError
+ *   - PromptFetchError (no_such_file) → throws PromptFetchFailedError
  *   - approval body invariants (prompt_sha256 matches fetched bytes,
  *     diff_sha256 is the server's hash of the streamed bytes,
- *     ISO-8601 issued_at, server-derived signature/key-id/snapshot)
+ *     ISO-8601 issued_at, server-derived signature/key-id)
+ *   - AGT-370: pipeline does NOT read the manifest at all (regression
+ *     guard: any code path that would invoke `git show` or read
+ *     trusted-keys would surface if a spy resolver were called)
  *
  * Doesn't cover the SSH-verb wrapper — that's `serverStampReview.test.ts`'s
  * job. The verb-level tests there assert parse / auth / stdin / response
@@ -34,7 +35,6 @@
  */
 
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
 import {
   createHash,
   createPublicKey,
@@ -42,7 +42,7 @@ import {
   verify,
   type KeyObject,
 } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -53,11 +53,6 @@ import {
 import { fingerprintFromPem } from "../src/lib/keys.ts";
 import type { UserRow } from "../src/lib/serverDb.ts";
 import {
-  parseManifest,
-  snapshotSha256,
-} from "../src/lib/trustedKeysManifest.ts";
-import {
-  ManifestFetchFailedError,
   PromptFetchFailedError,
   runReviewPipeline,
   ServerMissingApiKeyError,
@@ -66,8 +61,8 @@ import {
   type ParsedReviewRequest,
   type ReviewPipelineDeps,
   type ReviewPipelineInput,
-  type ReviewSigningMaterial,
 } from "../src/server/reviewPipeline.ts";
+import type { PromptResolver } from "../src/server/promptFetch.ts";
 
 import type {
   AnthropicClientShape,
@@ -89,9 +84,7 @@ const FIXTURE_USER: UserRow = {
 
 /**
  * Mint a fresh Ed25519 keypair + its `sha256:<hex>` fingerprint for the
- * test's signing-material injection. Returns the trio so individual
- * tests can either inject the full material or verify against the
- * public half.
+ * test's signing-material injection.
  */
 function mintSigningFixture(): {
   privateKey: KeyObject;
@@ -108,100 +101,49 @@ function mintSigningFixture(): {
 }
 
 /**
- * YAML body for a fixture trusted-keys manifest that lists the
- * given fingerprint with the required `server` capability. Keeps the
- * tests honest: the pipeline's manifest fetch + parse + snapshot
- * hash runs end-to-end against this exact YAML.
- */
-function manifestYamlForServerKey(serverFingerprint: string): string {
-  return [
-    `keys:`,
-    `  review-server-test:`,
-    `    fingerprint: ${serverFingerprint}`,
-    `    capabilities: [server]`,
-    ``,
-  ].join("\n");
-}
-
-/**
- * Create a tmp bare repo with `.stamp/reviewers/security.md` AND
- * `.stamp/trusted-keys/manifest.yml` committed at a real commit;
- * returns the bare-repo absolute path + the commit SHA + the fixture's
- * signing material (so tests can inject the matching key without
- * juggling separate fixture builders).
+ * Create a tmp prompt-cache directory with `security.md` (and any
+ * caller-requested extra files). Returns the cache path + the signing
+ * material so tests can inject the matching key without juggling
+ * separate fixture builders.
  *
- * Uses the host's git binary the same way `promptFetch.ts` does —
- * keeps the fixture honest (we're testing through the same code path
- * the server actually runs, not a mock prompt-fetch).
+ * AGT-370: the cache replaces the v4-era bare git repo as the prompt
+ * source. The server is now manifest-blind and repo-blind; the only
+ * thing it needs on disk is `<cacheRoot>/<reviewer>.md`.
  */
-function makeFixtureBareRepo(opts?: {
-  /** Override the manifest YAML committed at base_sha. Defaults to a
-   *  manifest listing the fixture signing key with the `server`
-   *  capability. Tests that exercise manifest-malformed paths can pass
-   *  a deliberately broken YAML here. */
-  manifestYamlOverride?: string;
-  /** Skip writing the manifest entirely (so the pipeline's manifest
-   *  fetch hits no_such_file). */
-  omitManifest?: boolean;
+function makeFixtureCache(opts?: {
+  /** Override the reviewer prompt contents (for tests that want a
+   *  specific hash). Defaults to REVIEWER_PROMPT. */
+  promptOverride?: string;
+  /** Skip writing the prompt file (so the pipeline's fetch hits
+   *  no_such_file). */
+  omitPrompt?: boolean;
 }): {
-  bareDir: string;
-  baseSha: string;
+  cacheRoot: string;
   signing: { privateKey: KeyObject; publicPem: string; fingerprint: string };
-  manifestYaml: string | null;
+  promptBytes: Buffer;
   cleanup: () => void;
 } {
   const signing = mintSigningFixture();
-  const manifestYaml = opts?.omitManifest
-    ? null
-    : (opts?.manifestYamlOverride ?? manifestYamlForServerKey(signing.fingerprint));
-
-  const root = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-"));
-  const work = path.join(root, "work");
-  const bare = path.join(root, "widget-co.git");
-
-  // Build a working repo with the prompt + manifest, then push to a bare.
-  mkdirSync(work);
-  const run = (args: string[], cwd: string) => {
-    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-    if (r.status !== 0) {
-      throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
-    }
-    return r.stdout.trim();
-  };
-  run(["init", "-q", "-b", "main"], work);
-  run(["config", "user.email", "test@example.com"], work);
-  run(["config", "user.name", "Test"], work);
-  run(["config", "commit.gpgsign", "false"], work);
-  mkdirSync(path.join(work, ".stamp", "reviewers"), { recursive: true });
-  writeFileSync(path.join(work, ".stamp", "reviewers", "security.md"), REVIEWER_PROMPT);
-  if (manifestYaml !== null) {
-    mkdirSync(path.join(work, ".stamp", "trusted-keys"), { recursive: true });
-    writeFileSync(
-      path.join(work, ".stamp", "trusted-keys", "manifest.yml"),
-      manifestYaml,
-    );
+  const cacheRoot = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-"));
+  const promptText = opts?.promptOverride ?? REVIEWER_PROMPT;
+  if (!opts?.omitPrompt) {
+    writeFileSync(path.join(cacheRoot, "security.md"), promptText);
   }
-  run(["add", "-A"], work);
-  run(["commit", "-q", "-m", "fixture"], work);
-  const baseSha = run(["rev-parse", "HEAD"], work);
-
-  run(["clone", "-q", "--bare", work, bare], root);
 
   return {
-    bareDir: bare,
-    baseSha,
+    cacheRoot,
     signing,
-    manifestYaml,
-    cleanup: () => rmSync(root, { recursive: true, force: true }),
+    promptBytes: Buffer.from(promptText, "utf-8"),
+    cleanup: () => rmSync(cacheRoot, { recursive: true, force: true }),
   };
 }
 
-function fixtureParams(baseSha: string, diff: Buffer): ParsedReviewRequest {
+function fixtureParams(diff: Buffer): ParsedReviewRequest {
   return {
     reviewer: "security",
     org: "acme",
     repo: "widget-co",
-    baseSha,
+    baseSha: "0123456789abcdef0123456789abcdef01234567",
     headSha: "fedcba9876543210fedcba9876543210fedcba98",
     diffSha256: createHash("sha256").update(diff).digest("hex"),
   };
@@ -210,16 +152,16 @@ function fixtureParams(baseSha: string, diff: Buffer): ParsedReviewRequest {
 /**
  * Standard test-deps bag, threaded through every pipeline call. Tests
  * pass in just the bits they want to override; the rest defaults to a
- * value pulled from the fixture bare repo (resolver + signing key) so
- * no test reaches the production env-resolution paths accidentally.
+ * value pulled from the fixture cache (resolver + signing key) so no
+ * test reaches the production env-resolution paths accidentally.
  */
 function fixtureInput(
-  fx: ReturnType<typeof makeFixtureBareRepo>,
+  fx: ReturnType<typeof makeFixtureCache>,
   diff: Buffer,
   deps: ReviewPipelineDeps,
 ): ReviewPipelineInput {
   const baseDeps: ReviewPipelineDeps = {
-    repoResolver: () => fx.bareDir,
+    promptResolver: (reviewer) => path.join(fx.cacheRoot, `${reviewer}.md`),
     signingKey: {
       privateKey: fx.signing.privateKey,
       fingerprint: fx.signing.fingerprint,
@@ -227,7 +169,7 @@ function fixtureInput(
   };
   return {
     diff,
-    params: fixtureParams(fx.baseSha, diff),
+    params: fixtureParams(diff),
     caller: FIXTURE_USER,
     deps: { ...baseDeps, ...deps },
   };
@@ -267,7 +209,7 @@ function rejectingClient(err: unknown): AnthropicClientShape {
 
 describe("runReviewPipeline — happy path (submit_verdict tool_use)", () => {
   it("returns a real verdict + prose from the submit_verdict tool block", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("diff --git a/foo b/foo\n+hello\n");
       const spy: Record<string, unknown> = {};
@@ -294,30 +236,30 @@ describe("runReviewPipeline — happy path (submit_verdict tool_use)", () => {
       assert.equal(r.prose, "fixture content; no security concerns.");
       assert.equal(r.approval.verdict, "approved");
       assert.equal(r.approval.reviewer, "security");
-      assert.equal(r.approval.base_sha, fx.baseSha);
-      assert.equal(r.approval.head_sha, fixtureParams(fx.baseSha, diff).headSha);
+      assert.equal(r.approval.base_sha, fixtureParams(diff).baseSha);
+      assert.equal(r.approval.head_sha, fixtureParams(diff).headSha);
       assert.equal(r.approval.diff_sha256, sha256Hex(diff));
 
-      // Crucial property: prompt_sha256 matches what fetchCanonicalPrompt
-      // returned (which is sha256 of the canonical prompt bytes). This
-      // is what the verifier rehashes against the bare repo's prompt at
-      // base_sha — drift here is a security regression.
-      assert.equal(r.approval.prompt_sha256, sha256Hex(Buffer.from(REVIEWER_PROMPT, "utf-8")));
+      // Crucial property: prompt_sha256 matches the bytes the
+      // filesystem-cache resolver returned. Drift here is a security
+      // regression — the verifier resolves prompt_sha256 transitively
+      // via the server's signature, but the chain only holds if the
+      // server's claim describes the bytes it actually fed to the
+      // model.
+      assert.equal(r.approval.prompt_sha256, sha256Hex(fx.promptBytes));
       assert.match(r.approval.prompt_sha256, /^[0-9a-f]{64}$/);
 
-      // AGT-331 signing fields: real fingerprint, real snapshot hash,
-      // real base64 Ed25519 signature, ISO-8601 issued_at.
+      // AGT-331 signing fields: real fingerprint, real base64 Ed25519
+      // signature, ISO-8601 issued_at. AGT-370 removed
+      // trusted_keys_snapshot_sha256 — the field shouldn't appear on
+      // the approval at all.
       assert.equal(r.approval.server_key_id, fx.signing.fingerprint);
       assert.match(r.approval.server_key_id, /^sha256:[0-9a-f]{64}$/);
       assert.equal(
-        r.approval.trusted_keys_snapshot_sha256,
-        snapshotSha256(parseManifest(fx.manifestYaml!)!),
+        (r.approval as Record<string, unknown>).trusted_keys_snapshot_sha256,
+        undefined,
+        "AGT-370: per-approval trusted_keys_snapshot_sha256 must not appear on server-produced ApprovalV4",
       );
-      assert.match(
-        r.approval.trusted_keys_snapshot_sha256,
-        /^sha256:[0-9a-f]{64}$/,
-      );
-      // Real base64 (Ed25519 sig is 64 bytes ⇒ 88-char base64 with `=` pad).
       assert.match(r.signature, /^[A-Za-z0-9+/]+=*$/);
       assert.equal(Buffer.from(r.signature, "base64").length, 64);
       assert.match(r.approval.issued_at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
@@ -339,7 +281,7 @@ describe("runReviewPipeline — happy path (submit_verdict tool_use)", () => {
   });
 
   it("sends the canonical prompt as the system message + diff as user message", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("+console.log('hi')\n");
       const spy: {
@@ -363,21 +305,18 @@ describe("runReviewPipeline — happy path (submit_verdict tool_use)", () => {
       );
 
       // System message must start with the canonical prompt bytes —
-      // confirms the server fetched the prompt and didn't take one
-      // from the caller. (The pipeline appends a small instructions-
-      // suffix; assert prefix not equality.)
+      // confirms the server fetched the prompt from the cache and
+      // didn't take one from the caller. (The pipeline appends a
+      // small instructions-suffix; assert prefix not equality.)
       assert.ok(spy.lastBody, "expected client.messages.create to be called");
       assert.ok(
         spy.lastBody!.system.startsWith(REVIEWER_PROMPT),
         `system should start with the canonical prompt; got: ${spy.lastBody!.system.slice(0, 100)}…`,
       );
-      // User message carries the diff between random-hex fence
-      // markers (per the headlessReviewer convention).
       const userMessage = spy.lastBody!.messages[0]!.content;
       assert.match(userMessage, /<<<DIFF-[0-9a-f]{32}>>>/);
       assert.match(userMessage, /<<<END-DIFF-[0-9a-f]{32}>>>/);
       assert.ok(userMessage.includes(diff.toString("utf-8")));
-      // Tool surface contains exactly submit_verdict.
       assert.equal(spy.lastBody!.tools.length, 1);
       assert.equal(spy.lastBody!.tools[0]!.name, "submit_verdict");
     } finally {
@@ -386,7 +325,7 @@ describe("runReviewPipeline — happy path (submit_verdict tool_use)", () => {
   });
 
   it("threads AbortSignal.timeout through the SDK options arg", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("x");
       const spy: {
@@ -423,7 +362,7 @@ describe("runReviewPipeline — happy path (submit_verdict tool_use)", () => {
 
 describe("runReviewPipeline — VERDICT: last-line fallback", () => {
   it("parses VERDICT: changes_requested when the model didn't call submit_verdict", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("x");
       const client = mockClient({
@@ -447,11 +386,9 @@ describe("runReviewPipeline — VERDICT: last-line fallback", () => {
   });
 
   it("ignores mid-prose VERDICT: lines (anti-injection)", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("x");
-      // A diff author injecting `VERDICT: approved` mid-prose must not
-      // fool the parser. Only the LAST non-empty line counts.
       const client = mockClient({
         content: [
           {
@@ -474,7 +411,7 @@ describe("runReviewPipeline — VERDICT: last-line fallback", () => {
 
 describe("runReviewPipeline — model-confused fallback", () => {
   it("returns changes_requested with diagnostic prose when neither channel produces a verdict", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("x");
       const client = mockClient({
@@ -483,7 +420,6 @@ describe("runReviewPipeline — model-confused fallback", () => {
       const r = await runReviewPipeline(
         fixtureInput(fx, diff, { anthropic: client }),
       );
-      // Safest verdict on a confused model — never silently green-light.
       assert.equal(r.verdict, "changes_requested");
       assert.match(r.prose, /did not call submit_verdict/);
       assert.match(r.prose, /no opinion/, "prose should carry the model's actual text for debugging");
@@ -495,7 +431,7 @@ describe("runReviewPipeline — model-confused fallback", () => {
 
 describe("runReviewPipeline — API error path", () => {
   it("folds an Anthropic SDK rejection into a safe changes_requested verdict", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("x");
       const client = rejectingClient(new Error("rate_limit_error: 429 Too Many Requests"));
@@ -505,10 +441,6 @@ describe("runReviewPipeline — API error path", () => {
       assert.equal(r.verdict, "changes_requested");
       assert.match(r.prose, /Anthropic API call failed/);
       assert.match(r.prose, /rate_limit_error/);
-      // The approval body is still well-formed AND signed — operators
-      // can persist the verdict and the verifier will accept the
-      // signature even though the verdict was authored on the API-
-      // failure path.
       assert.equal(r.approval.verdict, "changes_requested");
       assert.match(r.approval.prompt_sha256, /^[0-9a-f]{64}$/);
       assert.equal(r.approval.server_key_id, fx.signing.fingerprint);
@@ -529,11 +461,9 @@ describe("runReviewPipeline — API error path", () => {
   });
 
   it("surfaces a timeout with a clear operator message", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("x");
-      // Simulate the SDK's abort-via-signal behavior: rejection with
-      // an AbortError-named Error.
       const abortErr = new Error("The operation was aborted");
       abortErr.name = "AbortError";
       const client = rejectingClient(abortErr);
@@ -554,7 +484,7 @@ describe("runReviewPipeline — API error path", () => {
 
 describe("runReviewPipeline — missing ANTHROPIC_API_KEY", () => {
   it("throws ServerMissingApiKeyError when env is unset and no client injected", async () => {
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     const saved = process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     try {
@@ -570,9 +500,6 @@ describe("runReviewPipeline — missing ANTHROPIC_API_KEY", () => {
             (err as Error).message,
             /ANTHROPIC_API_KEY is not set on the stamp-server/,
           );
-          // The operator-of-server framing distinguishes from the
-          // headless path's MissingApiKeyError — different remediation,
-          // different prose. Pin the divergence.
           assert.match((err as Error).message, /server's environment/);
           return true;
         },
@@ -586,57 +513,43 @@ describe("runReviewPipeline — missing ANTHROPIC_API_KEY", () => {
 });
 
 describe("runReviewPipeline — prompt-fetch failure", () => {
-  it("throws PromptFetchFailedError when the bare repo path doesn't exist", async () => {
-    // Synthetic resolver pointing at a path that isn't a git repo —
-    // forces a no_such_repo. We deliberately don't construct a fixture
-    // bare repo here: we want the prompt fetch to fail.
-    const diff = Buffer.from("x");
-    const tmpDir = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-empty-"));
-    const signing = mintSigningFixture();
+  it("throws PromptFetchFailedError when the prompt cache is empty", async () => {
+    // Empty cache dir: the security.md the pipeline tries to read isn't
+    // there. Forces a no_such_file. The mock client should never be
+    // reached — the prompt fetch runs first.
+    const fx = makeFixtureCache({ omitPrompt: true });
     try {
-      const input: ReviewPipelineInput = {
-        diff,
-        params: fixtureParams(
-          "0123456789abcdef0123456789abcdef01234567",
-          diff,
-        ),
-        caller: FIXTURE_USER,
-        deps: {
-          repoResolver: () => path.join(tmpDir, "no-such.git"),
-          // Won't be reached — no API call should happen.
-          anthropic: rejectingClient(new Error("should never be called")),
-          signingKey: {
-            privateKey: signing.privateKey,
-            fingerprint: signing.fingerprint,
-          },
+      const diff = Buffer.from("x");
+      const client = rejectingClient(new Error("should never be called"));
+      await assert.rejects(
+        runReviewPipeline(fixtureInput(fx, diff, { anthropic: client })),
+        (err: unknown) => {
+          assert.ok(err instanceof PromptFetchFailedError);
+          assert.equal((err as PromptFetchFailedError).kind, "no_such_file");
+          assert.match((err as Error).message, /canonical prompt fetch failed/);
+          return true;
         },
-      };
-      await assert.rejects(runReviewPipeline(input), (err: unknown) => {
-        assert.ok(err instanceof PromptFetchFailedError);
-        assert.equal((err as PromptFetchFailedError).kind, "no_such_repo");
-        assert.match((err as Error).message, /canonical prompt fetch failed/);
-        return true;
-      });
+      );
     } finally {
-      rmSync(tmpDir, { recursive: true, force: true });
+      fx.cleanup();
     }
   });
 
-  it("throws PromptFetchFailedError when the reviewer prompt is absent at base_sha", async () => {
-    // Fixture bare repo has security.md committed; ask for a different
-    // reviewer name and observe the no_such_file error category.
-    const fx = makeFixtureBareRepo();
+  it("throws PromptFetchFailedError when the reviewer prompt file is missing", async () => {
+    // Cache has security.md committed; ask for a different reviewer
+    // name and observe the no_such_file error category.
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("x");
       const input: ReviewPipelineInput = {
         diff,
         params: {
-          ...fixtureParams(fx.baseSha, diff),
-          reviewer: "standards", // not present in the bare
+          ...fixtureParams(diff),
+          reviewer: "standards", // not provisioned in the cache
         },
         caller: FIXTURE_USER,
         deps: {
-          repoResolver: () => fx.bareDir,
+          promptResolver: (reviewer) => path.join(fx.cacheRoot, `${reviewer}.md`),
           anthropic: rejectingClient(new Error("should never be called")),
           signingKey: {
             privateKey: fx.signing.privateKey,
@@ -655,66 +568,55 @@ describe("runReviewPipeline — prompt-fetch failure", () => {
   });
 });
 
-describe("runReviewPipeline — manifest-fetch failure (AGT-331)", () => {
-  it("throws ManifestFetchFailedError when the manifest is absent at base_sha", async () => {
-    // Fixture bare repo with no manifest committed. The prompt fetch
-    // still succeeds (security.md is there); the manifest fetch hits
-    // no_such_file. The pipeline must refuse rather than fabricate a
-    // placeholder snapshot — the verifier requires a real binding.
-    const fx = makeFixtureBareRepo({ omitManifest: true });
+describe("runReviewPipeline — AGT-370 server is manifest-blind", () => {
+  it("never invokes any helper outside the injected prompt resolver — proof the manifest fetch is gone", async () => {
+    // Regression guard for the AGT-370 reshape: the server no longer
+    // reads the manifest at all. Counts every resolver invocation; if
+    // the pipeline ever re-introduces a "fetch the manifest at base_sha"
+    // step, it would either need to add a new resolver (breaking this
+    // test) or piggy-back on the prompt resolver (counted here and
+    // failing the assertion).
+    const fx = makeFixtureCache();
     try {
-      const diff = Buffer.from("x");
-      // Mock client should NOT be reached — the manifest fetch runs
-      // before the LLM call.
-      const client = rejectingClient(new Error("should never be called"));
-      await assert.rejects(
-        runReviewPipeline(fixtureInput(fx, diff, { anthropic: client })),
-        (err: unknown) => {
-          assert.ok(err instanceof ManifestFetchFailedError);
-          assert.equal((err as ManifestFetchFailedError).kind, "no_such_file");
-          assert.match((err as Error).message, /trusted-keys manifest fetch failed/);
-          return true;
-        },
+      const diff = Buffer.from("manifest-blindness-test");
+      const calls: string[] = [];
+      const spyResolver: PromptResolver = (reviewer) => {
+        calls.push(reviewer);
+        return path.join(fx.cacheRoot, `${reviewer}.md`);
+      };
+      const client = mockClient({
+        content: [
+          {
+            type: "tool_use",
+            name: "submit_verdict",
+            input: { verdict: "approved", prose: "ok" },
+          },
+        ],
+      });
+      const r = await runReviewPipeline(
+        fixtureInput(fx, diff, {
+          anthropic: client,
+          promptResolver: spyResolver,
+        }),
+      );
+      assert.equal(r.verdict, "approved");
+      assert.deepEqual(
+        calls,
+        ["security"],
+        "pipeline should call the prompt resolver exactly once with the reviewer name; any extra call would imply the server is re-reading the repo or manifest",
       );
     } finally {
       fx.cleanup();
     }
   });
 
-  it("throws ManifestFetchFailedError (malformed_manifest) when YAML parses but the manifest is invalid", async () => {
-    // Manifest YAML present but missing required `capabilities` field —
-    // parseManifest rejects, the pipeline surfaces a malformed_manifest
-    // throw.
-    const broken = "keys:\n  bogus:\n    fingerprint: not-a-fingerprint\n";
-    const fx = makeFixtureBareRepo({ manifestYamlOverride: broken });
+  it("succeeds with no manifest fixture provisioned (server never reads it)", async () => {
+    // Pure-cache fixture: no manifest, no bare git repo, nothing but a
+    // `<cacheRoot>/security.md` file. If the pipeline still works,
+    // we've proven the server doesn't touch the manifest.
+    const fx = makeFixtureCache();
     try {
-      const diff = Buffer.from("x");
-      const client = rejectingClient(new Error("should never be called"));
-      await assert.rejects(
-        runReviewPipeline(fixtureInput(fx, diff, { anthropic: client })),
-        (err: unknown) => {
-          assert.ok(err instanceof ManifestFetchFailedError);
-          assert.equal(
-            (err as ManifestFetchFailedError).kind,
-            "malformed_manifest",
-          );
-          return true;
-        },
-      );
-    } finally {
-      fx.cleanup();
-    }
-  });
-
-  it("binds approval.trusted_keys_snapshot_sha256 to the manifest at base_sha", async () => {
-    // Make a fixture with a specific manifest, then assert the snapshot
-    // hash baked into the approval matches snapshotSha256() applied to
-    // that exact manifest. The lenient-revocation contract depends on
-    // this binding: changing the manifest in a future commit must NOT
-    // change the snapshot value the pipeline emits for THIS base_sha.
-    const fx = makeFixtureBareRepo();
-    try {
-      const diff = Buffer.from("manifest-binding-test");
+      const diff = Buffer.from("no-manifest-on-server");
       const client = mockClient({
         content: [
           {
@@ -727,8 +629,14 @@ describe("runReviewPipeline — manifest-fetch failure (AGT-331)", () => {
       const r = await runReviewPipeline(
         fixtureInput(fx, diff, { anthropic: client }),
       );
-      const expected = snapshotSha256(parseManifest(fx.manifestYaml!)!);
-      assert.equal(r.approval.trusted_keys_snapshot_sha256, expected);
+      assert.equal(r.verdict, "approved");
+      assert.equal(r.approval.prompt_sha256, sha256Hex(fx.promptBytes));
+      // AGT-370: per-approval snapshot field is removed. Confirm
+      // we never set it (operator/verifier own the binding now).
+      assert.equal(
+        (r.approval as Record<string, unknown>).trusted_keys_snapshot_sha256,
+        undefined,
+      );
     } finally {
       fx.cleanup();
     }
@@ -737,26 +645,19 @@ describe("runReviewPipeline — manifest-fetch failure (AGT-331)", () => {
 
 describe("runReviewPipeline — signing-key failure (AGT-331)", () => {
   it("throws SigningKeyUnavailableError when no key is injected and the env path is empty", async () => {
-    // Force the env-resolved path to a tmp non-existent file. Without
-    // an injected signingKey the pipeline falls through to
-    // loadReviewSigningKey which throws ReviewSigningKeyError ⇒ the
-    // pipeline wraps it as SigningKeyUnavailableError.
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     const tmp = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-nokey-"));
     const savedPath = process.env.REVIEW_SIGNING_KEY_PATH;
     process.env.REVIEW_SIGNING_KEY_PATH = path.join(tmp, "missing-key.pem");
     try {
       const diff = Buffer.from("x");
       const client = rejectingClient(new Error("should never be called"));
-      // Build an input that does NOT carry signingKey in deps so the
-      // pipeline reaches loadSigningMaterialFromEnv. Build it directly
-      // rather than via fixtureInput so we keep the deps explicit.
       const input: ReviewPipelineInput = {
         diff,
-        params: fixtureParams(fx.baseSha, diff),
+        params: fixtureParams(diff),
         caller: FIXTURE_USER,
         deps: {
-          repoResolver: () => fx.bareDir,
+          promptResolver: (reviewer) => path.join(fx.cacheRoot, `${reviewer}.md`),
           anthropic: client,
         },
       };
@@ -782,17 +683,7 @@ describe("runReviewPipeline — signing-key failure (AGT-331)", () => {
 
 describe("runReviewPipeline — server-computed diff_sha256 (AGT-328 follow-up)", () => {
   it("uses the server's own sha256 of the streamed diff for approval.diff_sha256, not the client-echoed param", async () => {
-    // The verb-level cross-check rejects mismatched hashes before
-    // calling the pipeline, but the pipeline must STRUCTURALLY compute
-    // its own sha256 — never trust params.diffSha256 as the canonical
-    // value. To prove this, inject a params.diffSha256 that DOESN'T
-    // match the diff bytes and assert the approval's diff_sha256 still
-    // matches the real diff content.
-    //
-    // This is the AGT-328 security-reviewer-flagged improvement: bind
-    // the signed bytes to what the server actually saw, not what the
-    // client said it sent.
-    const fx = makeFixtureBareRepo();
+    const fx = makeFixtureCache();
     try {
       const diff = Buffer.from("real diff content");
       const client = mockClient({
@@ -805,9 +696,7 @@ describe("runReviewPipeline — server-computed diff_sha256 (AGT-328 follow-up)"
         ],
       });
       const base = fixtureInput(fx, diff, { anthropic: client });
-      // Overwrite the diffSha256 param to a deliberate wrong value. In
-      // production the verb would reject before reaching here; we
-      // bypass the verb to test the pipeline's structural property.
+      // Overwrite the diffSha256 param to a deliberate wrong value.
       base.params = { ...base.params, diffSha256: "f".repeat(64) };
       const r = await runReviewPipeline(base);
       assert.equal(r.approval.diff_sha256, sha256Hex(diff));
@@ -836,6 +725,22 @@ describe("runReviewPipeline — env-var caps", () => {
     } finally {
       if (saved === undefined) delete process.env.REVIEW_TIMEOUT_MS;
       else process.env.REVIEW_TIMEOUT_MS = saved;
+    }
+  });
+
+  it("resolvePromptCacheRoot reads STAMP_PROMPTS_DIR with a default", async () => {
+    const { resolvePromptCacheRoot } = await import(
+      "../src/server/reviewPipeline.ts"
+    );
+    const saved = process.env.STAMP_PROMPTS_DIR;
+    try {
+      delete process.env.STAMP_PROMPTS_DIR;
+      assert.equal(resolvePromptCacheRoot(), "/etc/stamp/reviewers");
+      process.env.STAMP_PROMPTS_DIR = "/tmp/custom-prompts";
+      assert.equal(resolvePromptCacheRoot(), "/tmp/custom-prompts");
+    } finally {
+      if (saved === undefined) delete process.env.STAMP_PROMPTS_DIR;
+      else process.env.STAMP_PROMPTS_DIR = saved;
     }
   });
 });

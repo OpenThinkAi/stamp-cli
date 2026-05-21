@@ -13,6 +13,7 @@ import { ensureUserKeypair } from "../lib/keys.js";
 import {
   parseManifest,
   resolveCapability,
+  snapshotSha256,
 } from "../lib/trustedKeysManifest.js";
 import { buildPubkeyMap } from "../lib/sshReviewClient.js";
 import {
@@ -567,7 +568,6 @@ function buildV4Trailers(input: {
         "diff_sha256",
         "base_sha",
         "head_sha",
-        "trusted_keys_snapshot_sha256",
         "issued_at",
         "server_key_id",
       ]) {
@@ -709,12 +709,24 @@ function buildV4Trailers(input: {
   // rule's `minimum_signatures`, we fail with an actionable message
   // BEFORE signing the operator's outer envelope — no point producing
   // a trailer the server will reject on push.
+  // AGT-370: operator computes manifest_snapshot_sha256 from the
+  // manifest at base_sha and binds it into the outer envelope. The
+  // server no longer reads the manifest at all; the verifier checks
+  // this single envelope-level value against snapshotSha256() of the
+  // manifest it reads from base_sha. Lifted from the per-approval
+  // slot in v4 (ApprovalV4.trusted_keys_snapshot_sha256, now removed).
+  // Computed BEFORE collectTrustAnchorSignatures so admin sigs and the
+  // operator's outer sig commit to the same value through the shared
+  // `trustAnchorSigningBytes` builder.
+  const manifestSnapshot = snapshotSha256(manifest);
+
   const trustAnchorSigs = collectTrustAnchorSignatures({
     repoRoot: input.repoRoot,
     baseSha: input.baseSha,
     headSha: input.headSha,
     targetBranch: input.targetBranch,
     diffSha256,
+    manifestSnapshotSha256: manifestSnapshot,
     approvals: entries,
     checks: v4Checks,
     operatorFingerprint: input.operatorFingerprint,
@@ -728,6 +740,7 @@ function buildV4Trailers(input: {
     head_sha: input.headSha,
     target_branch: input.targetBranch,
     diff_sha256: diffSha256,
+    manifest_snapshot_sha256: manifestSnapshot,
     approvals: entries,
     checks: v4Checks,
     trust_anchor_signatures: trustAnchorSigs,
@@ -768,6 +781,10 @@ function collectTrustAnchorSignatures(input: {
   headSha: string;
   targetBranch: string;
   diffSha256: string;
+  /** Operator-predicted manifest_snapshot_sha256 — same value baked
+   *  into the outer envelope. Admin signers compute this the same way
+   *  in `stamp admin sign` (AGT-370). */
+  manifestSnapshotSha256: string;
   approvals: ApprovalEntryV4[];
   checks: CheckAttestationV4[];
   operatorFingerprint: string;
@@ -841,6 +858,7 @@ function collectTrustAnchorSignatures(input: {
     headSha: input.headSha,
     targetBranch: input.targetBranch,
     diffSha256: input.diffSha256,
+    manifestSnapshotSha256: input.manifestSnapshotSha256,
     approvals: input.approvals,
     checks: input.checks,
     signerKeyId: input.operatorFingerprint,

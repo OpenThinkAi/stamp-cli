@@ -47,6 +47,10 @@ function makePayload(overrides: Partial<PrAttestationPayload> = {}): PrAttestati
     target_branch: "main",
     target_branch_tip_sha: "f".repeat(40),
     diff_sha256: "1".repeat(64),
+    // AGT-370: PR-mode v3 envelopes carry the operator-signed
+    // manifest_snapshot_sha256 alongside the diff binding. Parser
+    // requires it at the outer level.
+    manifest_snapshot_sha256: "sha256:" + "a".repeat(64),
     approvals: [
       // Parser does not deep-validate approval element shape — the
       // pipeline phase (`verifyV4ApprovalSignatures`) is the canonical
@@ -60,7 +64,6 @@ function makePayload(overrides: Partial<PrAttestationPayload> = {}): PrAttestati
           diff_sha256: "1".repeat(64),
           base_sha: "b".repeat(40),
           head_sha: "c".repeat(40),
-          trusted_keys_snapshot_sha256: "sha256:" + "a".repeat(64),
           issued_at: "2026-05-18T12:00:00Z",
           server_key_id: "sha256:" + "b".repeat(64),
         },

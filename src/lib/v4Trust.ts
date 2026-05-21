@@ -47,7 +47,7 @@ import {
   canonicalSerializePayload,
   type AttestationPayloadV4,
 } from "./attestationV4.js";
-import { hashPromptBytes, readReviewersFromYaml } from "./reviewerHash.js";
+import { readReviewersFromYaml } from "./reviewerHash.js";
 import { verifyBytes } from "./signing.js";
 import { buildPubkeyMap } from "./sshReviewClient.js";
 import {
@@ -159,6 +159,11 @@ export const COMMIT_PHASES_V4: ReadonlyArray<{ name: string; fn: PhaseV4 }> = [
   { name: "verifyV4TargetBranch", fn: verifyV4TargetBranch },
   { name: "verifyV4SignerTrust", fn: verifyV4SignerTrust },
   { name: "verifyV4OuterSignature", fn: verifyV4OuterSignature },
+  // AGT-370: envelope-level manifest snapshot binding (lifted from
+  // the per-approval slot in v4). Runs once before the per-approval
+  // loop in verifyV4ApprovalSignatures — a single check replaces the
+  // N-checks per envelope the v4 verifier did.
+  { name: "verifyV4ManifestSnapshot", fn: verifyV4ManifestSnapshot },
   { name: "verifyV4Approvals", fn: verifyV4Approvals },
   { name: "verifyV4DiffHash", fn: verifyV4DiffHash },
   { name: "verifyV4ApprovalSignatures", fn: verifyV4ApprovalSignatures },
@@ -363,33 +368,89 @@ export function verifyV4DiffHash(input: PhaseInputV4): PhaseResultV4 {
   return { ok: true };
 }
 
-/** Threat: per-approval signature forgery, stale snapshot, swapped
- *  prompt hash. For each approval:
+/**
+ * AGT-370: envelope-level manifest snapshot binding. The operator's
+ * outer signature commits to `payload.manifest_snapshot_sha256`; this
+ * phase confirms that value equals the snapshot of the manifest the
+ * verifier reads at `base_sha`.
+ *
+ * Lenient revocation moves from per-approval to per-envelope: a server
+ * key revoked AFTER `base_sha` remains valid for envelopes whose
+ * `base_sha` predates the revocation, because the manifest at that
+ * base still lists it. A key never listed in the manifest at `base_sha`
+ * cannot produce a server signature this verifier will accept (see
+ * `verifyV4ApprovalSignatures` below).
+ *
+ * Replaces the per-approval `trusted_keys_snapshot_sha256` check that
+ * lived in `verifyV4ApprovalSignatures` in v4. Single check per
+ * envelope, not N — same semantics, less surface.
+ */
+export function verifyV4ManifestSnapshot(input: PhaseInputV4): PhaseResultV4 {
+  const { sha, payload, manifest } = input;
+  const computed = snapshotSha256(manifest);
+  if (payload.manifest_snapshot_sha256 !== computed) {
+    return {
+      ok: false,
+      reason:
+        `commit ${sha.slice(0, 8)}: v4 manifest_snapshot_sha256 ` +
+        `(${payload.manifest_snapshot_sha256.slice(0, 16)}…) does not match the ` +
+        `manifest at base ${payload.base_sha.slice(0, 8)} ` +
+        `(${computed.slice(0, 16)}…). The envelope was signed against a ` +
+        `different snapshot of the trust set than the one committed at the ` +
+        `merge base. Re-run \`stamp merge\` (or \`stamp attest\`) so the ` +
+        `outer signature binds to the current manifest.`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Threat: per-approval signature forgery or swapped prompt hash. For
+ *  each approval:
  *    1. The inner server_key_id (authoritative — settled decision #9)
  *       must resolve to a key in the manifest AT base_sha with the
  *       'server' capability. Past approvals are grandfathered through
- *       the snapshot check: a key revoked on a later commit but still
- *       present at base_sha is accepted (lenient revocation).
+ *       the envelope-level snapshot check
+ *       (`verifyV4ManifestSnapshot`): a key revoked on a later commit
+ *       but still present at base_sha is accepted (lenient revocation).
  *    2. The outer server_attestation.server_key_id must match the
  *       inner; this prevents an attacker from swapping in a different
  *       server key's pubkey at verify time.
  *    3. The signature must verify against `canonicalSerializeApproval`
  *       of the inner approval body.
- *    4. The prompt_sha256 in the signed payload must match a fresh
- *       hash of the reviewer's prompt file at base_sha. The server
- *       fetched the prompt from its own bare repo at attestation
- *       time; the verifier recomputes from the merge-base tree. They
- *       agree because `.stamp/**` is gated separately (AGT-336/337).
- *    5. The approval's base_sha / head_sha / target_branch must
+ *    4. The approval's base_sha / head_sha / target_branch must
  *       match the payload's — a stale verdict for a different
  *       merge can't be folded in.
- *    6. The trusted_keys_snapshot_sha256 must match the manifest
- *       hash at base_sha (lenient revocation gate).
+ *
+ *  AGT-370 removed the v4-era step that recomputed `prompt_sha256`
+ *  from the reviewer's prompt file at base_sha. The server-signed
+ *  `prompt_sha256` is trusted by transitivity:
+ *  manifest (at base_sha) → server key (with `server` capability) →
+ *  signed approval body (this phase verifies the Ed25519) →
+ *  `prompt_sha256`. Re-hashing from the merge-base tree was never the
+ *  trust anchor; it was a belt-and-suspenders second-line defense that
+ *  is now impossible (the server filesystem-cache that AGT-370 wires
+ *  into has no path back to the operator's repo tree) and structurally
+ *  redundant given the signed chain. The change is intentional: it
+ *  removes a dependency that forced the server to maintain a bare
+ *  clone of every reviewed repo, and the security property survives
+ *  because tampering the signed bytes still fails the Ed25519 check
+ *  (test: "tampering the signed bytes still fails signature
+ *  verification" in `tests/v4Roundtrip.test.ts`).
+ *
+ *  Anticipated objection: "the verifier still has the operator's tree,
+ *  so the recompute could be independent of the server." Correct in the
+ *  abstract — but AGT-370's deployment shape (project [shape-2-
+ *  topology-correction]) removes `.stamp/reviewers/*.md` from reviewed
+ *  repos entirely. The merge-base tree has nothing for the verifier to
+ *  hash. Restoring the recompute would require keeping prompts in the
+ *  repo, which is the bare-repo dependency this project removes. The
+ *  trust shift is the design, not an oversight: prompt bytes are now
+ *  anchored at the server's signing key (governed by the manifest),
+ *  not at the operator's working tree. Do not re-introduce the
+ *  tree-side recompute without re-opening the topology decision.
  */
 export function verifyV4ApprovalSignatures(input: PhaseInputV4): PhaseResultV4 {
   const { sha, payload, manifest, pubkeyByFingerprint } = input;
-  const manifestSnapshot = snapshotSha256(manifest);
-  const reviewerDefs = readReviewerDefsAtRef(payload.base_sha);
 
   for (const entry of payload.approvals) {
     const a = entry.approval;
@@ -422,19 +483,6 @@ export function verifyV4ApprovalSignatures(input: PhaseInputV4): PhaseResultV4 {
       return {
         ok: false,
         reason: `commit ${sha.slice(0, 8)}: v4 approval ${reviewerLabel}: server_attestation.server_key_id (${entry.server_attestation.server_key_id}) does not match inner approval.server_key_id (${a.server_key_id}). The inner signed payload is authoritative; one of the two was tampered with after signing.`,
-      };
-    }
-
-    // Lenient revocation: the snapshot the approval was signed against
-    // must match the manifest as it stood at base_sha. A future
-    // revocation that lands on a later commit but has not yet been
-    // base'd into this merge is grandfathered. Conversely, a key that
-    // wasn't trusted at base_sha can't sign a valid approval here —
-    // the snapshot check would fail.
-    if (a.trusted_keys_snapshot_sha256 !== manifestSnapshot) {
-      return {
-        ok: false,
-        reason: `commit ${sha.slice(0, 8)}: v4 approval ${reviewerLabel}: trusted_keys_snapshot_sha256 (${a.trusted_keys_snapshot_sha256.slice(0, 16)}…) does not match the manifest at base ${payload.base_sha.slice(0, 8)} (${manifestSnapshot.slice(0, 16)}…). The server signed against a different snapshot of the trust set than the one committed at the merge base.`,
       };
     }
 
@@ -479,44 +527,6 @@ export function verifyV4ApprovalSignatures(input: PhaseInputV4): PhaseResultV4 {
       return {
         ok: false,
         reason: `commit ${sha.slice(0, 8)}: v4 approval ${reviewerLabel}: server signature does not verify against ${a.server_key_id} over canonical approval bytes`,
-      };
-    }
-
-    // Recompute prompt_sha256 from the reviewer's prompt file at
-    // base_sha. The verifier must NOT trust the value in the signed
-    // payload as-is — that value is what the SERVER claimed it
-    // hashed. We independently recompute against the prompt file as
-    // committed in the merge-base tree and require equality. If
-    // someone smuggles a permissive prompt into a feature branch and
-    // the server somehow didn't catch it, this is the second-line
-    // defense (the first being `.stamp/**` admin gate, which is
-    // AGT-336/337). If the reviewer isn't defined at base_sha at all,
-    // that's a misconfiguration and we reject.
-    const def = reviewerDefs[a.reviewer];
-    if (!def) {
-      return {
-        ok: false,
-        reason: `commit ${sha.slice(0, 8)}: v4 approval ${reviewerLabel}: reviewer is not defined in .stamp/config.yml at base ${payload.base_sha.slice(0, 8)}`,
-      };
-    }
-    let promptText: string;
-    try {
-      promptText = run(["show", `${payload.base_sha}:${def.prompt}`]);
-    } catch {
-      return {
-        ok: false,
-        reason: `commit ${sha.slice(0, 8)}: v4 approval ${reviewerLabel}: prompt "${def.prompt}" is unreadable at base ${payload.base_sha.slice(0, 8)}`,
-      };
-    }
-    // Match v3's verifyReviewerHashesAtMergeBase byte form: read as
-    // utf-8 string then re-encode to bytes for hashing. The server and
-    // merge-time signer both compute the same way, so the verifier's
-    // recomputed hash agrees iff the prompt file is byte-identical.
-    const recomputedPromptSha = hashPromptBytes(Buffer.from(promptText, "utf8"));
-    if (recomputedPromptSha !== a.prompt_sha256) {
-      return {
-        ok: false,
-        reason: `commit ${sha.slice(0, 8)}: v4 approval ${reviewerLabel}: prompt_sha256 mismatch — server signed ${a.prompt_sha256.slice(0, 12)}… but prompt file at base hashes to ${recomputedPromptSha.slice(0, 12)}…. The reviewer prompt the server reviewed differs from the one in the merge-base tree.`,
       };
     }
   }

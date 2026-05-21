@@ -65,6 +65,22 @@ import {
   diffSha256Hex,
   trustAnchorSigningBytes,
 } from "../src/lib/trustAnchorPayload.ts";
+import { parseManifest, snapshotSha256 } from "../src/lib/trustedKeysManifest.ts";
+
+/** Compute the manifest-snapshot binding admins must commit to in their
+ *  trust-anchor signature. AGT-370 lifted this field to the outer
+ *  envelope; both admin signers and `stamp merge` derive it the same
+ *  way from `.stamp/trusted-keys/manifest.yml` at base_sha. */
+function manifestSnapshotAtBase(repo: string, baseSha: string): string {
+  const yaml = execFileSync(
+    "git",
+    ["show", `${baseSha}:.stamp/trusted-keys/manifest.yml`],
+    { cwd: repo, encoding: "utf8" },
+  );
+  const m = parseManifest(yaml);
+  if (!m) throw new Error("manifest must parse at base_sha");
+  return snapshotSha256(m);
+}
 
 // ─── Harness ────────────────────────────────────────────────────────
 
@@ -281,7 +297,6 @@ function seedV4Review(h: Harness, base: string, head: string, diffSha: string): 
     diff_sha256: diffSha,
     base_sha: base,
     head_sha: head,
-    trusted_keys_snapshot_sha256: "sha256:" + "0".repeat(64),
     issued_at: "2026-05-17T18:42:13Z",
     server_key_id: h.serverKey.fingerprint,
   };
@@ -643,6 +658,7 @@ function bobSigns(h: Harness, baseSha: string, headSha: string, targetBranch: st
     headSha,
     targetBranch,
     diffSha256: diffSha,
+    manifestSnapshotSha256: manifestSnapshotAtBase(h.repo, baseSha),
     approvals,
     checks: [],
     signerKeyId: h.operatorFingerprint, // Bob signs WITH the operator's identity baked in

@@ -27,7 +27,6 @@
  */
 
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
 import {
   createHash,
   createPublicKey,
@@ -88,44 +87,33 @@ function manifestYamlForServerKey(serverFingerprint: string): string {
 }
 
 function makeFixtureBareRepo(): {
-  bareDir: string;
+  /** Filesystem prompt cache (post-AGT-370 replacement for the bare
+   *  git repo). The pipeline reads `<cacheRoot>/security.md`. */
+  cacheRoot: string;
   baseSha: string;
   signing: { privateKey: KeyObject; publicPem: string; fingerprint: string };
   cleanup: () => void;
 } {
   const signing = mintSigningFixture();
-  const manifestYaml = manifestYamlForServerKey(signing.fingerprint);
+  // The manifest YAML is no longer consumed by the server (AGT-370);
+  // the variable stays as a docstring reference for the trust shape
+  // the operator / verifier expect.
+  void manifestYamlForServerKey(signing.fingerprint);
 
   const root = mkdtempSync(path.join(os.tmpdir(), "stamp-prattprod-"));
-  const work = path.join(root, "work");
-  const bare = path.join(root, "widget-co.git");
+  const cacheRoot = path.join(root, "prompts");
+  mkdirSync(cacheRoot, { recursive: true });
+  writeFileSync(path.join(cacheRoot, "security.md"), REVIEWER_PROMPT);
 
-  mkdirSync(work);
-  const run = (args: string[], cwd: string) => {
-    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-    if (r.status !== 0) {
-      throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
-    }
-    return r.stdout.trim();
-  };
-  run(["init", "-q", "-b", "main"], work);
-  run(["config", "user.email", "test@example.com"], work);
-  run(["config", "user.name", "Test"], work);
-  run(["config", "commit.gpgsign", "false"], work);
-  mkdirSync(path.join(work, ".stamp", "reviewers"), { recursive: true });
-  mkdirSync(path.join(work, ".stamp", "trusted-keys"), { recursive: true });
-  writeFileSync(path.join(work, ".stamp", "reviewers", "security.md"), REVIEWER_PROMPT);
-  writeFileSync(
-    path.join(work, ".stamp", "trusted-keys", "manifest.yml"),
-    manifestYaml,
-  );
-  run(["add", "-A"], work);
-  run(["commit", "-q", "-m", "fixture"], work);
-  const baseSha = run(["rev-parse", "HEAD"], work);
-  run(["clone", "-q", "--bare", work, bare], root);
+  // base_sha is still required on the wire — it lands in
+  // ApprovalV4.base_sha and the verifier uses it to resolve the
+  // manifest operator-side. A fake 40-hex value suffices for this
+  // test because we never invoke the verifier or any code that
+  // resolves it back to a real commit.
+  const baseSha = "0123456789abcdef0123456789abcdef01234567";
 
   return {
-    bareDir: bare,
+    cacheRoot,
     baseSha,
     signing,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
@@ -166,7 +154,7 @@ function fixtureInput(
     params,
     caller: FIXTURE_USER,
     deps: {
-      repoResolver: () => fx.bareDir,
+      promptResolver: (reviewer) => path.join(fx.cacheRoot, `${reviewer}.md`),
       anthropic: client,
       signingKey: {
         privateKey: fx.signing.privateKey,
@@ -294,7 +282,6 @@ describe("runReviewPipeline — AGT-355 v3 PR-attestation payload production", (
         "diff_sha256",
         "base_sha",
         "head_sha",
-        "trusted_keys_snapshot_sha256",
         "issued_at",
         "server_key_id",
       ]) {

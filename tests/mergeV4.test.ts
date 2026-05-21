@@ -304,10 +304,6 @@ function buildApproval(args: {
     diff_sha256: args.diffSha256,
     base_sha: args.baseSha,
     head_sha: args.headSha,
-    // The exact manifest snapshot hash doesn't affect this test's
-    // assertions (AGT-335 verifies it; merge just propagates it). Use
-    // a deterministic placeholder of the right shape.
-    trusted_keys_snapshot_sha256: "sha256:" + "0".repeat(64),
     issued_at: "2026-05-17T18:42:13Z",
     server_key_id: args.serverFingerprint,
   };
@@ -359,7 +355,7 @@ describe("runMerge v4 — happy path", () => {
       );
 
       // Top-level invariants.
-      assert.equal(payload.schema_version, 4);
+      assert.equal(payload.schema_version, 5);
       assert.equal(payload.base_sha, base);
       assert.equal(payload.head_sha, head);
       assert.equal(payload.target_branch, "main");
@@ -722,17 +718,17 @@ describe("runMerge v4 — unit: envelope assembly + canonical bytes", () => {
       diff_sha256: "b".repeat(64),
       base_sha: "c".repeat(40),
       head_sha: "d".repeat(40),
-      trusted_keys_snapshot_sha256: "sha256:" + "e".repeat(64),
       issued_at: "2026-05-17T18:42:13Z",
       server_key_id: "sha256:" + "f".repeat(64),
     };
 
     const payload: AttestationPayloadV4 = {
-      schema_version: 4,
+      schema_version: 5,
       base_sha: approval.base_sha,
       head_sha: approval.head_sha,
       target_branch: "main",
       diff_sha256: approval.diff_sha256,
+      manifest_snapshot_sha256: "sha256:" + "e".repeat(64),
       approvals: [
         {
           approval,
@@ -759,6 +755,7 @@ describe("runMerge v4 — unit: envelope assembly + canonical bytes", () => {
       trust_anchor_signatures: shuffled.trust_anchor_signatures,
       checks: shuffled.checks,
       approvals: shuffled.approvals,
+      manifest_snapshot_sha256: shuffled.manifest_snapshot_sha256,
       diff_sha256: shuffled.diff_sha256,
       target_branch: shuffled.target_branch,
       head_sha: shuffled.head_sha,

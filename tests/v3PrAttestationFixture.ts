@@ -301,7 +301,6 @@ export function buildV3Envelope(opts: BuildEnvelopeOpts): PrAttestationEnvelope 
       diff_sha256: fixture.diffSha256,
       base_sha: fixture.baseSha,
       head_sha: fixture.headSha,
-      trusted_keys_snapshot_sha256: manifestSnapshot,
       issued_at: "2026-05-18T12:00:00Z",
       server_key_id: serverKey.fingerprint,
     };
@@ -328,6 +327,7 @@ export function buildV3Envelope(opts: BuildEnvelopeOpts): PrAttestationEnvelope 
     head_sha: fixture.headSha,
     target_branch: "main",
     diff_sha256: opts.diffSha256Override ?? fixture.diffSha256,
+    manifest_snapshot_sha256: manifestSnapshot,
     approvals,
     checks: opts.checksOverride ?? [],
     trust_anchor_signatures: opts.trustAnchorSignatures ?? [],
@@ -354,6 +354,7 @@ export function buildV3Envelope(opts: BuildEnvelopeOpts): PrAttestationEnvelope 
     target_branch: payloadV4.target_branch,
     target_branch_tip_sha: fixture.baseSha, // base IS the tip in the fixture
     diff_sha256: payloadV4.diff_sha256,
+    manifest_snapshot_sha256: payloadV4.manifest_snapshot_sha256,
     approvals: payloadV4.approvals,
     checks: payloadV4.checks,
     trust_anchor_signatures: payloadV4.trust_anchor_signatures,

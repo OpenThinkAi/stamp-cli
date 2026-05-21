@@ -281,6 +281,7 @@ function verifyV3Envelope(
     head_sha: envelope.payload.head_sha,
     target_branch: envelope.payload.target_branch,
     diff_sha256: envelope.payload.diff_sha256!,
+    manifest_snapshot_sha256: envelope.payload.manifest_snapshot_sha256!,
     approvals: envelope.payload.approvals as ApprovalEntryV4[],
     checks: envelope.payload.checks as CheckAttestationV4[],
     trust_anchor_signatures: envelope.payload

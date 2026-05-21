@@ -73,6 +73,7 @@ import {
   verifyV4ApprovalSignatures,
   verifyV4Checks,
   verifyV4DiffHash,
+  verifyV4ManifestSnapshot,
   verifyV4MergeStructure,
   verifyV4OuterSignature,
   verifyV4SignerTrust,
@@ -235,6 +236,7 @@ function runAllV4Phases(input: PhaseInputV4): { phase: string; reason: string } 
     { name: "verifyV4TargetBranch", fn: verifyV4TargetBranch },
     { name: "verifyV4SignerTrust", fn: verifyV4SignerTrust },
     { name: "verifyV4OuterSignature", fn: verifyV4OuterSignature },
+    { name: "verifyV4ManifestSnapshot", fn: verifyV4ManifestSnapshot },
     { name: "verifyV4Approvals", fn: verifyV4Approvals },
     { name: "verifyV4DiffHash", fn: verifyV4DiffHash },
     { name: "verifyV4ApprovalSignatures", fn: verifyV4ApprovalSignatures },
@@ -386,8 +388,9 @@ function setupHarness(): Harness {
 
 /**
  * Compute the canonical manifest snapshot hash at base_sha — exactly
- * what the verifier compares the approval's
- * `trusted_keys_snapshot_sha256` against in `verifyV4ApprovalSignatures`.
+ * what the verifier compares the envelope's `manifest_snapshot_sha256`
+ * against in `verifyV4ManifestSnapshot`. AGT-370 lifted this from the
+ * per-approval slot to the outer envelope.
  */
 function manifestSnapshotAtBase(repo: string, baseSha: string): string {
   const yaml = git(repo, ["show", `${baseSha}:.stamp/trusted-keys/manifest.yml`]);
@@ -404,7 +407,6 @@ function seedV4Review(args: {
   headSha: string;
   diffSha256: string;
   serverKey: ServerKey;
-  manifestSnapshot: string;
   verdict?: Verdict;
 }): { approval: ApprovalV4; signatureB64: string } {
   const approval: ApprovalV4 = {
@@ -414,7 +416,6 @@ function seedV4Review(args: {
     diff_sha256: args.diffSha256,
     base_sha: args.baseSha,
     head_sha: args.headSha,
-    trusted_keys_snapshot_sha256: args.manifestSnapshot,
     issued_at: "2026-05-17T18:42:13Z",
     server_key_id: args.serverKey.fingerprint,
   };
@@ -473,7 +474,6 @@ describe("v4 attestation round-trip — happy path", () => {
       headSha: head,
       diffSha256,
       serverKey: h.serverKey,
-      manifestSnapshot,
     });
 
     // ① Drive the real merge command end-to-end.
@@ -491,11 +491,17 @@ describe("v4 attestation round-trip — happy path", () => {
     //    field-level cryptography is the next step.
     const payloadBytes = trailerValueToPayloadBytes(payloadB64);
     const payload: AttestationPayloadV4 = JSON.parse(payloadBytes.toString("utf8"));
-    assert.equal(payload.schema_version, 4, "schema_version must be 4");
+    assert.equal(payload.schema_version, 5, "schema_version must be 5 (AGT-370 bump)");
     assert.equal(payload.base_sha, base, "payload.base_sha must equal merge-base");
     assert.equal(payload.head_sha, head, "payload.head_sha must equal feature tip");
     assert.equal(payload.target_branch, "main");
     assert.equal(payload.diff_sha256, diffSha256, "payload.diff_sha256 must equal recomputed");
+    // AGT-370: manifest snapshot binding lives on the outer envelope.
+    assert.equal(
+      payload.manifest_snapshot_sha256,
+      manifestSnapshot,
+      "payload.manifest_snapshot_sha256 must equal snapshotSha256() of the manifest at base",
+    );
     assert.equal(payload.approvals.length, 1, "exactly one approval folded");
     assert.equal(payload.checks.length, 0, "no checks in this fixture");
     assert.deepEqual(payload.trust_anchor_signatures, [], "no .stamp/** touches → no admin sigs");
@@ -606,7 +612,6 @@ describe("v4 attestation round-trip — failure modes (verifier rejects on tampe
       headSha: head,
       diffSha256,
       serverKey: harness.serverKey,
-      manifestSnapshot,
     });
     runFromRepo(harness.repo, () =>
       runMerge({ branch: "feature", into: "main", yes: true }),
@@ -763,7 +768,6 @@ describe("v4 attestation round-trip — failure modes (verifier rejects on tampe
     h = setupHarness();
     const base = shaOf(h.repo, "main");
     const head = shaOf(h.repo, "feature");
-    const manifestSnapshot = manifestSnapshotAtBase(h.repo, base);
     const staleDiff = "ab".repeat(32);
     seedV4Review({
       repo: h.repo,
@@ -772,7 +776,6 @@ describe("v4 attestation round-trip — failure modes (verifier rejects on tampe
       headSha: head,
       diffSha256: staleDiff,
       serverKey: h.serverKey,
-      manifestSnapshot,
     });
     const before = shaOf(h.repo, "main");
     assert.throws(

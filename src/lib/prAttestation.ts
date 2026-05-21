@@ -191,6 +191,15 @@ export interface PrAttestationPayload {
    *  the server signed independently. Absent on v2 envelopes — the v3
    *  trust model REQUIRES it. */
   diff_sha256?: string;
+  /** v3+ (AGT-370): `sha256:<hex>` of `.stamp/trusted-keys/manifest.yml`
+   *  at `base_sha`, same prefixed form `snapshotSha256()` returns.
+   *  Operator-signed via the outer envelope; the verifier checks it
+   *  once against the manifest it reads at `base_sha`. Lifted from the
+   *  per-approval `ApprovalV4.trusted_keys_snapshot_sha256` so the
+   *  server (which writes the per-approval body) no longer needs to
+   *  read the manifest — see `src/lib/attestationV4.ts`. Absent on v2
+   *  envelopes. */
+  manifest_snapshot_sha256?: string;
   /** v2 used `Approval[]` (legacy single-signature shape). v3 uses
    *  `ApprovalEntryV4[]` (server-signed inner approval + signature
    *  wrapper). Schema_version is the discriminator; the parser refuses
@@ -286,6 +295,7 @@ export function parseEnvelope(bytes: Buffer): PrAttestationEnvelope | null {
   // v3+-gated fields: required at parse time. v2 envelopes don't carry
   // these; they reject above via the version floor.
   if (typeof p.diff_sha256 !== "string") return null;
+  if (typeof p.manifest_snapshot_sha256 !== "string") return null;
   if (!Array.isArray(p.trust_anchor_signatures)) return null;
   if (typeof p.target_branch_tip_sha !== "string") return null;
   return env as PrAttestationEnvelope;

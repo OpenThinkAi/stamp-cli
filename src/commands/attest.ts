@@ -100,6 +100,7 @@ import { buildPubkeyMap } from "../lib/sshReviewClient.js";
 import {
   parseManifest,
   resolveCapability,
+  snapshotSha256,
 } from "../lib/trustedKeysManifest.js";
 
 export interface AttestOptions {
@@ -395,7 +396,6 @@ function buildV3Envelope(input: V3BuildInput): EnvelopeBuildResult {
         "diff_sha256",
         "base_sha",
         "head_sha",
-        "trusted_keys_snapshot_sha256",
         "issued_at",
         "server_key_id",
       ]) {
@@ -528,6 +528,13 @@ function buildV3Envelope(input: V3BuildInput): EnvelopeBuildResult {
   // into attest.
   const trustAnchorSignatures: never[] = [];
 
+  // AGT-370: operator-side manifest snapshot binding. The server no
+  // longer reads the manifest; the operator (who already has the repo
+  // checked out) computes this from the manifest at base_sha and the
+  // verifier checks it once against snapshotSha256() of the manifest
+  // it reads at the same ref.
+  const manifestSnapshot = snapshotSha256(manifest);
+
   const payload: PrAttestationPayload = {
     schema_version: PR_ATTESTATION_SCHEMA_VERSION,
     patch_id: input.patchId,
@@ -536,6 +543,7 @@ function buildV3Envelope(input: V3BuildInput): EnvelopeBuildResult {
     target_branch: input.targetBranch,
     target_branch_tip_sha: input.targetBranchTipSha,
     diff_sha256: diffSha256,
+    manifest_snapshot_sha256: manifestSnapshot,
     approvals: entries,
     checks: [], // Phase-1 deliberate omission — see file-level comment.
     trust_anchor_signatures: trustAnchorSignatures,
