@@ -72,6 +72,14 @@ export interface CollectTrustAnchorSignaturesInput {
    *  `stamp merge` to preserve the historical merge-only message
    *  wording. */
   errorContext?: { command: string };
+  /** schema_version to bake into the signing-target bytes. Defaults
+   *  to the v4 commit-trailer's `CURRENT_V4_SCHEMA_VERSION` (the
+   *  historical behavior). PR-mode callers MUST pass
+   *  `PR_ATTESTATION_SCHEMA_VERSION` so the bytes match what the
+   *  v3 PR-mode verifier reconstructs from the wire envelope. See
+   *  `src/lib/trustAnchorPayload.ts`'s `schemaVersion` field doc for
+   *  the full rationale. */
+  signingSchemaVersion?: number;
 }
 
 /**
@@ -162,6 +170,9 @@ export function collectTrustAnchorSignatures(
     approvals: input.approvals,
     checks: input.checks,
     signerKeyId: input.operatorFingerprint,
+    ...(input.signingSchemaVersion !== undefined
+      ? { schemaVersion: input.signingSchemaVersion }
+      : {}),
   });
 
   const verified: TrustAnchorSignatureV4[] = [];

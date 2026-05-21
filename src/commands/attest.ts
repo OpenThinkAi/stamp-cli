@@ -588,6 +588,11 @@ function buildV3Envelope(input: V3BuildInput): EnvelopeBuildResult {
     manifest,
     pubkeyByFingerprint,
     errorContext: { command: "stamp attest" },
+    // PR-mode envelope's payload carries schema_version=3; the verifier
+    // reconstructs admin signing bytes from that wire value. Without
+    // matching it here the signing target diverges between producer
+    // and verifier. See trustAnchorPayload.ts on the schemaVersion field.
+    signingSchemaVersion: PR_ATTESTATION_SCHEMA_VERSION,
   });
 
   const payload: PrAttestationPayload = {
