@@ -5,6 +5,39 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 2.1.1 — 2026-05-21
+
+Adds `stamp attest --migrate-existing` for the **Shape 4 migration bootstrap PR**: the one-time PR that activates Shape 4 (server-attested without code transfer) on an existing repo. AGT-398.
+
+### Background — why this exists
+
+2.1.0 introduced Shape 4 but assumed the migration commit would land "via stamp flow." First operator to actually try it (hivedb, Anglepoint-Inc) hit a deadlock:
+
+- `stamp review` reads `.stamp/config.yml` from `base_sha` (security boundary — feature branch can't unilaterally point at attacker-controlled server). Base lacks `review_server` → review runs locally → no server signatures captured.
+- `stamp attest` reads `.stamp/config.yml` from the working tree, sees the newly-added `review_server`, takes the v3 server-attested branch, demands server signatures that don't exist.
+- v2 fallback rejected by the verifier (`MIN_ACCEPTED_PR_ATTESTATION_VERSION = 3`).
+- `path_rules` `.stamp/**` `bypass_review_cycle: true` doesn't help — it bypasses the reviewer gate, but the schema-floor check is downstream.
+
+Shape 2 dodges the same deadlock via the 1.x bridge ("Step 4 — Land the migration commit through 1.x"). Shape 4 didn't exist in 1.x, so no equivalent fallback. Every Shape 4 migration of an existing repo would hit this — 2.1.1 fixes it permanently.
+
+### Added
+
+- **`stamp attest --migrate-existing` flag.** Produces a v3 envelope with an empty `server_signatures` block plus a `migration_bootstrap: { activated_paths: [...] }` marker inside the operator-signed payload. Accepted by the verifier only when all of these hold: (a) the marker is present, (b) the operator signature over the payload verifies, (c) an admin-capability signature in `trust_anchor_signatures` covers the diff, (d) `path_rules` at `base_sha` covers all touched paths with `bypass_review_cycle: true`, (e) the diff matches the narrow Shape-4-activation whitelist (re-validated at verify time, not just attest time).
+- **Shape-4-activation whitelist** (`src/lib/migrationBootstrap.ts`). The bootstrap path accepts ONLY: adding `review_server:` to a branch rule in `.stamp/config.yml`, optionally cleaning the `reviewers:` block from prompt-paths form to `{}` form, adding new `[server]+role_source: server` entries to `.stamp/trusted-keys/manifest.yml`, and adding new matching `*.pub` files. Touching anything else fails with a named-offender error. Operators who need broader changes land them via the normal flow after the bootstrap commit.
+- **Migration doc walkthrough step.** `docs/migration-1.x-to-2.x.md` Shape 4 walkthrough explains the bootstrap PR: run `stamp attest --migrate-existing` for the FIRST PR that activates Shape 4; subsequent PRs use the normal `stamp attest --into main --push origin`.
+
+### Constraints (deliberate)
+
+- `MIN_ACCEPTED_PR_ATTESTATION_VERSION` stays at 3. The bootstrap envelope IS a v3 envelope; it just has an empty `server_signatures` block + a marker. No schema-floor relaxation.
+- `minimum_signatures > 1` on the matched `path_rule` is refused at attest time (the bootstrap flag does a single operator-self admin sig; multi-admin envelope collection isn't supported by current tooling). Operators with `minimum_signatures: 2+` see an actionable error; workaround is to temporarily lower the rule in a prior PR.
+- The bootstrap marker is part of the operator-signed bytes — not a trailer addendum. Spoofing requires forging the operator's signature.
+
+### Provenance
+
+- AGT-398: commits `cd0c001`, `c20c94b`, `d830c24`, `f660d0e`.
+
+---
+
 ## 2.1.0 — 2026-05-21
 
 Adds **Shape 4** as a documented and supported deployment topology: GitHub primary + server-attested reviews + no code transfer to stamp-server. Driven by the [shape-2-topology-correction](https://github.com/OpenThinkAi/stamp-cli/blob/main/docs/migration-1.x-to-2.x.md#shape-4--github-primary-server-attested-without-code-transfer-private-repos) project — the topology lets private/internal repos keep code on its git host while still getting server-attested verdicts. Includes a v4→v5 envelope schema bump (breaking; v4 envelopes are rejected with a clear "schema too old" error) and a config validator change that's backward-compatible for Shape 1/2 deployments but unlocks the cleaner Shape 4 config shape.
