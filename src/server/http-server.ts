@@ -754,7 +754,7 @@ const pollState: PollWorkerState = {
  */
 export function resolvePromptsPollIntervalSec(): number {
   const raw = process.env["STAMP_PROMPTS_POLL_INTERVAL_SEC"];
-  if (raw === undefined || raw === null || raw === "") {
+  if (raw === undefined || raw === "") {
     return DEFAULT_PROMPTS_POLL_INTERVAL_SEC;
   }
   // Exact "0" is the documented opt-out signal.
@@ -772,13 +772,19 @@ export function resolvePromptsPollIntervalSec(): number {
     return DEFAULT_PROMPTS_POLL_INTERVAL_SEC;
   }
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0) {
-    // Operator typo (e.g. "3600s" or "1h"). Log once at start; fall
-    // back to the default rather than silently disabling — silent
-    // disable would mask a stale-cache symptom for hours.
+  // n <= 0 (NOT n < 0): the literal "0" exited above, so any other
+  // input that parses to a non-positive integer ("00", "000", "-5",
+  // "-0", etc.) is operator-error territory. Fall back to the default
+  // rather than silently disabling — the standards reviewer flagged
+  // "00" silently disabling polling as an invariant violation; this
+  // is the one-character fix that closes it. `!Number.isInteger(n)`
+  // is unreachable here (the regex above already rejected non-
+  // integers) but kept as belt-and-suspenders in case a future
+  // refactor loosens the regex.
+  if (!Number.isInteger(n) || n <= 0) {
     logLine(
       "warn",
-      `STAMP_PROMPTS_POLL_INTERVAL_SEC=${JSON.stringify(raw)} is not a non-negative integer; falling back to default ${DEFAULT_PROMPTS_POLL_INTERVAL_SEC}s`,
+      `STAMP_PROMPTS_POLL_INTERVAL_SEC=${JSON.stringify(raw)} is not a positive integer (and not the literal '0' opt-out); falling back to default ${DEFAULT_PROMPTS_POLL_INTERVAL_SEC}s`,
     );
     return DEFAULT_PROMPTS_POLL_INTERVAL_SEC;
   }

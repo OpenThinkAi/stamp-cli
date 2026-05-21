@@ -161,6 +161,20 @@ describe("resolvePromptsPollIntervalSec — env parsing", () => {
     assert.equal(resolvePromptsPollIntervalSec(), 0);
   });
 
+  it("does NOT treat '00' / '000' / '-0' as the disable signal (standards-reviewer invariant fix)", () => {
+    // Three permutations that previously silently disabled polling due
+    // to `Number("00") === 0` slipping past a `n < 0` check. The
+    // documented invariant is that ONLY the literal "0" disables;
+    // anything else that parses to a non-positive integer is an
+    // operator typo and must fall back to the default with a warn line.
+    process.env["STAMP_PROMPTS_POLL_INTERVAL_SEC"] = "00";
+    assert.equal(resolvePromptsPollIntervalSec(), DEFAULT_PROMPTS_POLL_INTERVAL_SEC);
+    process.env["STAMP_PROMPTS_POLL_INTERVAL_SEC"] = "000";
+    assert.equal(resolvePromptsPollIntervalSec(), DEFAULT_PROMPTS_POLL_INTERVAL_SEC);
+    process.env["STAMP_PROMPTS_POLL_INTERVAL_SEC"] = "-0";
+    assert.equal(resolvePromptsPollIntervalSec(), DEFAULT_PROMPTS_POLL_INTERVAL_SEC);
+  });
+
   it("returns parsed positive integer when valid", () => {
     process.env["STAMP_PROMPTS_POLL_INTERVAL_SEC"] = "7200";
     assert.equal(resolvePromptsPollIntervalSec(), 7200);
