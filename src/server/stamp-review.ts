@@ -61,6 +61,7 @@ import {
   type Role,
   type UserRow,
 } from "../lib/serverDb.js";
+import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 
 import {
@@ -334,6 +335,15 @@ export type StampReviewResponse = ReviewPipelineResult;
 // ─── main ───────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // Merge /etc/stamp/env into process.env first. sshd strips custom env
+  // vars from user sessions by default, so the container env's
+  // ANTHROPIC_API_KEY (and any other secret the entrypoint persists) is
+  // not visible to this script when invoked via the git-shell SSH path.
+  // The entrypoint writes them to /etc/stamp/env (mode 0640 root:git);
+  // this loader is the read side. Sessions that DO have the var via
+  // sshd_config's SetEnv (rare) win — the loader only fills unset keys.
+  loadServerEnvFile();
+
   // parseRequest → resolveAuth → runReviewPipeline (stubbed) →
   // emit JSON to stdout. The flow is intentionally linear so a
   // future HTTP entrypoint can fold the same steps into a request

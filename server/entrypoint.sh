@@ -343,6 +343,7 @@ write_env_var() {
 }
 
 write_env_var GITHUB_BOT_TOKEN
+write_env_var ANTHROPIC_API_KEY  # consumed by stamp-review.cjs via lib/serverEnvFile.loadServerEnvFile()
 
 # SSH sessions strip env vars by default; sshd_config's SetEnv bypasses
 # that for explicitly-listed vars. Inject STAMP_PUBLIC_URL so SSH-invoked

@@ -36,6 +36,7 @@ import {
   matchesAnyTagPattern,
   resolveTagPatterns,
 } from "../lib/refPatterns.js";
+import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 
 interface MirrorConfig {
   github?: {
@@ -54,29 +55,6 @@ interface MirrorConfig {
      */
     tags: string[];
   };
-}
-
-/**
- * sshd strips most env vars from sessions. The server entrypoint writes
- * secrets like GITHUB_BOT_TOKEN to /etc/stamp/env (0600, owned by git);
- * this loader merges them into process.env before the hook runs.
- */
-function loadServerEnvFile(path = "/etc/stamp/env"): void {
-  if (!existsSync(path)) return;
-  let content: string;
-  try {
-    content = readFileSync(path, "utf8");
-  } catch {
-    return;
-  }
-  for (const line of content.split("\n")) {
-    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)=(.*)$/);
-    if (!m) continue;
-    const key = m[1]!;
-    if (process.env[key] === undefined) {
-      process.env[key] = (m[2] ?? "").trim();
-    }
-  }
 }
 
 // Belt-and-suspenders redaction. The mirror push now passes the bot token
