@@ -80,6 +80,12 @@ export function reviewersList(): void {
   const maxNameLen = Math.max(...names.map((n) => n.length));
   for (const name of names) {
     const def = config.reviewers[name]!;
+    if (def.prompt === undefined) {
+      // Shape 4: prompt omitted; the server-bundled prompt is the
+      // canonical source and there's nothing on disk to report on.
+      console.log(`  ${name.padEnd(maxNameLen)}   (server-bundled — no local prompt)`);
+      continue;
+    }
     const abs = resolve(repoRoot, def.prompt);
     let annotation = "";
     if (!existsSync(abs)) {
@@ -107,6 +113,13 @@ export function reviewersEdit(name: string): void {
   if (!def) {
     throw new Error(
       `reviewer "${name}" is not configured. Run \`stamp reviewers list\` to see available reviewers.`,
+    );
+  }
+  if (def.prompt === undefined) {
+    throw new Error(
+      `reviewer "${name}" has no \`prompt:\` configured (server-bundled in Shape 4). ` +
+        `There is no local prompt file to edit. To author the prompt locally, set ` +
+        `\`reviewers.${name}.prompt\` to a path under .stamp/reviewers/ in .stamp/config.yml.`,
     );
   }
 
@@ -190,6 +203,12 @@ export function reviewersRemove(
   writeFileSync(configPath, stringifyConfig(config));
   console.log(`reviewer "${name}" removed from .stamp/config.yml`);
 
+  if (def.prompt === undefined) {
+    // Shape 4: nothing on disk to delete or report on.
+    console.log(`(no local prompt file — reviewer was server-bundled)`);
+    return;
+  }
+
   if (opts.deleteFile) {
     const promptAbs = resolve(repoRoot, def.prompt);
     if (existsSync(promptAbs)) {
@@ -235,6 +254,14 @@ export async function reviewersTest(
   // so the on-disk version is exactly what the user wants invoked. The
   // base-tree security boundary belongs to `stamp review` / `stamp merge`.
   const def = config.reviewers[name]!;
+  if (def.prompt === undefined) {
+    throw new Error(
+      `reviewer "${name}" has no \`prompt:\` configured (server-bundled in Shape 4). ` +
+        `\`stamp reviewers test\` is a local prompt-iteration helper and needs a ` +
+        `local prompt file to invoke. Set \`reviewers.${name}.prompt\` in .stamp/config.yml ` +
+        `to a path under .stamp/reviewers/ to use this command.`,
+    );
+  }
   const promptPath = join(repoRoot, def.prompt);
   const systemPrompt = readFileSync(promptPath, "utf8");
 
@@ -286,7 +313,9 @@ export function reviewersShow(name: string, opts: { limit: number }): void {
   const bar = "─".repeat(72);
   console.log(bar);
   console.log(`reviewer: ${name}`);
-  console.log(`prompt:   ${config.reviewers[name]!.prompt}`);
+  console.log(
+    `prompt:   ${config.reviewers[name]!.prompt ?? "(server-bundled — no local prompt)"}`,
+  );
   console.log(bar);
   if (stats.total === 0) {
     console.log("  no verdicts recorded yet");

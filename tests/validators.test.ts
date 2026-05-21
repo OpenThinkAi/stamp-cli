@@ -1119,6 +1119,70 @@ reviewers:
   });
 });
 
+// ---------- reviewers.<name>.prompt is optional (Shape 4 / AGT-397) ----------
+//
+// Shape 4 (server-attested without code transfer, AGT-370/372) has the
+// stamp-server resolve each reviewer's prompt from its bundled cache by
+// name — so a Shape 4 `.stamp/config.yml` names reviewers without a
+// `prompt:` field. The validator must accept that shape; the local-only
+// LLM paths still surface a clear error if they actually need the bytes.
+
+describe("parseConfigFromYaml — reviewers.<name>.prompt is optional (Shape 4)", () => {
+  it("accepts a reviewer entry with `prompt:` set to a string", () => {
+    const yaml = `
+branches:
+  main: { required: [r] }
+reviewers:
+  r: { prompt: .stamp/reviewers/r.md }
+`;
+    const c = parseConfigFromYaml(yaml);
+    assert.equal(c.reviewers.r!.prompt, ".stamp/reviewers/r.md");
+  });
+
+  it("accepts a reviewer entry with `prompt:` omitted (Shape 4 server-bundled)", () => {
+    // Two-reviewer config to make sure absence on one entry doesn't
+    // affect parsing of another sibling entry's fields.
+    const yaml = `
+branches:
+  main: { required: [security, standards] }
+reviewers:
+  security: {}
+  standards: { prompt: .stamp/reviewers/standards.md }
+`;
+    const c = parseConfigFromYaml(yaml);
+    assert.equal(c.reviewers.security!.prompt, undefined);
+    assert.equal(c.reviewers.standards!.prompt, ".stamp/reviewers/standards.md");
+  });
+
+  it("preserves sibling fields (tools, mcp_servers) when `prompt:` is omitted", () => {
+    const yaml = `
+branches:
+  main: { required: [r] }
+reviewers:
+  r:
+    tools: [Read, Grep]
+`;
+    const c = parseConfigFromYaml(yaml);
+    assert.equal(c.reviewers.r!.prompt, undefined);
+    assert.deepEqual(c.reviewers.r!.tools, ["Read", "Grep"]);
+  });
+
+  it("rejects a non-string `prompt:` value with the original error wording", () => {
+    // Optionality applies to ABSENCE; a present-but-wrong-type value
+    // is still a config bug we want to surface loudly.
+    const yaml = `
+branches:
+  main: { required: [r] }
+reviewers:
+  r: { prompt: 42 }
+`;
+    assert.throws(
+      () => parseConfigFromYaml(yaml),
+      /config\.reviewers\.r\.prompt must be a string/,
+    );
+  });
+});
+
 // ---------- decideMirrorStatus (mirror hook commit-status decision) ----------
 
 describe("decideMirrorStatus", () => {

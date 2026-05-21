@@ -162,3 +162,97 @@ describe("runReview({ plan: true }) — stdout/stderr separation", () => {
     assert.equal(plan.reviewers.length, 1);
   });
 });
+
+// AGT-397: a `.stamp/config.yml` with a reviewer in Shape 4 shape
+// (no `prompt:` field) but NO `review_server:` on the branch rule is
+// incoherent — there's no local prompt to invoke the LLM with and no
+// server to attest the verdict. `stamp review`, `--plan`, and `--headless`
+// must refuse cleanly, naming the reviewer and both remediations, before
+// touching the LLM / spawning anything / writing to the DB.
+
+function setupShape4WithoutReviewServer(): { repo: string; restoreCwd: () => void } {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "stamp-shape4-no-server-")));
+  const repo = join(tmp, "repo");
+  mkdirSync(repo);
+  git(["init", "-q", "-b", "main", repo], tmp);
+  git(["config", "user.email", "t@t.t"], repo);
+  git(["config", "user.name", "t"], repo);
+  git(["config", "commit.gpgsign", "false"], repo);
+  mkdirSync(join(repo, ".stamp"), { recursive: true });
+  // Reviewer declared without `prompt:`, AND no `review_server:` on the
+  // branch rule. This is the misconfiguration AGT-397 makes legible.
+  writeFileSync(
+    join(repo, ".stamp", "config.yml"),
+    [
+      "branches:",
+      "  main:",
+      "    required: [security]",
+      "reviewers:",
+      "  security: {}",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(join(repo, "README.md"), "# fixture\n");
+  git(["add", "-A"], repo);
+  git(["commit", "-q", "-m", "init"], repo);
+  git(["checkout", "-q", "-b", "feature"], repo);
+  writeFileSync(join(repo, "src.txt"), "hello\n");
+  git(["add", "src.txt"], repo);
+  git(["commit", "-q", "-m", "add src"], repo);
+
+  const prevCwd = process.cwd();
+  process.chdir(repo);
+  return { repo, restoreCwd: () => process.chdir(prevCwd) };
+}
+
+describe("runReview — Shape 4 reviewer with no review_server (AGT-397)", () => {
+  let cleanup: (() => void) | null = null;
+  let repo: string;
+
+  beforeEach(() => {
+    const f = setupShape4WithoutReviewServer();
+    repo = f.repo;
+    cleanup = () => {
+      f.restoreCwd();
+      rmSync(repo, { recursive: true, force: true });
+    };
+  });
+
+  afterEach(() => {
+    if (cleanup) cleanup();
+    cleanup = null;
+  });
+
+  const matchAgt397Message = (err: Error): boolean => {
+    assert.match(err.message, /reviewer "security"/);
+    assert.match(err.message, /no `prompt:` configured/);
+    assert.match(err.message, /no `review_server:` on branch rule/);
+    assert.match(err.message, /reviewers\.security\.prompt/);
+    assert.match(err.message, /review_server/);
+    return true;
+  };
+
+  it("local-LLM path: errors clearly, naming the reviewer and both remediations", async () => {
+    const cap = captureStreams();
+    try {
+      await assert.rejects(
+        () => runReview({ diff: "main..feature" }),
+        matchAgt397Message,
+      );
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("--plan path: errors with the same clear message", async () => {
+    const cap = captureStreams();
+    try {
+      await assert.rejects(
+        () => runReview({ diff: "main..feature", plan: true }),
+        matchAgt397Message,
+      );
+    } finally {
+      cap.restore();
+    }
+  });
+});

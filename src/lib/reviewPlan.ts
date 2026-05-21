@@ -184,6 +184,18 @@ export function buildReviewPlan(opts: BuildReviewPlanOptions): ReviewPlan {
   const reviewers: ReviewPlanReviewer[] = [];
   for (const name of reviewerNames) {
     const def = config.reviewers[name]!;
+    // `--plan` / `--headless` are local-only by construction: the parent
+    // agent (or stamp itself in headless mode) needs the prompt bytes to
+    // dispatch a subagent / call the Anthropic API. A reviewer configured
+    // without `prompt:` is a Shape 4 entry — the server-bundled prompt
+    // is the canonical source — and the local-only modes can't get at it.
+    // Refuse cleanly with the actionable next step.
+    if (def.prompt === undefined) {
+      throw new Error(
+        `reviewer "${name}": no \`prompt:\` configured and no \`review_server:\` on branch rule — ` +
+          `set \`reviewers.${name}.prompt\` in .stamp/config.yml or configure a \`review_server:\` for server-attested mode.`,
+      );
+    }
     let prompt: string;
     try {
       prompt = showAtRef(resolved.base_sha, def.prompt, opts.repoRoot);

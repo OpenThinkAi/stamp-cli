@@ -202,6 +202,61 @@ describe("buildReviewPlan — security and edge cases", () => {
       /reviewer "nope" is not configured/,
     );
   });
+
+  // AGT-397: a Shape 4 `.stamp/config.yml` lists reviewers without a
+  // `prompt:` path because the stamp-server resolves prompts from its
+  // bundled cache. `--plan` / `--headless` are local-only by construction
+  // and need prompt bytes to dispatch a subagent / call the API directly,
+  // so we refuse cleanly with the actionable next step rather than
+  // letting the missing-prompt confusion surface as a misleading git
+  // error later.
+  it("errors clearly when a reviewer is configured without `prompt:` (Shape 4 + local-only path)", () => {
+    const tmp = realpathSync(mkdtempSync(join(tmpdir(), "stamp-plan-no-prompt-")));
+    repo = join(tmp, "repo");
+    mkdirSync(repo);
+    git(["init", "-q", "-b", "main", repo], tmp);
+    git(["config", "user.email", "t@t.t"], repo);
+    git(["config", "user.name", "t"], repo);
+    git(["config", "commit.gpgsign", "false"], repo);
+
+    mkdirSync(join(repo, ".stamp"), { recursive: true });
+    // Shape 4 shape: reviewer name with no `prompt:` field. (No
+    // .stamp/reviewers/ dir necessary — the prompt lives on the server.)
+    writeFileSync(
+      join(repo, ".stamp", "config.yml"),
+      [
+        "branches:",
+        "  main:",
+        "    required: [security]",
+        "reviewers:",
+        "  security: {}",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(repo, "README.md"), "# fixture\n");
+    git(["add", "-A"], repo);
+    git(["commit", "-q", "-m", "init"], repo);
+
+    git(["checkout", "-q", "-b", "feature"], repo);
+    writeFileSync(join(repo, "src.txt"), "hello\n");
+    git(["add", "src.txt"], repo);
+    git(["commit", "-q", "-m", "add src.txt"], repo);
+
+    assert.throws(
+      () => buildReviewPlan({ diff: "main..feature", repoRoot: repo }),
+      (err: Error) => {
+        // The error must name the reviewer, the missing field, and both
+        // remediations (set the prompt OR configure review_server) so the
+        // operator can pick the right fix without re-reading docs.
+        assert.match(err.message, /reviewer "security"/);
+        assert.match(err.message, /no `prompt:` configured/);
+        assert.match(err.message, /no `review_server:` on branch rule/);
+        assert.match(err.message, /reviewers\.security\.prompt/);
+        assert.match(err.message, /review_server/);
+        return true;
+      },
+    );
+  });
 });
 
 describe("PLAN_NO_TRUST_BANNER", () => {

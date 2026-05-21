@@ -114,6 +114,20 @@ export function checkReviewerDrift(
     return unpinnedResult();
   }
 
+  // Lock files pin the prompt + tools + mcp hashes of a fetched persona.
+  // A reviewer with no `prompt:` (Shape 4: server-bundled) has nothing
+  // local to hash against the lock's prompt_sha256 — the pinning model
+  // doesn't apply. Refuse rather than silently mismatch; operators who
+  // want Shape 4 should delete the lock file.
+  if (def.prompt === undefined) {
+    throw new Error(
+      `reviewer "${reviewerName}" has a lock file but no \`prompt:\` configured ` +
+        `(server-bundled in Shape 4). Lock files pin local prompt bytes and don't apply ` +
+        `in server-attested mode. Delete .stamp/reviewers/${reviewerName}.lock.json to un-pin, ` +
+        `or set \`reviewers.${reviewerName}.prompt\` in .stamp/config.yml if you intend ` +
+        `to author the prompt locally.`,
+    );
+  }
   const promptPath = join(repoRoot, def.prompt);
   if (!existsSync(promptPath)) {
     throw new Error(

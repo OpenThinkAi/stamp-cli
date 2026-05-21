@@ -593,6 +593,18 @@ function verifyReviewerHashesAtMergeBase(input: PhaseInput): PhaseResult {
         reason: `${prefix} reviewer "${approval.reviewer}" not defined in .stamp/config.yml at merge-base`,
       };
     }
+    if (def.prompt === undefined) {
+      // v3 attestation cites this reviewer's prompt_sha256, but the
+      // committed config at merge-base has no prompt path. v3 envelopes
+      // are the local-LLM path; reaching here means a v3-shaped
+      // attestation referencing a Shape 4 (server-bundled) reviewer.
+      // That combination can't exist in a healthy producer flow — v4 is
+      // the envelope for server-attested reviews.
+      return {
+        ok: false,
+        reason: `${prefix} reviewer "${approval.reviewer}" has no \`prompt:\` in .stamp/config.yml at merge-base; v3 attestation references prompt_sha256 but the producer flow for server-bundled prompts is v4 (server-attested). The attestation envelope and the config shape are inconsistent.`,
+      };
+    }
     let promptBytes: string;
     try {
       promptBytes = run(["show", `${baseSha}:${def.prompt}`]);

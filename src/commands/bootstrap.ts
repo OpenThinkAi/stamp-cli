@@ -307,6 +307,9 @@ function buildPlan(
     }
     newReviewersConfig = seed.config.reviewers;
     for (const [name, def] of Object.entries(seed.config.reviewers)) {
+      // Shape 4 seed: reviewer declared without a `prompt:` (server-bundled).
+      // Nothing to copy from the seed dir to the repo; skip the file copy.
+      if (def.prompt === undefined) continue;
       const promptBody = seed.reviewerFiles.get(def.prompt);
       if (promptBody === undefined) {
         throw new Error(
