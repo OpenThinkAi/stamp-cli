@@ -57,6 +57,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { findBranchRule, parseConfigFromYaml } from "../lib/config.js";
 import { resolveDiff, runGit, showAtRef } from "../lib/git.js";
@@ -67,6 +68,7 @@ import {
   parseEnvelope,
   peekSchemaVersion,
   readAttestationBlobBytes,
+  serializePayload,
   type PrAttestationEnvelope,
 } from "../lib/prAttestation.js";
 import type {
@@ -78,8 +80,15 @@ import type {
 import { buildPubkeyMap } from "../lib/sshReviewClient.js";
 import {
   parseManifest,
+  resolveCapability,
+  snapshotSha256,
   type TrustedKeysManifest,
 } from "../lib/trustedKeysManifest.js";
+import { verifyBytes } from "../lib/signing.js";
+import {
+  bootstrapAdminSigningBytes,
+  validateShape4ActivationDiff,
+} from "../lib/migrationBootstrap.js";
 // PR-mode imports the shared v4-trust pipeline from src/lib/v4Trust.ts —
 // the same module pre-receive.ts uses. Both verifiers run the SAME
 // phase functions against PhaseInputV4 instances. AGT-338 standards
@@ -89,6 +98,7 @@ import {
 import {
   PR_MODE_PHASES_V4,
   parsePathRules,
+  pathMatchesAny,
   type PhaseInputV4,
   type PathRule,
 } from "../lib/v4Trust.js";
@@ -215,11 +225,16 @@ export function runVerifyPr(opts: VerifyPrOptions): void {
     );
   }
 
-  // Dispatch by schema_version. v3+ → run the v4-trust pipeline. The
-  // version floor above already refused v2/v1, so the only branch we
-  // execute here is the v3+ one — but the dispatch shape stays
-  // explicit so a future v5 reader has an obvious extension point.
+  // Dispatch by schema_version + bootstrap marker. v3+ envelopes
+  // normally run the v4-trust pipeline; envelopes carrying the
+  // `migration_bootstrap` marker (AGT-398) take the bootstrap-acceptance
+  // path instead, which checks the narrow whitelist + admin sig + base
+  // path_rules in lieu of server signatures.
   if (envelope.payload.schema_version >= MIN_ACCEPTED_PR_ATTESTATION_VERSION) {
+    if (envelope.payload.migration_bootstrap !== undefined) {
+      verifyBootstrapEnvelope(envelope, opts, resolved, patch_id, repoRoot);
+      return;
+    }
     verifyV3Envelope(envelope, opts, resolved, patch_id, repoRoot);
     return;
   }
@@ -445,6 +460,407 @@ function verifyV3Envelope(
 }
 
 /**
+ * AGT-398: verify a Shape 4 migration-bootstrap envelope.
+ *
+ * Acceptance requires ALL of:
+ *
+ *   1. `migration_bootstrap` marker present in the operator-signed
+ *      bytes — guaranteed because `serializePayload` includes it and
+ *      the operator's outer signature commits to those bytes.
+ *      Operator signature verification step below.
+ *   2. Diff matches the Shape 4 activation whitelist (re-validated
+ *      from base/head trees, NOT trusted from attest-time).
+ *   3. `activated_paths` in the marker equals the actual changed files
+ *      between base and head (no claim about an empty diff that
+ *      smuggles in changes verifier didn't expect).
+ *   4. Operator outer signature over the full payload verifies.
+ *      Operator must hold `operator` or `admin` capability per the
+ *      manifest at base_sha (lenient revocation).
+ *   5. Exactly one entry in `trust_anchor_signatures` (multi-admin is
+ *      out of scope for the bootstrap flow today — the attest-side
+ *      refuses minimum_signatures > 1).
+ *   6. The admin signature in `trust_anchor_signatures` verifies
+ *      against the bootstrap signing bytes (canonical payload with
+ *      marker + trust_anchor_signatures: []).
+ *   7. The admin's key holds `admin` capability in the manifest at
+ *      base_sha.
+ *   8. `path_rules` at base_sha covers every activated path with
+ *      `bypass_review_cycle: true`. This is the security boundary:
+ *      base must already have committed to bypassing the reviewer
+ *      cycle for these paths (typically via a prior Shape 2 migration).
+ *   9. `approvals` is empty (a non-empty approvals array is allowed by
+ *      the type but rejected here — a bootstrap envelope that also
+ *      claims server signatures is structurally invalid and likely a
+ *      tampering attempt).
+ *
+ *  After acceptance, the PR-mode-only `strict_base` check (if
+ *  configured on the branch rule) still applies.
+ */
+function verifyBootstrapEnvelope(
+  envelope: PrAttestationEnvelope,
+  opts: VerifyPrOptions,
+  resolved: { base_sha: string; head_sha: string },
+  patch_id: string,
+  repoRoot: string,
+): void {
+  const payload = envelope.payload;
+  const marker = payload.migration_bootstrap;
+  if (!marker) {
+    fail(
+      `internal error: bootstrap dispatch with no marker (should be unreachable)`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // (9) — bootstrap envelopes MUST have empty approvals. A non-empty
+  // approvals array combined with the bootstrap marker is an inversion
+  // of the bootstrap shape; reject explicitly.
+  if (payload.approvals.length !== 0) {
+    fail(
+      `bootstrap envelope has ${payload.approvals.length} approvals — bootstrap envelopes MUST have approvals: []. Non-empty server signatures should go through the normal (non-bootstrap) attest flow.`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // (2) — re-validate the diff whitelist from the merge-base / head
+  // trees. We DO NOT trust the attest-side check; the attester could
+  // have been tampered with. The validator re-shells out to git show.
+  const validation = validateShape4ActivationDiff({
+    repoRoot,
+    baseSha: payload.base_sha,
+    headSha: payload.head_sha,
+  });
+  if (!validation.ok) {
+    fail(
+      `bootstrap envelope rejected: diff does not match the Shape 4 activation whitelist — ${validation.reason}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // (3) — marker's activated_paths must equal the actual changed files.
+  const claimed = [...marker.activated_paths].sort();
+  const actual = [...validation.activatedPaths].sort();
+  if (
+    claimed.length !== actual.length ||
+    !claimed.every((p, i) => p === actual[i])
+  ) {
+    fail(
+      `bootstrap envelope's migration_bootstrap.activated_paths (${claimed.join(", ")}) does not match the actual changed-files set (${actual.join(", ")}). The marker must declare exactly the paths the bootstrap PR activates.`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // Load the base manifest. Bootstrap requires the manifest in the
+  // merge-base tree (the base may already have admin keys + path_rules
+  // from a prior migration — that's the scaffolding bootstrap relies on).
+  const baseManifest = loadManifestAtBase(payload.base_sha, repoRoot);
+  if (!baseManifest) {
+    fail(
+      `bootstrap envelope rejected: .stamp/trusted-keys/manifest.yml is missing or ` +
+        `malformed at base ${payload.base_sha.slice(0, 8)}. Bootstrap requires the ` +
+        `manifest in the merge-base tree (it's the trust root for the operator's ` +
+        `outer signature and the admin counter-signature).`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // verifyV4ManifestSnapshot equivalent: operator's signature commits
+  // to manifest_snapshot_sha256; that must equal the snapshot of the
+  // manifest the verifier reads at base_sha.
+  if (!payload.manifest_snapshot_sha256) {
+    fail(
+      `bootstrap envelope is missing manifest_snapshot_sha256 — required for v3+ envelopes`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const computedSnapshot = snapshotSha256(baseManifest);
+  if (payload.manifest_snapshot_sha256 !== computedSnapshot) {
+    fail(
+      `bootstrap envelope manifest_snapshot_sha256 (${payload.manifest_snapshot_sha256.slice(0, 16)}…) does not match the manifest at base ${payload.base_sha.slice(0, 8)} (${computedSnapshot.slice(0, 16)}…)`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // Pubkey resolution off the base tree.
+  const pubkeyByFingerprint = loadPubkeysAtBase(payload.base_sha, repoRoot);
+
+  // (4) — operator outer signature. Operator must be in the manifest
+  // at base_sha with operator or admin capability.
+  const operatorCaps = resolveCapability(baseManifest, payload.signer_key_id);
+  if (operatorCaps === null) {
+    fail(
+      `bootstrap envelope signer ${payload.signer_key_id} is not listed in the manifest at base ${payload.base_sha.slice(0, 8)}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  if (!operatorCaps.includes("operator") && !operatorCaps.includes("admin")) {
+    fail(
+      `bootstrap envelope signer ${payload.signer_key_id} has capabilities [${operatorCaps.join(", ")}] at base ${payload.base_sha.slice(0, 8)} — needs operator or admin`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const operatorPem = pubkeyByFingerprint.get(payload.signer_key_id);
+  if (!operatorPem) {
+    fail(
+      `bootstrap envelope signer ${payload.signer_key_id} has no matching .pub file in .stamp/trusted-keys/ at base ${payload.base_sha.slice(0, 8)}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const operatorBytes = serializePayload(payload);
+  let operatorSigOk = false;
+  try {
+    operatorSigOk = verifyBytes(operatorPem, operatorBytes, envelope.signature);
+  } catch (err) {
+    fail(
+      `bootstrap envelope operator-signature verification threw: ${err instanceof Error ? err.message : String(err)}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  if (!operatorSigOk) {
+    fail(
+      `bootstrap envelope operator signature does not verify against the operator's pubkey ${payload.signer_key_id}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // (5) + (6) + (7) — admin counter-signature.
+  const sigs = payload.trust_anchor_signatures ?? [];
+  if (sigs.length !== 1) {
+    fail(
+      `bootstrap envelope must carry exactly one trust_anchor_signatures entry (got ${sigs.length}) — multi-admin bootstrap collection is not supported by the bootstrap path. Lower path_rules minimum_signatures or use the standard admin-sign flow.`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const adminSig = sigs[0]!;
+  const adminCaps = resolveCapability(baseManifest, adminSig.signer_key_id);
+  if (adminCaps === null) {
+    fail(
+      `bootstrap envelope admin signer ${adminSig.signer_key_id} is not listed in the manifest at base ${payload.base_sha.slice(0, 8)}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  if (!adminCaps.includes("admin")) {
+    fail(
+      `bootstrap envelope admin signer ${adminSig.signer_key_id} has capabilities [${adminCaps.join(", ")}] at base ${payload.base_sha.slice(0, 8)} — needs admin`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const adminPem = pubkeyByFingerprint.get(adminSig.signer_key_id);
+  if (!adminPem) {
+    fail(
+      `bootstrap envelope admin signer ${adminSig.signer_key_id} has no matching .pub file in .stamp/trusted-keys/ at base ${payload.base_sha.slice(0, 8)}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // Re-build the bootstrap signing bytes from the parsed envelope so a
+  // tampered admin sig over different bytes is rejected.
+  const v4View: AttestationPayloadV4 = {
+    schema_version: payload.schema_version,
+    base_sha: payload.base_sha,
+    head_sha: payload.head_sha,
+    target_branch: payload.target_branch,
+    diff_sha256: payload.diff_sha256!,
+    manifest_snapshot_sha256: payload.manifest_snapshot_sha256!,
+    approvals: [],
+    checks: payload.checks as CheckAttestationV4[],
+    trust_anchor_signatures: [],
+    signer_key_id: payload.signer_key_id,
+  };
+  const adminBytes = bootstrapAdminSigningBytes({ payloadV4: v4View, marker });
+  let adminSigOk = false;
+  try {
+    adminSigOk = verifyBytes(adminPem, adminBytes, adminSig.signature);
+  } catch (err) {
+    fail(
+      `bootstrap envelope admin-signature verification threw: ${err instanceof Error ? err.message : String(err)}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  if (!adminSigOk) {
+    fail(
+      `bootstrap envelope admin signature by ${adminSig.signer_key_id} does not verify against the bootstrap signing-bytes (payload-with-marker, trust_anchor_signatures: []).`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // (8) — path_rules at base must cover every activated path with
+  // bypass_review_cycle: true. This is the load-bearing condition that
+  // compensates for the absent reviewer cycle; if base doesn't already
+  // declare these paths as bypass-eligible, the bootstrap envelope is
+  // refused.
+  const pathRules = loadPathRulesAtBase(payload.base_sha, repoRoot);
+  if (pathRules.length === 0) {
+    fail(
+      `bootstrap envelope rejected: no path_rules configured at base ${payload.base_sha.slice(0, 8)}. The bootstrap path requires path_rules covering the activated paths with bypass_review_cycle: true — typically already in place from a prior Shape 2 migration.`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  for (const p of marker.activated_paths) {
+    let coveredBy: PathRule | null = null;
+    for (const rule of pathRules) {
+      if (pathMatchesAny(p, [rule.pattern])) {
+        coveredBy = rule;
+        break;
+      }
+    }
+    if (!coveredBy) {
+      fail(
+        `bootstrap envelope rejected: path_rules at base ${payload.base_sha.slice(0, 8)} does not cover activated path "${p}". Configured patterns: ${pathRules.map((r) => `"${r.pattern}"`).join(", ")}.`,
+        patch_id,
+        resolved.base_sha,
+        resolved.head_sha,
+      );
+    }
+    if (!coveredBy.bypass_review_cycle) {
+      fail(
+        `bootstrap envelope rejected: path_rule "${coveredBy.pattern}" at base ${payload.base_sha.slice(0, 8)} has bypass_review_cycle: false. Bootstrap requires the matched rule to opt out of the reviewer cycle.`,
+        patch_id,
+        resolved.base_sha,
+        resolved.head_sha,
+      );
+    }
+  }
+
+  // Target-branch check (equivalent to verifyV4TargetBranch). The
+  // envelope's target_branch must equal the caller-supplied --into.
+  if (payload.target_branch !== opts.into) {
+    fail(
+      `bootstrap envelope target_branch ("${payload.target_branch}") does not match --into ("${opts.into}")`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // Verify diff_sha256 binds to the actual diff (same byte computation
+  // as verifyV4DiffHash). Defends against an envelope produced against
+  // one diff being replayed onto a different diff.
+  if (!payload.diff_sha256) {
+    fail(
+      `bootstrap envelope is missing diff_sha256 — required for v3+ envelopes`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const actualDiff = spawnSync(
+    "git",
+    ["diff", `${payload.base_sha}...${payload.head_sha}`],
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (actualDiff.status !== 0) {
+    fail(
+      `bootstrap envelope rejected: could not compute base...head diff for diff_sha256 check`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const diffText = actualDiff.stdout ?? "";
+  const actualDiffSha256 = createHash("sha256")
+    .update(Buffer.from(diffText, "utf8"))
+    .digest("hex");
+  if (actualDiffSha256 !== payload.diff_sha256) {
+    fail(
+      `bootstrap envelope diff_sha256 mismatch — payload claims ${payload.diff_sha256.slice(0, 12)}… but base...head hashes to ${actualDiffSha256.slice(0, 12)}…. The operator signed against a different diff.`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+
+  // PR-mode strict_base check, mirrored from the v3 path. Sourced from
+  // base's branch rule for consistency.
+  let configYaml: string;
+  try {
+    configYaml = showAtRef(payload.base_sha, ".stamp/config.yml", repoRoot);
+  } catch (e) {
+    fail(
+      `bootstrap envelope rejected: could not read .stamp/config.yml at base ${payload.base_sha.slice(0, 8)}: ${(e as Error).message}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  const config = parseConfigFromYaml(configYaml);
+  const rule = findBranchRule(config.branches, opts.into);
+  if (!rule) {
+    fail(
+      `bootstrap envelope rejected: no branch rule for "${opts.into}" in .stamp/config.yml at base ${payload.base_sha.slice(0, 8)}`,
+      patch_id,
+      resolved.base_sha,
+      resolved.head_sha,
+    );
+  }
+  if (rule.strict_base) {
+    const currentTip = runGit(
+      ["rev-parse", `${opts.into}^{commit}`],
+      repoRoot,
+    ).trim();
+    if (envelope.payload.target_branch_tip_sha !== currentTip) {
+      fail(
+        `bootstrap strict_base check failed: attestation was signed when ${opts.into} was at ${envelope.payload.target_branch_tip_sha?.slice(0, 8)}, but ${opts.into} is now at ${currentTip.slice(0, 8)}`,
+        patch_id,
+        resolved.base_sha,
+        resolved.head_sha,
+      );
+    }
+  }
+
+  printSuccess({
+    patch_id,
+    base_sha: resolved.base_sha,
+    head_sha: resolved.head_sha,
+    target_branch: opts.into,
+    signer_key_id: payload.signer_key_id,
+    approvals: [],
+    strict_base: rule.strict_base ?? false,
+    schema_version: envelope.payload.schema_version,
+    bootstrap: true,
+    activated_paths: marker.activated_paths,
+  });
+}
+
+/**
  * Load the trusted-keys manifest at `base_sha` (a git ref), via
  * `git show`. Returns null if the file is missing or malformed —
  * mirrors how `pre-receive.ts:verifyCommitV4` loads the manifest from
@@ -575,6 +991,11 @@ interface SuccessSummary {
   approvals: Array<{ reviewer: string; verdict: string }>;
   strict_base: boolean;
   schema_version: number;
+  /** AGT-398: true when verifying a Shape 4 migration-bootstrap envelope.
+   *  Surfaces `(bootstrap)` next to the schema line in the success
+   *  output and lists `activated_paths` instead of `approvals`. */
+  bootstrap?: boolean;
+  activated_paths?: string[];
 }
 
 function printSuccess(s: SuccessSummary): void {
@@ -585,12 +1006,18 @@ function printSuccess(s: SuccessSummary): void {
   );
   console.log(bar);
   console.log(`  patch-id:        ${s.patch_id}`);
-  console.log(`  schema:          v${s.schema_version} (v4-trust)`);
+  console.log(
+    `  schema:          v${s.schema_version}${s.bootstrap ? " (Shape 4 migration bootstrap)" : " (v4-trust)"}`,
+  );
   console.log(`  signer:          ${s.signer_key_id}`);
   console.log(`  base mode:       ${s.strict_base ? "strict" : "loose"}`);
-  for (const a of s.approvals) {
-    const mark = a.verdict === "approved" ? "✓" : "✗";
-    console.log(`  ${mark}  ${a.reviewer.padEnd(16)} ${a.verdict}`);
+  if (s.bootstrap && s.activated_paths) {
+    console.log(`  activated:       ${s.activated_paths.join(", ")}`);
+  } else {
+    for (const a of s.approvals) {
+      const mark = a.verdict === "approved" ? "✓" : "✗";
+      console.log(`  ${mark}  ${a.reviewer.padEnd(16)} ${a.verdict}`);
+    }
   }
   console.log(bar);
   console.log("result: VERIFIED");
