@@ -15,14 +15,21 @@
  * --- Scope of this pipeline ---
  *
  * AGT-328 landed the scaffold. AGT-330 wired the real Anthropic Messages
- * API call. AGT-331 (this revision) closes the remaining placeholders:
+ * API call. AGT-331 added verdict signing. AGT-370 (this revision)
+ * reshapes the data sources:
  *
- *   - fetch the canonical reviewer prompt via `promptFetch.ts` (AGT-329)
- *     from the server's bare repo at `base_sha` — never from the caller
- *   - fetch `.stamp/trusted-keys/manifest.yml` at `base_sha` from the
- *     same bare repo, parse it, and bind its canonical snapshot hash
- *     into `approval.trusted_keys_snapshot_sha256` (enables lenient
- *     revocation per design.md "Trust model")
+ *   - fetch the canonical reviewer prompt via `promptFetch.ts` from
+ *     the server's local FILESYSTEM CACHE (`STAMP_PROMPTS_DIR/<reviewer>.md`),
+ *     not from a bare git repo. The server no longer needs a clone of
+ *     the operator's repo; HiveDB (or similar upstream) writes
+ *     canonical prompts directly into the cache out-of-band.
+ *   - drop the manifest-fetch step entirely. The trusted-keys
+ *     snapshot binding moved to the OUTER envelope
+ *     (`AttestationPayloadV4.manifest_snapshot_sha256`, operator-signed)
+ *     in AGT-370; the per-approval `trusted_keys_snapshot_sha256` is
+ *     gone. The server is now manifest-blind: it produces an approval
+ *     body whose `server_key_id` the operator+verifier resolve against
+ *     the manifest at `base_sha` on their side.
  *   - load the server's Ed25519 review-signing key from the path the
  *     bootstrap script (AGT-327) minted into, and stamp the fingerprint
  *     into `approval.server_key_id`
@@ -48,9 +55,8 @@
  * a real failure into a fake verdict. The throw categories:
  *
  *   - `ServerMissingApiKeyError`     — ANTHROPIC_API_KEY unset on server
- *   - `PromptFetchFailedError`       — prompt missing / unreachable at base_sha
- *   - `ManifestFetchFailedError`     — trusted-keys manifest missing /
- *                                      malformed at base_sha
+ *   - `PromptFetchFailedError`       — prompt missing in the filesystem
+ *                                      cache or unreadable (AGT-370)
  *   - `SigningKeyUnavailableError`   — server's review-signing key isn't
  *                                      loadable (file absent, wrong mode,
  *                                      unparseable, ...)
@@ -84,16 +90,11 @@ import {
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
 import type { UserRow } from "../lib/serverDb.js";
-import {
-  parseManifest,
-  snapshotSha256,
-} from "../lib/trustedKeysManifest.js";
 
 import {
-  defaultRepoResolver,
+  defaultPromptCacheResolver,
   fetchCanonicalPrompt,
-  fetchManifestAtBaseSha,
-  type RepoResolver,
+  type PromptResolver,
 } from "./promptFetch.js";
 
 /**
@@ -146,16 +147,22 @@ export function resolveReviewTimeoutMs(): number {
 }
 
 /**
- * Resolve the server-side bare-repo root from env or fall back to the
- * stamp-server default. The Docker image bind-mounts `/srv/git`; the
- * `STAMP_REPO_ROOT` env var lets tests inject a tmp directory without
- * editing this file.
+ * Resolve the server-side prompt-cache directory from env or fall back
+ * to the stamp-server default. AGT-370 moved the prompt source from a
+ * bare git repo (`STAMP_REPO_ROOT`, removed) to a filesystem cache so
+ * the server no longer needs a clone of the operator's repo. HiveDB
+ * (or whichever upstream owns the prompts) writes reviewer prompts
+ * directly into `STAMP_PROMPTS_DIR` out-of-band.
  *
  * Read each call (not module-load) so tests that exercise the SSH verb
  * with different fixtures don't have to restart the module graph.
+ *
+ * Exported so the SSH verb (and a future HTTP verb) can pin the same
+ * default the pipeline documents, and so tests can assert the env
+ * resolution shape without spelunking through the pipeline internals.
  */
-function resolveRepoRoot(): string {
-  return process.env["STAMP_REPO_ROOT"] || "/srv/git";
+export function resolvePromptCacheRoot(): string {
+  return process.env["STAMP_PROMPTS_DIR"] || "/etc/stamp/reviewers";
 }
 
 /**
@@ -290,7 +297,8 @@ export interface ReviewSigningMaterial {
  * code path constructs these from env, tests inject mocks.
  *
  * Default behavior when each field is omitted:
- *   - `repoResolver`: `defaultRepoResolver(STAMP_REPO_ROOT || "/srv/git")`
+ *   - `promptResolver`: `defaultPromptCacheResolver(STAMP_PROMPTS_DIR ||
+ *     "/etc/stamp/reviewers")` — AGT-370.
  *   - `anthropic`: `new Anthropic({apiKey: process.env.ANTHROPIC_API_KEY})`
  *   - `timeoutMs`: `resolveReviewTimeoutMs()`
  *   - `signingKey`: `loadReviewSigningKey({privateKeyPath:
@@ -301,7 +309,11 @@ export interface ReviewSigningMaterial {
  * test fails. Tests pass a `deps` bag explicitly.
  */
 export interface ReviewPipelineDeps {
-  repoResolver?: RepoResolver;
+  /** Prompt-file resolver. AGT-370 replaces the v4-era `repoResolver`
+   *  (bare-repo + `git show` at base_sha) with a filesystem-cache
+   *  resolver mapping `reviewer` → an absolute path on disk. The
+   *  server no longer reads the repo at all. */
+  promptResolver?: PromptResolver;
   anthropic?: AnthropicClientShape;
   timeoutMs?: number;
   /** Override the model id. Defaults to `SERVER_DEFAULT_MODEL` (=
@@ -385,30 +397,6 @@ export class PromptFetchFailedError extends Error {
 }
 
 /**
- * Typed error for trusted-keys manifest fetch / parse failures. The
- * v4 verifier requires every approval to carry a snapshot hash of the
- * manifest at `base_sha`; if we can't read that manifest at all (no
- * file, no ref, malformed YAML) there is no honest snapshot to bind
- * to, so the pipeline THROWS rather than fabricating a placeholder.
- *
- * `kind` is one of:
- *   - the underlying `PromptFetchError` kinds (no_such_repo,
- *     no_such_ref, no_such_file, ambiguous_sha, invalid_input,
- *     git_error) when the bytes weren't reachable
- *   - `"malformed_manifest"` when the bytes parsed but
- *     `parseManifest` rejected them (yaml-invalid, duplicate
- *     fingerprints, unknown capability, etc.)
- */
-export class ManifestFetchFailedError extends Error {
-  readonly kind: string;
-  constructor(kind: string, detail: string) {
-    super(`trusted-keys manifest fetch failed (${kind}): ${detail}`);
-    this.kind = kind;
-    this.name = "ManifestFetchFailedError";
-  }
-}
-
-/**
  * Typed error for failures loading the server's Ed25519 signing key at
  * request time. Wraps `ReviewSigningKeyError` so the SSH verb's
  * top-level handler can match on a single class while preserving the
@@ -430,40 +418,43 @@ export class SigningKeyUnavailableError extends Error {
 /**
  * Run a review request through the pipeline.
  *
- * Flow:
- *   1. Fetch the canonical reviewer prompt from the bare repo at
- *      `params.baseSha` via `fetchCanonicalPrompt`. The bare-hex
+ * Flow (AGT-370):
+ *   1. Fetch the canonical reviewer prompt from the server's
+ *      filesystem cache via `fetchCanonicalPrompt`. The bare-hex
  *      sha256 of the fetched bytes becomes `approval.prompt_sha256`.
  *      Failure here THROWS `PromptFetchFailedError` — there's no
  *      reasonable verdict to return when we don't have a prompt.
- *   2. Fetch `.stamp/trusted-keys/manifest.yml` at the same `base_sha`
- *      via `fetchManifestAtBaseSha`, parse it, and compute the
- *      canonical-snapshot hash (`sha256:<hex>`). Failure here THROWS
- *      `ManifestFetchFailedError` — the v4 verifier requires every
- *      approval to bind to the manifest as it existed at attestation
- *      time, and there's no honest fallback.
- *   3. Load the server's review-signing key from the env-resolved
+ *
+ *      The server no longer reads `.stamp/trusted-keys/manifest.yml`
+ *      at all. The manifest snapshot binding moved to the OUTER
+ *      envelope (operator-signed) in `AttestationPayloadV4.manifest_snapshot_sha256`;
+ *      the per-approval `trusted_keys_snapshot_sha256` field is gone.
+ *      The verifier still resolves the server's signing key against
+ *      the manifest at `base_sha` — that lookup happens operator-side
+ *      and verifier-side, never server-side. See `AttestationPayloadV4`
+ *      docstring for the trust-chain.
+ *   2. Load the server's review-signing key from the env-resolved
  *      path. Failure THROWS `SigningKeyUnavailableError` — without a
  *      stable signing identity we cannot produce a verifiable
  *      attestation.
- *   4. Build the Anthropic Messages call: prompt-as-system,
+ *   3. Build the Anthropic Messages call: prompt-as-system,
  *      diff-as-user-message (wrapped in random-hex fence markers to
  *      defeat in-diff prompt-injection), one `submit_verdict` tool
  *      defined. Single non-streaming call, abort-on-timeout via
  *      `AbortSignal.timeout(timeoutMs)`.
- *   5. Parse the response: prefer the `submit_verdict` tool_use block,
+ *   4. Parse the response: prefer the `submit_verdict` tool_use block,
  *      fall back to a last-line `VERDICT:` regex against the text
  *      blocks. A response that produces neither folds into
  *      `verdict: changes_requested` with the parse failure noted in
  *      prose.
- *   6. Compose the `ApprovalV4` body with the real verdict +
- *      prompt_sha256 + trusted_keys_snapshot_sha256 + server_key_id +
- *      server-computed `issued_at`. The `diff_sha256` field is the
- *      server's own sha256 of the streamed diff bytes — the verb has
- *      already cross-checked this against the client's claimed value,
- *      and binding the server's hash here makes "approval covers the
- *      bytes we actually reviewed" structural rather than convention.
- *   7. Canonical-serialize the approval and sign with the server's
+ *   5. Compose the `ApprovalV4` body with the real verdict +
+ *      prompt_sha256 + server_key_id + server-computed `issued_at`.
+ *      The `diff_sha256` field is the server's own sha256 of the
+ *      streamed diff bytes — the verb has already cross-checked this
+ *      against the client's claimed value, and binding the server's
+ *      hash here makes "approval covers the bytes we actually
+ *      reviewed" structural rather than convention.
+ *   6. Canonical-serialize the approval and sign with the server's
  *      Ed25519 private key. The base64 signature is returned alongside
  *      the approval; the client (AGT-332) re-canonicalizes the parsed
  *      approval and verifies the signature against the same canonical
@@ -473,19 +464,15 @@ export async function runReviewPipeline(
   input: ReviewPipelineInput,
 ): Promise<ReviewPipelineResult> {
   const deps = input.deps ?? {};
-  const resolver = deps.repoResolver ?? defaultRepoResolver(resolveRepoRoot());
+  const resolver =
+    deps.promptResolver ?? defaultPromptCacheResolver(resolvePromptCacheRoot());
 
-  // Stage 1: fetch canonical prompt at base_sha. This is the load-bearing
-  // security property — the operator does NOT send the prompt; the server
-  // reads it from its own bare repo. See promptFetch.ts header for the
-  // substitution-attack rationale.
-  const prompt = await fetchCanonicalPrompt(
-    resolver,
-    input.params.org,
-    input.params.repo,
-    input.params.baseSha,
-    input.params.reviewer,
-  );
+  // Stage 1: fetch canonical prompt from the server's filesystem
+  // cache. This is the load-bearing security property — the operator
+  // does NOT send the prompt; the server reads it from its own
+  // filesystem (populated out-of-band by HiveDB / similar). See
+  // promptFetch.ts header for the substitution-attack rationale.
+  const prompt = await fetchCanonicalPrompt(resolver, input.params.reviewer);
   if (prompt.kind !== "ok") {
     // Convert the typed error result to a throw so the verb's
     // top-level handler can map it to stderr+exit. The verb's logs
@@ -494,27 +481,13 @@ export async function runReviewPipeline(
     throw new PromptFetchFailedError(prompt.kind, prompt.detail);
   }
 
-  // Stage 2: fetch the trusted-keys manifest at the SAME base_sha and
-  // compute the canonical snapshot hash. Binding to base_sha (not
-  // HEAD, not the working tree) is what makes lenient revocation work:
-  // future merges using a later manifest snapshot reject a revoked
-  // key, while past attestations whose snapshot predates the revocation
-  // remain valid. Throwing here keeps the trust property honest — a
-  // server that can't read its own manifest is not equipped to attest.
-  const trustedKeysSnapshotSha256 = await loadTrustedKeysSnapshot(
-    resolver,
-    input.params.org,
-    input.params.repo,
-    input.params.baseSha,
-  );
-
-  // Stage 3: load the server's review-signing key. Mint-on-missing is
+  // Stage 2: load the server's review-signing key. Mint-on-missing is
   // a bootstrap-only concern; at request time, a missing key is a
   // deployment fault that must surface — not be papered over with a
   // freshly-rotated identity.
   const signingMaterial = deps.signingKey ?? loadSigningMaterialFromEnv();
 
-  // Stage 4: build the Anthropic client (or use the injected one for
+  // Stage 3: build the Anthropic client (or use the injected one for
   // tests). Missing-API-key fails fast with a typed error.
   const anthropic = deps.anthropic ?? buildAnthropicFromEnv();
   const model = deps.model ?? SERVER_DEFAULT_MODEL;
@@ -585,7 +558,6 @@ export async function runReviewPipeline(
     diff_sha256: observedDiffSha256,
     base_sha: input.params.baseSha,
     head_sha: input.params.headSha,
-    trusted_keys_snapshot_sha256: trustedKeysSnapshotSha256,
     issued_at,
     server_key_id: signingMaterial.fingerprint,
   };
@@ -616,35 +588,6 @@ export async function runReviewPipeline(
     pr_attestation_v3_payload_b64: prAttestationV3PayloadB64,
     pr_attestation_v3_signature_b64: signature,
   };
-}
-
-/**
- * Fetch the manifest at base_sha, parse it, and return the prefixed
- * snapshot hash. Throws `ManifestFetchFailedError` on every failure path
- * (file missing, bytes malformed, parse rejected) — there is no
- * sensible fallback.
- */
-async function loadTrustedKeysSnapshot(
-  resolver: RepoResolver,
-  org: string,
-  repo: string,
-  baseSha: string,
-): Promise<string> {
-  const fetched = await fetchManifestAtBaseSha(resolver, org, repo, baseSha);
-  if (fetched.kind !== "ok") {
-    throw new ManifestFetchFailedError(fetched.kind, fetched.detail);
-  }
-  const manifest = parseManifest(fetched.bytes.toString("utf8"));
-  if (!manifest) {
-    throw new ManifestFetchFailedError(
-      "malformed_manifest",
-      `.stamp/trusted-keys/manifest.yml at ${baseSha} did not parse as a ` +
-        `valid trusted-keys manifest (yaml-invalid, unknown capability, ` +
-        `duplicate fingerprint, or other shape violation). Fix the manifest ` +
-        `in the operator's repo and re-attest.`,
-    );
-  }
-  return snapshotSha256(manifest);
 }
 
 /**
