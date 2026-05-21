@@ -385,9 +385,32 @@ This adds `.stamp/config.yml` with `review_server:`, `.stamp/trusted-keys/manife
 
 If you're moving from Shape 2 (mirror) to Shape 4: also delete `.github/workflows/stamp-mirror.yml`, remove the `stamp-mirror-only` ruleset on GitHub, drop the `STAMP_MIRROR_KEY` org secret, and on stamp-server delete the now-orphan `/srv/git/<repo>.git` bare and disable the mirror SSH user.
 
-### Step 3 — Land the migration commit through 1.x
+### Step 3 — Bootstrap the migration commit with `stamp attest --migrate-existing`
 
-Same as Shape 1 step 4. The migration commit itself is reviewed under the old gate (1.x or operator-attested) since the new `review_server` only kicks in once the commit lands.
+The Shape 4 activation commit deadlocks the normal flow because of a structural chicken-and-egg: `stamp review` sources `.stamp/config.yml` from `base_sha` (a security boundary — a feature branch cannot unilaterally point review at an attacker-controlled server), so review at base runs LOCALLY and the DB has no server signatures. `stamp attest` sources from the working tree, sees `review_server`, and demands a v3 envelope with the server signatures it cannot produce.
+
+`stamp attest --migrate-existing` is the dedicated bootstrap flow for exactly this PR:
+
+```sh
+git checkout -b stamp-shape-4-activation
+# Edit `.stamp/config.yml` to add `review_server:` to the relevant
+# branch rule. Add the new server pubkey + manifest entry. Commit.
+stamp attest --into main --migrate-existing --push origin
+# Open the PR; stamp/verify-attestation@v1 accepts the bootstrap envelope.
+```
+
+The bootstrap envelope is a v3-shaped envelope with empty `server_signatures`, a `migration_bootstrap` marker in the operator-signed payload naming the activated paths, and one operator-self admin counter-signature in `trust_anchor_signatures`. The verifier accepts it ONLY when ALL of:
+
+- the diff matches a narrow Shape 4 activation whitelist (adds `review_server:` to a branch rule + adds `[server]`+`role_source:server` entries to the manifest + adds new `*.pub` files);
+- the marker's `activated_paths` equals the actual changed files;
+- the operator outer signature verifies;
+- exactly one admin-capability signature is present, and it verifies against the bootstrap signing bytes;
+- `path_rules` at `base_sha` covers every activated path with `bypass_review_cycle: true`;
+- `approvals` is empty (a non-empty array is rejected as structurally invalid for a bootstrap envelope).
+
+The narrow whitelist is the security boundary: an attacker cannot smuggle non-trust-anchor changes through the bootstrap path. The whitelist refuses any file outside `.stamp/`, any modification (not addition) of an existing manifest entry or pubkey, and any branch-rule change other than `review_server:` addition. Run `stamp attest --migrate-existing` only on a PR whose diff is exactly the Shape 4 activation.
+
+Subsequent PRs use the normal flow (`stamp attest --into main --push origin`) once `main` carries the activated config.
 
 ### Step 4 — Per-PR developer flow under v4
 
