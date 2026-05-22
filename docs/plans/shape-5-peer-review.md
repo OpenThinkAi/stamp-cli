@@ -509,14 +509,28 @@ hyphenated; `stamp peer ...` (the commands) does not.
 Agent-visible. Each command's exit code is part of its contract and is
 verified at acceptance.
 
-| Command | 0 | 1 | 2 | 3 |
+**Code 2 is reserved.** Per stamp-cli convention, exit code 2 means
+*invalid usage / arg-parse error* (surfaced by commander.js) or
+*command not implemented* — never an operational failure of a
+valid invocation. Agent wrappers treat 2 as "I called this wrong,"
+not "the operation failed." Every command below therefore returns 2
+only via the commander arg parser; operational failure modes use
+code 1 for the primary failure and codes 3+ for distinguishable
+secondary modes. The columns below omit code 2 for that reason.
+
+| Command | 0 | 1 | 3 | 4 |
 |---|---|---|---|---|
-| `stamp pr open` | success: push + PR + broadcast all OK | push failed (git error stderr-passthrough) | `gh pr create` failed; PR not opened. Push has already landed — operator decides whether to retry, delete the branch, or open manually | broadcast to stamp-server failed; PR is open on GitHub but listeners weren't notified. Operator can re-broadcast via a follow-up subcommand or just open a fresh PR |
+| `stamp pr open` | success: push + PR + broadcast all OK | push failed (git error stderr-passthrough) | `gh pr create` failed; PR not opened. Push has already landed — operator decides whether to retry, delete the branch, or open manually | broadcast to stamp-server failed; PR is open on GitHub but listeners weren't notified. Operator can re-broadcast or just open a fresh PR |
 | `stamp pr listen` | ctrl-C clean shutdown | auth failure (Ed25519 signature rejected by server, or operator not in any subscribed org's manifest) | transport failure after retry exhaustion (server unreachable) | — |
 | `stamp pr ping` | success — including the "no active seat-holders, nothing to do" case (exit 0 with a stderr note) | auth failure or operator is not the original `requested_by_fp` for this patch_id | patch_id resolution failed (no PR detected from HEAD, or `<pr-url>` doesn't resolve) | — |
 | `stamp peer test` | triage call succeeded; decision printed | rules file missing or unparseable | Haiku call failed (network, auth, or schema-validation) | — |
 | `stamp peer log` | success | log file missing | — | — |
 | `stamp peer drafts list/show/delete` | success | requested draft / drafts dir missing | I/O error (permissions, etc.) | — |
+
+`stamp pr open`'s 0/1/3/4 ladder is intentionally non-contiguous with
+code 2 skipped — the partial-success cases (push landed but a later
+step failed) are exactly where an agent must not confuse an
+operational failure with a usage error.
 
 **`gh` is a hard requirement** for `stamp pr open` and for the
 listener's PR-review posting. We do not bundle an Octokit client. If
