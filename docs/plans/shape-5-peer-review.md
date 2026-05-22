@@ -66,13 +66,13 @@ To keep the design honest:
   protocol feature.
 - **Not a daemon.** No background process holds the user's signing key
   or GitHub token. The listener is an explicit foreground command the
-  user invokes (`stamp pr-reviews --listen ...`) that exits when they
+  user invokes (`stamp pr listen ...`) that exits when they
   ctrl-C. Presence = "the user has the listener running"; absence =
   "events fall through to whoever does."
 - **Not authoritative for re-review on update.** When a PR is updated
   (new commits → new `patch_id`), the stamp-server does NOT
   automatically re-broadcast or invalidate prior seats. The PR
-  author triggers re-review explicitly via `stamp pr-ping-reviewers`.
+  author triggers re-review explicitly via `stamp pr ping`.
   Discipline beats orchestration.
 
 ## Topology — where Shape 5 fits
@@ -108,13 +108,13 @@ most one other reviewer to claim a seat) but the protocol doesn't care.
 **At PR open (laptop A — the author):**
 
 ```
-$ stamp open-pr feature-branch
+$ stamp pr open feature-branch
   ✓ pushed origin/feature-branch
   ✓ opened PR #142 via gh
   ✓ broadcast pr-opened to stamp-server (patch_id 4f3a…b2e1)
 ```
 
-`stamp open-pr` is opt-in. PRs opened via plain `git push` + `gh pr
+`stamp pr open` is opt-in. PRs opened via plain `git push` + `gh pr
 create` do NOT trigger fanout. This is a deliberate boundary — the
 author actively chooses to invoke the peer-review layer.
 
@@ -144,7 +144,7 @@ to subscribed listeners.
 B has previously run:
 
 ```
-$ stamp pr-reviews --listen \
+$ stamp pr listen \
     --org anglepoint-engineering \
     --org anglepoint-inc
   ✓ subscribed; listening for PR events
@@ -181,7 +181,7 @@ When the `pr-opened` event arrives:
 
 ```
 $ git push origin feature-branch
-$ stamp pr-ping-reviewers
+$ stamp pr ping
   ✓ found 2 seat-holders for PR #142 (matt, alice)
   ✓ sent re-review-requested to both
 ```
@@ -259,13 +259,13 @@ patch_id for the same PR (after rebase / new commits) opens a fresh
 race; old seat state for the prior patch_id remains historically but
 does not block.
 
-## Listener: `stamp pr-reviews --listen`
+## Listener: `stamp pr listen`
 
 A single foreground long-running command. No MCP server. No background
 daemon. The user explicitly invokes it; it exits on ctrl-C.
 
 ```sh
-stamp pr-reviews --listen \
+stamp pr listen \
   --org anglepoint-engineering \
   --org anglepoint-inc \
   [--server <host>]          # default: from ~/.stamp/server.yml
@@ -282,8 +282,10 @@ stamp pr-reviews --listen \
 - On event: triage → claim (if applicable) → review → post → log →
   loop.
 - Heartbeat every 60s for active claims so the seat TTL refreshes.
-- Emit one-line status to stderr for each event (`triaged skip`,
-  `claimed seat 2; running review`, `posted review #142`).
+- Emit one-line status to stderr for each event using the standard
+  stamp glyphs: `⟳` for in-progress, `✓` for success, `✗` for failure.
+  Examples: `⟳ triaging event for PR #142`, `⟳ claimed seat 2; running
+  review`, `✓ posted review #142`, `✗ triage failed (Haiku 500); skipping`.
 - Track cumulative spend against the daily cap; refuse new reviews
   with a notification once hit.
 
@@ -318,7 +320,7 @@ Mitigations:
 - **Full triplet logged** to `~/.stamp/peer-watch.log` (rules text +
   event payload + decision JSON) so users can see exactly what
   happened.
-- **Dry-run replay** via `stamp peer-watch test --event <fixture>`,
+- **Dry-run replay** via `stamp peer test --event <fixture>`,
   which loads a saved event payload and replays the triage call
   against the user's current `peer-watch.md`. Lets users iterate on
   their rules with concrete examples.
@@ -405,9 +407,10 @@ in the log.
 Author-triggered, not server-automated.
 
 ```sh
-stamp pr-ping-reviewers              # current PR (detected from HEAD)
-stamp pr-ping-reviewers <pr-url>     # explicit PR
-stamp pr-ping-reviewers @matt        # ping one specific prior reviewer
+stamp pr ping                          # current PR (detected from HEAD)
+stamp pr ping <pr-url>                 # explicit PR
+stamp pr ping --reviewer matt          # ping one specific prior reviewer
+stamp pr ping <pr-url> --reviewer alice --reviewer bob
 ```
 
 **Flow:**
@@ -482,21 +485,49 @@ migration on stamp-server.
 
 ## Client command surface
 
-New commands (all under the existing `stamp` binary):
+New commands (all under the existing `stamp` binary). The surface
+follows stamp-cli's established `stamp <verb>` / `stamp <noun> <verb>`
+two-level pattern — subcommand selectors are positional verbs, not
+flags. Hyphenated compound top-level names (`stamp open-pr`,
+`stamp pr-ping-reviewers`) would break the convention and are
+explicitly avoided. `peer-watch.md` (the rules *file*) stays
+hyphenated; `stamp peer ...` (the commands) does not.
 
 | Command | Purpose |
 |---|---|
-| `stamp open-pr <branch>` | Push, `gh pr create`, broadcast `pr-opened`. Opt-in entry point. |
-| `stamp pr-reviews --listen --org <name>...` | Long-running listener; processes events; exits on ctrl-C. |
-| `stamp pr-ping-reviewers [pr-url\|@user...]` | Author-side re-review trigger. |
-| `stamp peer-watch test --event <fixture>` | Dry-run the triage call against a saved event for rules iteration. |
-| `stamp peer-watch log` | Tail `~/.stamp/peer-watch.log` with colorized triplets. |
-| `stamp peer-watch drafts` | List drafts saved in `~/.stamp/drafts/`, render one, or delete. |
+| `stamp pr open <branch>` | Push, `gh pr create`, broadcast `pr-opened`. Opt-in entry point. |
+| `stamp pr listen --org <name>...` | Long-running listener; processes events; exits on ctrl-C. |
+| `stamp pr ping [<pr-url>] [--reviewer <name>...]` | Author-side re-review trigger. |
+| `stamp peer test --event <fixture>` | Dry-run the triage call against a saved event for rules iteration. |
+| `stamp peer log` | Tail `~/.stamp/peer-watch.log` with colorized triplets. |
+| `stamp peer drafts list` | List drafts saved in `~/.stamp/drafts/` with patch-id + age. |
+| `stamp peer drafts show <patch-id>` | Render a single draft body. |
+| `stamp peer drafts delete <patch-id>` | Delete a draft. `--all` for bulk (requires `--yes`). |
 
-**`gh` is a hard requirement** for `stamp open-pr` and for the
-listener's PR-review posting. We do not bundle an Octokit client.
-Operators who don't have `gh` get a clear error on the first
-peer-review command they run, with install instructions.
+### Exit codes
+
+Agent-visible. Each command's exit code is part of its contract and is
+verified at acceptance.
+
+| Command | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| `stamp pr open` | success: push + PR + broadcast all OK | push failed (git error stderr-passthrough) | `gh pr create` failed; PR not opened. Push has already landed — operator decides whether to retry, delete the branch, or open manually | broadcast to stamp-server failed; PR is open on GitHub but listeners weren't notified. Operator can re-broadcast via a follow-up subcommand or just open a fresh PR |
+| `stamp pr listen` | ctrl-C clean shutdown | auth failure (Ed25519 signature rejected by server, or operator not in any subscribed org's manifest) | transport failure after retry exhaustion (server unreachable) | — |
+| `stamp pr ping` | success — including the "no active seat-holders, nothing to do" case (exit 0 with a stderr note) | auth failure or operator is not the original `requested_by_fp` for this patch_id | patch_id resolution failed (no PR detected from HEAD, or `<pr-url>` doesn't resolve) | — |
+| `stamp peer test` | triage call succeeded; decision printed | rules file missing or unparseable | Haiku call failed (network, auth, or schema-validation) | — |
+| `stamp peer log` | success | log file missing | — | — |
+| `stamp peer drafts list/show/delete` | success | requested draft / drafts dir missing | I/O error (permissions, etc.) | — |
+
+**`gh` is a hard requirement** for `stamp pr open` and for the
+listener's PR-review posting. We do not bundle an Octokit client. If
+`gh` is not on PATH on the first peer-review command, stamp exits 127
+with:
+
+```
+error: 'gh' (GitHub CLI) not found on PATH
+        install: https://cli.github.com
+        then re-run: stamp pr open <branch>
+```
 
 ## Validation plan
 
@@ -517,7 +548,7 @@ works in <30 min total flight time.
 
 **Test 1 — basic loop (A → B):**
 
-1. A: `stamp pr-reviews --listen --org anglepoint-engineering` in one
+1. A: `stamp pr listen --org anglepoint-engineering` in one
    terminal.
 2. B: same.
 3. A (different terminal): make a code change, commit, `stamp
@@ -529,7 +560,7 @@ works in <30 min total flight time.
 
 **Test 2 — swap and repeat (B → A):**
 
-1. B: `stamp open-pr feature-2`.
+1. B: `stamp pr open feature-2`.
 2. Confirm A's listener processes it; B's listener skips
    (author-exclusion).
 3. Confirm A's post mode matches A's rules (e.g. drafts go to
@@ -538,7 +569,7 @@ works in <30 min total flight time.
 **Test 3 — seat capacity + extras (add laptop C):**
 
 1. C has `peer-watch.md` with `claim_seat: always` for the test repo.
-2. A: `stamp open-pr feature-3`.
+2. A: `stamp pr open feature-3`.
 3. Confirm B claims seat 1, A claims seat 2 (author can't claim own —
    actually A skips; need a 4th machine or simulated 3rd reviewer).
 4. Revised: 3 reviewers + 1 author (4 machines). Or use the same
@@ -549,7 +580,7 @@ works in <30 min total flight time.
 **Test 4 — re-review ping:**
 
 1. A: push a new commit to `feature-1`.
-2. A: `stamp pr-ping-reviewers`.
+2. A: `stamp pr ping`.
 3. Confirm B's listener receives the re-review event and posts a
    fresh review.
 
@@ -577,10 +608,10 @@ its own PR through the normal stamp flow.
 | Step | Scope | Why this order |
 |---|---|---|
 | **4a** | stamp-server endpoints + SQLite schema migration (SSH-verb transport for spike) | Foundation; nothing else can land without the server surface. |
-| **4b** | `stamp open-pr` command | First user-visible piece; works against the new server endpoints. Tested via a "broadcast received" log line on the server. |
-| **4c** | `stamp pr-reviews --listen` command — wire frame (no triage yet) | Listener registers, receives events, claims seat by always-claim policy, runs a hard-coded single review prompt. Validates the loop end-to-end. |
+| **4b** | `stamp pr open` command | First user-visible piece; works against the new server endpoints. Tested via a "broadcast received" log line on the server. |
+| **4c** | `stamp pr listen` command — wire frame (no triage yet) | Listener registers, receives events, claims seat by always-claim policy, runs a hard-coded single review prompt. Validates the loop end-to-end. |
 | **4d** | `peer-watch.md` triage call + named prompt loader | Real triage decisions replace the hard-coded claim. Determinism mitigations (logging + `peer-watch test`) land in this step. |
-| **4e** | `stamp pr-ping-reviewers` + re-review event delivery | Closes the update story. |
+| **4e** | `stamp pr ping` + re-review event delivery | Closes the update story. |
 | **4f** | Cost cap tracking + daily-spend enforcement + notifications | Production safety. |
 | **4g** | Two/three-laptop validation per the plan above | Acceptance gate. |
 | **4h** | WS-transport upgrade (replaces SSH-verb long-poll) | Post-spike hardening; only after validation proves the design. |
