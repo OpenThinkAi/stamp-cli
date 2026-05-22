@@ -382,6 +382,16 @@ stamp init --migrate-to-server-attested --server <host:port>
 
 The `--server <host:port>` flag tells the init flow where to fetch the server's review-signing pubkey. If you've already persisted the endpoint via `stamp server config --server <host:port>` (which writes `~/.stamp/server.yml`), the flag is optional — `stamp init` falls back to that file. If neither source is set the command refuses with a message naming both options.
 
+**Non-interactive contexts (CI, agent runs): use `--admin-keys`.** The interactive admin-promotion prompt only fires when stdin is a TTY. Without a TTY, the command refuses to run unless you declare which detected key(s) should carry the `[admin]` capability via `--admin-keys`:
+
+```sh
+stamp init --migrate-to-server-attested \
+  --server <host:port> \
+  --admin-keys sha256:<alice-fingerprint>,sha256:<bob-fingerprint>
+```
+
+The flag accepts a comma-separated list of `sha256:<64hex>` fingerprints. Each must match a detected key under `.stamp/trusted-keys/`; unknown fingerprints are rejected with an error listing the available set. The flag is also accepted in TTY mode as an escape from the prompt. (Run the command once with `--dry-run` from a TTY to see the available fingerprints if you don't have them recorded.)
+
 **Backward-compat note:** prior to this release `stamp init --migrate-to-server-attested` produced an offline Phase-1 scaffold (comment-out only, no server connection). That intermediate flow is gone — the command now reaches the server before writing. Automation that called it without a server endpoint will fail with the actionable error above instead of silently producing a partial scaffold.
 
 The scaffold does ALL of the following in one command:
@@ -411,7 +421,34 @@ The flow is idempotent: re-running on a partially-migrated repo skips writes tha
 
 If you're moving from Shape 2 (mirror) to Shape 4: also delete `.github/workflows/stamp-mirror.yml`, remove the `stamp-mirror-only` ruleset on GitHub, drop the `STAMP_MIRROR_KEY` org secret, and on stamp-server delete the now-orphan `/srv/git/<repo>.git` bare and disable the mirror SSH user. These changes ride alongside the activation diff in the same PR.
 
-### Step 3 — Land the activation PR with `stamp attest --migrate-existing`
+**`required_checks` must be empty in PR mode.** PR-mode `stamp attest` writes `checks: []` into the v3 envelope by design — pre-merge tests run as GitHub Action checks (not at attest time), so duplicating them on the local side would produce a weaker signal at twice the cost (see [`src/commands/attest.ts`](../src/commands/attest.ts)'s file-level comment). If your repo's `.stamp/config.yml` carries a non-empty `required_checks: [...]` under the activated branch rule from a previous Shape 1 / 2.x deployment, the verifier will reject every Shape 4 attestation produced by `stamp attest` because the envelope's `checks: []` does not satisfy the rule. Set `required_checks: []` (or omit the key) on the activated branch rule as part of the Shape 4 activation diff. The whitelist accepts `required_checks` edits on the same branch rule that gains `review_server:`.
+
+### Step 3 — SHA-pinning the verify Action
+
+The `.github/workflows/stamp-verify.yml` file scaffolded by `--migrate-to-server-attested` references `stamp/verify-attestation` by **commit SHA**, not by mutable git tag:
+
+```yaml
+- name: stamp/verify-attestation
+  uses: OpenThinkAi/stamp-cli/.github/actions/verify-attestation@<40-char-sha>
+```
+
+SHA-pinning is deliberate. A mutable tag (e.g. `@v1.6.1`) lets the upstream silently re-resolve to a different commit if the tag is force-moved; SHA-pinning makes the workflow identify the action's bytes immutably, which is the standard security-review posture for third-party GitHub Actions. The trailing-comment line in the rendered workflow names both the SHA and the human-readable version (e.g. `# Runs stamp/verify-attestation (SHA-pinned to <sha>; corresponds to v1.6.1) on every PR.`) so operators can cross-reference release notes without re-resolving.
+
+**Bumping the pinned SHA (operators who fork the action source).** When stamp-cli ships a new `stamp/verify-attestation` release, the source of truth for resolving the human-readable tag to a commit SHA is:
+
+```sh
+gh api repos/OpenThinkAi/stamp-cli/git/ref/tags/<vX.Y.Z>
+```
+
+Take the `object.sha` from the JSON response. If `object.type` is `tag` (annotated tag), dereference one level:
+
+```sh
+gh api repos/OpenThinkAi/stamp-cli/git/tags/<sha>
+```
+
+Then update both the `uses:` line and the trailing-comment line on `.github/workflows/stamp-verify.yml` in your repos. Operators consuming a fork of stamp-cli's action (`--action-source <org/repo>` on `stamp init`) substitute their fork's path and use the same resolve command against their fork to pin to an immutable byte set in their own repo.
+
+### Step 4 — Land the activation PR with `stamp attest --migrate-existing`
 
 The Shape 4 activation commit deadlocks the normal flow because of a structural chicken-and-egg: `stamp review` sources `.stamp/config.yml` from `base_sha` (a security boundary — a feature branch cannot unilaterally point review at an attacker-controlled server), so review at base runs LOCALLY and the DB has no server signatures. `stamp attest` sources from the working tree, sees `review_server`, and demands a v3 envelope with the server signatures it cannot produce.
 
@@ -439,7 +476,7 @@ The `.github/workflows/stamp-verify.yml` change rides in the same PR but is outs
 
 Subsequent PRs use the normal flow (`stamp attest --into main --push origin`) once `main` carries the activated config.
 
-### Step 4 — Per-PR developer flow under v4
+### Step 5 — Per-PR developer flow under v4
 
 ```sh
 git checkout -b feature
@@ -452,7 +489,7 @@ stamp attest --into main --push origin  # signs envelope, pushes branch + attest
 
 The wire protocol is identical to Shape 2 — `stamp review` sends `--reviewer`, `--org`, `--repo`, `--base-sha`, `--head-sha`, `--diff-sha256` plus the diff on stdin. The only difference is that the server uses `--reviewer` to look up its bundled prompt (not to fetch from a bare repo at `--base-sha`). The reviewer name is validated against `REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/` before path construction (see `src/server/promptFetch.ts`) so `--reviewer` cannot be used to traverse out of `/etc/stamp/reviewers/`. No mirror workflow runs because none exists.
 
-### Step 5 — Repeat for each repo
+### Step 6 — Repeat for each repo
 
 Same as Shape 2 step 6. Mix-and-match across the org is supported — some repos can run Shape 2 (mirror) and others Shape 4 (no mirror) against the same stamp-server.
 

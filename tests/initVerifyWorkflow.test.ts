@@ -26,6 +26,7 @@ import {
   maybeWriteVerifyWorkflow,
   renderVerifyWorkflow,
   VERIFY_ACTION_REF,
+  VERIFY_ACTION_VERSION,
 } from "../src/lib/verifyWorkflow.ts";
 
 function tmpRepo(): { path: string; cleanup: () => void } {
@@ -155,13 +156,43 @@ describe("maybeWriteVerifyWorkflow — idempotency", () => {
 describe("renderVerifyWorkflow — pinned content", () => {
   const body = renderVerifyWorkflow();
 
+  it("VERIFY_ACTION_REF is a 40-char lowercase hex commit SHA (SHA-pinned)", () => {
+    // Security: SHA-pinning the action ref makes the rendered workflow
+    // identify the action's bytes immutably. A mutable tag (e.g.
+    // "v1.6.1") would let upstream silently re-resolve to a different
+    // commit on a future audit cycle.
+    assert.match(
+      VERIFY_ACTION_REF,
+      /^[a-f0-9]{40}$/,
+      `VERIFY_ACTION_REF must be a 40-char lowercase hex SHA, got "${VERIFY_ACTION_REF}"`,
+    );
+  });
+
   it("references the OpenThinkAi/stamp-cli action at the pinned VERIFY_ACTION_REF", () => {
     assert.match(
       body,
       new RegExp(
-        `uses:\\s*OpenThinkAi/stamp-cli/\\.github/actions/verify-attestation@${VERIFY_ACTION_REF.replace(/\./g, "\\.")}`,
+        `uses:\\s*OpenThinkAi/stamp-cli/\\.github/actions/verify-attestation@${VERIFY_ACTION_REF}`,
       ),
       `expected workflow to reference @${VERIFY_ACTION_REF}; body:\n${body}`,
+    );
+  });
+
+  it("the comment line names both the SHA and the human-readable version", () => {
+    // Surface both so operators reading the workflow can cross-reference
+    // against release notes without re-resolving the SHA.
+    assert.ok(
+      body.includes(VERIFY_ACTION_REF),
+      "rendered workflow must mention the SHA",
+    );
+    assert.ok(
+      body.includes(VERIFY_ACTION_VERSION),
+      `rendered workflow must mention the human-readable version (${VERIFY_ACTION_VERSION})`,
+    );
+    assert.match(
+      body,
+      new RegExp(`SHA-pinned to ${VERIFY_ACTION_REF}.*${VERIFY_ACTION_VERSION.replace(/\./g, "\\.")}`),
+      "comment line must read `SHA-pinned to <sha>; corresponds to <version>`",
     );
   });
 
@@ -213,7 +244,7 @@ describe("renderVerifyWorkflow — --action-source override", () => {
     assert.match(
       body,
       new RegExp(
-        `uses:\\s*Anglepoint-Inc/anglepoint-stamp-server/\\.github/actions/verify-attestation@${VERIFY_ACTION_REF.replace(/\./g, "\\.")}`,
+        `uses:\\s*Anglepoint-Inc/anglepoint-stamp-server/\\.github/actions/verify-attestation@${VERIFY_ACTION_REF}`,
       ),
     );
     // Default upstream MUST NOT appear when override is in use — that

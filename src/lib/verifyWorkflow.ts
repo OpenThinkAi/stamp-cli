@@ -20,14 +20,37 @@ import { ensureDir } from "./paths.js";
 export const DEFAULT_ACTION_SOURCE = "OpenThinkAi/stamp-cli";
 
 /**
- * stamp/verify-attestation Action ref pinned by stamp-cli releases.
- * Operators who care about action stability bump this in lockstep with
- * the stamp-cli release that contains the matching action.yml. Bumping
- * stamp-cli without bumping this ref would point users at an Action
- * that doesn't exist (or worse, that semantically differs from the
- * stamp version they have installed locally).
+ * stamp/verify-attestation Action ref, pinned to an immutable commit
+ * SHA on `OpenThinkAi/stamp-cli`. A 40-char hex SHA — NOT a mutable git
+ * tag — so the rendered workflow identifies the action's bytes
+ * unambiguously and CI does not silently re-resolve to a different
+ * commit if the tag is moved upstream. (Security reviewers flag the
+ * mutable-tag form on every audit; SHA-pinning is the precedent.)
+ *
+ * When bumping, the source of truth for resolving a human-readable
+ * release to a commit SHA is:
+ *
+ *   gh api repos/OpenThinkAi/stamp-cli/git/ref/tags/<vX.Y.Z>
+ *
+ * If the response's `object.type === "tag"` (annotated tag), dereference:
+ *
+ *   gh api repos/OpenThinkAi/stamp-cli/git/tags/<sha>
+ *
+ * Then update both this constant and the trailing-version note below in
+ * lockstep with the stamp-cli release that contains the matching
+ * `action.yml`. Bumping stamp-cli without bumping this ref would point
+ * users at an Action that doesn't exist (or worse, that semantically
+ * differs from the stamp version they have installed locally).
  */
-export const VERIFY_ACTION_REF = "v1.6.1";
+// SHA for stamp/verify-attestation@v1.6.1.
+export const VERIFY_ACTION_REF =
+  "394f6e1bbdab0e0a1b677a08ed207596a936d590";
+
+/** Human-readable version that `VERIFY_ACTION_REF` corresponds to.
+ *  Surfaced in the rendered workflow's comment line so operators can
+ *  cross-reference the SHA against release notes without resolving the
+ *  SHA themselves. Update in lockstep with `VERIFY_ACTION_REF`. */
+export const VERIFY_ACTION_VERSION = "v1.6.1";
 
 /**
  * Drop the `.github/workflows/stamp-verify.yml` workflow file when
@@ -78,7 +101,7 @@ export function renderVerifyWorkflow(
   return [
     "name: stamp verify",
     "",
-    `# Runs stamp/verify-attestation@${VERIFY_ACTION_REF} on every PR.`,
+    `# Runs stamp/verify-attestation (SHA-pinned to ${VERIFY_ACTION_REF}; corresponds to ${VERIFY_ACTION_VERSION}) on every PR.`,
     "# Wire `stamp verify` (this job's name) into branch protection",
     "# Required Status Checks to make a green attestation a merge",
     "# precondition.",

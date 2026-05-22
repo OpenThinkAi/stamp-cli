@@ -135,6 +135,10 @@ program
     "with --migrate-to-server-attested: print proposed changes without writing them or fetching the server pubkey. No-op outside the migration path.",
   )
   .option(
+    "--admin-keys <fingerprints>",
+    "with --migrate-to-server-attested: comma-separated sha256:<64hex> fingerprints of the detected keys to promote to the [admin] capability. Required in non-interactive contexts (CI, agent runs). Takes precedence over the interactive prompt; refuses unknown fingerprints with the available set in the error.",
+  )
+  .option(
     "--pr-mode",
     "Shape 2 (PR mode) auto-mirror scaffold: write .github/workflows/stamp-mirror.yml so every push to GitHub mirrors to stamp-server for server-attested reviews. Prints the org-secret + keypair walkthrough. See docs/migration-1.x-to-2.x.md.",
   )
@@ -160,6 +164,7 @@ program
       migrateToServerAttested?: boolean;
       server?: string;
       dryRun?: boolean;
+      adminKeys?: string;
       prMode?: boolean;
       prModeForce?: boolean;
       actionSource?: string;
@@ -172,9 +177,34 @@ program
         // existing repo would be redundant (and would print the
         // already-on-disk summary block again).
         if (opts.migrateToServerAttested) {
+          // Parse --admin-keys at the CLI surface so a malformed input
+          // fails before any IO. Each entry must look like a canonical
+          // fingerprint (sha256:<64-lowercase-hex>); reject obvious
+          // typos (wrong prefix, wrong length, non-hex chars) here so
+          // the operator sees the failure at parse time, not after the
+          // server pubkey fetch.
+          let adminKeys: string[] | undefined;
+          if (opts.adminKeys !== undefined) {
+            const fingerprintRe = /^sha256:[0-9a-f]{64}$/;
+            const raw = opts.adminKeys.split(",").map((s) => s.trim()).filter(Boolean);
+            if (raw.length === 0) {
+              throw new Error(
+                "--admin-keys: at least one comma-separated sha256:<64hex> fingerprint is required.",
+              );
+            }
+            const malformed = raw.filter((fp) => !fingerprintRe.test(fp));
+            if (malformed.length > 0) {
+              throw new Error(
+                `--admin-keys: malformed fingerprint(s): ${malformed.join(", ")}. ` +
+                  `Expected sha256:<64 lowercase hex chars>; got input that does not match.`,
+              );
+            }
+            adminKeys = raw;
+          }
           runMigrateToServerAttested({
             dryRun: opts.dryRun === true,
             server: opts.server,
+            adminKeys,
           });
           return;
         }
