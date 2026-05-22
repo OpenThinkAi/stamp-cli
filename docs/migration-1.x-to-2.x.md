@@ -382,6 +382,8 @@ stamp init --migrate-to-server-attested --server <host:port>
 
 The `--server <host:port>` flag tells the init flow where to fetch the server's review-signing pubkey. If you've already persisted the endpoint via `stamp server config --server <host:port>` (which writes `~/.stamp/server.yml`), the flag is optional — `stamp init` falls back to that file. If neither source is set the command refuses with a message naming both options.
 
+**Backward-compat note:** prior to this release `stamp init --migrate-to-server-attested` produced an offline Phase-1 scaffold (comment-out only, no server connection). That intermediate flow is gone — the command now reaches the server before writing. Automation that called it without a server endpoint will fail with the actionable error above instead of silently producing a partial scaffold.
+
 The scaffold does ALL of the following in one command:
 
 1. Detects existing `.stamp/trusted-keys/*.pub` files and writes (or extends) `.stamp/trusted-keys/manifest.yml`. On a fresh 1.x repo with no manifest, the operator picks which keys gain `admin` capability via an interactive prompt; existing manifests are preserved entry-for-entry (the bootstrap whitelist refuses any modification of an existing entry).

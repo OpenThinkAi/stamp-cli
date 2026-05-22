@@ -381,10 +381,10 @@ export function rewriteConfigForMigration(
   };
 }
 
-/** Default `path_rules:` block appended when none exists. Pinned here
- *  rather than constructed dynamically so the migration test can match
- *  it exactly. The signature count is the two-admin default; single-admin
- *  repos get a 1-signature variant via `renderPathRulesBlock(1)`. */
+/** Two-admin default `path_rules:` block. Alias for
+ *  `renderPathRulesBlock(2)`; kept named for tests that match the
+ *  multi-admin default exactly. Single-admin repos render with
+ *  `renderPathRulesBlock(1)`. */
 export const DEFAULT_PATH_RULES_BLOCK = renderPathRulesBlock(2);
 
 /** Build the `path_rules:` block with the given `minimum_signatures`.

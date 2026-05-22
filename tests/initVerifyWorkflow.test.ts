@@ -26,7 +26,7 @@ import {
   maybeWriteVerifyWorkflow,
   renderVerifyWorkflow,
   VERIFY_ACTION_REF,
-} from "../src/commands/init.ts";
+} from "../src/lib/verifyWorkflow.ts";
 
 function tmpRepo(): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(path.join(os.tmpdir(), "stamp-init-pr-"));

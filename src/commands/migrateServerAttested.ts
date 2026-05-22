@@ -36,11 +36,9 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
-import { maybeWriteVerifyWorkflow } from "./init.js";
 import { readLineSync } from "../lib/humanMerge.js";
 import { fingerprintFromPem } from "../lib/keys.js";
 import {
-  DEFAULT_PATH_RULES_BLOCK,
   detectExistingKeys,
   disambiguateNames,
   renderPathRulesBlock,
@@ -48,6 +46,7 @@ import {
   serializeManifest,
   type DetectedKey,
 } from "../lib/migrateServerAttested.js";
+import { maybeWriteVerifyWorkflow } from "../lib/verifyWorkflow.js";
 import {
   ensureDir,
   findRepoRoot,
@@ -365,7 +364,7 @@ export function runMigrateToServerAttested(
   console.log(
     `  server pubkey:   ${relative(repoRoot, serverPubkeyPath)} (${pubkeyAction})`,
   );
-  console.log(`  server fingerprint: ${serverFingerprint}`);
+  console.log(`  fingerprint:     ${serverFingerprint}`);
   if (rewrite.reviewServerBranchAdded) {
     console.log(
       `  review_server:   added to branch "${rewrite.reviewServerBranchAdded}" -> ${reviewServerUrl}`,
@@ -650,7 +649,7 @@ function printDryRun(s: DryRunSnapshot): void {
   );
   console.log(`Default branch:   ${s.defaultBranch}`);
   console.log(`review_server:    ${s.reviewServerUrl}`);
-  console.log(`minimum_signatures: ${s.minimumSignatures}`);
+  console.log(`min_signatures:   ${s.minimumSignatures}`);
   console.log();
   console.log(`Detected ${s.detected.length} pubkey(s) in .stamp/trusted-keys/:`);
   for (const k of s.detected) {
@@ -721,10 +720,6 @@ function printDryRun(s: DryRunSnapshot): void {
   console.log(bar);
   console.log("end dry-run");
   console.log(bar);
-
-  // Touch the unused export so a future module-cleanup pass doesn't
-  // drop the default block while it's still referenced from tests.
-  void DEFAULT_PATH_RULES_BLOCK;
 }
 
 function indent(text: string, prefix: string): string {

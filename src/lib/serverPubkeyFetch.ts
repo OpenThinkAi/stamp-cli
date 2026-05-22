@@ -63,9 +63,12 @@ function realFetch(server: ServerConfig): string {
     stdio: ["ignore", "pipe", "inherit"],
     encoding: "utf8",
   });
-  if (result.status !== 0) {
+  if (result.error || result.status !== 0) {
+    const failure = result.error
+      ? `failed to spawn ssh: ${result.error.message}`
+      : `exit ${result.status}`;
     throw new Error(
-      `stamp server pubkey --review-signing failed (exit ${result.status}) against ` +
+      `stamp server pubkey --review-signing ${failure} against ` +
         `${server.user}@${server.host}:${server.port}. If you see ` +
         `"command not found", the server image predates the review-signing ` +
         `feature — redeploy it first. If you see ` +
