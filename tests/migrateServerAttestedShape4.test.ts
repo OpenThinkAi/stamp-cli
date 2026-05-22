@@ -444,3 +444,250 @@ describe("runMigrateToServerAttested — end-to-end whitelist acceptance", () =>
     }
   });
 });
+
+// ─── 5. WS3 — --admin-keys flag + non-TTY hard error ──────────────────
+
+/**
+ * Setup a Shape 2 repo without a pre-existing manifest so the
+ * admin-selection branch is exercised. Returns the same harness shape
+ * as setupShape2Repo, plus a `bobFingerprint` for multi-key tests.
+ */
+function setupShape2RepoFreshManifest(opts: {
+  multiAdmin?: boolean;
+}): Harness & { bobFingerprint: string | null } {
+  const root = mkdtempSync(path.join(os.tmpdir(), "stamp-ws3-"));
+  const repo = path.join(root, "repo");
+  const home = path.join(root, "home");
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(home, { recursive: true });
+
+  const prevHome = process.env["HOME"];
+  process.env["HOME"] = home;
+
+  const { keypair: operatorKp } = ensureUserKeypair();
+  const operatorFingerprint = operatorKp.fingerprint;
+
+  git(repo, ["init", "-q", "-b", "main"]);
+  git(repo, ["config", "user.name", "Test"]);
+  git(repo, ["config", "user.email", "test@example.invalid"]);
+  git(repo, ["config", "commit.gpgsign", "false"]);
+
+  mkdirSync(path.join(repo, ".stamp", "reviewers"), { recursive: true });
+  mkdirSync(path.join(repo, ".stamp", "trusted-keys"), { recursive: true });
+
+  writeFileSync(
+    path.join(repo, ".stamp", "reviewers", "security.md"),
+    "be paranoid\n",
+  );
+
+  // Operator pubkey only — no manifest. The migration scaffolder will
+  // build the manifest from scratch.
+  const operatorPubFile = operatorFingerprint.replace(":", "_") + ".pub";
+  writeFileSync(
+    path.join(repo, ".stamp", "trusted-keys", operatorPubFile),
+    operatorKp.publicKeyPem,
+  );
+
+  const bobKp = opts.multiAdmin ? generateKeypair() : null;
+  if (bobKp) {
+    writeFileSync(
+      path.join(repo, ".stamp", "trusted-keys", "bob.pub"),
+      bobKp.publicKeyPem,
+    );
+  }
+
+  writeFileSync(
+    path.join(repo, ".stamp", "config.yml"),
+    [
+      "branches:",
+      "  main:",
+      "    required: [security]",
+      "reviewers:",
+      "  security:",
+      "    prompt: .stamp/reviewers/security.md",
+      "    tools: []",
+      "",
+    ].join("\n"),
+  );
+
+  writeFileSync(path.join(repo, "README.md"), "hello\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-q", "-m", "initial"]);
+
+  const serverKp = generateKeypair();
+  const restoreFetch = __setFetchForTests(() => serverKp.publicKeyPem);
+
+  return {
+    repo,
+    home,
+    operatorFingerprint,
+    bobFingerprint: bobKp ? bobKp.fingerprint : null,
+    serverPubkeyPem: serverKp.publicKeyPem,
+    serverFingerprint: serverKp.fingerprint,
+    cleanup: () => {
+      restoreFetch();
+      if (prevHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = prevHome;
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+describe("runMigrateToServerAttested — --admin-keys flag (WS3)", () => {
+  it("promotes the single named fingerprint to [admin, operator]", () => {
+    const h = setupShape2RepoFreshManifest({ multiAdmin: false });
+    try {
+      withCwd(h.repo, () =>
+        runMigrateToServerAttested({
+          server: SERVER_ARG,
+          adminKeys: [h.operatorFingerprint],
+        }),
+      );
+      const manifestText = readFileSync(
+        path.join(h.repo, ".stamp", "trusted-keys", "manifest.yml"),
+        "utf8",
+      );
+      const parsed = parseManifest(manifestText);
+      assert.ok(parsed);
+      const operatorEntry = parsed!.entries.find(
+        (e) => e.fingerprint === h.operatorFingerprint,
+      );
+      assert.ok(operatorEntry, "operator entry must be present");
+      assert.deepEqual(
+        operatorEntry!.capabilities.sort(),
+        ["admin", "operator"].sort(),
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("promotes multiple named fingerprints", () => {
+    const h = setupShape2RepoFreshManifest({ multiAdmin: true });
+    try {
+      withCwd(h.repo, () =>
+        runMigrateToServerAttested({
+          server: SERVER_ARG,
+          adminKeys: [h.operatorFingerprint, h.bobFingerprint!],
+        }),
+      );
+      const manifestText = readFileSync(
+        path.join(h.repo, ".stamp", "trusted-keys", "manifest.yml"),
+        "utf8",
+      );
+      const parsed = parseManifest(manifestText);
+      assert.ok(parsed);
+      const adminCount = parsed!.entries.filter((e) =>
+        e.capabilities.includes("admin"),
+      ).length;
+      assert.equal(adminCount, 2, "both fingerprints must be promoted to admin");
+      const cfg = readFileSync(
+        path.join(h.repo, ".stamp", "config.yml"),
+        "utf8",
+      );
+      assert.ok(
+        cfg.includes("minimum_signatures: 2"),
+        "multi-admin smart-default kicks in",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("rejects an unknown fingerprint with an actionable error naming the available set", () => {
+    const h = setupShape2RepoFreshManifest({ multiAdmin: false });
+    try {
+      const bogus = "sha256:" + "0".repeat(64);
+      assert.throws(
+        () =>
+          withCwd(h.repo, () =>
+            runMigrateToServerAttested({
+              server: SERVER_ARG,
+              adminKeys: [bogus],
+            }),
+          ),
+        (err: Error) => {
+          assert.match(err.message, /unknown fingerprint/i);
+          assert.match(err.message, /Available fingerprints/i);
+          assert.ok(
+            err.message.includes(h.operatorFingerprint),
+            `error should list the operator's real fingerprint; got: ${err.message}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+describe("runMigrateToServerAttested — non-TTY hard error (WS3)", () => {
+  it("throws when neither --admin-keys nor selectAdminIndexes is passed and stdin is non-TTY", () => {
+    // The test harness inherits a non-TTY stdin from node:test, so we
+    // can exercise the production code path directly. (process.stdin.isTTY
+    // is undefined / falsy in the test runner.)
+    const h = setupShape2RepoFreshManifest({ multiAdmin: false });
+    try {
+      assert.throws(
+        () =>
+          withCwd(h.repo, () =>
+            runMigrateToServerAttested({
+              server: SERVER_ARG,
+              // Deliberately no adminKeys and no selectAdminIndexes.
+            }),
+          ),
+        (err: Error) => {
+          assert.match(err.message, /no admin keys selected/i);
+          assert.match(err.message, /--admin-keys/);
+          assert.match(err.message, /non-interactively/);
+          // Lists available fingerprints so operator can fix the
+          // invocation without re-running detection.
+          assert.ok(err.message.includes(h.operatorFingerprint));
+          return true;
+        },
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+describe("runMigrateToServerAttested — zero-admin manifest refusal (WS3)", () => {
+  it("refuses to write a fresh manifest when adminKeys resolves to zero admins (defense-in-depth)", () => {
+    // Drive selectAdminIndexes with an empty array to bypass the
+    // non-TTY hard error and reach the write-time refusal. Models the
+    // hand-edit / future-codepath case where zero admins makes it to
+    // the manifest writer.
+    const h = setupShape2RepoFreshManifest({ multiAdmin: false });
+    try {
+      assert.throws(
+        () =>
+          withCwd(h.repo, () =>
+            runMigrateToServerAttested({
+              server: SERVER_ARG,
+              selectAdminIndexes: [],
+            }),
+          ),
+        (err: Error) => {
+          assert.match(
+            err.message,
+            /refusing to write .*manifest\.yml with zero admin-capability keys/i,
+          );
+          assert.match(err.message, /unsignable/);
+          return true;
+        },
+      );
+      // Manifest must NOT have been written.
+      assert.equal(
+        existsSync(
+          path.join(h.repo, ".stamp", "trusted-keys", "manifest.yml"),
+        ),
+        false,
+        "manifest must not be written when refusal fires",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+});

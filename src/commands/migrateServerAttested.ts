@@ -88,6 +88,18 @@ export interface MigrateToServerAttestedOptions {
    *  to `~/.stamp/server.yml`. */
   server?: string;
   /**
+   * Explicit non-interactive admin-promotion: array of
+   * `sha256:<64hex>` fingerprints to promote to `[admin, operator]`. The
+   * CLI parses `--admin-keys <fp1>,<fp2>,...` into this list. Takes
+   * precedence over both the interactive prompt and `selectAdminIndexes`.
+   * Every fingerprint must match a key detected under
+   * `.stamp/trusted-keys/`; an unknown fingerprint is rejected with an
+   * actionable error naming the available set. Required in non-TTY
+   * contexts (CI, agents); the command refuses to write a manifest with
+   * no admin keys.
+   */
+  adminKeys?: string[];
+  /**
    * Test seam: when set, used as the source of admin-promotion selection
    * instead of prompting on stdin. Indexes are 1-based to mirror what the
    * operator would type; out-of-range values are silently dropped (same
@@ -138,6 +150,11 @@ export function runMigrateToServerAttested(
       `Manifest already present at ${relative(repoRoot, manifestPath)} — ` +
         `preserving existing capability assignments (idempotent re-run).`,
     );
+  } else if (opts.adminKeys !== undefined) {
+    // Explicit --admin-keys flag wins in every mode (TTY and non-TTY).
+    // Validate each fingerprint against detected keys so a typo surfaces
+    // immediately rather than at first signed-commit time.
+    adminFingerprints = pickAdminsFromFingerprints(detected, opts.adminKeys);
   } else if (opts.selectAdminIndexes !== undefined) {
     adminFingerprints = pickAdminsFromIndexes(
       detected,
@@ -152,31 +169,43 @@ export function runMigrateToServerAttested(
   } else if (process.stdin.isTTY && process.stdout.isTTY) {
     adminFingerprints = promptForAdminPromotion(detected);
   } else {
-    adminFingerprints = new Set();
-    console.error(
-      "warning: non-interactive stdin — no keys will be promoted to " +
-        "`admin`. Re-run from a TTY to pick admin keys, or hand-edit " +
-        `${relative(repoRoot, manifestPath)} after this command finishes.`,
+    // Non-interactive stdin with no --admin-keys flag. Silently skipping
+    // the prompt would leave every key at `[operator]` and write an
+    // unsignable Shape 4 manifest (path_rules require admin signatures
+    // but no key carries [admin]). Hard-error instead so the operator
+    // re-runs with a clear declaration of intent.
+    const available = detected
+      .map((k) => `  - ${k.fingerprint} (${k.filename})`)
+      .join("\n");
+    throw new Error(
+      `no admin keys selected: stamp init is running non-interactively and no ` +
+        `--admin-keys flag was passed. Pass --admin-keys <sha256:...>[,<sha256:...>,...] ` +
+        `to declare which detected keys should get the [admin] capability. ` +
+        `Available fingerprints:\n${available}`,
     );
   }
 
   // 4. Smart-default minimum_signatures. Single-admin repos need 1 (a
   //    2-signature gate would deadlock every subsequent .stamp/** PR).
+  //    Zero admins can no longer reach here for a fresh manifest — the
+  //    non-TTY/--admin-keys path errors above and the manifest write
+  //    step below refuses zero-admin manifests outright. The branch
+  //    survives for the idempotent re-run case (existing manifest)
+  //    where pre-existing entries may carry no admin caps; in that
+  //    case the existing manifest is preserved byte-for-byte (the
+  //    bootstrap whitelist refuses any modification of an existing
+  //    entry) so the path_rules gate setting matches whatever the
+  //    operator already had.
   const adminCount = adminFingerprints.size;
   const minimumSignatures = adminCount === 1 ? 1 : 2;
   if (adminCount === 1) {
+    // Single-admin is the normal one-operator workflow, not an alarm.
+    // Surface as an informational note (no `warning:` prefix) so CI
+    // log scanners don't flag it.
     console.error(
-      "warning: single admin key detected — setting path_rules .stamp/** " +
+      "note: single admin key detected — setting path_rules .stamp/** " +
         "`minimum_signatures: 1`. Promote a second admin (re-run the " +
         "migration and pick two) to harden the gate.",
-    );
-  } else if (adminCount === 0 && !dryRun && !manifestExists) {
-    console.error(
-      "warning: no admin keys selected — path_rules .stamp/** will require " +
-        `${minimumSignatures} admin signature(s), which means no admin-cap key ` +
-        "can sign trust-anchor changes. The scaffolded manifest is still " +
-        "valid; hand-edit it to add capabilities: [admin] before the first " +
-        "post-migration PR.",
     );
   }
 
@@ -219,6 +248,22 @@ export function runMigrateToServerAttested(
       { name: SERVER_MANIFEST_NAME, fingerprint: serverFingerprint },
     );
   } else {
+    // Belt-and-suspenders: refuse to write a fresh manifest with zero
+    // admin-capability keys. The non-TTY path above already errors,
+    // but this catches any future code path (or a hand-edit that
+    // bypasses the prompt) that lands here with an empty admin set.
+    // Skipped in dry-run because dry-run uses a default-empty
+    // adminFingerprints set when no selection input is provided —
+    // failing there would block previews. Real-run only.
+    if (!dryRun && adminFingerprints.size === 0) {
+      throw new Error(
+        "refusing to write .stamp/trusted-keys/manifest.yml with zero " +
+          "admin-capability keys: the resulting Shape 4 setup would be " +
+          "unsignable (path_rules require admin signatures but no key " +
+          "carries the [admin] capability). Promote at least one key or " +
+          "rerun without --migrate-to-server-attested.",
+      );
+    }
     manifestText = serializeManifest(
       detected,
       adminFingerprints,
@@ -528,6 +573,53 @@ function listReviewerPromptFiles(reviewersDir: string): string[] {
   return entries
     .filter((f) => f.endsWith(".md"))
     .map((f) => join(reviewersDir, f));
+}
+
+/**
+ * Resolve `--admin-keys <fp1>,<fp2>,...` against the detected pubkey
+ * set. Every input fingerprint must match exactly one detected key
+ * (case-insensitive on the hex tail; the canonical fingerprint form is
+ * lowercase but operators copying from logs may include uppercase).
+ * Unknown fingerprints throw with the available set in the error
+ * message so the operator can fix the typo without re-running detection.
+ */
+function pickAdminsFromFingerprints(
+  detected: DetectedKey[],
+  fingerprints: ReadonlyArray<string>,
+): Set<string> {
+  const detectedByFp = new Map(
+    detected.map((k) => [k.fingerprint.toLowerCase(), k]),
+  );
+  const out = new Set<string>();
+  const unknown: string[] = [];
+  for (const raw of fingerprints) {
+    const fp = raw.trim().toLowerCase();
+    if (fp === "") continue;
+    const match = detectedByFp.get(fp);
+    if (!match) {
+      unknown.push(raw);
+      continue;
+    }
+    out.add(match.fingerprint);
+  }
+  if (unknown.length > 0) {
+    const available = detected
+      .map((k) => `  - ${k.fingerprint} (${k.filename})`)
+      .join("\n");
+    throw new Error(
+      `--admin-keys: unknown fingerprint(s): ${unknown.join(", ")}. ` +
+        `Every fingerprint must match a detected key under .stamp/trusted-keys/. ` +
+        `Available fingerprints:\n${available}`,
+    );
+  }
+  if (out.size === 0) {
+    throw new Error(
+      `--admin-keys: no fingerprints supplied. Pass at least one ` +
+        `sha256:<64hex> fingerprint, or drop the flag to use the ` +
+        `interactive prompt (TTY only).`,
+    );
+  }
+  return out;
 }
 
 /** 1-based index selection mirror of the interactive prompt. */

@@ -565,12 +565,15 @@ reviewers:
     const r = tmpRepo();
     try {
       dropKey(r.path, "alice.pub");
+      // WS3: must declare an admin (selectAdminIndexes: [1] picks alice)
+      // so we get past the zero-admin manifest-refusal guard and reach
+      // the config-missing check the test is exercising.
       assert.throws(
         () =>
           withStubbedFetch(() =>
             withCwd(r.path, () =>
               runMigrateToServerAttested({
-                selectAdminIndexes: [],
+                selectAdminIndexes: [1],
                 server: SERVER_ARG,
               }),
             ),
