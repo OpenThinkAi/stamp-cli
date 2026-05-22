@@ -365,50 +365,75 @@ If you later decide you want the trust property, you can flip the same repo into
 
 For repos that need server-attested reviews but cannot mirror their code to stamp-server. Same trust properties as Shape 2; no mirror workflow, no bare repo on the server, no per-repo deploy key. The server reads canonical reviewer prompts from its bundled image directory; the operator's repo never carries `.stamp/reviewers/*.md`.
 
+The migration is a **single PR**. `stamp init --migrate-to-server-attested` scaffolds the complete Shape 4 surface (manifest, server pubkey, review_server URL, reviewer-cleanup, path_rules, verify workflow, reviewer-prompt deletions); `stamp attest --migrate-existing` produces the bootstrap envelope that lands in the same PR.
+
 ### Step 1 — Same as Shape 1
 
-Upgrade stamp-server to a 2.1+ build (server-bundled reviewer prompts require 2.1) and capture the review-signing pubkey (see [Shape 1 steps 1–2](#step-1--upgrade-stamp-server-to-a-2x-capable-build)).
+Upgrade stamp-server to a 2.1+ build (server-bundled reviewer prompts require 2.1).
 
 The server image bundles canonical reviewer prompts (`security.md`, `standards.md`, `product.md`) at `/etc/stamp/reviewers/` at build time. Operators who maintain a fork of stamp-server edit `server/reviewers/*.md` in the fork and rebuild — see [`server/README.md`](../server/README.md#reviewer-prompts) for the editing workflow. Upstream `openthinkai/stamp-server:2.x` ships with the default prompt set.
 
-### Step 2 — Per-repo: scaffold v4 trust anchors
+### Step 2 — Per-repo: one-command scaffold
 
 ```sh
-git checkout -b stamp-2x-migration
-
-stamp init --migrate-to-server-attested
+git checkout -b stamp-shape-4-activation
+stamp init --migrate-to-server-attested --server <host:port>
 ```
 
-This adds `.stamp/config.yml` with `review_server:`, `.stamp/trusted-keys/manifest.yml` with the server's review-signing key as `[server]` capability, and `.stamp/trusted-keys/review-server.pub`.
+The `--server <host:port>` flag tells the init flow where to fetch the server's review-signing pubkey. If you've already persisted the endpoint via `stamp server config --server <host:port>` (which writes `~/.stamp/server.yml`), the flag is optional — `stamp init` falls back to that file. If neither source is set the command refuses with a message naming both options.
 
-**Do not commit `.stamp/reviewers/*.md`.** In Shape 4 the server is the canonical source of prompt bytes; keeping copies in the repo invites drift between what the server hashes at review time and what the operator believes was reviewed. The reviewer cycle accepts a `reviewers:` block in `.stamp/config.yml` that names the required reviewers without `prompt:` paths.
+The scaffold does ALL of the following in one command:
 
-If you're moving from Shape 2 (mirror) to Shape 4: also delete `.github/workflows/stamp-mirror.yml`, remove the `stamp-mirror-only` ruleset on GitHub, drop the `STAMP_MIRROR_KEY` org secret, and on stamp-server delete the now-orphan `/srv/git/<repo>.git` bare and disable the mirror SSH user.
+1. Detects existing `.stamp/trusted-keys/*.pub` files and writes (or extends) `.stamp/trusted-keys/manifest.yml`. On a fresh 1.x repo with no manifest, the operator picks which keys gain `admin` capability via an interactive prompt; existing manifests are preserved entry-for-entry (the bootstrap whitelist refuses any modification of an existing entry).
+2. Fetches the stamp-server's review-signing public key over SSH (the wire protocol is `ssh -p <port> git@<host> stamp-server-pubkey --review-signing`; same SSH surface as the rest of stamp's server-side commands). Writes the pubkey to `.stamp/trusted-keys/review-server-prod.pub` and adds a `review-server-prod` manifest entry with `capabilities: [server]` and `role_source: server`.
+3. Adds `review_server: ssh://git@<host>:<port>` to the default branch's rule in `.stamp/config.yml` (prefers `main`; otherwise the first branch listed).
+4. Rewrites every reviewer entry in `.stamp/config.yml` to `{}` form (Shape 4 server-bundled prompt mode). The reviewer NAMES stay; the per-reviewer `prompt:`, `tools:`, `mcp_servers:` fields go.
+5. Smart-defaults `path_rules: .stamp/**` `minimum_signatures` based on the admin-capability count: 1 when exactly one admin was selected (with a warning), 2 otherwise. A two-signature gate on a single-admin repo would deadlock every subsequent `.stamp/**` PR.
+6. Deletes every `.stamp/reviewers/*.md` file (Shape 4 retires the in-repo prompt copies; the server holds the canonical bytes).
+7. Writes `.github/workflows/stamp-verify.yml` (if absent) so subsequent PRs get verified in CI.
 
-### Step 3 — Bootstrap the migration commit with `stamp attest --migrate-existing`
+The combined effect produces a diff that `stamp attest --migrate-existing` accepts cleanly: the `.stamp/**` subset (config edit + manifest entry + new pubkey + reviewer-prompt deletions) is whitelisted by `validateShape4ActivationDiff`; the workflow file lives outside `.stamp/**` and is therefore outside the activation envelope (it doesn't need to be — the verifier runs in CI on the NEXT PR onward, not on the bootstrap PR itself).
+
+**Trust model for the server pubkey: TOFU on the SSH transport.** The first fetch trusts whatever public key the server returns over the SSH channel. This is the same trust posture as every other stamp SSH operation (`stamp provision`, `stamp review`, `stamp server pubkey`). To harden post-setup, verify the fetched fingerprint out-of-band against the operator's independent record — the command prints the fingerprint at the end of its summary block. The recommended verification is:
+
+```sh
+ssh -p <port> git@<host> stamp-server-pubkey --review-signing | \
+  openssl pkey -pubin -in - -outform DER | sha256sum
+```
+
+The output's hex digest, prefixed with `sha256:`, must equal the fingerprint in the freshly-written `.stamp/trusted-keys/manifest.yml` under the `review-server-prod` entry.
+
+The flow is idempotent: re-running on a partially-migrated repo skips writes that already match the desired state (pubkey file with matching content, manifest entry, review_server URL, etc.), and warns to stderr without clobbering when something exists but differs.
+
+**`--dry-run`** prints the proposed scaffold without writing or invoking the SSH fetch. The dry-run preview uses a `<SERVER_REVIEW_SIGNING_PUBKEY>` placeholder for the pubkey and a `sha256:<computed-at-real-run>` placeholder for the fingerprint, so the preview is offline-safe.
+
+If you're moving from Shape 2 (mirror) to Shape 4: also delete `.github/workflows/stamp-mirror.yml`, remove the `stamp-mirror-only` ruleset on GitHub, drop the `STAMP_MIRROR_KEY` org secret, and on stamp-server delete the now-orphan `/srv/git/<repo>.git` bare and disable the mirror SSH user. These changes ride alongside the activation diff in the same PR.
+
+### Step 3 — Land the activation PR with `stamp attest --migrate-existing`
 
 The Shape 4 activation commit deadlocks the normal flow because of a structural chicken-and-egg: `stamp review` sources `.stamp/config.yml` from `base_sha` (a security boundary — a feature branch cannot unilaterally point review at an attacker-controlled server), so review at base runs LOCALLY and the DB has no server signatures. `stamp attest` sources from the working tree, sees `review_server`, and demands a v3 envelope with the server signatures it cannot produce.
 
 `stamp attest --migrate-existing` is the dedicated bootstrap flow for exactly this PR:
 
 ```sh
-git checkout -b stamp-shape-4-activation
-# Edit `.stamp/config.yml` to add `review_server:` to the relevant
-# branch rule. Add the new server pubkey + manifest entry. Commit.
+git add .
+git commit -m "Shape 4: activate server-attested reviews"
 stamp attest --into main --migrate-existing --push origin
 # Open the PR; stamp/verify-attestation@v1 accepts the bootstrap envelope.
 ```
 
 The bootstrap envelope is a v3-shaped envelope with empty `server_signatures`, a `migration_bootstrap` marker in the operator-signed payload naming the activated paths, and one operator-self admin counter-signature in `trust_anchor_signatures`. The verifier accepts it ONLY when ALL of:
 
-- the diff matches a narrow Shape 4 activation whitelist (adds `review_server:` to a branch rule + adds `[server]`+`role_source:server` entries to the manifest + adds new `*.pub` files);
+- the diff matches a narrow Shape 4 activation whitelist (adds `review_server:` to a branch rule + adds `[server]`+`role_source:server` entries to the manifest + adds new `*.pub` files + deletes `.stamp/reviewers/*.md` files);
 - the marker's `activated_paths` equals the actual changed files;
 - the operator outer signature verifies;
 - exactly one admin-capability signature is present, and it verifies against the bootstrap signing bytes;
 - `path_rules` at `base_sha` covers every activated path with `bypass_review_cycle: true`;
 - `approvals` is empty (a non-empty array is rejected as structurally invalid for a bootstrap envelope).
 
-The narrow whitelist is the security boundary: an attacker cannot smuggle non-trust-anchor changes through the bootstrap path. The whitelist refuses any file outside `.stamp/`, any modification (not addition) of an existing manifest entry or pubkey, and any branch-rule change other than `review_server:` addition. Run `stamp attest --migrate-existing` only on a PR whose diff is exactly the Shape 4 activation.
+The narrow whitelist is the security boundary: an attacker cannot smuggle non-trust-anchor changes through the bootstrap path. The whitelist refuses any file outside `.stamp/`, any modification (not addition) of an existing manifest entry or pubkey, any branch-rule change other than `review_server:` addition, and any add or modification of `.stamp/reviewers/*.md` (deletions only are accepted there, mirroring the Shape 4 retirement of in-repo prompts). Run `stamp attest --migrate-existing` only on a PR whose diff is exactly the Shape 4 activation that `stamp init --migrate-to-server-attested` produces.
+
+The `.github/workflows/stamp-verify.yml` change rides in the same PR but is outside the activation envelope — that's fine, the verifier doesn't gate on it. The workflow file becomes active on the NEXT PR.
 
 Subsequent PRs use the normal flow (`stamp attest --into main --push origin`) once `main` carries the activated config.
 
