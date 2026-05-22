@@ -400,6 +400,20 @@ write_env_var() {
 write_env_var GITHUB_BOT_TOKEN
 write_env_var ANTHROPIC_API_KEY  # consumed by stamp-review.cjs via lib/serverEnvFile.loadServerEnvFile()
 
+# Phase B (AGT-373) — STAMP_PROMPTS_REPO_URL and STAMP_PROMPTS_DIR are read
+# by resolvePromptCacheRoot() at SSH-verb request time. stamp-review.cjs's
+# loadServerEnvFile() call merges them back into process.env early in
+# main(), so the resolver sees them. Without these write_env_var lines
+# the URL toggle silently fails closed — the verb falls through to the
+# Phase A bundled-prompts path and Phase B operators see the staging
+# repo provisioned but never consulted. (The webhook + poll workers run
+# inside the long-running stamp-http-server process, which inherits the
+# container env normally, so the cache itself was populating correctly
+# while the consumer side was reading the bundled fallback — a confusing
+# half-broken state.)
+write_env_var STAMP_PROMPTS_REPO_URL
+write_env_var STAMP_PROMPTS_DIR
+
 # SSH sessions strip env vars by default; sshd_config's SetEnv bypasses
 # that for explicitly-listed vars. Inject STAMP_PUBLIC_URL so SSH-invoked
 # commands like stamp-mint-invite (which reads process.env directly) see

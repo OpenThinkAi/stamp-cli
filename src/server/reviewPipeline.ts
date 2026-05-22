@@ -207,6 +207,13 @@ export const PHASE_B_CACHE_ROOT = "/srv/git/.prompts-cache";
  * Exported so the SSH verb (and a future HTTP verb) can pin the same
  * default the pipeline documents, and so tests can assert the env
  * resolution shape without spelunking through the pipeline internals.
+ *
+ * SSH-verb env-var contract: both `STAMP_PROMPTS_REPO_URL` and
+ * `STAMP_PROMPTS_DIR` MUST appear in `server/entrypoint.sh`'s
+ * `write_env_var` list — sshd strips them from the session env on the
+ * verb path, and `stamp-review.cjs`'s `loadServerEnvFile()` call
+ * recovers them from `/etc/stamp/env` only if the entrypoint persisted
+ * them there. `tests/serverEnvFile.test.ts` pins this contract.
  */
 export function resolvePromptCacheRoot(): string {
   warnIfLegacyRepoRootSet();
