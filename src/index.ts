@@ -124,11 +124,15 @@ program
   )
   .option(
     "--migrate-to-server-attested",
-    "scaffold the stamp 2.x trust anchors for an existing 1.x repo: writes .stamp/trusted-keys/manifest.yml, comments out reviewer mcp_servers/tools blocks, adds a default path_rules gate. Operator picks which existing keys gain `admin` capability via interactive prompt. See docs/migration-1.x-to-2.x.md.",
+    "scaffold the complete Shape 4 setup for an existing stamp 1.x repo (one PR): writes .stamp/trusted-keys/manifest.yml + new server pubkey + .github/workflows/stamp-verify.yml, adds review_server to the default branch, rewrites reviewer entries to {} (Shape 4 server-bundled prompt form), smart-defaults path_rules minimum_signatures based on admin count, and deletes .stamp/reviewers/*.md. Output passes `stamp attest --migrate-existing` cleanly. See docs/migration-1.x-to-2.x.md.",
+  )
+  .option(
+    "--server <host:port>",
+    "with --migrate-to-server-attested: stamp server endpoint to fetch the review-signing pubkey from. Falls back to ~/.stamp/server.yml. No-op outside the migration path.",
   )
   .option(
     "--dry-run",
-    "with --migrate-to-server-attested: print proposed changes without writing them. No-op outside the migration path.",
+    "with --migrate-to-server-attested: print proposed changes without writing them or fetching the server pubkey. No-op outside the migration path.",
   )
   .option(
     "--pr-mode",
@@ -154,6 +158,7 @@ program
       oteam: boolean;
       prCheck: boolean;
       migrateToServerAttested?: boolean;
+      server?: string;
       dryRun?: boolean;
       prMode?: boolean;
       prModeForce?: boolean;
@@ -167,7 +172,10 @@ program
         // existing repo would be redundant (and would print the
         // already-on-disk summary block again).
         if (opts.migrateToServerAttested) {
-          runMigrateToServerAttested({ dryRun: opts.dryRun === true });
+          runMigrateToServerAttested({
+            dryRun: opts.dryRun === true,
+            server: opts.server,
+          });
           return;
         }
         // `--dry-run` is migration-path-only — the other init code

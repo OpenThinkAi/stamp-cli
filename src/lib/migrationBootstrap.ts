@@ -196,12 +196,26 @@ export function validateShape4ActivationDiff(
     }
   }
 
-  // Per-path validation. We allow exactly three classes:
+  // Per-path validation. We allow exactly four classes:
   //   - .stamp/config.yml (modify-only; M)
   //   - .stamp/trusted-keys/manifest.yml (modify-only; M)
   //   - .stamp/trusted-keys/*.pub (add-only; A)
+  //   - .stamp/reviewers/*.md (delete-only; D) — Shape 4 ditches the
+  //     in-repo prompt copies; the server is the canonical source.
   let sawReviewServerAdd = false;
   for (const e of entries) {
+    if (
+      e.path.startsWith(".stamp/reviewers/") &&
+      e.path.endsWith(".md")
+    ) {
+      if (e.status !== "D") {
+        return {
+          ok: false,
+          reason: `bootstrap diff modifies or adds "${e.path}" (status "${e.status}") — the bootstrap flag only permits deleting .stamp/reviewers/*.md files in this directory (Shape 4 retires in-repo prompts), not modifying or adding them.`,
+        };
+      }
+      continue;
+    }
     if (e.path === ".stamp/config.yml") {
       if (e.status !== "M" && e.status !== "A") {
         return {
