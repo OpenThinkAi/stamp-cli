@@ -585,6 +585,119 @@ describe("validateShape4ActivationDiff", () => {
     }
   });
 
+  it("accepts deletion of .stamp/reviewers/*.md alongside the Shape 4 activation (WS2 widening)", () => {
+    const h = setupHarness();
+    try {
+      // Drop an in-repo reviewer prompt on main BEFORE branching to
+      // shape-4-activation. The harness already created shape-4-activation
+      // from main without a reviewers/*.md; we re-create the branch here
+      // with the file at base + a delete on head.
+      git(h.repo, ["checkout", "-q", "main"]);
+      writeFileSync(
+        path.join(h.repo, ".stamp", "reviewers", "security.md"),
+        "in-repo prompt\n",
+      );
+      git(h.repo, ["add", "-A"]);
+      git(h.repo, ["commit", "-q", "-m", "add reviewer prompt at base"]);
+
+      git(h.repo, ["checkout", "-q", "-b", "shape-4-activation-with-delete"]);
+      // Same Shape 4 activation diff as the harness builds, plus a
+      // delete of the prompt file.
+      writeFileSync(
+        path.join(h.repo, ".stamp", "config.yml"),
+        [
+          "branches:",
+          "  main:",
+          "    required: [security]",
+          "    review_server: ssh://git@stamp.test.invalid:22",
+          "reviewers:",
+          "  security:",
+          "    prompt: .stamp/reviewers/security.md",
+          "    tools: []",
+          "path_rules:",
+          "  \".stamp/**\":",
+          "    require_capability: admin",
+          "    minimum_signatures: 1",
+          "    bypass_review_cycle: true",
+          "",
+        ].join("\n"),
+      );
+      const serverPubFile = h.serverKey.fingerprint.replace(":", "_") + ".pub";
+      writeFileSync(
+        path.join(h.repo, ".stamp", "trusted-keys", serverPubFile),
+        h.serverKey.publicPem,
+      );
+      writeFileSync(
+        path.join(h.repo, ".stamp", "trusted-keys", "manifest.yml"),
+        [
+          "keys:",
+          "  operator-test:",
+          `    fingerprint: ${h.operatorFingerprint}`,
+          "    capabilities: [admin, operator]",
+          "  review-server-prod:",
+          `    fingerprint: ${h.serverKey.fingerprint}`,
+          "    capabilities: [server]",
+          "    role_source: server",
+          "",
+        ].join("\n"),
+      );
+      git(h.repo, [
+        "rm",
+        "-q",
+        ".stamp/reviewers/security.md",
+      ]);
+      git(h.repo, ["add", "-A"]);
+      git(h.repo, ["commit", "-q", "-m", "Shape 4 + delete in-repo prompt"]);
+
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "shape-4-activation-with-delete");
+      const result = validateShape4ActivationDiff({
+        repoRoot: h.repo,
+        baseSha: base,
+        headSha: head,
+      });
+      assert.ok(
+        result.ok,
+        `expected acceptance with .md delete, got: ${(result as { ok: false; reason: string }).reason ?? "(missing reason)"}`,
+      );
+      const paths = (result as { ok: true; activatedPaths: string[] }).activatedPaths;
+      assert.ok(
+        paths.includes(".stamp/reviewers/security.md"),
+        `deleted reviewer file must appear in activatedPaths; got [${paths.join(", ")}]`,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("rejects an ADD of .stamp/reviewers/*.md (whitelist is delete-only)", () => {
+    const h = setupHarness();
+    try {
+      // shape-4-activation already has the canonical Shape 4 diff. Add
+      // a NEW reviewer prompt on the feature branch — must reject.
+      writeFileSync(
+        path.join(h.repo, ".stamp", "reviewers", "rogue.md"),
+        "added late\n",
+      );
+      git(h.repo, ["add", "-A"]);
+      git(h.repo, ["commit", "-q", "-m", "add a reviewer prompt"]);
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "shape-4-activation");
+      const result = validateShape4ActivationDiff({
+        repoRoot: h.repo,
+        baseSha: base,
+        headSha: head,
+      });
+      assert.equal(result.ok, false);
+      assert.match(
+        (result as { ok: false; reason: string }).reason,
+        /\.stamp\/reviewers\/rogue\.md/,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it("rejects a diff that modifies an existing manifest entry", () => {
     const h = setupHarness();
     try {

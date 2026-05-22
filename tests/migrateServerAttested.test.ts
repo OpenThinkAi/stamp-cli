@@ -24,11 +24,30 @@ import {
   detectExistingKeys,
   disambiguateNames,
   nameFromFilename,
+  renderPathRulesBlock,
   rewriteConfigForMigration,
   serializeManifest,
 } from "../src/lib/migrateServerAttested.ts";
 import { runMigrateToServerAttested } from "../src/commands/migrateServerAttested.ts";
+import { __setFetchForTests } from "../src/lib/serverPubkeyFetch.ts";
 import { parseManifest } from "../src/lib/trustedKeysManifest.ts";
+
+// The WS2 one-PR flow fetches the server's review-signing pubkey over SSH
+// at every real (non-dry) run. Mint a fixed server keypair for every test
+// in this file and stub the SSH fetcher so tests stay hermetic and don't
+// hit a network. Restored in each test's finally block via the returned
+// restore fn.
+const SERVER_KP = generateKeypair();
+function withStubbedFetch<T>(fn: () => T): T {
+  const restore = __setFetchForTests(() => SERVER_KP.publicKeyPem);
+  try {
+    return fn();
+  } finally {
+    restore();
+  }
+}
+
+const SERVER_ARG = "stamp.test.invalid:22";
 
 interface TmpRepo {
   path: string;
@@ -350,7 +369,7 @@ ${DEFAULT_PATH_RULES_BLOCK}
 });
 
 describe("runMigrateToServerAttested — end-to-end", () => {
-  it("writes manifest + rewrites config + appends path_rules", () => {
+  it("writes manifest + rewrites config + scaffolds Shape 4 surface", () => {
     const r = tmpRepo();
     try {
       const fpAlice = dropKey(r.path, "alice.pub");
@@ -370,10 +389,15 @@ reviewers:
         command: npx
 `,
       );
-      withCwd(r.path, () =>
-        runMigrateToServerAttested({ selectAdminIndexes: [1] }),
+      withStubbedFetch(() =>
+        withCwd(r.path, () =>
+          runMigrateToServerAttested({
+            selectAdminIndexes: [1],
+            server: SERVER_ARG,
+          }),
+        ),
       );
-      // Manifest landed with alice promoted.
+      // Manifest landed with alice promoted PLUS the server entry.
       const manifestText = readFileSync(
         join(r.path, ".stamp", "trusted-keys", "manifest.yml"),
         "utf8",
@@ -385,15 +409,41 @@ reviewers:
       );
       assert.deepEqual(byFp[fpAlice], ["admin", "operator"]);
       assert.deepEqual(byFp[fpBob], ["operator"]);
+      assert.deepEqual(byFp[SERVER_KP.fingerprint], ["server"]);
+      // Server pubkey landed on disk under the canonical name.
+      const serverPubPath = join(
+        r.path,
+        ".stamp",
+        "trusted-keys",
+        "review-server-prod.pub",
+      );
+      assert.equal(
+        readFileSync(serverPubPath, "utf8"),
+        SERVER_KP.publicKeyPem,
+        "server pubkey must be written at review-server-prod.pub",
+      );
 
-      // Config rewrite: tools + mcp_servers commented, path_rules appended.
+      // Config rewrite: reviewers in {} form, review_server on main,
+      // path_rules with min_sigs=1 (only alice is admin).
       const cfgText = readFileSync(
         join(r.path, ".stamp", "config.yml"),
         "utf8",
       );
-      assert.ok(cfgText.includes("    # tools:"));
-      assert.ok(cfgText.includes("    # mcp_servers:"));
-      assert.ok(cfgText.includes(DEFAULT_PATH_RULES_BLOCK));
+      assert.ok(cfgText.includes("security: {}"));
+      assert.ok(cfgText.includes("review_server: ssh://git@stamp.test.invalid:22"));
+      assert.ok(cfgText.includes(renderPathRulesBlock(1)));
+      // Workflow file landed.
+      const wfPath = join(
+        r.path,
+        ".github",
+        "workflows",
+        "stamp-verify.yml",
+      );
+      assert.equal(
+        existsSync(wfPath),
+        true,
+        "stamp-verify.yml must be scaffolded",
+      );
     } finally {
       r.cleanup();
     }
@@ -412,7 +462,9 @@ reviewers:
     tools: [Read]
 `;
       writeFileSync(join(r.path, ".stamp", "config.yml"), initialCfg);
-      withCwd(r.path, () => runMigrateToServerAttested({ dryRun: true }));
+      withCwd(r.path, () =>
+        runMigrateToServerAttested({ dryRun: true, server: SERVER_ARG }),
+      );
       const manifestPath = join(
         r.path,
         ".stamp",
@@ -454,8 +506,13 @@ reviewers:
 `,
       );
       // First run promotes alice.
-      withCwd(r.path, () =>
-        runMigrateToServerAttested({ selectAdminIndexes: [1] }),
+      withStubbedFetch(() =>
+        withCwd(r.path, () =>
+          runMigrateToServerAttested({
+            selectAdminIndexes: [1],
+            server: SERVER_ARG,
+          }),
+        ),
       );
       const firstManifest = readFileSync(
         join(r.path, ".stamp", "trusted-keys", "manifest.yml"),
@@ -468,8 +525,13 @@ reviewers:
 
       // Second run with no selection: should preserve alice as admin,
       // not demote her.
-      withCwd(r.path, () =>
-        runMigrateToServerAttested({ selectAdminIndexes: [] }),
+      withStubbedFetch(() =>
+        withCwd(r.path, () =>
+          runMigrateToServerAttested({
+            selectAdminIndexes: [],
+            server: SERVER_ARG,
+          }),
+        ),
       );
       const secondManifest = readFileSync(
         join(r.path, ".stamp", "trusted-keys", "manifest.yml"),
@@ -505,8 +567,13 @@ reviewers:
       dropKey(r.path, "alice.pub");
       assert.throws(
         () =>
-          withCwd(r.path, () =>
-            runMigrateToServerAttested({ selectAdminIndexes: [] }),
+          withStubbedFetch(() =>
+            withCwd(r.path, () =>
+              runMigrateToServerAttested({
+                selectAdminIndexes: [],
+                server: SERVER_ARG,
+              }),
+            ),
           ),
         /expected \.stamp\/config\.yml/,
       );
@@ -525,7 +592,10 @@ reviewers:
       assert.throws(
         () =>
           withCwd(r.path, () =>
-            runMigrateToServerAttested({ dryRun: true }),
+            runMigrateToServerAttested({
+              dryRun: true,
+              server: SERVER_ARG,
+            }),
           ),
         /no existing keys to migrate/,
       );
