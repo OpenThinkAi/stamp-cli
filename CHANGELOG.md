@@ -5,6 +5,48 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 2.2.0 — 2026-05-22
+
+Closes the **shape-4-adoptability** project: a stamp 1.x operator can now follow the Shape 4 walkthrough in `docs/migration-1.x-to-2.x.md` literally and end up in a working server-attested-without-code-transfer setup without reading source. Three workstreams, driven by friction points from the `anglepoint-review-bot` dry-run (2026-05-21).
+
+### Background — why this exists
+
+2.1.0 introduced Shape 4 and 2.1.1 fixed the activation deadlock, but adoption was still painful: the documented 1-PR migration actually took 4 PRs + manual hand-edits, `.stamp/**` changes were unsignable on a fully-gated Shape 4 repo, and the migration command silently produced unrecoverable manifests in non-TTY (CI) contexts. 2.2.0 closes all three gaps in one release.
+
+### Added
+
+- **`stamp attest` collects admin counter-signatures** from `refs/notes/stamp-trust-anchor-sigs` and folds them into the v3 PR-attestation envelope. Previously hardcoded to `trust_anchor_signatures: []`, which made `.stamp/**` changes unsignable on Shape 4 repos. Logic extracted into the shared `src/lib/trustAnchorCollection.ts` so `stamp merge` and `stamp attest` both call the same path.
+- **`stamp admin sign --mode={auto,pr,v4}` flag.** Lets the operator force the envelope mode for the signing target: `pr` (`schema_version 3`) or `v4` (`schema_version 5`). `auto` (default) detects from the target branch rule's `review_server`. See the Breaking section for the default-behavior implications.
+- **`stamp init --migrate-to-server-attested --server <host:port>` produces a complete Shape 4 setup in one command.** Fetches the stamp-server's review-signing pubkey via SSH (TOFU), writes `.stamp/trusted-keys/review-server-prod.pub` + a `[server]+role_source: server` manifest entry, adds `review_server: ssh://git@<host>:<port>` to the default branch rule, scaffolds `.github/workflows/stamp-verify.yml`, appends `path_rules` with a smart-defaulted `minimum_signatures` based on admin count, deletes legacy `.stamp/reviewers/*.md` files, rewrites the `reviewers:` block to `{}` form. The combined diff passes `stamp attest --migrate-existing`'s whitelist cleanly.
+- **`stamp init --admin-keys <sha256:…,…>` flag.** Comma-separated fingerprints declare which detected pubkeys gain the `[admin]` capability. Required in non-TTY contexts; allowed in TTY as an explicit alternative to the interactive prompt.
+- **Migration-existing whitelist widened** to accept `D` (delete) status for paths matching `.stamp/reviewers/*.md`. Required so the Shape 4 cleanup of legacy reviewer prompts can ride in the activation envelope.
+
+### Changed
+
+- **`VERIFY_ACTION_REF` is now commit-SHA-pinned** to `394f6e1bbdab0e0a1b677a08ed207596a936d590` (== `v1.6.1` on `OpenThinkAi/stamp-cli`). The `.github/workflows/stamp-verify.yml` produced by `stamp init` now references the action by SHA — security reviewers no longer flag the mutable-tag pattern. The trailing comment names the human-readable version. Operators forking the action source can resolve their own SHA via `gh api repos/<fork>/git/ref/tags/<tag>`.
+- **Verify-workflow helpers moved** from `src/commands/init.ts` to `src/lib/verifyWorkflow.ts` so both `stamp init` and `stamp init --migrate-to-server-attested` import from `lib` rather than a sibling command module.
+- **`stamp init` summary lines** for the Shape 4 migration relabel `server fingerprint:` → `fingerprint:` and `minimum_signatures:` → `min_signatures:` to align the value column at a single offset.
+
+### Breaking
+
+- **`stamp init --migrate-to-server-attested` now requires a server endpoint.** Pre-2.2.0 the command produced an offline Phase-1 scaffold (comment-out only, no server connection); that intermediate flow is gone. Pass `--server <host:port>` on the CLI or persist the endpoint via `stamp server config --server <host:port>`. Automation that called the command without one will hard-error with an actionable message instead of silently producing a partial scaffold.
+- **`stamp init --migrate-to-server-attested` in non-TTY without `--admin-keys` is a hard error.** Pre-2.2.0 the interactive admin-promotion prompt was silently skipped in non-TTY, leaving a manifest with zero admin-capability keys — an unsignable Shape 4 setup. Now the command refuses to proceed and names the recovery path. Defense-in-depth at write-time also refuses to serialize a manifest with zero admin-capability keys regardless of how it got there.
+- **`stamp admin sign` default envelope mode is now `auto`, not `v4`.** Pre-2.2.0 the command always produced a `schema_version 5` (v4 commit-trailer) signature regardless of the repo's topology. On a Shape 4 repo (target branch rule has `review_server` set), the new `auto` default produces a `schema_version 3` (PR-mode) signature instead — and the two are not cross-compatible, because the verifier reconstructs the signing target from the envelope's own `schema_version`. Automation that calls `stamp admin sign` without a flag on a Shape 4 repo will silently switch envelope types; the command's stdout summary names the resolved mode, but exit codes don't distinguish. Pass `--mode v4` explicitly to preserve the pre-2.2.0 behavior.
+
+### Constraints (deliberate)
+
+- TOFU on the server pubkey fetch — the SSH transport is the trust boundary, same as the rest of stamp's server-side surface. Operators harden out-of-band by independently verifying the fingerprint; the migration walkthrough names the verification command.
+- `minimum_signatures` smart-default is 1 for single-admin repos, 2 otherwise. Zero-admin is refused at write time (see Breaking above), so the previously-possible "default to 2 with warning on a zero-admin manifest" path is removed.
+- Admin signing for PR-mode (`stamp admin sign --mode pr`) uses `schema_version 3` in the signing target; the v4 commit-trailer mode keeps `schema_version 5`. Sigs are not cross-compatible between modes — the verifier reconstructs the target from the envelope's own `schema_version`.
+
+### Provenance
+
+- WS1: merge `c455c215`
+- WS2: merge `c9057672`
+- WS3: merge `9c904f0c`
+
+---
+
 ## 2.1.1 — 2026-05-21
 
 Adds `stamp attest --migrate-existing` for the **Shape 4 migration bootstrap PR**: the one-time PR that activates Shape 4 (server-attested without code transfer) on an existing repo. AGT-398.
