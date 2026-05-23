@@ -70,13 +70,9 @@ You push directly to stamp-server; the pre-receive hook is the source of truth. 
 
 Go to [Upgrade walkthrough — Shape 1](#upgrade-walkthrough--shape-1-stamp-server-primary).
 
-### Shape 2 — GitHub primary, stamp-server mirrors for review (PR mode)
+### Shape 2 — removed (was: GitHub primary, stamp-server mirrors for review)
 
-GitHub holds the source of truth and runs the PR UI. A GitHub Action auto-mirrors every push to stamp-server, which runs reviews and signs verdicts. `stamp/verify-attestation@v1` validates v4 attestations as a required PR check.
-
-Best fit if your team already lives in GitHub PRs and you don't want to migrate the dev surface.
-
-Go to [Upgrade walkthrough — Shape 2](#upgrade-walkthrough--shape-2-pr-mode).
+Shape 2 (mirror-mode PR — a GitHub Action mirrored every push to stamp-server) was **removed**, superseded by **Shape 4**, which delivers the same server-attested PR verification without mirroring your full source. If you're on Shape 2, see [Shape 2 (mirror-mode PR) — removed](#shape-2-mirror-mode-pr--removed) for the migration steps.
 
 ### Shape 3 — Local-only (iteration feedback, no trust)
 
@@ -92,7 +88,7 @@ GitHub holds the source of truth and runs the PR UI. **stamp-server never receiv
 
 Best fit if your code must not leave its git host — private/internal codebases, compliance constraints, or any repo where mirroring the full source to stamp-server is a non-starter.
 
-Trust model is identical to Shape 2: the server's review-signing key still controls the prompt bytes (because prompts are image-baked, not host-mounted), and the verifier validates the server's signature against the manifest at base_sha. The only thing missing relative to Shape 2 is the mirror workflow and the bare-repo clone on stamp-server.
+Trust model: the server's review-signing key controls the prompt bytes (because prompts are image-baked, not host-mounted), and the verifier validates the server's signature against the manifest at base_sha — with no mirror workflow and no bare-repo clone on stamp-server.
 
 Go to [Upgrade walkthrough — Shape 4](#upgrade-walkthrough--shape-4-server-attested-without-code-transfer).
 
@@ -257,85 +253,25 @@ Steps 3–5 are per-repo. Different repos can be on different stamp lines simult
 
 ---
 
-## Upgrade walkthrough — Shape 2 (PR mode)
+## Shape 2 (mirror-mode PR) — removed
 
-If GitHub is your primary remote and you don't want to flip dev surface to stamp-server, run stamp-server as a review-only secondary. A GitHub Action auto-mirrors every push to stamp-server, which signs verdicts; `stamp/verify-attestation@v1` validates them as a required PR check.
+> **Shape 2 was removed.** `stamp init --pr-mode` / `--pr-mode-force`, the scaffolded `.github/workflows/stamp-mirror.yml`, and the `STAMP_MIRROR_KEY` org secret are gone. Shape 2 mirrored your full source into stamp-server on every push; **Shape 4 (server-attested without code transfer)** delivers the same server-signed PR attestation without that mirror.
+>
+> **If you were on Shape 2:**
+> 1. Migrate to Shape 4 — follow the [Shape 4 walkthrough](#upgrade-walkthrough--shape-4-server-attested-without-code-transfer).
+> 2. Delete `.github/workflows/stamp-mirror.yml` from your repo.
+> 3. Remove the `STAMP_MIRROR_KEY` org secret (no longer used).
+> 4. The `stamp/verify-attestation@v1` required check stays — Shape 4 uses the same verification.
+>
+> No attestation history is lost: existing signed merges verify unchanged.
 
-### Step 1 — Same as Shape 1
+### v3 PR-attestation envelope (shared verifier shape, AGT-338 + AGT-355)
 
-Upgrade stamp-server to 2.x and capture the review-signing pubkey (see [Shape 1 steps 1–2](#step-1--upgrade-stamp-server-to-a-2x-capable-build)).
-
-### Step 2 — Mint a mirror SSH user on stamp-server
-
-The mirror Action pushes to stamp-server using an SSH keypair stored as a GitHub organization secret.
-
-```sh
-# On stamp-server: mint a service-account user the mirror Action will push as
-ssh -p <port> git@<host> stamp-mint-invite mirror --role member
-
-# Generate an SSH keypair locally; private goes to GitHub, pub goes to stamp-server
-ssh-keygen -t ed25519 -f /tmp/stamp-mirror -N ""
-# Register /tmp/stamp-mirror.pub against the `mirror` user via the invite flow
-# (one keypair for the whole org — same key used by every repo's mirror workflow)
-```
-
-Add the private key as a GitHub **organization secret** (e.g. `STAMP_MIRROR_KEY`), scoped to repos using stamp.
-
-### Step 3 — Per-repo: scaffold the mirror workflow + v4 trust anchors
-
-In each repo:
-
-```sh
-git checkout -b stamp-2x-migration
-
-# Same trust-anchor scaffold as Shape 1. Run this FIRST, then hand-add
-# `review_server` to .stamp/config.yml (so the next step can substitute
-# host/port into the workflow template).
-stamp init --migrate-to-server-attested
-
-# Scaffold the GitHub Action that mirrors every push to stamp-server.
-# Reads host/port from the `review_server` URL the previous step added,
-# and org/repo from `git remote get-url origin`.
-stamp init --pr-mode
-```
-
-`stamp init --pr-mode` installs:
-
-- `.github/workflows/stamp-mirror.yml` — pushes the ref to stamp-server on every GitHub push, using `STAMP_MIRROR_KEY` (org-level secret). Host, port, org, repo are substituted from `review_server` + `origin`.
-- Prints a walkthrough to stdout covering keypair generation, the `stamp-mint-invite mirror --role member` step on stamp-server, and the GitHub org-secret registration URL.
-
-The PR-check workflow (`.github/workflows/stamp-verify.yml`) is dropped separately by the mode-aware default in `stamp init` (it lands automatically for forge-direct / local-only modes; opt out with `--no-pr-check`). The trust-anchor scaffold from `--migrate-to-server-attested` is identical to Shape 1's step 3.
-
-> Running `--pr-mode` is idempotent — an existing `stamp-mirror.yml` is left in place so operator customizations (concurrency block, fork-PR gating, etc.) survive re-runs. Pass `--pr-mode-force` to overwrite (useful after configuring `review_server` so the host/port placeholders fill in).
-
-### Step 4 — Land the migration commit through 1.x
-
-Same as Shape 1 step 4. Once main moves, v4 enforcement is live for this repo via the GitHub Action.
-
-### Step 5 — Per-PR developer flow under v4
-
-```sh
-git checkout -b feature
-# ...edit, commit...
-stamp review --diff main..HEAD          # reviews via stamp-server, signed verdicts in local DB
-stamp attest --into main --push origin  # signs envelope, pushes branch + attestation ref
-# Open PR; mirror workflow pushes to stamp-server; verify workflow checks the attestation;
-# green check → merge in GitHub UI
-```
-
-The attestation is keyed on `git patch-id`, so it survives squash / rebase / merge-commit — same property as 1.x PR-mode.
-
-#### v3 PR-attestation shape (verifier + producer, AGT-338 + AGT-355)
-
-The Action's verifier ships in 2.x at envelope `schema_version: 3`. v3 envelopes carry the same v4-trust fields the server-gated commit-trailer envelope does — per-approval server attestations (one per required reviewer, byte-canonical `ApprovalV4` shape), a top-level `diff_sha256` binding the operator's outer signature to the actual diff, the manifest snapshot hash for lenient revocation, and `trust_anchor_signatures` (admin counter-signatures) populated when the diff touches a `path_rules` glob. The shared `verifyV4*` phase helpers in `src/lib/v4Trust.ts` run against both the v3 PR-envelope's embedded fields and the v4 commit-trailer envelope, but PR-mode runs a deliberate **subset** of the phases (`PR_MODE_PHASES_V4` omits `verifyV4MergeStructure` because PR-mode runs BEFORE a 2-parent merge commit exists). The shared phase logic is identical; the phase set differs.
+The Action's verifier ships in 2.x at envelope `schema_version: 3`, used by the server-attested PR flow (Shape 4). v3 envelopes carry the same v4-trust fields the server-gated commit-trailer envelope does — per-approval server attestations (one per required reviewer, byte-canonical `ApprovalV4` shape), a top-level `diff_sha256` binding the operator's outer signature to the actual diff, the manifest snapshot hash for lenient revocation, and `trust_anchor_signatures` (admin counter-signatures) populated when the diff touches a `path_rules` glob. The shared `verifyV4*` phase helpers in `src/lib/v4Trust.ts` run against both the v3 PR-envelope's embedded fields and the v4 commit-trailer envelope, but the PR-attestation flow runs a deliberate **subset** of the phases (`PR_MODE_PHASES_V4` omits `verifyV4MergeStructure` because the PR flow runs BEFORE a 2-parent merge commit exists). The shared phase logic is identical; the phase set differs.
 
 The verifier rejects v2 envelopes (produced by 1.x `stamp attest` or by 2.x `stamp attest` against a branch rule without `review_server`) with a "schema_version too old" actionable error. v2 envelopes pre-date the v4 trust model and cannot be upgraded in place — re-attestation against a 2.x stamp-server is required.
 
 **End-to-end v3 production is live as of 2.0.1.** When a branch rule declares `review_server`, `stamp review` requests server-attested verdicts via SSH and persists the server-signed approval rows in the local DB, then `stamp attest` folds those rows into a v3 PR-attestation envelope and operator-signs the outer. The GH Action accepts the envelope directly — no 1.x-action pin or bridge-window workaround needed. The wire-protocol surface for the server-signed bytes is documented in `src/server/reviewPipeline.ts` (`ReviewPipelineResult.pr_attestation_v3_*` fields).
-
-### Step 6 — Repeat for each repo
-
-Each repo independently opts in via its own `review_server` config and mirror workflow. Mix-and-match across the org is supported.
 
 ---
 
@@ -357,13 +293,13 @@ If your 1.x deployment is purely local-only (`stamp init --mode local-only`, no 
 
 See [`local-only-mode.md`](./local-only-mode.md) for the full local-only contract, the security boundary, and the headless billing caveat.
 
-If you later decide you want the trust property, you can flip the same repo into Shape 1 or Shape 2 by deploying stamp-server and adding `review_server` — there's nothing to undo on the local-only side.
+If you later decide you want the trust property, you can flip the same repo into Shape 1 or Shape 4 by deploying stamp-server and adding `review_server` — there's nothing to undo on the local-only side.
 
 ---
 
 ## Upgrade walkthrough — Shape 4 (server-attested without code transfer)
 
-For repos that need server-attested reviews but cannot mirror their code to stamp-server. Same trust properties as Shape 2; no mirror workflow, no bare repo on the server, no per-repo deploy key. The server reads canonical reviewer prompts from its bundled image directory; the operator's repo never carries `.stamp/reviewers/*.md`.
+For repos that need server-attested reviews but cannot mirror their code to stamp-server. Full server-attested trust properties; no mirror workflow, no bare repo on the server, no per-repo deploy key. The server reads canonical reviewer prompts from its bundled image directory; the operator's repo never carries `.stamp/reviewers/*.md`.
 
 The migration is a **single PR**. `stamp init --migrate-to-server-attested` scaffolds the complete Shape 4 surface (manifest, server pubkey, review_server URL, reviewer-cleanup, path_rules, verify workflow, reviewer-prompt deletions); `stamp attest --migrate-existing` produces the bootstrap envelope that lands in the same PR.
 
@@ -487,15 +423,15 @@ stamp attest --into main --push origin  # signs envelope, pushes branch + attest
 # green check → merge in GitHub UI
 ```
 
-The wire protocol is identical to Shape 2 — `stamp review` sends `--reviewer`, `--org`, `--repo`, `--base-sha`, `--head-sha`, `--diff-sha256` plus the diff on stdin. The only difference is that the server uses `--reviewer` to look up its bundled prompt (not to fetch from a bare repo at `--base-sha`). The reviewer name is validated against `REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/` before path construction (see `src/server/promptFetch.ts`) so `--reviewer` cannot be used to traverse out of `/etc/stamp/reviewers/`. No mirror workflow runs because none exists.
+The wire protocol is the standard server-attested SSH flow — `stamp review` sends `--reviewer`, `--org`, `--repo`, `--base-sha`, `--head-sha`, `--diff-sha256` plus the diff on stdin. The server uses `--reviewer` to look up its bundled prompt at `/etc/stamp/reviewers/` (no bare-repo clone is involved). The reviewer name is validated against `REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/` before path construction (see `src/server/promptFetch.ts`) so `--reviewer` cannot be used to traverse out of `/etc/stamp/reviewers/`. No mirror workflow runs because none exists.
 
 ### Step 6 — Repeat for each repo
 
-Same as Shape 2 step 6. Mix-and-match across the org is supported — some repos can run Shape 2 (mirror) and others Shape 4 (no mirror) against the same stamp-server.
+Each repo independently opts into server-attested review via its own `review_server` config. Mix-and-match across the org is supported against the same stamp-server.
 
 ### Verifier behavior (Shape 4 specifics)
 
-`stamp/verify-attestation@v1` validates each approval's signature against the server key resolved from the manifest at base_sha, and re-runs the envelope-level `manifest_snapshot_sha256` check. It does NOT recompute `prompt_sha256` from the merge-base tree — in Shape 4 the prompts are not in the operator's repo, so there's nothing to recompute against. The trust chain for prompt bytes is: manifest (at base_sha) → server key with `server` capability → signed approval body → `prompt_sha256`. The recompute step that Shape 1/2 ran was a belt-and-suspenders second-line defense; in Shape 4 it's structurally impossible and the signed chain is the trust anchor. See [`src/lib/v4Trust.ts`](../src/lib/v4Trust.ts) `verifyV4ApprovalSignatures` for the in-code rationale.
+`stamp/verify-attestation@v1` validates each approval's signature against the server key resolved from the manifest at base_sha, and re-runs the envelope-level `manifest_snapshot_sha256` check. It does NOT recompute `prompt_sha256` from the merge-base tree — in Shape 4 the prompts are not in the operator's repo, so there's nothing to recompute against. The trust chain for prompt bytes is: manifest (at base_sha) → server key with `server` capability → signed approval body → `prompt_sha256`. The recompute step that the server-gated path (Shape 1) runs was a belt-and-suspenders second-line defense; in Shape 4 it's structurally impossible and the signed chain is the trust anchor. See [`src/lib/v4Trust.ts`](../src/lib/v4Trust.ts) `verifyV4ApprovalSignatures` for the in-code rationale.
 
 ---
 
@@ -650,7 +586,7 @@ Concretely:
 - **`.stamp/trusted-keys/manifest.yml`** on each reviewed repo: unchanged. The server's review-signing key entry has the same `[server]` capability + `role_source: server`; it does NOT need a new capability for Phase B.
 - **`path_rules` for `.stamp/**`:** unchanged. Trust-anchor changes still require admin counter-sigs; Phase B does not introduce a new gated path.
 - **`stamp/verify-attestation@v1` Action:** unchanged. The verifier resolves `prompt_sha256` against the server-signed approval body; the storage layer behind the server is opaque to it.
-- **Shape selection (1/2/4):** unchanged. Phase B sits orthogonally to topology — you can run Phase B on any of Shape 1, Shape 2, or Shape 4. Shape 4 is the most common pairing (since both reach for "the prompts are server-owned, not repo-owned"), but nothing about the trust model requires it.
+- **Shape selection (1/4):** unchanged. Phase B sits orthogonally to topology — you can run Phase B on Shape 1 or Shape 4. Shape 4 is the most common pairing (since both reach for "the prompts are server-owned, not repo-owned"), but nothing about the trust model requires it.
 
 If you had a working v4 setup before opting into Phase B, you have a working v4 setup after. The migration is purely on the server's prompt-storage layer.
 
