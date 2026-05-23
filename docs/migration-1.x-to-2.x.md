@@ -74,7 +74,7 @@ Go to [Upgrade walkthrough — Shape 1](#upgrade-walkthrough--shape-1-stamp-serv
 
 Shape 2 (mirror-mode PR — a GitHub Action mirrored every push to stamp-server) was **removed**, superseded by **Shape 4**, which delivers the same server-attested PR verification without mirroring your full source. If you're on Shape 2, see [Shape 2 (mirror-mode PR) — removed](#shape-2-mirror-mode-pr--removed) for the migration steps.
 
-### Shape 3 — Local-only (iteration feedback, no trust)
+### Local-only (no server — iteration feedback, no trust)
 
 No server. `stamp review --plan` emits a structured plan for a parent Claude Code session to dispatch, or `stamp review --headless` calls Anthropic directly with `ANTHROPIC_API_KEY`. **Produces no attestation in 2.x** — verdicts are advisory.
 

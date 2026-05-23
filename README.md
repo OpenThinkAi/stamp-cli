@@ -51,7 +51,7 @@ what trust guarantees you actually get. In 2.x, the trust ladder is explicit:
 | Shape | Origin is… | Trust source | Enforcement |
 |---|---|---|---|
 | **Server-gated** (Shape 1, recommended) | A stamp server you deployed | Server signs every verdict; admin-cap keys gate `.stamp/**` changes | Pre-receive hook rejects unstamped pushes; v4 envelope verified end-to-end |
-| **Local-only** (Shape 3, no trust) | Anywhere | None — `--plan` / `--headless` produce no attestation | Discipline-only; signs merges but the remote doesn't enforce anything |
+| **Local-only** (no server, no trust) | Anywhere | None — `--plan` / `--headless` produce no attestation | Discipline-only; signs merges but the remote doesn't enforce anything |
 
 Server-gated rides on server-attested verdicts and produces verifying v4
 attestations. Local-only is for fast reviewer iteration when you haven't
@@ -706,7 +706,7 @@ diff hash together.
   via `stamp admin revoke` blocks future merges without invalidating past
   ones. Rotate by adding the new key first, collecting admin sigs on the
   manifest change, then revoking the old key in a follow-up commit.
-- **Local-only mode (Shape 3).** Produces no attestation by design — `--plan`
+- **Local-only mode (no server).** Produces no attestation by design — `--plan`
   and `--headless` are iteration aids, not trust claims. Anything producible
   without a server can be forged by the operator. See
   [`docs/local-only-mode.md`](./docs/local-only-mode.md).
