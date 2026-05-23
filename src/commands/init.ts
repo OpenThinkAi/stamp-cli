@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { ensureAgentsMd, ensureClaudeMd, type AgentsMdMode } from "../lib/agentsMd.js";
 import { maybePrintDeprecationNotice } from "../lib/deprecationNotice.js";
 import { isPathTracked, runGit } from "../lib/git.js";
@@ -13,12 +13,11 @@ import {
 } from "../lib/ghRuleset.js";
 import { readLineSync } from "../lib/humanMerge.js";
 import { readOteamConfig, patchStampHost } from "../lib/oteamConfig.js";
-import { classifyRemote, describeShape, parseOrgRepoFromUrl } from "../lib/remote.js";
+import { classifyRemote, describeShape } from "../lib/remote.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
 import {
   DEFAULT_ACTION_SOURCE,
   maybeWriteVerifyWorkflow,
-  renderVerifyWorkflow,
   VERIFY_ACTION_REF,
 } from "../lib/verifyWorkflow.js";
 import {
@@ -28,10 +27,8 @@ import {
   DEFAULT_STANDARDS_PROMPT,
   EXAMPLE_REVIEWER_PROMPT,
   MINIMAL_CONFIG,
-  parseConfigFromYaml,
   stringifyConfig,
 } from "../lib/config.js";
-import { parseReviewServerUrl } from "../lib/sshReviewClient.js";
 import { openDb } from "../lib/db.js";
 import {
   ensureUserKeypair,
@@ -126,35 +123,6 @@ export interface InitOptions {
    * mirror of their server-gated repo).
    */
   prCheck?: boolean;
-  /**
-   * When true, scaffold the Shape 2 (PR mode) auto-mirror workflow at
-   * `.github/workflows/stamp-mirror.yml`. The workflow pushes the repo
-   * to stamp-server on every GitHub push, using `secrets.STAMP_MIRROR_KEY`
-   * (an org-level secret the operator registers once).
-   *
-   * Independent of the `--mode` flag: `--pr-mode` is the Shape 2 fit, but
-   * the operator may legitimately drop the workflow into any repo whose
-   * remote is github.com. Template placeholders are filled from
-   * `.stamp/config.yml`'s `review_server` (host + port) and
-   * `git remote get-url origin` (org + repo). When `review_server` is
-   * not yet configured, the file is written with `<STAMP_SERVER_HOST>` /
-   * `<STAMP_SERVER_PORT>` literals so the operator can run AGT-342's
-   * `--migrate-to-server-attested` first and re-run with `--force`.
-   *
-   * Idempotent: if a `stamp-mirror.yml` already exists at the target
-   * path, init reports "exists" and leaves it alone. `prModeForce: true`
-   * overwrites unconditionally — escape hatch for re-running after
-   * `review_server` was added.
-   */
-  prMode?: boolean;
-  /**
-   * When true and `prMode` is also true, overwrite an existing
-   * `.github/workflows/stamp-mirror.yml` rather than leaving it
-   * untouched. Default false (idempotent re-init preserves operator
-   * customizations). Useful when re-running after configuring
-   * `review_server` so the host/port placeholders get filled in.
-   */
-  prModeForce?: boolean;
   /**
    * GitHub `org/repo` that hosts the `stamp/verify-attestation` action
    * referenced from `.github/workflows/stamp-verify.yml`. Default
@@ -265,17 +233,6 @@ export function runInit(opts: InitOptions = {}): void {
     opts.actionSource ?? DEFAULT_ACTION_SOURCE,
   );
 
-  // PR-mode auto-mirror workflow (Shape 2 of the server-attested-reviews
-  // deployment shapes — GitHub primary, stamp-server does reviews).
-  // Opt-in only — operators have to ask for this with `--pr-mode`
-  // because the mirror workflow pushes to stamp-server on every GitHub
-  // push and requires an org-level `STAMP_MIRROR_KEY` secret to be set
-  // up. The walkthrough text printed below this block tells the
-  // operator what to do next.
-  const prModeResult = opts.prMode
-    ? maybeWritePrModeMirrorWorkflow(repoRoot, { force: opts.prModeForce })
-    : { action: "skipped" as const, path: PR_MODE_WORKFLOW_PATH, substitution: null };
-
   // Ensure AGENTS.md carries the stamp guidance section unless the operator
   // opted out with --no-agents-md. The content branches on effectiveMode —
   // server-gated promises rejection, local-only is honest that pushes are
@@ -322,14 +279,6 @@ export function runInit(opts: InitOptions = {}): void {
     console.log(
       `  PR check:    ${prCheckResult.action} ${prCheckResult.path} ` +
         `(stamp/verify-attestation@${VERIFY_ACTION_REF})`,
-    );
-  }
-  if (prModeResult.action !== "skipped") {
-    const subSuffix = prModeResult.substitution
-      ? ` (host: ${prModeResult.substitution.host}:${prModeResult.substitution.port}, repo: ${prModeResult.substitution.org}/${prModeResult.substitution.repo})`
-      : " (placeholders unfilled — configure review_server then re-run with --force)";
-    console.log(
-      `  PR mirror:   ${prModeResult.action} ${prModeResult.path}${subSuffix}`,
     );
   }
   console.log(
@@ -394,15 +343,6 @@ export function runInit(opts: InitOptions = {}): void {
         "  - Operator workflow per PR: stamp review → stamp attest --into main\n" +
         "    --push origin → open PR → check goes green → human merges.\n",
     );
-  }
-
-  // PR-mode walkthrough. Print whenever the workflow exists on disk
-  // (just-written OR pre-existing). The walkthrough is mostly out-of-
-  // band setup (keypair generation, org-secret registration on
-  // github.com) so a re-init operator sees the checklist again and
-  // can use it to confirm they finished step 3.
-  if (prModeResult.action !== "skipped") {
-    printPrModeWalkthrough(prModeResult);
   }
 
   if (scaffoldOrSync === "scaffold") {
@@ -830,399 +770,3 @@ function resolveMode(
       return { effectiveMode: "local-only", warnings };
   }
 }
-
-
-/**
- * Path of the Shape 2 (PR mode) auto-mirror workflow file written by
- * `stamp init --pr-mode`. Exported so tests + the summary-line emitter
- * stay in sync with the actual destination.
- */
-export const PR_MODE_WORKFLOW_PATH = ".github/workflows/stamp-mirror.yml";
-
-/** Substituted values used when rendering the PR-mode mirror workflow. */
-export interface PrModeSubstitution {
-  host: string;
-  port: number;
-  org: string;
-  repo: string;
-}
-
-/** Result of attempting to drop the PR-mode mirror workflow file. */
-export interface PrModeMirrorResult {
-  action: "wrote" | "exists" | "skipped";
-  path: string;
-  /** What `derivePrModeSubstitution` resolved at the time of this call.
-   *  Non-null when both `.stamp/config.yml`'s `review_server` parsed and
-   *  `origin` parsed into `(org, repo)`. Null otherwise — the workflow
-   *  is then rendered with `<STAMP_SERVER_HOST>` / `<STAMP_SERVER_PORT>`
-   *  / `<REPO_ORG>` / `<REPO_NAME>` placeholders.
-   *
-   *  This is a *snapshot of the derivation*, not an assertion about the
-   *  bytes on disk. When `action === "exists"`, this may be non-null
-   *  while the existing file still has stale placeholders (or vice
-   *  versa). Use `--pr-mode-force` to refresh the file. */
-  substitution: PrModeSubstitution | null;
-}
-
-/**
- * Drop `.github/workflows/stamp-mirror.yml` from a template, substituting
- * the stamp-server endpoint (from `.stamp/config.yml`'s `review_server`)
- * and the GitHub repo (from `git remote get-url origin`). Returns "wrote",
- * "exists", or "skipped" so the caller can report what landed.
- *
- * Idempotent by default — if the target file already exists, we leave it
- * alone (operator may have customized concurrency, fork-PR conditions,
- * etc.). Pass `force: true` to overwrite — useful when re-running after
- * configuring `review_server` so the host/port placeholders get filled in.
- *
- * The walkthrough text (keypair generation, secret registration) is the
- * caller's job; see `printPrModeWalkthrough` below.
- */
-export function maybeWritePrModeMirrorWorkflow(
-  repoRoot: string,
-  opts: { force?: boolean } = {},
-): PrModeMirrorResult {
-  const fullPath = join(repoRoot, PR_MODE_WORKFLOW_PATH);
-
-  // Try to derive substitution values. Best-effort: if `.stamp/config.yml`
-  // doesn't have a `review_server` yet (operator may run --pr-mode before
-  // AGT-342's --migrate-to-server-attested) we still write the workflow,
-  // but with `<STAMP_SERVER_HOST>` / `<STAMP_SERVER_PORT>` literals so
-  // the operator can fill them in by hand or re-run with --force after
-  // configuring review_server.
-  const substitution = derivePrModeSubstitution(repoRoot);
-
-  if (existsSync(fullPath) && !opts.force) {
-    return { action: "exists", path: PR_MODE_WORKFLOW_PATH, substitution };
-  }
-
-  ensureDir(dirname(fullPath));
-  writeFileSync(fullPath, renderMirrorWorkflow(substitution));
-  return { action: "wrote", path: PR_MODE_WORKFLOW_PATH, substitution };
-}
-
-/**
- * Best-effort: derive `(host, port, org, repo)` from this repo's
- * `.stamp/config.yml` and `git remote get-url origin`. Returns null when
- * either side can't be confidently parsed — the caller then renders the
- * workflow with raw placeholders so the operator can edit by hand.
- *
- * Pulls (host, port) from any branch rule's `review_server` URL — the
- * first one that parses cleanly wins. Phase 1 of server-attested
- * reviews has a single per-branch URL by design (see "Deferred to
- * Phase 2" in docs/plans/server-attested-reviews.md), so "first match
- * wins" is the same as "the only match." If a future schema adds
- * per-reviewer overrides, this helper stays correct because the
- * branch-rule URL remains the canonical mirror endpoint.
- */
-export function derivePrModeSubstitution(
-  repoRoot: string,
-): PrModeSubstitution | null {
-  let host: string | null = null;
-  let port: number | null = null;
-  try {
-    const configFile = join(repoRoot, ".stamp", "config.yml");
-    if (existsSync(configFile)) {
-      const cfg = parseConfigFromYaml(readFileSync(configFile, "utf8"));
-      for (const rule of Object.values(cfg.branches)) {
-        if (rule.review_server) {
-          try {
-            const url = parseReviewServerUrl(rule.review_server);
-            host = url.host;
-            port = url.port;
-            break;
-          } catch {
-            // Malformed URL — skip this rule, try the next. Don't fail
-            // the whole substitution; config validation will surface
-            // the error to the operator separately.
-          }
-        }
-      }
-    }
-  } catch {
-    // Malformed config — fall through to placeholder rendering.
-  }
-
-  let org: string | null = null;
-  let repo: string | null = null;
-  try {
-    const url = runGit(["remote", "get-url", "origin"], repoRoot).trim();
-    const parsed = parseOrgRepoFromUrl(url);
-    if (parsed) {
-      org = parsed.org;
-      repo = parsed.repo;
-    }
-  } catch {
-    // No origin configured, or git failure — fall through.
-  }
-
-  if (host === null || port === null || org === null || repo === null) {
-    return null;
-  }
-  return { host, port, org, repo };
-}
-
-/**
- * Build the PR-mode auto-mirror workflow body. When `sub` is null, the
- * template is rendered with literal `<PLACEHOLDER>` markers so the
- * operator can fill them in by hand and re-run init with --force.
- *
- * Defense-in-depth: substituted values (host/port/org/repo) are emitted
- * as YAML `env:` variables on the run step and referenced as `"$VAR"`
- * inside the shell — they never appear as command tokens. Even if the
- * upstream parsers (`parseReviewServerUrl`, `parseOrgRepoFromUrl`)
- * grow a regression that lets a metacharacter slip through, the
- * generated shell still sees the values as quoted variable expansions,
- * not as syntactically-active tokens.
- *
- * Inline rather than file-loaded because the template is short and
- * version-bound to this release (matching the pattern of
- * `renderVerifyWorkflow` above).
- */
-export function renderMirrorWorkflow(sub: PrModeSubstitution | null): string {
-  // Substituted values are emitted as YAML `env:` entries on the run
-  // step (see "Defense-in-depth" in the JSDoc above). Either a parsed
-  // value or a literal `<PLACEHOLDER>` marker the operator hand-fills.
-  // Either way the value never becomes a shell command token.
-  const host = sub ? sub.host : "<STAMP_SERVER_HOST>";
-  const port = sub ? String(sub.port) : "<STAMP_SERVER_PORT>";
-  const org = sub ? sub.org : "<REPO_ORG>";
-  const repo = sub ? sub.repo : "<REPO_NAME>";
-
-  return [
-    "name: stamp-mirror",
-    "",
-    "# Shape 2 (PR mode) auto-mirror: pushes every GitHub push to the",
-    "# stamp-server bare repo over SSH, so `stamp-review` (the server-",
-    "# attested-reviews verb) can see the new commits. See",
-    "# docs/migration-1.x-to-2.x.md for the full Shape 2 setup.",
-    "#",
-    "# Auth: org-level secret STAMP_MIRROR_KEY (an Ed25519 private key",
-    "# whose pubkey is registered on stamp-server via",
-    "# `stamp-mint-invite mirror --role member`). Scope the secret to",
-    "# repos using stamp at the GitHub org level — once, not per repo.",
-    "",
-    "on:",
-    "  push:",
-    "    branches: ['**']",
-    "    tags: ['**']",
-    "",
-    "permissions:",
-    "  # Read-only is sufficient: we push to stamp-server over SSH",
-    "  # using STAMP_MIRROR_KEY, not back to github via GITHUB_TOKEN.",
-    "  contents: read",
-    "",
-    "jobs:",
-    "  mirror:",
-    "    name: mirror to stamp-server",
-    "    runs-on: ubuntu-latest",
-    "    timeout-minutes: 5",
-    "    steps:",
-    "      - name: checkout",
-    "        uses: actions/checkout@v4",
-    "        with:",
-    "          # Full history so `git push --mirror` ships every ref",
-    "          # the server needs to resolve `base..head` diffs.",
-    "          fetch-depth: 0",
-    "      - name: push to stamp-server",
-    "        env:",
-    "          STAMP_MIRROR_KEY: ${{ secrets.STAMP_MIRROR_KEY }}",
-    "          # Substituted values flow through env: so the shell never",
-    "          # sees them as command tokens — defense-in-depth against",
-    "          # any future parser regression that lets a shell",
-    "          # metacharacter slip past the upstream URL validators.",
-    `          STAMP_SERVER_HOST: ${yamlScalar(host)}`,
-    `          STAMP_SERVER_PORT: ${yamlScalar(port)}`,
-    `          STAMP_REPO_ORG: ${yamlScalar(org)}`,
-    `          STAMP_REPO_NAME: ${yamlScalar(repo)}`,
-    "        run: |",
-    "          set -euo pipefail",
-    "          if [ -z \"${STAMP_MIRROR_KEY:-}\" ]; then",
-    "            echo 'error: STAMP_MIRROR_KEY is not set.' >&2",
-    "            echo 'Register the org secret at:' >&2",
-    "            echo '  https://github.com/organizations/<your-org>/settings/secrets/actions/new' >&2",
-    "            echo 'Name: STAMP_MIRROR_KEY. Scope: repos using stamp.' >&2",
-    "            exit 1",
-    "          fi",
-    "          mkdir -p ~/.ssh",
-    "          chmod 0700 ~/.ssh",
-    "          # Write the key atomically with restrictive perms: a subshell",
-    "          # umask 077 creates the file already 0600, eliminating the race",
-    "          # between `>` (which would use the runner's umask, typically 0644)",
-    "          # and a follow-up `chmod`. Matters on self-hosted runners where",
-    "          # other processes share the user; near-zero blast radius on the",
-    "          # GitHub-hosted ephemeral VMs. Trailing newline kept — some",
-    "          # openssh versions reject keys without one.",
-    "          (umask 077 && printf '%s\\n' \"$STAMP_MIRROR_KEY\" > ~/.ssh/stamp_mirror_key)",
-    "          # Pin the host key on first contact. TOFU on every job;",
-    "          # for higher assurance, REPLACE the keyscan with a known-",
-    "          # host fingerprint your operator verified out-of-band",
-    "          # (e.g. `ssh-keygen -lf <pubkey>`). The walkthrough that",
-    "          # `stamp init --pr-mode` prints calls this out as a",
-    "          # post-setup hardening step.",
-    "          ssh-keyscan -p \"$STAMP_SERVER_PORT\" \"$STAMP_SERVER_HOST\" \\",
-    "            >> ~/.ssh/known_hosts 2>/dev/null",
-    "          # `|| true` on remote-add because rerunning the job (e.g.",
-    "          # workflow re-run) finds an existing remote and would fail",
-    "          # otherwise. The fetch URL is fixed by template; nothing",
-    "          # gets clobbered by tolerating the add-already-exists case.",
-    "          git remote add stamp-server \\",
-    "            \"ssh://git@${STAMP_SERVER_HOST}:${STAMP_SERVER_PORT}/srv/git/${STAMP_REPO_ORG}/${STAMP_REPO_NAME}.git\" \\",
-    "            || true",
-    "          GIT_SSH_COMMAND=\"ssh -i ~/.ssh/stamp_mirror_key -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/known_hosts\" \\",
-    "            git push --mirror stamp-server",
-    "",
-  ].join("\n");
-}
-
-/**
- * Emit a value as a YAML scalar that round-trips back to the same
- * string regardless of its contents. Used to inject substituted
- * host/port/org/repo into `env:` entries in the generated workflow
- * without risking YAML parser hiccups when the value contains a `<`,
- * a `-` lead, or any other character YAML treats specially in plain
- * scalar form. We always double-quote, escaping `\` and `"` per the
- * YAML 1.2 double-quoted-scalar grammar. This is the minimal subset
- * needed for our four substituted strings (which are already shape-
- * validated by `parseReviewServerUrl` / `parseOrgRepoFromUrl`); we
- * deliberately do NOT use the `yaml` package's `stringify` here
- * because the surrounding template is hand-built line-by-line and
- * pulling a YAML stringifier in for four scalars is overkill.
- */
-function yamlScalar(value: string): string {
-  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  return `"${escaped}"`;
-}
-
-/**
- * Print the post-scaffold walkthrough to stdout. Walks the operator
- * through the one-time org-level setup (keypair generation, registering
- * the pubkey on stamp-server, depositing the private key as an org
- * secret on GitHub) plus the per-repo finish step (commit + push the
- * workflow file). Re-printed on every `--pr-mode` re-init so the
- * checklist stays discoverable.
- */
-function printPrModeWalkthrough(result: PrModeMirrorResult): void {
-  const subSummary = result.substitution
-    ? `stamp-server at ssh://git@${result.substitution.host}:${result.substitution.port}, mirror path /srv/git/${result.substitution.org}/${result.substitution.repo}.git`
-    : "stamp-server host/port and org/repo placeholders unfilled — see below";
-
-  // Walkthrough verb must match `action` so it agrees with the
-  // `PR mirror:` summary line emitted earlier. "Wrote" on an "exists"
-  // result would produce a direct factual contradiction in the same
-  // stdout stream.
-  const verb = result.action === "wrote" ? "Wrote" : "Found existing";
-
-  console.log("PR-mode (Shape 2) mirror workflow notes:");
-  console.log(`  ${verb} ${result.path} (${subSummary}).`);
-  console.log();
-  if (!result.substitution) {
-    console.log(
-      "  Placeholders not substituted because `.stamp/config.yml` has no",
-    );
-    console.log(
-      "  `review_server` configured (or `origin` couldn't be parsed). Either:",
-    );
-    console.log(
-      "    - run `stamp init --migrate-to-server-attested` first to add",
-    );
-    console.log(
-      "      `review_server`, then re-run `stamp init --pr-mode --pr-mode-force`,",
-    );
-    console.log(
-      "    - or hand-edit the <STAMP_SERVER_HOST> / <STAMP_SERVER_PORT> /",
-    );
-    console.log(
-      "      <REPO_ORG> / <REPO_NAME> markers in the workflow file.",
-    );
-    console.log();
-  }
-  console.log("  Next steps (one-time per org, not per repo):");
-  console.log();
-  console.log(
-    "    1. Generate an Ed25519 mirror keypair locally:",
-  );
-  console.log(
-    "         ssh-keygen -t ed25519 -f stamp-mirror -N '' -C 'stamp-mirror@<your-org>'",
-  );
-  console.log();
-  console.log(
-    "    2. Register the public half (`stamp-mirror.pub`) on stamp-server",
-  );
-  console.log("       via the invite flow:");
-  if (result.substitution) {
-    console.log(
-      `         ssh -p ${result.substitution.port} git@${result.substitution.host} \\`,
-    );
-  } else {
-    console.log("         ssh -p <port> git@<stamp-server-host> \\");
-  }
-  console.log(
-    "           stamp-mint-invite mirror --role member",
-  );
-  console.log(
-    "       Accept the invite with the pubkey from step 1 to create the",
-  );
-  console.log(
-    "       `mirror` service-account user on stamp-server.",
-  );
-  console.log();
-  console.log(
-    "    3. Add the PRIVATE half (`stamp-mirror`) as an org-level secret",
-  );
-  console.log("       on GitHub:");
-  console.log(
-    "         https://github.com/organizations/<your-org>/settings/secrets/actions/new",
-  );
-  console.log(
-    "       Name: STAMP_MIRROR_KEY. Scope: repos using stamp.",
-  );
-  console.log();
-  console.log(
-    "    4. Commit and push the workflow file. The first push will trigger",
-  );
-  console.log(
-    "       the mirror; subsequent pushes mirror automatically.",
-  );
-  console.log();
-  console.log(
-    "    5. (Recommended) Pin the stamp-server SSH host key in the",
-  );
-  console.log(
-    "       workflow. The template uses `ssh-keyscan` for first-contact",
-  );
-  console.log(
-    "       TOFU on every run, which an active MitM at push time could",
-  );
-  console.log(
-    "       defeat. To harden, capture the fingerprint out-of-band:",
-  );
-  if (result.substitution) {
-    console.log(
-      `         ssh-keyscan -p ${result.substitution.port} ${result.substitution.host}`,
-    );
-  } else {
-    console.log("         ssh-keyscan -p <port> <stamp-server-host>");
-  }
-  console.log(
-    "       Verify it matches what your operator independently knows,",
-  );
-  console.log(
-    "       then commit the line into `~/.ssh/known_hosts` in the",
-  );
-  console.log(
-    "       workflow run-step (replacing the `ssh-keyscan` invocation).",
-  );
-  console.log();
-  console.log(
-    "  Re-running `stamp init --pr-mode` is idempotent — the existing",
-  );
-  console.log(
-    "  workflow file is left alone. Pass `--pr-mode-force` to overwrite",
-  );
-  console.log(
-    "  (useful after configuring `review_server` so placeholders fill in).",
-  );
-  console.log();
-}
-
