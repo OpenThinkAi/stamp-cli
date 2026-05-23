@@ -31,7 +31,6 @@ Foundational work has landed but is not yet user-visible without `review_server`
 - **Pre-receive hook refactor** — `src/hooks/pre-receive.ts` split into named phase functions so the new v4 verification phases land cleanly.
 - **DESIGN.md security model** — operator-trust caveat promoted to the headline with a forward-pointer to the v4 resolution.
 - **Migration guide** — [`migration-1.x-to-2.x.md`](./migration-1.x-to-2.x.md).
-- **PR-mode mirror workflow scaffold** — `stamp init --pr-mode` installs `.github/workflows/stamp-mirror.yml` plus the org-secret walkthrough for the GitHub-primary deployment shape.
 
 ### Remaining work
 

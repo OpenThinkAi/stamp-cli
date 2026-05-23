@@ -51,16 +51,15 @@ what trust guarantees you actually get. In 2.x, the trust ladder is explicit:
 | Shape | Origin is… | Trust source | Enforcement |
 |---|---|---|---|
 | **Server-gated** (Shape 1, recommended) | A stamp server you deployed | Server signs every verdict; admin-cap keys gate `.stamp/**` changes | Pre-receive hook rejects unstamped pushes; v4 envelope verified end-to-end |
-| **PR mode** (Shape 2) | GitHub directly | Mirror Action pushes to stamp-server for review; v3 PR-attestation signed by server | GitHub Action `stamp/verify-attestation@v1` runs on every PR as a required check |
 | **Local-only** (Shape 3, no trust) | Anywhere | None — `--plan` / `--headless` produce no attestation | Discipline-only; signs merges but the remote doesn't enforce anything |
 
-Server-gated and PR mode both ride on server-attested verdicts and produce
-verifying v4 attestations. Local-only is for fast reviewer iteration when you
-haven't deployed a server — it makes no trust claim. **Pick deliberately**;
-they're not interchangeable.
+Server-gated rides on server-attested verdicts and produces verifying v4
+attestations. Local-only is for fast reviewer iteration when you haven't
+deployed a server — it makes no trust claim. **Pick deliberately**; they're
+not interchangeable.
 
-PR-check mode is the natural fit for teams that already merge through GitHub
-PRs. The reviewer flow stays local (`stamp review` runs your AI personas on
+The GitHub-primary path (PR verification) is the natural fit for teams that
+already merge through GitHub PRs. The reviewer flow stays local (`stamp review` runs your AI personas on
 your machine, full speed and full control), the resulting attestation is
 content-addressed (survives squash + rebase + merge-commit), and the PR's
 green-check requirement keeps the human in the merge loop. No server to
@@ -90,29 +89,26 @@ Migrating an existing 1.x repo? Use `stamp init --migrate-to-server-attested`
 config without touching your reviewer prompts. See the
 [migration guide](./docs/migration-1.x-to-2.x.md) for the full walkthrough.
 
-### PR mode (Shape 2)
+### GitHub-primary path (PR verification)
 
 For teams whose source of truth is GitHub, `stamp init` against a github.com
 origin auto-scaffolds `.github/workflows/stamp-verify.yml` (the verifier that
-runs `stamp/verify-attestation@v1` on every PR). To get **server-attested**
-PR mode — verdicts signed by stamp-server, not just locally — also pass
-`--pr-mode` to install the mirror workflow that pushes every PR head to
-stamp-server for review:
+runs `stamp/verify-attestation@v1` on every PR):
 
 ```sh
 cd myproject
-stamp init --pr-mode                     # scaffolds .stamp/ + stamp-verify.yml (auto)
-                                          # + stamp-mirror.yml (--pr-mode opt-in)
-git add .stamp .github && git commit -m "stamp: scaffold PR mode"
+stamp init                               # scaffolds .stamp/ + stamp-verify.yml (auto)
+git add .stamp .github && git commit -m "stamp: scaffold PR verification"
 git push origin main
 # In GitHub: Settings → Branches → main → Require status checks →
 # add `stamp verify` (the workflow's job name) as required
 ```
 
-Without `--pr-mode`, `stamp init` still wires the advisory PR-check from 1.x
-— the verifier runs but verdicts are produced locally rather than by
-stamp-server. The advisory path remains supported for teams that don't run a
-stamp-server but want the attestation audit trail in PR checks.
+`stamp init` wires the advisory PR-check: the verifier runs on every PR and
+verdicts are produced locally. For **server-attested** verdicts (signed by
+stamp-server) without mirroring your full source into the server, use the
+server-attested deployment — see the
+[migration guide](./docs/migration-1.x-to-2.x.md).
 
 Per-PR developer flow:
 
