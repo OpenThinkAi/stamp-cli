@@ -194,9 +194,9 @@ interface Harness {
 }
 
 /**
- * Set up a Shape 2 → Shape 4 migration harness:
+ * Set up a pre-migration → Shape 4 migration harness:
  *   - `main` already carries a `path_rules` ".stamp/**" entry with
- *     bypass_review_cycle: true (the pre-existing Shape 2 scaffolding)
+ *     bypass_review_cycle: true (the pre-existing trust scaffolding)
  *   - `main` has a manifest binding the operator as `admin` (so the
  *     operator can self-counter-sign the bootstrap envelope)
  *   - feature branch ADDS `review_server:` to the `main` branch rule
@@ -268,7 +268,7 @@ function setupHarness(): Harness {
   );
   writeFileSync(path.join(repo, "README.md"), "initial\n");
   git(repo, ["add", "-A"]);
-  git(repo, ["commit", "-q", "-m", "initial: Shape 2 trust scaffolding"]);
+  git(repo, ["commit", "-q", "-m", "initial: pre-migration trust scaffolding"]);
 
   // Server key the bootstrap PR will introduce.
   const serverKey = mintServerKey();
@@ -404,7 +404,7 @@ function setupHarnessCustomBase(args: {
   );
   writeFileSync(path.join(repo, "README.md"), "initial\n");
   git(repo, ["add", "-A"]);
-  git(repo, ["commit", "-q", "-m", "initial: Shape 2 trust scaffolding"]);
+  git(repo, ["commit", "-q", "-m", "initial: pre-migration trust scaffolding"]);
 
   const serverKey = mintServerKey();
 

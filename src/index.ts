@@ -139,14 +139,6 @@ program
     "with --migrate-to-server-attested: comma-separated sha256:<64hex> fingerprints of the detected keys to promote to the [admin] capability. Required in non-interactive contexts (CI, agent runs). Takes precedence over the interactive prompt; refuses unknown fingerprints with the available set in the error.",
   )
   .option(
-    "--pr-mode",
-    "Shape 2 (PR mode) auto-mirror scaffold: write .github/workflows/stamp-mirror.yml so every push to GitHub mirrors to stamp-server for server-attested reviews. Prints the org-secret + keypair walkthrough. See docs/migration-1.x-to-2.x.md.",
-  )
-  .option(
-    "--pr-mode-force",
-    "with --pr-mode, overwrite an existing .github/workflows/stamp-mirror.yml (useful when re-running after configuring review_server so the host/port placeholders fill in)",
-  )
-  .option(
     "--action-source <org/repo>",
     "GitHub repo that hosts the stamp/verify-attestation action used by .github/workflows/stamp-verify.yml. Default 'OpenThinkAi/stamp-cli'. Override when consuming a fork (e.g. 'Anglepoint-Inc/anglepoint-stamp-server') so the workflow tracks your fork's updates instead of the upstream.",
   )
@@ -165,8 +157,6 @@ program
       server?: string;
       dryRun?: boolean;
       adminKeys?: string;
-      prMode?: boolean;
-      prModeForce?: boolean;
       actionSource?: string;
     }) => {
       try {
@@ -209,8 +199,8 @@ program
           return;
         }
         // `--dry-run` is migration-path-only — the other init code
-        // paths (mode auto-detection, PR-mode scaffold, GitHub Ruleset
-        // application) write files and call out to `gh` unconditionally.
+        // paths (mode auto-detection, GitHub Ruleset application) write
+        // files and call out to `gh` unconditionally.
         // Silently ignoring `--dry-run` outside the migration was a
         // footgun: agents (and humans) reasonably expect "preview only"
         // semantics universally. Error loudly instead so the operator
@@ -255,8 +245,6 @@ program
           // to forward an explicit `false` to runInit so its mode-aware
           // default fires when the operator hasn't opted out.
           prCheck: opts.prCheck === false ? false : undefined,
-          prMode: opts.prMode === true,
-          prModeForce: opts.prModeForce === true,
           actionSource: opts.actionSource,
         });
       } catch (err) {
