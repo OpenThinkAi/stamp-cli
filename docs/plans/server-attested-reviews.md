@@ -538,6 +538,12 @@ Setup:
 
 ### Shape 2: GitHub is the primary git remote (PR mode), stamp-server does reviews
 
+> **Historical (removed).** Shape 2 (mirror-mode PR — `stamp init
+> --pr-mode` + `.github/workflows/stamp-mirror.yml` + the `STAMP_MIRROR_KEY`
+> org secret) was removed; it is superseded by Shape 4 (server-attested
+> without code transfer). This section is retained as a design record. See
+> [`shape-2-3-deprecation.md`](./shape-2-3-deprecation.md).
+
 GitHub holds the source of truth and runs the PR UI. Stamp-server runs
 reviews and signs verdicts. The two are kept in sync via a GitHub Action
 that auto-mirrors GitHub → stamp-server on every push.
