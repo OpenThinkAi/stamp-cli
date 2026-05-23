@@ -5,6 +5,39 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## Unreleased
+
+> Contains a breaking removal — the next release should be a **major** version cut.
+
+### Removed
+
+- **Shape 2 (mirror-mode PR) deployment topology.** `stamp init --pr-mode`
+  and `--pr-mode-force`, the scaffolded `.github/workflows/stamp-mirror.yml`,
+  and the `STAMP_MIRROR_KEY` org-secret flow are removed. Shape 2 is
+  superseded by **Shape 4** (server-attested reviews without code transfer),
+  which provides the same server-signed PR attestation without mirroring your
+  source into the stamp-server. This is a breaking CLI change: `stamp init
+  --pr-mode` / `--pr-mode-force` now fail with an actionable removal notice
+  (exit 2, invalid-usage) naming Shape 4 and pointing at the migration guide,
+  rather than commander's bare `unknown option`.
+
+  **Migration:** move to Shape 4 (see
+  [`docs/migration-1.x-to-2.x.md`](./docs/migration-1.x-to-2.x.md) →
+  "Shape 2 (mirror-mode PR) — removed"), delete
+  `.github/workflows/stamp-mirror.yml`, and drop the `STAMP_MIRROR_KEY`
+  org secret. The `stamp/verify-attestation@v1` required check is unchanged.
+  Existing signed merges continue to verify.
+
+### Changed
+
+- Documentation no longer brands the no-server / local-only path as
+  "Shape 3." The capability is unchanged — `stamp review --plan` and
+  `stamp review --headless` work exactly as before, and the no-server
+  AGENTS.md content is unchanged; only the numbered-topology framing was
+  retired for clarity.
+
+---
+
 ## 2.2.0 — 2026-05-22
 
 Closes the **shape-4-adoptability** project: a stamp 1.x operator can now follow the Shape 4 walkthrough in `docs/migration-1.x-to-2.x.md` literally and end up in a working server-attested-without-code-transfer setup without reading source. Three workstreams, driven by friction points from the `anglepoint-review-bot` dry-run (2026-05-21).

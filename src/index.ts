@@ -11,7 +11,7 @@ process.on("warning", (warn) => {
 
 import { Command } from "commander";
 import { runBootstrap } from "./commands/bootstrap.js";
-import { runInit } from "./commands/init.js";
+import { runInit, removedPrModeNotice } from "./commands/init.js";
 import { runMigrateToServerAttested } from "./commands/migrateServerAttested.js";
 import {
   runInvitesAccept,
@@ -1223,6 +1223,14 @@ reviewers
   .action((name: string | undefined) =>
     wrap(() => reviewersVerify({ only: name })),
   );
+
+// Tombstone the removed Shape 2 `--pr-mode` flags with an actionable notice
+// before commander rejects them as a bare "unknown option". Exit 2 = usage.
+const prModeRemoval = removedPrModeNotice(process.argv);
+if (prModeRemoval) {
+  for (const line of prModeRemoval) console.error(line);
+  process.exit(2);
+}
 
 program.parseAsync(process.argv).catch((err) => {
   const message = err instanceof Error ? err.message : String(err);

@@ -770,3 +770,22 @@ function resolveMode(
       return { effectiveMode: "local-only", warnings };
   }
 }
+
+/**
+ * Tombstone for the removed Shape 2 `--pr-mode` / `--pr-mode-force` flags
+ * (mirror-mode PR, superseded by Shape 4). Commander would otherwise reject
+ * these as a bare "unknown option" with no path forward; this produces an
+ * actionable removal notice instead. Returns the stderr lines the caller
+ * should emit before exiting 2 (invalid-usage, per the exit-code convention),
+ * or null when no removed flag is present.
+ */
+export function removedPrModeNotice(argv: readonly string[]): string[] | null {
+  const flag = argv.find(
+    (a) => a === "--pr-mode" || a === "--pr-mode-force",
+  );
+  if (!flag) return null;
+  return [
+    `error: '${flag}' was removed in stamp 2.x (Shape 2 mirror-mode PR is superseded by Shape 4).`,
+    `note: see docs/migration-1.x-to-2.x.md → "Shape 2 (mirror-mode PR) — removed".`,
+  ];
+}
