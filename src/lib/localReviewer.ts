@@ -74,9 +74,12 @@ export async function invokeLocalReviewer(
 
   const client =
     params.client ??
-    createLocalReviewClient(
-      params.endpoint !== undefined ? { baseURL: params.endpoint } : {},
-    );
+    createLocalReviewClient({
+      // Local servers' tool-calling is unreliable (mlx_lm.server crashes on
+      // it); rely on the one-shot core's VERDICT: fallback instead.
+      disableTools: true,
+      ...(params.endpoint !== undefined ? { baseURL: params.endpoint } : {}),
+    });
 
   const result = await runOneShotReview({
     reviewer: {

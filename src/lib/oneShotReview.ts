@@ -56,11 +56,38 @@ import type { ReviewPlanReviewer } from "./reviewPlan.js";
  *  the input side. */
 const ONESHOT_MAX_TOKENS = 4096;
 
-/** Last-line VERDICT regex shape, shared with src/lib/reviewer.ts. Strict
- *  so a stray `VERDICT: approved` quoted mid-response can't fool the
- *  fallback parser — must be the entire last non-empty line. */
-const VERDICT_LINE_REGEX =
-  /^VERDICT:\s*(approved|changes_requested|denied)\s*$/;
+/**
+ * Parse a single line as a verdict declaration, tolerant of the formatting
+ * real (especially local) models emit: markdown emphasis/heading markers, a
+ * leading list/quote bullet, case differences, `:`/`-` separators, and
+ * trailing text after the value. Returns the normalized verdict or null.
+ *
+ * Anchored to the START of the stripped line, so a verdict merely *mentioned*
+ * inside a prose sentence ("...I'd normally mark this denied, but...") is not
+ * matched — only a line that leads with the verdict declaration.
+ */
+function parseVerdictLine(
+  line: string,
+): "approved" | "changes_requested" | "denied" | null {
+  const stripped = line
+    // Strip markdown emphasis/heading/quote markers — but NOT `_`, which is
+    // part of the `changes_requested` value (stripping it produced
+    // `changesrequested`, which then failed the enum check). `*` covers
+    // **bold**/*italic*; `_`-style emphasis on a verdict line is vanishingly
+    // rare and not worth corrupting the value for.
+    .replace(/[*`#>]/g, "")
+    .replace(/^\s*[-•]\s*/, "")
+    .trim()
+    .toLowerCase();
+  const m = stripped.match(
+    /^verdict\s*[:\-]?\s*(approved|changes[_ -]?requested|denied)\b/,
+  );
+  if (!m) return null;
+  const v = m[1]!.replace(/[ -]/g, "_");
+  return v === "approved" || v === "changes_requested" || v === "denied"
+    ? v
+    : null;
+}
 
 /**
  * Inline tool schema — NOT MCP. Same name + arg shape as the trusted-mode
@@ -280,51 +307,48 @@ function extractVerdict(
     };
   }
 
-  // Fallback: parse VERDICT: from the last non-empty text line. Same
-  // last-line-only discipline as reviewer.ts to defeat mid-prose injection
-  // payloads.
+  // Fallback: no structured tool verdict — scan the text bottom-up for a
+  // verdict-leading line. Walking from the end means the model's FINAL
+  // verdict wins over any earlier mention (and over a VERDICT line echoed
+  // out of diff content, preserving the anti-injection posture);
+  // parseVerdictLine tolerates the loose formatting local models produce.
   const fullText = textChunks.join("\n");
   const lines = fullText.split("\n");
-  let lastIdx = lines.length - 1;
-  while (lastIdx >= 0 && lines[lastIdx]!.trim() === "") lastIdx--;
-  if (lastIdx < 0) {
+  let matchIdx = -1;
+  let verdictVal: OneShotReviewResult["verdict"] = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const v = parseVerdictLine(lines[i]!);
+    if (v) {
+      verdictVal = v;
+      matchIdx = i;
+      break;
+    }
+  }
+  if (verdictVal === null) {
+    const empty = fullText.trim().length === 0;
     return {
       ...planEntry,
       verdict: null,
-      prose: "",
+      prose: empty ? "" : fullText,
       model,
-      error:
-        `model returned no text and did not call submit_verdict. ` +
-        `Stop reason: ` +
-        String(
-          (
-            response as unknown as {
-              stop_reason?: string;
-            }
-          ).stop_reason ?? "unknown",
-        ),
+      error: empty
+        ? `model returned no text and did not call submit_verdict. ` +
+          `Stop reason: ` +
+          String(
+            (response as unknown as { stop_reason?: string }).stop_reason ??
+              "unknown",
+          )
+        : `model did not call submit_verdict and no line declares a ` +
+          `VERDICT: (approved|changes_requested|denied). Inspect the prose ` +
+          `for the actual response shape.`,
     };
   }
-  const match = lines[lastIdx]!.match(VERDICT_LINE_REGEX);
-  if (!match || !match[1]) {
-    return {
-      ...planEntry,
-      verdict: null,
-      prose: fullText,
-      model,
-      error:
-        `model did not call submit_verdict and the last non-empty line is ` +
-        `not a VERDICT: line. Either the prompt instructed neither path, ` +
-        `or the model ignored both — inspect the prose for the actual ` +
-        `response shape.`,
-    };
-  }
-  // Strip the VERDICT: line from prose so the displayed text is the review
+  // Strip the verdict line (and anything after it) so prose is the review
   // itself, not the parser sentinel.
-  const prose = lines.slice(0, lastIdx).join("\n").trimEnd();
+  const prose = lines.slice(0, matchIdx).join("\n").trimEnd();
   return {
     ...planEntry,
-    verdict: match[1] as OneShotReviewResult["verdict"],
+    verdict: verdictVal,
     prose,
     model,
   };

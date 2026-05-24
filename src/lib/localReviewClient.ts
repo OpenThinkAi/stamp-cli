@@ -54,9 +54,29 @@ export interface LocalReviewClientOptions {
   /** Bearer token. Most local servers ignore it; defaults to a placeholder
    *  so the header is always present. */
   apiKey?: string;
+  /**
+   * Omit the `tools` field from the request. Local OpenAI-compatible servers
+   * have wildly inconsistent function-calling support — notably
+   * `mlx_lm.server` (the default Apple-Silicon backend) *crashes* server-side
+   * when `tools` are present and the model emits non-JSON tool text. With
+   * tools omitted, the verdict comes back through the one-shot core's
+   * last-line `VERDICT:` fallback, which is reliable across every backend.
+   * The trusted local reviewer sets this; flip it off only for a server you
+   * know does OpenAI tool-calling correctly. Defaults to false here so the
+   * client itself stays faithful to what it's told.
+   */
+  disableTools?: boolean;
   /** Injectable fetch for testing. Production leaves unset → global fetch. */
   fetchImpl?: FetchLike;
 }
+
+/**
+ * Chat-template sentinels some local servers (e.g. this build of
+ * `mlx_lm.server` with qwen) leak into the decoded `content` instead of
+ * stripping. Left in, they break the strict last-line `VERDICT:` parser and
+ * pollute prose, so the adapter scrubs them before handing text to the core.
+ */
+const SPECIAL_TOKEN_RE = /<\|(?:im_end|im_start|endoftext|eot_id)\|>/g;
 
 /** OpenAI chat-completions response subset we read. */
 interface OpenAIChatResponse {
@@ -81,13 +101,22 @@ export function createLocalReviewClient(
 ): ChatClientShape {
   const baseURL = (opts.baseURL ?? LOCAL_DEFAULT_BASE_URL).replace(/\/+$/, "");
   const apiKey = opts.apiKey ?? PLACEHOLDER_API_KEY;
+  const disableTools = opts.disableTools ?? false;
   const doFetch: FetchLike = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
 
   return {
     messages: {
       create: async (params, options) => {
         // Anthropic Messages → OpenAI Chat Completions request shape.
-        const body = {
+        const body: {
+          model: string;
+          max_tokens: number;
+          messages: Array<{ role: string; content: string }>;
+          tools?: Array<{
+            type: "function";
+            function: { name: string; description: string; parameters: unknown };
+          }>;
+        } = {
           model: params.model,
           max_tokens: params.max_tokens,
           messages: [
@@ -97,15 +126,20 @@ export function createLocalReviewClient(
               content: m.content,
             })),
           ],
-          tools: params.tools.map((t) => ({
+        };
+        // Only advertise tools when the backend can handle them. Several
+        // local servers (notably mlx_lm.server) crash when `tools` are
+        // present; the one-shot core's `VERDICT:` fallback covers those.
+        if (!disableTools && params.tools.length > 0) {
+          body.tools = params.tools.map((t) => ({
             type: "function" as const,
             function: {
               name: t.name,
               description: t.description,
               parameters: t.input_schema,
             },
-          })),
-        };
+          }));
+        }
 
         const res = await doFetch(`${baseURL}/chat/completions`, {
           method: "POST",
@@ -145,8 +179,12 @@ export function createLocalReviewClient(
           | { type: "tool_use"; name: string; input: unknown }
         > = [];
 
-        if (typeof message?.content === "string" && message.content.length > 0) {
-          content.push({ type: "text", text: message.content });
+        if (typeof message?.content === "string") {
+          // Scrub leaked chat-template sentinels (e.g. mlx_lm.server emits a
+          // trailing `<|im_end|>`) that would otherwise break the strict
+          // last-line VERDICT: parser and pollute prose.
+          const text = message.content.replace(SPECIAL_TOKEN_RE, "").trimEnd();
+          if (text.length > 0) content.push({ type: "text", text });
         }
         for (const tc of message?.tool_calls ?? []) {
           const name = tc.function?.name;

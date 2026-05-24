@@ -184,6 +184,44 @@ describe("createLocalReviewClient — response translation", () => {
   });
 });
 
+describe("createLocalReviewClient — disableTools + sanitization", () => {
+  it("includes tools in the request by default", async () => {
+    const { fetchImpl, calls } = fakeFetch({
+      choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+    });
+    const client = createLocalReviewClient({ fetchImpl });
+    await client.messages.create(chatParams());
+    const body = JSON.parse(calls[0]!.init.body);
+    assert.ok(Array.isArray(body.tools), "tools should be present by default");
+  });
+
+  it("omits tools when disableTools is set (mlx_lm.server crashes on them)", async () => {
+    const { fetchImpl, calls } = fakeFetch({
+      choices: [{ message: { content: "VERDICT: approved" }, finish_reason: "stop" }],
+    });
+    const client = createLocalReviewClient({ fetchImpl, disableTools: true });
+    await client.messages.create(chatParams());
+    const body = JSON.parse(calls[0]!.init.body);
+    assert.equal(body.tools, undefined, "tools must be omitted under disableTools");
+  });
+
+  it("strips leaked chat-template sentinels from content", async () => {
+    const { fetchImpl } = fakeFetch({
+      choices: [
+        {
+          message: { content: "VERDICT: approved<|im_end|>" },
+          finish_reason: "stop",
+        },
+      ],
+    });
+    const client = createLocalReviewClient({ fetchImpl });
+    const res = await client.messages.create(chatParams());
+    const block = res.content[0] as { type: string; text: string };
+    assert.equal(block.type, "text");
+    assert.equal(block.text, "VERDICT: approved");
+  });
+});
+
 describe("createLocalReviewClient — error surfacing", () => {
   it("throws with status + snippet on non-ok HTTP", async () => {
     const { fetchImpl } = fakeFetch(null, {
