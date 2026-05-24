@@ -49,6 +49,7 @@ import {
 import { runLog } from "./commands/log.js";
 import { runAttest } from "./commands/attest.js";
 import { runMerge } from "./commands/merge.js";
+import { runPrOpen } from "./commands/prOpen.js";
 import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
@@ -759,6 +760,55 @@ program
     } catch (err) {
       handleCliError(err);
     }
+  });
+
+const pr = program
+  .command("pr")
+  .description(
+    "GitHub PR integration for stamp — opt-in peer-agentic review broadcast",
+  );
+
+pr
+  .command("open <branch>")
+  .description(
+    "push <branch> to origin, open a GitHub PR via 'gh pr create', and broadcast a signed " +
+      "pr-opened event to the stamp-server so peer-agentic reviewers are notified. " +
+      "Plain 'git push' + 'gh pr create' do NOT trigger any broadcast — the opt-in boundary " +
+      "is enforced solely by this command.",
+  )
+  .option(
+    "--server <host:port>",
+    "override ~/.stamp/server.yml with an inline endpoint",
+  )
+  .option(
+    "--remote <name>",
+    "remote to push to (default: origin)",
+    "origin",
+  )
+  .addHelpText(
+    "after",
+    `
+Three-step sequence:
+  1. git push origin <branch>             — push the branch to the remote
+  2. gh pr create --head <branch> --fill  — open the GitHub PR
+  3. broadcast signed pr-opened payload   — notify stamp-server listeners
+
+Exit codes:
+  0   — full success (all three steps completed), OR stamp-server has peer
+        reviews disabled (STAMP_PEER_REVIEWS_ENABLED not set) — informational
+  1   — 'git push' failed; no PR opened, no broadcast attempted
+  3   — 'gh pr create' failed; push already landed — open PR manually or retry
+  4   — broadcast failed; PR is live on GitHub but listeners were not notified
+  127 — 'gh' (GitHub CLI) not found on PATH
+
+Prerequisites:
+  - 'gh' must be installed: https://cli.github.com
+  - stamp signing key at ~/.stamp/keys/ed25519 ('stamp keys generate' to create)
+  - stamp-server config at ~/.stamp/server.yml ('stamp server config <host:port>' to set)
+`,
+  )
+  .action(async (branch: string, opts: { server?: string; remote: string }) => {
+    await runPrOpen({ branch, server: opts.server, remote: opts.remote });
   });
 
 program

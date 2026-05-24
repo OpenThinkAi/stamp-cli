@@ -287,7 +287,7 @@ export interface AttestationEnvelopeV4 {
  * this because the operator is the only signer and the verifier
  * round-trips the exact base64'd bytes from the commit trailer.
  */
-function sortKeysDeep(value: unknown): unknown {
+export function sortKeysDeep(value: unknown): unknown {
   if (value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map(sortKeysDeep);
   const obj = value as Record<string, unknown>;
@@ -320,6 +320,37 @@ export function canonicalSerializeApproval(a: ApprovalV4): Buffer {
  */
 export function canonicalSerializePayload(p: AttestationPayloadV4): Buffer {
   return Buffer.from(JSON.stringify(sortKeysDeep(p)), "utf8");
+}
+
+/**
+ * Fields of the `pr-opened` broadcast payload that are covered by the
+ * client's Ed25519 signature (all fields excluding `signature` itself).
+ * Used by `prOpenedClient.ts` to produce the signing target and
+ * documented here so a future server-side or WS verifier can match
+ * exactly this field set without re-deriving the shape.
+ */
+export interface PrOpenedPayloadBody {
+  repo: string;
+  patch_id: string;
+  base_sha: string;
+  head_sha: string;
+  requested_by_fp: string;
+  paths_changed: string[];
+  title: string;
+  body: string;
+  pr_url: string;
+}
+
+/**
+ * Canonical bytes the client's Ed25519 signature is computed over for a
+ * `pr-opened` broadcast. Covers all fields in `PrOpenedPayloadBody` (every
+ * field of the payload EXCLUDING the `signature` field itself). The signing
+ * target is `sortKeysDeep` + `JSON.stringify` over those fields so a future
+ * verifier (server-side or WS) can reproduce the bytes without coordinating
+ * beyond "apply this function to the payload minus the signature field."
+ */
+export function canonicalSerializePrOpened(body: PrOpenedPayloadBody): Buffer {
+  return Buffer.from(JSON.stringify(sortKeysDeep(body)), "utf8");
 }
 
 /**
