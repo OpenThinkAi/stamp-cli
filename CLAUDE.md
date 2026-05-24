@@ -11,7 +11,7 @@ For everything else, the primary docs are:
 
 If you're here to help maintain or extend stamp-cli itself, see [`CONTRIBUTING.md`](./CONTRIBUTING.md) — this repo is stamp-gated, so changes go through the standard `stamp review → merge → push` cycle.
 
-<!-- stamp:claude:begin (managed by stamp-cli — do not edit between markers) -->
+<!-- stamp:begin (managed by `stamp init` — do not edit between markers) -->
 
 ## Stamp-protected repository — read AGENTS.md before any git operation
 
@@ -27,8 +27,10 @@ stamp review --diff main..feature       # all reviewers run in parallel
 stamp status --diff main..feature       # gate check (exit 0 = open)
 git checkout main
 stamp merge feature --into main         # signs the merge
-git push origin main                    # OR `stamp push main` if origin is a stamp server
+stamp push main                         # push to the stamp server; pre-receive hook verifies the signed merge
 ```
+
+Key commands: `stamp provision` — provision a new repo; `stamp review` — run reviewers; `stamp merge` — sign a merge; `stamp push` — push to a stamp server.
 
 **The full reference is at [`AGENTS.md`](./AGENTS.md) at the repo root** —
 read it before any git command. It covers the mode (server-gated vs.
@@ -40,7 +42,7 @@ blocks you.
 (there's nothing to review against). Recent `stamp init` runs do this commit
 automatically. Every subsequent change goes through the stamp flow.
 
-<!-- stamp:claude:end -->
+<!-- stamp:end -->
 
 <!-- think:retro:begin (managed by `think init --retro` — do not edit between markers) -->
 # Iterative Learning
