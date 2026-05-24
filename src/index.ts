@@ -50,6 +50,7 @@ import { runLog } from "./commands/log.js";
 import { runAttest } from "./commands/attest.js";
 import { runMerge } from "./commands/merge.js";
 import { runPrOpen } from "./commands/prOpen.js";
+import { runPrListen } from "./commands/prListen.js";
 import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
@@ -809,6 +810,54 @@ Prerequisites:
   )
   .action(async (branch: string, opts: { server?: string; remote: string }) => {
     await runPrOpen({ branch, server: opts.server, remote: opts.remote });
+  });
+
+pr
+  .command("listen")
+  .description(
+    "subscribe to peer-review PR events for the given org(s) and run the builtin-default review " +
+      "for each incoming PR-opened event. Runs as a foreground loop until ctrl-C.",
+  )
+  .requiredOption(
+    "--org <org>",
+    "org slug to subscribe to (repeat for multiple orgs)",
+    (v: string, acc: string[]) => { acc.push(v); return acc; },
+    [] as string[],
+  )
+  .option(
+    "--server <host:port>",
+    "override ~/.stamp/server.yml with an inline endpoint",
+  )
+  .addHelpText(
+    "after",
+    `
+Subscribes the operator's stamp identity to PR-opened events for the given orgs,
+then loops indefinitely:
+  - Receives pr-opened events via the in-process fanout registry (wire-frame;
+    real cross-process delivery via WebSocket transport is not yet implemented)
+  - Applies author-exclusion (skips own PRs)
+  - Claims a reviewer seat; runs the builtin-default review via the Claude Agent SDK
+  - Posts the result via 'gh pr review --comment'
+  - Sends a heartbeat every 60 s to keep the seat alive
+
+Exit codes:
+  0   — clean shutdown (ctrl-C / SIGINT)
+  1   — auth failure (no signing key, subscribe failed)
+  2   — arg-parse error (--org is required)
+
+Prerequisites:
+  - 'gh' must be installed: https://cli.github.com
+  - stamp signing key at ~/.stamp/keys/ed25519 ('stamp keys generate' to create)
+  - stamp-server config at ~/.stamp/server.yml ('stamp server config <host:port>' to set)
+`,
+  )
+  .action(async (opts: { org: string[]; server?: string }) => {
+    const orgs: string[] = Array.isArray(opts.org) ? opts.org : [opts.org];
+    if (orgs.length === 0) {
+      process.stderr.write(`error: --org is required (repeat for multiple orgs)\n`);
+      process.exit(2);
+    }
+    await runPrListen({ orgs, server: opts.server });
   });
 
 program
