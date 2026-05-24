@@ -1017,6 +1017,14 @@ invites
   .option("--stamp-pubkey <path>", "override stamp signing pubkey path (default ~/.stamp/keys/ed25519.pub)")
   .option("--short-name <name>", "override the short_name (default derived from user@host)")
   .option("--yes", "skip the confirmation prompt (required for non-TTY stdin)")
+  .option(
+    "--insecure-http-for-dev",
+    "use plaintext HTTP for the accept POST (dev / LAN only; default is HTTPS). Requires --accept-insecure.",
+  )
+  .option(
+    "--accept-insecure",
+    "explicit consent to send the token + SSH pubkey over plaintext HTTP (required with --insecure-http-for-dev; --yes alone does NOT enable HTTP)",
+  )
   .action(
     async (
       urlOrToken: string,
@@ -1026,6 +1034,8 @@ invites
         stampPubkey?: string;
         shortName?: string;
         yes?: boolean;
+        insecureHttpForDev?: boolean;
+        acceptInsecure?: boolean;
       },
     ) => {
       try {
@@ -1036,6 +1046,8 @@ invites
           stampPubkeyPath: opts.stampPubkey,
           shortName: opts.shortName,
           yes: opts.yes,
+          insecureHttpForDev: opts.insecureHttpForDev,
+          acceptInsecure: opts.acceptInsecure,
         });
       } catch (err) {
         handleCliError(err);

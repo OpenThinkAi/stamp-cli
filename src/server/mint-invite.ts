@@ -95,20 +95,20 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { short_name, role };
 }
 
-function publicHostFromUrl(url: string): { host: string; insecure: boolean } {
+function publicHostFromUrl(url: string): { host: string; isHttp: boolean } {
   // STAMP_PUBLIC_URL examples:
   //   https://stamp.example.com           (port implicit at 443)
   //   https://stamp.example.com:8443
-  //   http://localhost:8080               (dev — `insecure` flips on)
-  // The invite URL omits scheme; the receiving CLI defaults to https.
-  // For dev/self-hosted-on-LAN setups the operator points STAMP_PUBLIC_URL
-  // at http://...; we prepend `?insecure=1` to the share URL so the CLI
-  // knows to use plain HTTP for the accept POST.
+  //   http://localhost:8080               (dev / self-hosted-on-LAN)
+  // The invite URL omits scheme AND carries no transport marker (AGT-416):
+  // the receiving CLI defaults to HTTPS and an invitee must opt into plain
+  // HTTP explicitly. `isHttp` is used ONLY to append a dev-ergonomics hint
+  // to the stderr note — it never changes the emitted URL.
   try {
     const u = new URL(url);
     const host = u.host;
     if (!host) throw new Error("URL has no host");
-    return { host, insecure: u.protocol === "http:" };
+    return { host, isHttp: u.protocol === "http:" };
   } catch (e) {
     fail(`STAMP_PUBLIC_URL is malformed: ${(e as Error).message}`, 1);
   }
@@ -183,8 +183,9 @@ function main(): void {
       invited_by: callerRow.id,
     });
 
-    const insecureSuffix = publicEndpoint.insecure ? "?insecure=1" : "";
-    const shareUrl = `stamp+invite://${publicEndpoint.host}/${minted.token}${insecureSuffix}`;
+    // AGT-416: bare URL, no transport marker. Transport is the invitee's
+    // client-side decision (defaults to HTTPS).
+    const shareUrl = `stamp+invite://${publicEndpoint.host}/${minted.token}`;
     // stdout = the URL only — that's the machine-readable contract the
     // calling CLI captures and prints to the operator.
     process.stdout.write(shareUrl + "\n");
@@ -194,8 +195,14 @@ function main(): void {
       `note: minted invite for short_name=${args.short_name} role=${args.role} ` +
         `(expires in ~${expiresInMin}m, invited_by=${callerRow.short_name})\n`,
     );
+    // On a plain-HTTP (dev/LAN) server the invitee must opt into plaintext
+    // transport explicitly — surface the exact command so they don't hit a
+    // cryptic HTTPS-connection failure against an http-only endpoint.
+    const acceptHint = publicEndpoint.isHttp
+      ? ` --insecure-http-for-dev --accept-insecure`
+      : "";
     process.stderr.write(
-      `note: invitee runs:  stamp invites accept "${shareUrl}"\n`,
+      `note: invitee runs:  stamp invites accept "${shareUrl}"${acceptHint}\n`,
     );
   } finally {
     db.close();

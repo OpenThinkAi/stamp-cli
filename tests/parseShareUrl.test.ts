@@ -17,28 +17,34 @@ describe("parseShareUrl", () => {
     const r = parseShareUrl(`stamp+invite://stamp.example.com:8443/${VALID_TOKEN}`);
     assert.equal(r.host, "stamp.example.com:8443");
     assert.equal(r.token, VALID_TOKEN);
-    assert.equal(r.insecure, false);
+    // AGT-416: the URL carries no transport marker anymore.
+    assert.equal("insecure" in r, false);
   });
 
   it("parses a URL with implicit port (just hostname)", () => {
     const r = parseShareUrl(`stamp+invite://stamp.example.com/${VALID_TOKEN}`);
     assert.equal(r.host, "stamp.example.com");
     assert.equal(r.token, VALID_TOKEN);
-    assert.equal(r.insecure, false);
   });
 
-  it("flips insecure on ?insecure=1", () => {
+  it("strips and IGNORES a legacy ?insecure=1 query (no transport effect)", () => {
+    // AGT-416: legacy URLs still parse, but the query can no longer
+    // influence transport — there is no `insecure` field to flip.
     const r = parseShareUrl(`stamp+invite://localhost:8080/${VALID_TOKEN}?insecure=1`);
     assert.equal(r.host, "localhost:8080");
     assert.equal(r.token, VALID_TOKEN);
-    assert.equal(r.insecure, true);
+    assert.equal("insecure" in r, false);
+  });
+
+  it("strips an arbitrary trailing query string too", () => {
+    const r = parseShareUrl(`stamp+invite://localhost:8080/${VALID_TOKEN}?foo=bar&baz=1`);
+    assert.equal(r.token, VALID_TOKEN);
   });
 
   it("accepts a bare token when --server is supplied", () => {
     const r = parseShareUrl(VALID_TOKEN, "stamp.example.com:443");
     assert.equal(r.host, "stamp.example.com:443");
     assert.equal(r.token, VALID_TOKEN);
-    assert.equal(r.insecure, false);
   });
 
   it("rejects a bare token without --server", () => {

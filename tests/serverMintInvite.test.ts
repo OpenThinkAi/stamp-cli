@@ -145,7 +145,9 @@ describe("stamp-mint-invite — success path", () => {
     }
   });
 
-  it("flips ?insecure=1 onto the URL when STAMP_PUBLIC_URL is http", () => {
+  it("emits a BARE url (no ?insecure marker) even when STAMP_PUBLIC_URL is http", () => {
+    // AGT-416: transport is never baked into the URL. On an http server the
+    // URL stays bare; the stderr note carries the dev opt-in hint instead.
     const h = setup("admin");
     try {
       const r = runMintInvite(h, ["dev-user"], {
@@ -153,7 +155,10 @@ describe("stamp-mint-invite — success path", () => {
       });
       assert.equal(r.status, 0, `stderr=${r.stderr}`);
       const url = r.stdout.trim();
-      assert.match(url, /^stamp\+invite:\/\/localhost:8080\/[A-Za-z0-9_-]{43}\?insecure=1$/);
+      assert.match(url, /^stamp\+invite:\/\/localhost:8080\/[A-Za-z0-9_-]{43}$/);
+      assert.doesNotMatch(url, /insecure/);
+      // dev-ergonomics hint surfaces the opt-in flags on the invitee command
+      assert.match(r.stderr, /--insecure-http-for-dev --accept-insecure/);
     } finally {
       h.cleanup();
     }

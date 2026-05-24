@@ -156,6 +156,45 @@ export interface InvitesAcceptOptions {
   stampPubkeyPath?: string;
   shortName?: string;
   yes?: boolean;
+  /**
+   * AGT-416: opt into plaintext HTTP transport for the accept POST
+   * (dev / self-hosted-on-LAN). Default (false) is HTTPS. Selecting HTTP
+   * ALSO requires `acceptInsecure` — see `resolveAcceptTransport`.
+   */
+  insecureHttpForDev?: boolean;
+  /**
+   * AGT-416: explicit consent to transmit the single-use invite token +
+   * SSH pubkey over plaintext. Required in addition to `insecureHttpForDev`
+   * and checked independently of `yes` — `--yes` alone must never enable
+   * HTTP.
+   */
+  acceptInsecure?: boolean;
+}
+
+/**
+ * Decide the accept-POST transport entirely client-side (AGT-416). Pure
+ * so the transport contract is unit-testable without a live server.
+ *
+ * Default is HTTPS. Plaintext HTTP requires BOTH `insecureHttpForDev`
+ * (transport selection) AND `acceptInsecure` (explicit plaintext consent).
+ * The two-flag gate is deliberate: it makes `--yes` insufficient on its
+ * own to downgrade transport, so an agent passing `--yes` can never
+ * silently ship the token + pubkey in the clear.
+ */
+export function resolveAcceptTransport(opts: {
+  insecureHttpForDev?: boolean;
+  acceptInsecure?: boolean;
+}): { useHttp: boolean } {
+  if (!opts.insecureHttpForDev) return { useHttp: false };
+  if (!opts.acceptInsecure) {
+    throw new UsageError(
+      "--insecure-http-for-dev selects plaintext HTTP, which transmits the " +
+        "single-use invite token and your SSH public key UNENCRYPTED. This " +
+        "requires explicit consent: re-run with --accept-insecure as well. " +
+        "(--yes does NOT enable HTTP.) Omit both flags to use HTTPS (default).",
+    );
+  }
+  return { useHttp: true };
 }
 
 function defaultSshPubkeyPath(): string {
@@ -215,6 +254,7 @@ function loadStampPubkey(path: string): DetectedStamp | null {
 
 async function postAccept(
   target: ParsedShareTarget,
+  useHttp: boolean,
   body: {
     token: string;
     ssh_pubkey: string;
@@ -223,10 +263,10 @@ async function postAccept(
   },
 ): Promise<{ status: number; body: unknown }> {
   const payload = Buffer.from(JSON.stringify(body), "utf8");
-  const requestFn = target.insecure ? httpRequest : httpsRequest;
+  const requestFn = useHttp ? httpRequest : httpsRequest;
   return new Promise((resolve, reject) => {
     const req = requestFn(
-      `${target.insecure ? "http" : "https"}://${target.host}/invite/accept`,
+      `${useHttp ? "http" : "https"}://${target.host}/invite/accept`,
       {
         method: "POST",
         headers: {
@@ -304,6 +344,21 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
     throw e;
   }
 
+  // Resolve transport client-side (AGT-416) BEFORE any network work, so an
+  // HTTP request without the required consent fails fast with a clear
+  // error rather than after key-loading side effects.
+  const { useHttp } = resolveAcceptTransport({
+    insecureHttpForDev: opts.insecureHttpForDev,
+    acceptInsecure: opts.acceptInsecure,
+  });
+  if (useHttp) {
+    process.stderr.write(
+      `warning: sending the invite token and your SSH public key over ` +
+        `PLAINTEXT HTTP to ${target.host} — readable by anyone on the ` +
+        `network path. Only use this against a trusted dev / LAN server.\n`,
+    );
+  }
+
   const sshPath = opts.sshPubkeyPath ?? defaultSshPubkeyPath();
   const ssh = loadSshPubkey(sshPath);
 
@@ -333,7 +388,7 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
     });
     try {
       process.stdout.write(
-        `Accepting invite at ${target.insecure ? "http" : "https"}://${target.host}\n` +
+        `Accepting invite at ${useHttp ? "http" : "https"}://${target.host}\n` +
           `\n` +
           `  ssh pubkey:     ${ssh.path}\n` +
           `                  ${ssh.fingerprint}\n` +
@@ -358,7 +413,7 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
     }
   }
 
-  const response = await postAccept(target, {
+  const response = await postAccept(target, useHttp, {
     token: target.token,
     ssh_pubkey: ssh.full,
     stamp_pubkey: stamp?.pem ?? null,
