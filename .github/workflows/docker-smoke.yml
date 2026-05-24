@@ -1,0 +1,36 @@
+name: docker-smoke
+
+# Build the stamp-server image AND boot it, on every push to main and every
+# PR. This is the BACKSTOP layer for AGT-425: the blocking gate is the local
+# `docker-boot-smoke` required_check that runs during `stamp merge` (the only
+# thing that fires before the push → GitHub-mirror → Railway redeploy, since
+# Railway auto-deploys main without waiting on CI). This job runs AFTER that
+# push, so it's post-hoc visibility — it catches a boot regression that the
+# local check skipped (e.g. a lib-only change that nonetheless affects boot)
+# and gives outside-contributor PRs a green/red signal without the stamp key.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  boot-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      # SHA-pinned, matching ci.yml / publish.yml — a mutable tag on a CI
+      # action is a supply-chain foot-gun.
+      - name: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # STAMP_SMOKE_FORCE=1 makes the script build + boot unconditionally
+      # (it has no merge commit to diff against here, and we want CI to
+      # always exercise the image regardless of what changed).
+      - name: docker boot-smoke
+        run: STAMP_SMOKE_FORCE=1 bash scripts/docker-boot-smoke.sh
