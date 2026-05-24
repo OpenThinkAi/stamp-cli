@@ -9,6 +9,24 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 > Contains a breaking removal — the next release should be a **major** version cut.
 
+### Security
+
+- **AGT-411: Enforce `STAMP_PROMPTS_DIR` production refusal.** The server now
+  hard-fails at boot when `STAMP_PROMPTS_DIR` is set to a non-default path in a
+  production context (`STAMP_ENV` absent or `production`). This closes the
+  prompt-substitution attack vector: a platform operator with env-var access
+  could previously point `STAMP_PROMPTS_DIR` at an attacker-writable directory
+  and substitute reviewer prompts at review time while attestations continued to
+  verify cleanly downstream. The enforcement is two-layer: (1) `entrypoint.sh`
+  calls the new `server/lib/check-prompts-dir.sh` guard at boot, refusing to
+  start; (2) `resolvePromptCacheRoot()` in `src/server/reviewPipeline.ts`
+  hard-errors per-request in case the entrypoint guard is bypassed. To use a
+  custom prompts directory in non-production environments, set both
+  `STAMP_ENV=dev` (or `=test`) and `STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY=1`.
+  The insecure-test toggle is explicitly rejected in production (AC #3).
+  Phase B deployments (`STAMP_PROMPTS_REPO_URL` set) are not affected — the
+  guard is a no-op when Phase B is active.
+
 ### Removed
 
 - **Shape 2 (mirror-mode PR) deployment topology.** `stamp init --pr-mode`
