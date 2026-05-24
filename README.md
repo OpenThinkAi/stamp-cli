@@ -490,14 +490,30 @@ API call, nothing metered:
 
 ```yaml
 reviewers:
-  security: local:qwen2.5-coder-32b      # runs on the local endpoint
-  standards: claude-sonnet-4-6           # still Anthropic
-local_endpoint: http://localhost:1234/v1  # optional; defaults to LM Studio
+  security: local:lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-4bit  # local
+  standards: claude-sonnet-4-6                                              # Anthropic
+local_endpoint: http://localhost:8080/v1   # e.g. mlx_lm.server; LM Studio uses :1234
 ```
 
-`stamp config reviewers set security local:qwen2.5-coder-32b` works through
-the same CLI; `local_endpoint` is hand-edited (it's machine-specific).
-Mix and match — some reviewers local, some Anthropic — per reviewer.
+The id after `local:` is whatever the server reports at `GET <endpoint>/models`.
+
+`stamp config reviewers set security local:<model-id>` works through the
+same CLI; `local_endpoint` is hand-edited (it's machine-specific). Mix and
+match — some reviewers local, some Anthropic — per reviewer.
+
+**Per-run override.** Set `STAMP_REVIEWER_BACKEND=anthropic` to force every
+reviewer onto the Anthropic agent-SDK path for a single run, ignoring any
+`local:` config — for someone who normally runs local but wants to review on
+Claude this time:
+
+```
+STAMP_REVIEWER_BACKEND=anthropic stamp review --diff main..feature
+```
+
+It uses your logged-in Claude session (no `ANTHROPIC_API_KEY` needed) and
+accepts the post-June-15 metering. A `local:` reviewer's model id isn't valid
+for Anthropic, so it falls back to the SDK default model; reviewers pinned to
+a real Anthropic model keep it.
 
 **Trust posture is identical to the Anthropic local-LLM path.** A local
 reviewer produces a verdict that gates `stamp merge` exactly like the SDK
@@ -508,19 +524,24 @@ the review off the metered path. (And because an all-local run sends nothing
 off-host, it skips the Anthropic data-flow consent gate — useful for
 regulated / air-gapped repos.)
 
-**Setup (LM Studio):** load the model → **Developer** → **Start Server** →
-`curl http://localhost:1234/v1/models` to get the exact model id → put that
-id after `local:`.
+**Setup.** Any OpenAI-compatible server works. Two common ones:
+
+- **`mlx_lm.server`** (Apple Silicon): `mlx_lm.server --model <hf-repo-id> --port 8080` → endpoint `http://localhost:8080/v1`.
+- **LM Studio**: load the model → **Developer** → **Start Server** → endpoint `http://localhost:1234/v1`.
+
+Then `curl <endpoint>/models` for the exact model id, put it after `local:`, and set `local_endpoint` to match.
 
 **v1 limitations.** The local reviewer is one-shot (a single model turn, no
 agentic file-reading tools): it sees the diff, not the surrounding tree. For
 a reviewer with `enforce_reads_on_dotstamp` (the `security` default), stamp
 auto-includes the full content of changed `.stamp/*` files in the prompt so
-trust-anchor changes are still inspected. The model should support
-tool-calling for the structured `submit_verdict`; if it doesn't, end the
-reviewer prompt with a `VERDICT: <choice>` line (stamp parses that as a
-fallback). The prior-review "ratchet" prose is Anthropic-path-only for now —
-the local path still gets the narrowed delta diff across rounds.
+trust-anchor changes are still inspected. It does **not** use tool-calling —
+several local servers (notably `mlx_lm.server`) mishandle or crash on the
+`tools` parameter — so the verdict comes through a `VERDICT:` line that
+stamp's prompt appends automatically and parses leniently (markdown/case
+tolerant); just write your reviewer prompt normally. The prior-review
+"ratchet" prose is Anthropic-path-only for now — the local path still gets
+the narrowed delta diff across rounds.
 
 ### Reviewer execution budgets
 

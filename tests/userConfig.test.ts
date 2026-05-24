@@ -293,6 +293,45 @@ describe("resolveReviewerBackend + local: scheme", () => {
     assert.equal(resolveReviewerModel("security"), null);
   });
 
+  it("STAMP_REVIEWER_BACKEND=anthropic forces the SDK path, dropping local: to null", () => {
+    writeUserConfig({
+      reviewers: {
+        security: `${LOCAL_MODEL_PREFIX}qwen`,
+        standards: "claude-opus-4-7",
+      },
+      local_endpoint: "http://localhost:8080/v1",
+    });
+    const saved = process.env.STAMP_REVIEWER_BACKEND;
+    process.env.STAMP_REVIEWER_BACKEND = "anthropic";
+    try {
+      // local: reviewer → anthropic with null model (SDK default)
+      assert.deepEqual(resolveReviewerBackend("security"), {
+        kind: "anthropic",
+        model: null,
+      });
+      // a real anthropic model id is preserved under the override
+      assert.deepEqual(resolveReviewerBackend("standards"), {
+        kind: "anthropic",
+        model: "claude-opus-4-7",
+      });
+    } finally {
+      if (saved === undefined) delete process.env.STAMP_REVIEWER_BACKEND;
+      else process.env.STAMP_REVIEWER_BACKEND = saved;
+    }
+  });
+
+  it("an unrecognized STAMP_REVIEWER_BACKEND value is ignored (config wins)", () => {
+    writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
+    const saved = process.env.STAMP_REVIEWER_BACKEND;
+    process.env.STAMP_REVIEWER_BACKEND = "banana";
+    try {
+      assert.equal(resolveReviewerBackend("security").kind, "local");
+    } finally {
+      if (saved === undefined) delete process.env.STAMP_REVIEWER_BACKEND;
+      else process.env.STAMP_REVIEWER_BACKEND = saved;
+    }
+  });
+
   it("round-trips local_endpoint through stringify + parse", () => {
     const cfg = {
       reviewers: { security: "local:qwen" },

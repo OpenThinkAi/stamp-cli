@@ -328,6 +328,24 @@ export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
     cfg = null;
   }
   const raw = cfg?.reviewers[reviewer];
+
+  // Operator override: `STAMP_REVIEWER_BACKEND=anthropic` forces the Anthropic
+  // agent-SDK path for every reviewer regardless of any `local:` config. This
+  // is the escape hatch for "I normally run local, but this run I want Claude"
+  // — it uses the logged-in Claude session (no API key required) and accepts
+  // the post-June-15 metering. A `local:` value carries a local model id that
+  // isn't valid for Anthropic, so it drops to null (SDK default); a real
+  // Anthropic model id is preserved.
+  if (
+    process.env.STAMP_REVIEWER_BACKEND?.trim().toLowerCase() === "anthropic"
+  ) {
+    return typeof raw === "string" &&
+      raw.length > 0 &&
+      !raw.startsWith(LOCAL_MODEL_PREFIX)
+      ? { kind: "anthropic", model: raw }
+      : { kind: "anthropic", model: null };
+  }
+
   if (typeof raw !== "string" || raw.length === 0) {
     return { kind: "anthropic", model: null };
   }
