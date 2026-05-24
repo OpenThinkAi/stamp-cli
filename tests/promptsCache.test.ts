@@ -37,8 +37,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import {
+  buildCloneArgs,
+  buildRemoteSetUrlArgs,
   cloneOrFetchPromptsCache,
   getPromptPath,
+  scrubGitUrlCredentials,
 } from "../src/server/prompts-cache.ts";
 
 // ─── fixture helpers ─────────────────────────────────────────────────
@@ -377,5 +380,105 @@ describe("cloneOrFetchPromptsCache — input validation", () => {
       cloneOrFetchPromptsCache({ url: "file:///x.git", ref: "main" }),
       /cacheRoot is required/,
     );
+  });
+
+  // AGT-417: URL shape validation (option-injection / whitespace / controls)
+  it("rejects a `-`-leading url (git option-injection class)", async () => {
+    await assert.rejects(
+      cloneOrFetchPromptsCache({
+        url: "--upload-pack=touch /tmp/pwned",
+        ref: "main",
+        cacheRoot: join(workRoot, "cache"),
+      }),
+      /not an accepted git URL shape/,
+    );
+  });
+
+  it("rejects a url containing whitespace", async () => {
+    await assert.rejects(
+      cloneOrFetchPromptsCache({
+        url: "https://example.com/a b.git",
+        ref: "main",
+        cacheRoot: join(workRoot, "cache"),
+      }),
+      /not an accepted git URL shape/,
+    );
+  });
+
+  it("rejects a url containing a control character", async () => {
+    await assert.rejects(
+      cloneOrFetchPromptsCache({
+        url: "https://example.com/a" + String.fromCharCode(1) + "b.git",
+        ref: "main",
+        cacheRoot: join(workRoot, "cache"),
+      }),
+      /not an accepted git URL shape/,
+    );
+  });
+
+  it("masks embedded credentials in the thrown error (no network)", async () => {
+    // Well-shaped file:// URL with userinfo → passes the shape check, then
+    // git clone fails fast locally (no such repo). The thrown error must
+    // mask the token. Pins AC4's credential-masking on the error path.
+    let err: Error | null = null;
+    try {
+      await cloneOrFetchPromptsCache({
+        url: "file://x-access-token:SUPERSECRET@/nonexistent/repo.git",
+        ref: "main",
+        cacheRoot: join(workRoot, "fresh-cache"),
+      });
+    } catch (e) {
+      err = e as Error;
+    }
+    assert.ok(err, "expected the clone to fail");
+    assert.ok(
+      !err!.message.includes("SUPERSECRET"),
+      `token leaked in error: ${err!.message}`,
+    );
+    assert.match(err!.message, /\*\*\*@/);
+  });
+});
+
+describe("scrubGitUrlCredentials (AGT-417)", () => {
+  it("masks userinfo for any scheme", () => {
+    assert.equal(
+      scrubGitUrlCredentials("https://x-access-token:TOK@github.com/o/r.git"),
+      "https://***@github.com/o/r.git",
+    );
+    assert.equal(
+      scrubGitUrlCredentials("ssh://user:pw@host/path"),
+      "ssh://***@host/path",
+    );
+  });
+
+  it("leaves the scp-short git@host: form alone (no inline secret)", () => {
+    assert.equal(
+      scrubGitUrlCredentials("git@github.com:o/r.git"),
+      "git@github.com:o/r.git",
+    );
+  });
+
+  it("leaves a credential-free URL unchanged", () => {
+    assert.equal(
+      scrubGitUrlCredentials("https://github.com/o/r.git"),
+      "https://github.com/o/r.git",
+    );
+  });
+});
+
+describe("git argv builders carry the -- terminator (AGT-417)", () => {
+  it("buildCloneArgs puts -- before the url positional", () => {
+    const args = buildCloneArgs("main", "https://h/r.git", "/tmp/x");
+    assert.deepEqual(args, [
+      "clone", "--quiet", "--branch", "main", "--", "https://h/r.git", "/tmp/x",
+    ]);
+    // the url must come AFTER the -- terminator
+    assert.ok(args.indexOf("--") < args.indexOf("https://h/r.git"));
+  });
+
+  it("buildRemoteSetUrlArgs puts -- before the url positional", () => {
+    const args = buildRemoteSetUrlArgs("https://h/r.git");
+    assert.deepEqual(args, ["remote", "set-url", "origin", "--", "https://h/r.git"]);
+    assert.ok(args.indexOf("--") < args.indexOf("https://h/r.git"));
   });
 });
