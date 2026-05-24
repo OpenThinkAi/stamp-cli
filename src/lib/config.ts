@@ -238,9 +238,56 @@ export interface McpServerDef {
  */
 export const ENV_IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/**
+ * Optional top-level `data_flow:` block (AGT-415). Operator-authored
+ * disclosure that `stamp review` echoes, plus an opt-in confirmation gate
+ * for regulated repos. Every `stamp review` ships the diff off-host to a
+ * sub-processor (Anthropic, directly or via a `review_server`); this block
+ * lets an operator commit a project-specific disclosure and — for repos
+ * under regulated content — require an explicit committed acknowledgement
+ * before any review runs.
+ *
+ * IMPORTANT (security): this is a TOP-LEVEL field. It does NOT enter the
+ * v3/v4 reviewer attestation hash chain (which hashes only per-reviewer
+ * `prompt`/`tools`/`mcp_servers` — see `reviewerHash.ts`), so it is a
+ * purely additive config field: existing attestations and `stamp verify`
+ * are unaffected. Like every other policy field, `stamp review` reads it
+ * from the merge-base tree, NOT the working tree — so a feature branch
+ * cannot ship its own `confirmed: true` to wave its own introduction past
+ * the gate.
+ */
+export interface DataFlowConfig {
+  /**
+   * Operator-authored sub-processor disclosure prose. When present,
+   * `stamp review` echoes it to stderr on every run (AC #2). Free-form;
+   * multi-line is fine. Echo is silenced by `STAMP_SUPPRESS_LLM_NOTICE=1`
+   * along with the rest of the data-flow notices.
+   */
+  disclosure?: string;
+  /**
+   * Opt-in regulated marker (AC #3). When `true`, `stamp review` REFUSES
+   * to run unless `confirmed: true` is also committed. Absent/false means
+   * the block is disclosure-only: it echoes (if `disclosure` is set) but
+   * never blocks. This is the ONLY field that arms the gate — adding
+   * disclosure text alone never bricks review for a non-regulated repo.
+   */
+  require_confirmation?: boolean;
+  /**
+   * Operator's committed acknowledgement of the data flow. Only meaningful
+   * when `require_confirmation: true`; in that case review proceeds iff
+   * this is exactly `true`. Committing it (rather than passing a flag at
+   * runtime) is deliberate: the acknowledgement itself goes through stamp
+   * review, leaving an auditable record of who accepted the sub-processor
+   * disclosure.
+   */
+  confirmed?: boolean;
+}
+
 export interface StampConfig {
   branches: Record<string, BranchRule>;
   reviewers: Record<string, ReviewerDef>;
+  /** Optional sub-processor disclosure + confirmation gate (AGT-415). */
+  data_flow?: DataFlowConfig;
 }
 
 export function loadConfig(path: string): StampConfig {
@@ -394,7 +441,51 @@ function validateConfig(input: unknown): StampConfig {
     };
   }
 
-  return { branches, reviewers };
+  const data_flow = parseDataFlow(obj.data_flow);
+
+  return { branches, reviewers, ...(data_flow ? { data_flow } : {}) };
+}
+
+function parseDataFlow(input: unknown): DataFlowConfig | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("config.data_flow must be an object");
+  }
+  const d = input as Record<string, unknown>;
+
+  let disclosure: string | undefined;
+  if (d.disclosure !== undefined) {
+    if (typeof d.disclosure !== "string") {
+      throw new Error("config.data_flow.disclosure must be a string");
+    }
+    disclosure = d.disclosure;
+  }
+
+  let require_confirmation: boolean | undefined;
+  if (d.require_confirmation !== undefined) {
+    if (typeof d.require_confirmation !== "boolean") {
+      throw new Error(
+        `config.data_flow.require_confirmation must be a boolean (got ${JSON.stringify(d.require_confirmation)})`,
+      );
+    }
+    require_confirmation = d.require_confirmation;
+  }
+
+  let confirmed: boolean | undefined;
+  if (d.confirmed !== undefined) {
+    if (typeof d.confirmed !== "boolean") {
+      throw new Error(
+        `config.data_flow.confirmed must be a boolean (got ${JSON.stringify(d.confirmed)})`,
+      );
+    }
+    confirmed = d.confirmed;
+  }
+
+  return {
+    ...(disclosure !== undefined ? { disclosure } : {}),
+    ...(require_confirmation !== undefined ? { require_confirmation } : {}),
+    ...(confirmed !== undefined ? { confirmed } : {}),
+  };
 }
 
 function parsePositiveInt(input: unknown, path: string): number | undefined {

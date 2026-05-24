@@ -671,17 +671,61 @@ required.
   SHAs, signer key fingerprint, and a tool-call audit trace (tool
   names + input hashes — not the diff content itself).
 
-**Disclosure on first run.** The first `stamp review` in a repo prints
-a short note (to stderr) pointing at this section. The notice is
-recorded under `.git/stamp/llm-notice-shown` and not repeated. To
-suppress it unconditionally — agent loops, CI workers, environments
-where the disclosure has already been baked into team docs — set
-`STAMP_SUPPRESS_LLM_NOTICE=1`.
+**Disclosure on run.** Two notices fire on stderr:
+
+- The first `stamp review` in a repo prints a short one-time note
+  pointing at this section, recorded under `.git/stamp/llm-notice-shown`
+  and not repeated.
+- **Every** `stamp review` prints a terse per-invocation marker —
+  `note: diff sent off-host for review (N reviewers).` — so the data
+  flow is visible even in an agent loop or CI run that misses the
+  one-time note. It is mode-neutral: it reads accurately whether the
+  diff goes directly to Anthropic or through a `review_server` that
+  calls Anthropic on the client's behalf.
+
+Both are suppressed unconditionally with `STAMP_SUPPRESS_LLM_NOTICE=1`
+— agent loops, CI workers, environments where the disclosure is already
+baked into team docs.
+
+**Sub-processor disclosure & consent (`data_flow`).** Anthropic is a
+**sub-processor** for stamp-cli: every review ships the diff to it (or to
+a `review_server` that does). An optional top-level `data_flow:` block in
+`.stamp/config.yml` lets operators make that explicit and, for regulated
+repos, gate review on a committed acknowledgement:
+
+```yaml
+data_flow:
+  # Echoed to stderr on every `stamp review` (suppressible). Free-form prose.
+  disclosure: |
+    Reviews send the diff to Anthropic (sub-processor). Do not place
+    PHI/PCI in a branch reviewed on an account without a ZDR contract.
+  # Opt-in regulated gate. When true, `stamp review` REFUSES to run unless
+  # `confirmed: true` is also committed. Omit (or set false) for
+  # disclosure-only behaviour — the block echoes but never blocks.
+  require_confirmation: true
+  # The committed acknowledgement. Reviewed like any other config change,
+  # so accepting the sub-processor disclosure leaves an audit record.
+  confirmed: true
+```
+
+The block is read from the merge-base tree like every other policy field,
+so a feature branch cannot ship its own `confirmed: true` to wave its own
+introduction past the gate. It is purely additive — it does **not** enter
+the reviewer attestation hash, so existing attestations and `stamp verify`
+are unaffected.
 
 **Anthropic's data handling.** Reviewer calls go through the Claude
 Agent SDK, which inherits whatever auth + retention posture you have
 configured for Claude Code on your machine (Anthropic API key, Zero
-Data Retention contract, etc.). See Anthropic's
+Data Retention contract, etc.). **`STAMP_ANTHROPIC_NO_RETAIN=1` is a
+documented no-op** in this build: the Agent SDK exposes no honoured
+request-level zero-retention control, and Anthropic
+[Zero Data Retention](https://docs.anthropic.com/en/docs/about-claude/data-retention)
+is an *account-level* contract — it cannot be toggled per request via an
+env var or header. Setting the flag prints a warning to that effect rather
+than implying a guarantee that isn't there; to actually bound exposure,
+arrange a ZDR contract with Anthropic or set `STAMP_NO_LLM=1` to stop
+sending diffs off-host. See Anthropic's
 [privacy policy](https://www.anthropic.com/privacy) and
 [usage policy](https://www.anthropic.com/legal/aup) for the
 authoritative terms; configure accordingly before running stamp on
