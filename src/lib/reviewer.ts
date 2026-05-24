@@ -49,11 +49,28 @@ const VERDICT_LINE_REGEX = /^VERDICT:\s*(approved|changes_requested|denied)\s*$/
  * resolved Read input. AGT-035 / audit M3.
  */
 const REVIEWER_INTERNAL_DENY_PATHS: string[] = [];
-// `.git/stamp/` — review verdict DB (state.db + WAL sidecars), failed-parse
-// spools, llm-notice marker. Internal state for stamp itself; no review task
-// reads any of it. The directory was added as a prefix (not just state.db
-// as a single path) after the failed-parse spool moved here under #12 fix.
-const REVIEWER_INTERNAL_DENY_PREFIXES = [".git/stamp/", ".stamp/trusted-keys/"];
+// Reviewer-internal deny prefixes (AGT-418). Repo-root-relative.
+//
+// `.git/` — ALL of it. `.git/config` and `.git/credentials` routinely hold
+// HTTPS remote URLs with embedded tokens, `credential.helper store` caches,
+// and internal hostnames; `.git/stamp/` holds the verdict DB + failed-parse
+// spools. No review task ever needs to SDK-Read git internals (the diff and
+// repo content reach the reviewer through its prompt and the working tree,
+// not via reads under `.git/`). Broadened from the prior `.git/stamp/`-only
+// prefix, which left `.git/config` readable — the credential-exfil hole this
+// ticket closes.
+//
+// `.stamp/trusted-keys/` — signing-key manifest + trust-anchor pubkeys.
+//
+// NOTE (deliberate): we do NOT blanket-deny `.stamp/`. `.stamp/config.yml`
+// and `.stamp/reviewers/*` are committed, public, in-diff config that a
+// reviewer with `enforce_reads_on_dotstamp: true` (the default `security`
+// reviewer) is REQUIRED to SDK-Read to satisfy the verdict-↔-trace
+// consistency check (see findMissingDotstampReads). Denying them would
+// deadlock that reviewer on any `.stamp/`-touching diff for zero
+// secret-exfil benefit (nothing there is secret). So the only `.stamp/`
+// subtree we deny is the trust-key material above.
+const REVIEWER_INTERNAL_DENY_PREFIXES = [".git/", ".stamp/trusted-keys/"];
 
 /**
  * Resolve an arbitrary tool-supplied path against repoRoot and reject it if
@@ -182,12 +199,13 @@ function denyIfReviewerInternal(
   resolvedAbs: string,
   resolvedRoot: string,
   inputPath: string,
+  toolName: string,
 ): string | null {
   const rel = path.relative(resolvedRoot, resolvedAbs);
   for (const denied of REVIEWER_INTERNAL_DENY_PATHS) {
     if (rel === denied) {
       return (
-        `Read of "${inputPath}" denied: ${denied} is a reviewer-internal ` +
+        `${toolName} of "${inputPath}" denied: ${denied} is a reviewer-internal ` +
         `attestation/trust file that no review task needs to read.`
       );
     }
@@ -195,8 +213,8 @@ function denyIfReviewerInternal(
   for (const prefix of REVIEWER_INTERNAL_DENY_PREFIXES) {
     if (rel === prefix.replace(/\/$/, "") || rel.startsWith(prefix)) {
       return (
-        `Read of "${inputPath}" denied: ${prefix}* is reviewer-internal ` +
-        `(trust anchors / verdict DB / spools) and is exfil-attractive.`
+        `${toolName} of "${inputPath}" denied: ${prefix}* is reviewer-internal ` +
+        `(git internals / credentials / trust anchors) and is exfil-attractive.`
       );
     }
   }
@@ -365,6 +383,7 @@ export function checkReviewerTool(args: {
       internalProbe,
       internalRoot,
       filePath as string,
+      "Read",
     );
     if (internal) return { allow: false, reason: internal };
     return { allow: true };
@@ -386,6 +405,17 @@ export function checkReviewerTool(args: {
         "Grep",
       );
       if (realpathCheck.deny) return { allow: false, reason: realpathCheck.deny };
+      // AGT-418: the reviewer-internal denylist must gate Grep too, not
+      // just Read — otherwise `Grep({path:'.git'})` reads .git/config
+      // contents straight past the gate. Probe the realpath (symlink-aware)
+      // like Read does.
+      const internal = denyIfReviewerInternal(
+        realpathCheck.canon ?? resolved,
+        realpathCheck.canonRoot ?? resolvedRoot,
+        grepPath as string,
+        "Grep",
+      );
+      if (internal) return { allow: false, reason: internal };
     }
     return { allow: true };
   }
@@ -404,6 +434,14 @@ export function checkReviewerTool(args: {
         "Glob",
       );
       if (realpathCheck.deny) return { allow: false, reason: realpathCheck.deny };
+      // AGT-418: gate Glob against the reviewer-internal denylist too.
+      const internal = denyIfReviewerInternal(
+        realpathCheck.canon ?? resolved,
+        realpathCheck.canonRoot ?? resolvedRoot,
+        globPath as string,
+        "Glob",
+      );
+      if (internal) return { allow: false, reason: internal };
     }
     // Belt-and-suspenders: reject patterns that look like absolute paths
     // or contain `..` segments. The path-scope check above prevents the

@@ -357,9 +357,12 @@ new `required_checks.run` string. Conservative guidance:
 1. `Read`, `Grep`, and `Glob` are scoped to `repoRoot` by an explicit
    allowlist enforced in the SDK's `hooks.PreToolUse` callback (path
    inputs are resolved against `repoRoot` and rejected if they escape;
-   `.git/stamp/state.db` and `.stamp/trusted-keys/*` are denied even
-   inside the repo). Avoid `Bash` and `Write` — nothing a reviewer
-   should need.
+   all of `.git/` — incl. `.git/config` / `.git/credentials`, which can
+   hold credential-bearing remote URLs — and `.stamp/trusted-keys/*` are
+   denied even inside the repo. `.stamp/config.yml` and
+   `.stamp/reviewers/*` stay readable: they're committed, public, and a
+   reviewer with `enforce_reads_on_dotstamp` must inspect them). Avoid
+   `Bash` and `Write` — nothing a reviewer should need.
 2. `WebFetch` should be enabled only when a reviewer genuinely needs it
    and the prompt constrains *where* it's allowed to fetch from. The
    `allowed_hosts` field on a WebFetch entry is a *domain-level*

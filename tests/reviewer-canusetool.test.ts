@@ -226,6 +226,61 @@ describe("checkReviewerTool — Read", () => {
   });
 });
 
+describe("checkReviewerTool — internal denylist across Read/Grep/Glob (AGT-418)", () => {
+  // Read takes file_path; Grep/Glob take path. Build the right input per tool.
+  const call = (tool: "Read" | "Grep" | "Glob", p: string) =>
+    checkReviewerTool({
+      toolName: tool,
+      toolInput: tool === "Read" ? { file_path: p } : { path: p },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+
+  // AGT-418: the credential-exfil hole was `.git/config` (HTTPS remote
+  // URLs with embedded tokens, credential.helper caches). Broadening the
+  // prefix from `.git/stamp/` to `.git/` closes it. Grep/Glob were
+  // previously ungated entirely — `Grep({path:'.git'})` would have read
+  // .git/config contents straight through.
+  const deniedPaths = [
+    ".git/config",
+    ".git/credentials",
+    ".git/HEAD",
+    ".git/stamp/state.db", // still covered (subsumed by .git/)
+    ".stamp/trusted-keys/manifest.yml", // a .stamp/-prefixed path that IS denied
+  ];
+
+  for (const tool of ["Read", "Grep", "Glob"] as const) {
+    for (const p of deniedPaths) {
+      it(`${tool} denies "${p}"`, () => {
+        const r = call(tool, p);
+        assert.equal(r.allow, false, `${tool}('${p}') must be denied`);
+        if (!r.allow) {
+          assert.match(r.reason, new RegExp(`^${tool} of`));
+          assert.match(r.reason, /exfil|denied|reviewer-internal/);
+        }
+      });
+    }
+
+    // Carve-out: the trust-anchor config a reviewer with
+    // enforce_reads_on_dotstamp MUST be able to SDK-Read stays allowed for
+    // every tool. Denying these would deadlock the default security reviewer.
+    for (const p of [".stamp/config.yml", ".stamp/reviewers/security.md"]) {
+      it(`${tool} allows "${p}" (enforce_reads carve-out)`, () => {
+        assert.equal(call(tool, p).allow, true);
+      });
+    }
+
+    // Siblings of `.git/` / `.stamp/` (not UNDER them) must not be caught
+    // by the prefix — a file literally named `.gitignore` is normal repo
+    // content, not git internals.
+    for (const p of [".gitignore", ".gitattributes", "src/stamp-helper.ts"]) {
+      it(`${tool} allows sibling "${p}" (prefix anchored, not substring)`, () => {
+        assert.equal(call(tool, p).allow, true);
+      });
+    }
+  }
+});
+
 describe("checkReviewerTool — Grep", () => {
   it("allows Grep with no path (defaults to cwd which is repoRoot)", () => {
     const r = checkReviewerTool({
