@@ -134,6 +134,49 @@ export interface InitOptions {
   actionSource?: string;
 }
 
+/**
+ * AGT-421: PRINT (do NOT install) a copy-pasteable weekly prune-schedule
+ * snippet so reviewer-prose retention is bounded by default. We print
+ * rather than install because writing a user crontab / launchd job from a
+ * CLI is invasive, surprising for an agent-run `stamp init`, and has no
+ * clean uninstall path. Platform-selected: launchd on macOS, cron elsewhere.
+ */
+function printProseRetentionSnippet(repoRoot: string): void {
+  console.log();
+  console.log(
+    "Retention: reviewer prose (quoted file:line diff snippets) persists in",
+  );
+  console.log(
+    ".git/stamp/state.db until pruned. Bound it with a weekly schedule",
+  );
+  console.log("(copy-paste — stamp does NOT install this for you):");
+  console.log();
+  if (process.platform === "darwin") {
+    console.log(
+      "  # launchd: save as ~/Library/LaunchAgents/dev.openthink.stamp-prune.plist,",
+    );
+    console.log("  # then `launchctl load` it. Key fields:");
+    console.log(
+      `  #   ProgramArguments: [<abs stamp path>, prune, --older-than, 60d]  (cd ${repoRoot})`,
+    );
+    console.log(
+      "  #   StartCalendarInterval: { Weekday: 0, Hour: 3 }   # Sundays 03:00",
+    );
+  } else {
+    console.log(
+      "  # crontab -e  (cron has a bare PATH — use the absolute stamp path):",
+    );
+    console.log(
+      `  0 3 * * 0  cd ${repoRoot} && "$(command -v stamp)" prune --older-than 60d`,
+    );
+  }
+  console.log();
+  console.log(
+    "  Or set STAMP_REVIEW_PROSE_TTL_DAYS (prune then nulls old prose), or run",
+  );
+  console.log("  `stamp review --no-prose` to never record prose for a repo.");
+}
+
 export function runInit(opts: InitOptions = {}): void {
   // Bridge-release deprecation banner (AGT-346). Printed to stderr before
   // any of init's own structured output so it never gets buried under the
@@ -411,6 +454,7 @@ export function runInit(opts: InitOptions = {}): void {
   console.log(
     "opt out of the per-repo notice (STAMP_SUPPRESS_LLM_NOTICE=1).",
   );
+  printProseRetentionSnippet(repoRoot);
 
   // Loud agent-imperative footer. Prints regardless of mode — both
   // server-gated (where it's redundant but harmless) and local-only (where

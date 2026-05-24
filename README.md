@@ -663,6 +663,20 @@ required.
   --older-than 30d`; one invocation cleans both DB rows and old spool
   files under the same threshold; `--dry-run` previews both passes
   without deleting).
+- **Content posture of the `issues` (prose) column.** Reviewer prompts
+  instruct the model to quote specific `file:line` snippets, so the
+  `reviews.issues` column accumulates verbatim excerpts of the most
+  sensitive parts of every diff reviewed on this machine. The `0600`/`0700`
+  modes protect against peer users, but `state.db` is **not** excluded from
+  backups or `tar`-the-repo workflows and is shared across worktrees (it
+  lives in the git common dir). **On a machine reviewing PHI/PCI or other
+  regulated content, treat `.git/stamp/state.db` (and the
+  `.git/stamp/failed-parses/` spool) as carrying that classification** —
+  apply matching backup and retention controls. Three retention knobs:
+  `stamp init` prints a weekly `stamp prune` schedule snippet;
+  `STAMP_REVIEW_PROSE_TTL_DAYS` makes `stamp prune` null prose older than
+  the TTL (keeping the verdict rows); and `stamp review --no-prose` records
+  verdict + hashes only, never persisting prose for that run.
 - Your Ed25519 signing key (`~/.stamp/keys/`) never leaves your machine.
 
 **What gets attached to the merge commit and mirrored to GitHub:**

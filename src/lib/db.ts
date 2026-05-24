@@ -625,3 +625,38 @@ export function pruneReviews(
   del.run(sqliteModifier);
   return peek;
 }
+
+/**
+ * Null out reviewer prose (the `issues` column) on rows older than
+ * `now − sqliteModifier`, WITHOUT deleting the rows (AGT-421). The verdict
+ * + diff_hash/prompt_hash stay intact so the verdict cache and the audit
+ * trail survive; only the human-facing prose — which can quote sensitive
+ * file:line snippets — is dropped. Returns the number of rows nulled.
+ *
+ * CONTRACT NOTE: `review_sha` (= hash of the prose) is baked into a *signed
+ * attestation* at write time and is NEVER recomputed from this DB at verify
+ * time, so nulling prose here cannot invalidate an existing attestation. If
+ * a future verifier is ever added that recomputes review_sha from live rows,
+ * this contract must be revisited.
+ */
+export function expireProse(db: DatabaseSync, sqliteModifier: string): number {
+  const res = db
+    .prepare(
+      "UPDATE reviews SET issues = NULL WHERE issues IS NOT NULL AND created_at < datetime('now', ?)",
+    )
+    .run(sqliteModifier);
+  return Number(res.changes);
+}
+
+/** Count rows whose prose `expireProse` would null — the dry-run peek. AGT-421. */
+export function countProseToExpire(
+  db: DatabaseSync,
+  sqliteModifier: string,
+): number {
+  const row = db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM reviews WHERE issues IS NOT NULL AND created_at < datetime('now', ?)",
+    )
+    .get(sqliteModifier) as { count: number };
+  return row.count;
+}

@@ -278,6 +278,65 @@ describe("runReview — server-attested SSH transport", () => {
     }
   });
 
+  it("--no-prose records verdict + hashes but NULL issues (AGT-421)", async () => {
+    const baseSha = git(["rev-parse", "main"], fx!.repo).trim();
+    const headSha = git(["rev-parse", "HEAD"], fx!.repo).trim();
+    const diff = git(["diff", "main..HEAD"], fx!.repo);
+    const diffSha256 = createHash("sha256").update(diff, "utf8").digest("hex");
+    const serverFp = fingerprintFromPem(fx!.serverKeyPem);
+    const approval: ApprovalV4 = {
+      reviewer: "security",
+      verdict: "approved",
+      prompt_sha256: "a".repeat(64),
+      diff_sha256: diffSha256,
+      base_sha: baseSha,
+      head_sha: headSha,
+      trusted_keys_snapshot_sha256: "sha256:" + "b".repeat(64),
+      issued_at: "2026-05-17T18:42:13Z",
+      server_key_id: serverFp,
+    };
+    const signature = fx!.signServerApproval(approval);
+    const sshFake: SshSpawnFn = async () => ({
+      // The server STILL returns prose; --no-prose drops it client-side.
+      stdout:
+        JSON.stringify({ verdict: "approved", prose: "secret quoted snippet", approval, signature }) + "\n",
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+    });
+
+    const cap = captureStreams();
+    try {
+      await runReview({ diff: "main..feature", noProse: true, _sshSpawnForTest: sshFake });
+    } finally {
+      cap.restore();
+    }
+
+    const db = new DatabaseSync(stampStateDbPath(fx!.repo));
+    try {
+      const row = db
+        .prepare(
+          `SELECT verdict, issues, server_approval_json, server_signature_b64
+             FROM reviews WHERE reviewer = ? AND base_sha = ? AND head_sha = ?`,
+        )
+        .get("security", baseSha, headSha) as {
+        verdict: string;
+        issues: string | null;
+        server_approval_json: string;
+        server_signature_b64: string;
+      };
+      assert.ok(row, "expected a row");
+      assert.equal(row.verdict, "approved"); // verdict recorded
+      assert.equal(row.issues, null); // prose omitted
+      assert.ok(row.server_approval_json, "verdict+hashes (signed approval) still recorded");
+      assert.ok(row.server_signature_b64, "signature still recorded");
+      // the dropped prose must not have leaked into the row anywhere
+      assert.ok(!JSON.stringify(row).includes("secret quoted snippet"));
+    } finally {
+      db.close();
+    }
+  });
+
   it("sets exitCode=1 when the signed verdict isn't approved", async () => {
     const baseSha = git(["rev-parse", "main"], fx!.repo).trim();
     const headSha = git(["rev-parse", "HEAD"], fx!.repo).trim();
