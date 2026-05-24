@@ -39,7 +39,9 @@ import {
   isValidReviewerName,
   loadOrCreateUserConfig,
   loadUserConfig,
+  LOCAL_MODEL_PREFIX,
   parseUserConfig,
+  resolveReviewerBackend,
   resolveReviewerModel,
   stringifyUserConfig,
   writeUserConfig,
@@ -238,6 +240,112 @@ describe("resolveReviewerModel", () => {
     assert.equal(resolveReviewerModel("security"), "claude-opus-4-7");
     assert.equal(resolveReviewerModel("standards"), "claude-sonnet-4-6");
     assert.equal(resolveReviewerModel("product"), null);
+  });
+});
+
+describe("resolveReviewerBackend + local: scheme", () => {
+  it("returns anthropic kind with null model when unset", () => {
+    assert.deepEqual(resolveReviewerBackend("security"), {
+      kind: "anthropic",
+      model: null,
+    });
+  });
+
+  it("returns anthropic kind with the configured model id", () => {
+    writeUserConfig({ reviewers: { security: "claude-opus-4-7" } });
+    assert.deepEqual(resolveReviewerBackend("security"), {
+      kind: "anthropic",
+      model: "claude-opus-4-7",
+    });
+  });
+
+  it("routes a local: value to the local backend with the model suffix", () => {
+    writeUserConfig({
+      reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen2.5-coder-32b` },
+      local_endpoint: "http://localhost:1234/v1",
+    });
+    assert.deepEqual(resolveReviewerBackend("security"), {
+      kind: "local",
+      model: "qwen2.5-coder-32b",
+      endpoint: "http://localhost:1234/v1",
+    });
+  });
+
+  it("local backend endpoint is undefined when local_endpoint is unset (adapter defaults)", () => {
+    writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
+    assert.deepEqual(resolveReviewerBackend("security"), {
+      kind: "local",
+      model: "qwen",
+      endpoint: undefined,
+    });
+  });
+
+  it("a bare 'local:' with no model falls back to anthropic default", () => {
+    writeUserConfig({ reviewers: { security: "local:" } });
+    assert.deepEqual(resolveReviewerBackend("security"), {
+      kind: "anthropic",
+      model: null,
+    });
+  });
+
+  it("resolveReviewerModel returns null for a local-configured reviewer (anthropic callers never see local:)", () => {
+    writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
+    assert.equal(resolveReviewerModel("security"), null);
+  });
+
+  it("STAMP_REVIEWER_BACKEND=anthropic forces the SDK path, dropping local: to null", () => {
+    writeUserConfig({
+      reviewers: {
+        security: `${LOCAL_MODEL_PREFIX}qwen`,
+        standards: "claude-opus-4-7",
+      },
+      local_endpoint: "http://localhost:8080/v1",
+    });
+    const saved = process.env.STAMP_REVIEWER_BACKEND;
+    process.env.STAMP_REVIEWER_BACKEND = "anthropic";
+    try {
+      // local: reviewer → anthropic with null model (SDK default)
+      assert.deepEqual(resolveReviewerBackend("security"), {
+        kind: "anthropic",
+        model: null,
+      });
+      // a real anthropic model id is preserved under the override
+      assert.deepEqual(resolveReviewerBackend("standards"), {
+        kind: "anthropic",
+        model: "claude-opus-4-7",
+      });
+    } finally {
+      if (saved === undefined) delete process.env.STAMP_REVIEWER_BACKEND;
+      else process.env.STAMP_REVIEWER_BACKEND = saved;
+    }
+  });
+
+  it("an unrecognized STAMP_REVIEWER_BACKEND value is ignored (config wins)", () => {
+    writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
+    const saved = process.env.STAMP_REVIEWER_BACKEND;
+    process.env.STAMP_REVIEWER_BACKEND = "banana";
+    try {
+      assert.equal(resolveReviewerBackend("security").kind, "local");
+    } finally {
+      if (saved === undefined) delete process.env.STAMP_REVIEWER_BACKEND;
+      else process.env.STAMP_REVIEWER_BACKEND = saved;
+    }
+  });
+
+  it("round-trips local_endpoint through stringify + parse", () => {
+    const cfg = {
+      reviewers: { security: "local:qwen" },
+      local_endpoint: "http://localhost:1234/v1",
+    };
+    const round = parseUserConfig(stringifyUserConfig(cfg));
+    assert.deepEqual(round, cfg);
+  });
+
+  it("rejects a non-URL local_endpoint at parse time", () => {
+    assert.throws(
+      () => parseUserConfig("local_endpoint: not-a-url\nreviewers: {}\n"),
+      /local_endpoint .* must be an http\(s\) URL/,
+    );
   });
 });
 

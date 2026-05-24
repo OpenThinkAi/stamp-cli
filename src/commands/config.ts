@@ -74,6 +74,7 @@ export function runConfigReviewersSet(opts: ReviewersSetOptions): void {
   const existing = loadOrEmpty();
   const prior = existing.reviewers[opts.reviewer];
   const next: UserConfig = {
+    ...existing,
     reviewers: { ...existing.reviewers, [opts.reviewer]: id },
   };
   const path = writeUserConfig(next);
@@ -124,7 +125,7 @@ export function runConfigReviewersClear(opts: ReviewersClearOptions): void {
     console.log(`note: reviewers.${reviewer} is not set; nothing to clear`);
     return;
   }
-  const next: UserConfig = { reviewers: { ...existing.reviewers } };
+  const next: UserConfig = { ...existing, reviewers: { ...existing.reviewers } };
   delete next.reviewers[reviewer];
   const path = writeUserConfig(next);
   console.log(`cleared reviewers.${reviewer}`);

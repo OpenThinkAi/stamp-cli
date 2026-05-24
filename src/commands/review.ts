@@ -49,7 +49,13 @@ import {
   type ServerReviewResult,
   type SshSpawnFn,
 } from "../lib/sshReviewClient.js";
-import { loadOrCreateUserConfig, resolveReviewerModel } from "../lib/userConfig.js";
+import {
+  loadOrCreateUserConfig,
+  resolveReviewerBackend,
+  resolveReviewerModel,
+  type ReviewerBackend,
+} from "../lib/userConfig.js";
+import { invokeLocalReviewer } from "../lib/localReviewer.js";
 import { UsageError } from "./serverRepo.js";
 import {
   findRepoRoot,
@@ -420,23 +426,58 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     );
   }
 
-  // AGT-415 data-flow disclosure + consent. Positioned at the common
-  // point AFTER the diff-size cap and config parse but BEFORE the
-  // transport split below, so it covers BOTH the direct-Anthropic and
-  // `review_server` paths and fires before any diff leaves the host:
+  // Resolve the target branch rule first — it decides the transport
+  // (server-attested vs local) and therefore whether diff content leaves
+  // the host, which gates the data-flow disclosure below.
+  const targetBranch = opts.into ?? inferTargetBranch(opts.diff);
+  const branchRule = targetBranch ? findBranchRule(config.branches, targetBranch) : undefined;
+  const serverMode = !!branchRule?.review_server;
+
+  // Per-reviewer backend selection from per-user ~/.stamp/config.yml. Only
+  // the local-LLM path honors it; server-attested mode resolves reviewers
+  // on the server, so every reviewer's diff goes off-host there. Resolve
+  // once and reuse in the fan-out below.
+  const backendByReviewer = new Map<string, ReviewerBackend>();
+  if (!serverMode) {
+    for (const name of reviewerNames) {
+      backendByReviewer.set(name, resolveReviewerBackend(name));
+    }
+  }
+
+  // Reviewers whose diff content actually leaves this host: all of them in
+  // server-attested mode, or just the non-local (Anthropic) reviewers in
+  // local-LLM mode. A `local:` reviewer sends the diff only to a localhost
+  // model endpoint.
+  const offHostCount = serverMode
+    ? reviewerNames.length
+    : reviewerNames.filter(
+        (n) => backendByReviewer.get(n)!.kind !== "local",
+      ).length;
+
+  // AGT-415 data-flow disclosure + consent — fires only when diff content
+  // leaves the host (Anthropic directly, or via `review_server`):
   //   1. confirmed gate — refuse (throw) for regulated repos that armed
   //      `data_flow.require_confirmation` without committing `confirmed`.
   //      `config` here is parsed from the merge-base tree (base_sha), so a
-  //      feature branch cannot ship its own `confirmed: true` to bypass
-  //      the gate on its own introduction.
+  //      feature branch cannot ship its own `confirmed: true` to bypass it.
   //   2. no-retain warning — loud no-op notice when STAMP_ANTHROPIC_NO_RETAIN=1.
-  //   3. per-invocation marker — fires on every review (distinct from the
-  //      once-per-repo notice in maybePrintLlmNotice below).
+  //   3. per-invocation marker — counts only the off-host reviewers.
   //   4. disclosure echo — operator-authored data_flow.disclosure block.
-  assertDataFlowConfirmed(config.data_flow);
-  printNoRetainWarning();
-  printDiffSentMarker(reviewerNames.length);
-  printDataFlowDisclosure(config.data_flow);
+  // An all-local run sends nothing off-box, so the gate doesn't apply — this
+  // is what makes local backends usable in regulated / air-gapped setups
+  // that arm data_flow.require_confirmation.
+  if (offHostCount > 0) {
+    assertDataFlowConfirmed(config.data_flow);
+    printNoRetainWarning();
+    printDiffSentMarker(offHostCount);
+    printDataFlowDisclosure(config.data_flow);
+  } else {
+    console.log(
+      `note: all ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} use a local model; ` +
+        `the diff stays on this host (no Anthropic sub-processor involved).`,
+    );
+    console.log();
+  }
 
   // Stamp 2.x server-attested transport (AGT-332). When `review_server`
   // is configured on the target branch's rule, route each reviewer
@@ -448,8 +489,6 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   // 1.x compatibility contract (AGT-339/347): when `review_server` is
   // unset, fall through to the legacy local-LLM path verbatim. Operators
   // who never set the field see no behavior change.
-  const targetBranch = opts.into ?? inferTargetBranch(opts.diff);
-  const branchRule = targetBranch ? findBranchRule(config.branches, targetBranch) : undefined;
   if (branchRule?.review_server) {
     // Server-attested mode: the stamp-server resolves each reviewer's
     // prompt from its bundled cache (AGT-370 filesystem cache). We do
@@ -689,45 +728,81 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       console.log();
     }
 
-    const results = await Promise.allSettled(
-      reviewerNames.map((name) => {
-        const cached = cacheHits.get(name);
-        if (cached) {
-          // Cache hit: synthesize a ReviewerInvocation from the stored row.
-          // tool_calls is empty by design — no fresh tool invocations happened
-          // this run. The original tool_calls audit trail (if any) is still
-          // on the source row. retros likewise — cached runs don't generate
-          // new retro candidates.
-          return Promise.resolve<ReviewerInvocation>({
-            reviewer: name,
-            prose: cached.issues ?? "",
-            verdict: cached.verdict,
-            tool_calls: [],
-            retros: [],
-          });
-        }
-        const prior = priorByReviewer.get(name);
-        // Per-reviewer diff scoping: when a prior verdict is in scope and
-        // we have a delta computed, the reviewer sees only the delta. The
-        // base_sha + head_sha args still describe the full range (used for
-        // attestation / display); only the bytes the model evaluates are
-        // narrowed. deltaScope flag is threaded honestly so the prompt
-        // builders gate their narrowing-language correctly — fallback path
-        // gets the 1.7.0 prompt-only ratchet wording instead.
-        const isDeltaScope = deltaDiffs.has(name);
-        const diffForReviewer = deltaDiffs.get(name) ?? resolved.diff;
-        return invokeReviewer({
+    // Per-reviewer task: returns a ReviewerInvocation promise. Cache hits
+    // short-circuit with the stored row; a `local:` backend routes through
+    // the unmetered one-shot local path, everything else the agent SDK.
+    const runReviewerTask = (name: string): Promise<ReviewerInvocation> => {
+      const cached = cacheHits.get(name);
+      if (cached) {
+        // Cache hit: synthesize from the stored row. tool_calls/retros empty
+        // — no fresh invocation this run (the source row keeps the original
+        // audit trail).
+        return Promise.resolve<ReviewerInvocation>({
           reviewer: name,
-          config,
-          repoRoot,
+          prose: cached.issues ?? "",
+          verdict: cached.verdict,
+          tool_calls: [],
+          retros: [],
+        });
+      }
+      const prior = priorByReviewer.get(name);
+      // Per-reviewer diff scoping: with a prior verdict in scope and a delta
+      // computed, the reviewer sees only the delta (base/head still describe
+      // the full range for attestation). deltaScope is threaded honestly so
+      // the prompt builders gate their narrowing language.
+      const isDeltaScope = deltaDiffs.has(name);
+      const diffForReviewer = deltaDiffs.get(name) ?? resolved.diff;
+      // Per-reviewer backend (per-user ~/.stamp/config.yml). `local:` →
+      // unmetered one-shot local path; otherwise the agent-SDK reviewer. The
+      // prior-review ratchet prose is agent-SDK-only for now — the local path
+      // still gets the narrowed delta diff but not the prior-verdict context.
+      const backend = backendByReviewer.get(name) ?? {
+        kind: "anthropic",
+        model: null,
+      };
+      if (backend.kind === "local") {
+        return invokeLocalReviewer({
+          reviewer: name,
+          systemPrompt: promptBytesByReviewer.get(name)!,
           diff: diffForReviewer,
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
-          systemPrompt: promptBytesByReviewer.get(name)!,
-          ...(prior ? { priorReview: prior, deltaScope: isDeltaScope } : {}),
+          model: backend.model,
+          endpoint: backend.endpoint,
+          repoRoot,
+          enforceReadsOnDotstamp:
+            config.reviewers[name]?.enforce_reads_on_dotstamp ?? false,
         });
-      }),
+      }
+      return invokeReviewer({
+        reviewer: name,
+        config,
+        repoRoot,
+        diff: diffForReviewer,
+        base_sha: resolved.base_sha,
+        head_sha: resolved.head_sha,
+        systemPrompt: promptBytesByReviewer.get(name)!,
+        ...(prior ? { priorReview: prior, deltaScope: isDeltaScope } : {}),
+      });
+    };
+
+    // A single local model server holds one model on the GPU and OOMs under
+    // concurrent large-context requests (observed: 3 reviewers × ~28K-token
+    // diff crashed mlx_lm.server with a Metal out-of-memory). So when any
+    // reviewer uses a local backend, run reviewers SEQUENTIALLY. All-Anthropic
+    // runs keep the parallel fan-out — the API handles concurrency fine.
+    const anyLocal = reviewerNames.some(
+      (n) => (backendByReviewer.get(n)?.kind ?? "anthropic") === "local",
     );
+    let results: PromiseSettledResult<ReviewerInvocation>[];
+    if (anyLocal) {
+      results = [];
+      for (const name of reviewerNames) {
+        results.push(await settleResult(runReviewerTask(name)));
+      }
+    } else {
+      results = await Promise.allSettled(reviewerNames.map(runReviewerTask));
+    }
 
     let anyFailed = false;
     for (let i = 0; i < reviewerNames.length; i++) {
@@ -771,6 +846,19 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
 
 function sha256(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+/** Settle a promise into a PromiseSettledResult without rejecting — used by
+ *  the sequential (local-backend) review path so one reviewer's failure
+ *  doesn't abort the rest, matching Promise.allSettled's contract. */
+async function settleResult<T>(
+  p: Promise<T>,
+): Promise<PromiseSettledResult<T>> {
+  try {
+    return { status: "fulfilled", value: await p };
+  } catch (reason) {
+    return { status: "rejected", reason };
+  }
 }
 
 function chooseReviewers(config: StampConfig, only?: string): string[] {
