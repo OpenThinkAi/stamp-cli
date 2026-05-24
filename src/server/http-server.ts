@@ -45,6 +45,7 @@ import { insertUser, openServerDb } from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
 import {
   cloneOrFetchPromptsCache,
+  scrubGitUrlCredentials,
   type CloneOrFetchOpts,
   type RefreshResult,
 } from "./prompts-cache.js";
@@ -906,7 +907,7 @@ export function startPromptsPollWorker(): void {
 
   logLine(
     "info",
-    `prompts-poll: started (interval=${intervalSec}s, url=${opts.url}, ref=${opts.ref}, cacheRoot=${opts.cacheRoot})`,
+    `prompts-poll: started (interval=${intervalSec}s, url=${scrubGitUrlCredentials(opts.url)}, ref=${opts.ref}, cacheRoot=${opts.cacheRoot})`,
   );
 }
 

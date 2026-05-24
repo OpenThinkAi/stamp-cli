@@ -306,12 +306,71 @@ export function getPromptPath(
 
 // ─── Internals ────────────────────────────────────────────────────────
 
+/**
+ * Permitted shapes for the prompts-cache git URL (AGT-417). Anchored at `^`,
+ * so a value can never begin with `-` (the git option-injection class,
+ * CVE-2017-1000117 — a `--upload-pack=<cmd>` / `-oProxyCommand=<cmd>` where
+ * git expects a URL). The `\S+` tail forbids whitespace; C0 control chars
+ * are rejected by a separate `hasControlChars` check in validateOpts (they
+ * are not whitespace, so `\S` would otherwise admit them).
+ * `file://` is intentionally permitted: it's a non-credential-bearing local
+ * scheme and is the transport every offline test fixture uses. `git@host:`
+ * is the scp-short SSH form (carries no inline secret — auth is by key).
+ */
+const GIT_URL_SHAPE_RE =
+  /^(https:\/\/|ssh:\/\/|file:\/\/|git@[^\s:]+:)\S+$/;
+
+/**
+ * Mask credentials embedded in a URL's userinfo before it reaches a log or
+ * error message (AGT-417). `https://x-access-token:<TOKEN>@github.com/...`
+ * → `https://***@github.com/...`. Scheme-agnostic; leaves the scp-short
+ * `git@host:` form alone (no `://`, no inline secret). Exported so the
+ * poll-worker / bootstrap log sites scrub with the same rule.
+ */
+export function scrubGitUrlCredentials(text: string): string {
+  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^@\s/]+@/gi, "$1***@");
+}
+
+/** True if `s` contains any C0 control character (charcode < 0x20). Used to
+ * reject control chars in the git URL — `\S` in GIT_URL_SHAPE_RE rejects
+ * whitespace but not controls. Charcode scan avoids embedding control-char
+ * escapes in a regex literal. AGT-417. */
+function hasControlChars(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) < 0x20) return true;
+  }
+  return false;
+}
+
+/**
+ * Build the `git clone` / `git remote set-url` argv with a `--` terminator
+ * before the operator-controlled `url` positional, so git can never
+ * re-interpret it as an option even if the shape check were bypassed
+ * (defense in depth alongside GIT_URL_SHAPE_RE). Exported so the terminator
+ * is unit-testable without spawning git. AGT-417.
+ */
+export function buildCloneArgs(ref: string, url: string, tmpPath: string): string[] {
+  return ["clone", "--quiet", "--branch", ref, "--", url, tmpPath];
+}
+export function buildRemoteSetUrlArgs(url: string): string[] {
+  return ["remote", "set-url", "origin", "--", url];
+}
+
 function validateOpts(opts: CloneOrFetchOpts): void {
   if (!opts || typeof opts !== "object") {
     throw new Error("cloneOrFetchPromptsCache: opts must be an object");
   }
   if (!opts.url || typeof opts.url !== "string") {
     throw new Error("cloneOrFetchPromptsCache: url is required");
+  }
+  // Shape-validate the URL: anchored prefix allowlist + no whitespace/control
+  // chars. Rejects `-`-leading option-injection payloads up front. AGT-417.
+  if (!GIT_URL_SHAPE_RE.test(opts.url) || hasControlChars(opts.url)) {
+    throw new Error(
+      `cloneOrFetchPromptsCache: url ${JSON.stringify(scrubGitUrlCredentials(opts.url))} ` +
+        `is not an accepted git URL shape (must start with https:// , ssh:// , file:// , or git@host: ` +
+        `and contain no whitespace or control characters)`,
+    );
   }
   if (!opts.ref || typeof opts.ref !== "string") {
     throw new Error("cloneOrFetchPromptsCache: ref is required");
@@ -436,8 +495,8 @@ async function refreshInternal(
     // also fail against the same bogus url, throwing — exactly the
     // behavior the "mid-fetch failure" tests expect).
     try {
-      runGit(cacheRoot, ["remote", "set-url", "origin", url], env);
-      runGit(cacheRoot, ["fetch", "--prune", "origin", ref], env);
+      runGit(cacheRoot, buildRemoteSetUrlArgs(url), env);
+      runGit(cacheRoot, ["fetch", "--prune", "origin", "--", ref], env);
       runGit(cacheRoot, ["checkout", ref], env);
       runGit(cacheRoot, ["reset", "--hard", `origin/${ref}`], env);
       const commitSha = runGit(cacheRoot, ["rev-parse", "HEAD"], env).trim();
@@ -456,7 +515,7 @@ async function refreshInternal(
 
   // Atomic rebuild: clone to .tmp, verify, swap.
   mkdirSync(dirname(cacheRoot), { recursive: true });
-  runGit(dirname(cacheRoot), ["clone", "--quiet", "--branch", ref, url, tmpPath], env);
+  runGit(dirname(cacheRoot), buildCloneArgs(ref, url, tmpPath), env);
 
   // Belt-and-suspenders: confirm the ref resolved on disk before we commit
   // to the swap. `git clone --branch` would have errored if `ref` didn't
@@ -566,8 +625,13 @@ function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   } catch (err) {
     const e = err as { stderr?: Buffer | string; message?: string };
     const stderr = typeof e.stderr === "string" ? e.stderr : e.stderr?.toString("utf8") ?? "";
+    // Scrub credentials from BOTH the composed argv and git's own stderr
+    // (git echoes the remote URL in many failure messages) before the
+    // string reaches a server log. AGT-417.
+    const argv = scrubGitUrlCredentials(args.join(" "));
+    const cleanStderr = scrubGitUrlCredentials(stderr.trim());
     throw new Error(
-      `git ${args.join(" ")} (cwd=${cwd}) failed: ${e.message ?? String(err)}${stderr ? `\nstderr: ${stderr.trim()}` : ""}`,
+      `git ${argv} (cwd=${cwd}) failed: ${scrubGitUrlCredentials(e.message ?? String(err))}${cleanStderr ? `\nstderr: ${cleanStderr}` : ""}`,
     );
   }
 }

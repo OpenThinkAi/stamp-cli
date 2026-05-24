@@ -50,6 +50,7 @@ import { join } from "node:path";
 
 import {
   cloneOrFetchPromptsCache,
+  scrubGitUrlCredentials,
   type RefreshResult,
 } from "./prompts-cache.js";
 
@@ -92,7 +93,7 @@ async function main(): Promise<void> {
   // network round-trip. Operators debugging a slow boot will see this
   // line first and know which env vars resolved to what.
   process.stderr.write(
-    `prompts-cache: populating cache at ${cacheRoot} from ${repoUrl}@${ref}` +
+    `prompts-cache: populating cache at ${cacheRoot} from ${scrubGitUrlCredentials(repoUrl)}@${ref}` +
       (deployKeyPath ? ` (deploy key: ${deployKeyPath})` : "") +
       "\n",
   );
