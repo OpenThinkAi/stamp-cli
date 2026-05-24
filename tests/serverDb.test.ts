@@ -25,17 +25,23 @@ import path from "node:path";
 import { describe, it, before, after } from "node:test";
 
 import {
+  appendEvent,
   checkAndConsumeToken,
+  claimSeatTx,
   countByRole,
   findCachedServerVerdict,
+  findPatch,
   findUserBySshFingerprint,
   findUserByShortName,
+  insertPatch,
   insertUser,
   listUsers,
   openServerDb,
   recordServerVerdict,
+  releaseSeat,
   resolveReviewRateCap,
   suggestUniqueShortName,
+  touchHeartbeat,
   upsertUserByFingerprint,
 } from "../src/lib/serverDb.ts";
 
@@ -544,5 +550,318 @@ describe("resolveReviewRateCap (AGT-420)", () => {
     assert.equal(resolveReviewRateCap("member"), 10);
     process.env.MAX_REVIEWS_PER_HOUR = "not-a-number";
     assert.equal(resolveReviewRateCap("member"), 30);
+  });
+});
+
+// ─── AGT-427: peer-review schema + helpers ──────────────────────────
+
+describe("peer_review schema (AGT-427)", () => {
+  it("schema creates peer_review_patches and peer_review_events tables idempotently (AC 1)", () => {
+    const t = tmpDbPath();
+    try {
+      // First open: creates schema.
+      const db1 = openServerDb({ path: t.path, skipChmod: true });
+      // Verify tables exist via PRAGMA.
+      const tables1 = db1
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .all() as { name: string }[];
+      const tableNames1 = tables1.map((r) => r.name);
+      assert.ok(tableNames1.includes("peer_review_patches"), "peer_review_patches table must exist after first open");
+      assert.ok(tableNames1.includes("peer_review_events"), "peer_review_events table must exist after first open");
+
+      // Check columns via PRAGMA table_info.
+      const patchCols = db1
+        .prepare("PRAGMA table_info(peer_review_patches)")
+        .all() as { name: string }[];
+      const patchColNames = patchCols.map((c) => c.name);
+      for (const col of [
+        "patch_id", "requested_by_fp", "base_sha", "head_sha", "repo",
+        "broadcast_at", "seat_1_holder", "seat_2_holder",
+        "seat_1_claimed_at", "seat_2_claimed_at",
+      ]) {
+        assert.ok(patchColNames.includes(col), `peer_review_patches must have column ${col}`);
+      }
+
+      const eventCols = db1
+        .prepare("PRAGMA table_info(peer_review_events)")
+        .all() as { name: string }[];
+      const eventColNames = eventCols.map((c) => c.name);
+      for (const col of ["id", "patch_id", "event_type", "actor_fp", "occurred_at", "payload"]) {
+        assert.ok(eventColNames.includes(col), `peer_review_events must have column ${col}`);
+      }
+
+      db1.close();
+
+      // Second open: schema is idempotent — no error, tables still present.
+      const db2 = openServerDb({ path: t.path, skipChmod: true });
+      const tables2 = db2
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .all() as { name: string }[];
+      const tableNames2 = tables2.map((r) => r.name);
+      assert.ok(tableNames2.includes("peer_review_patches"), "peer_review_patches must survive second open");
+      assert.ok(tableNames2.includes("peer_review_events"), "peer_review_events must survive second open");
+      // No extra tables should have appeared.
+      assert.deepStrictEqual(
+        tableNames1.sort(),
+        tableNames2.sort(),
+        "table set must be identical after two schema runs",
+      );
+      db2.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("insertPatch / findPatch / appendEvent (AGT-427)", () => {
+  it("round-trips a patch row", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "patch-001",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/widget",
+      });
+      const row = findPatch(db, "patch-001");
+      assert.ok(row, "patch row must be found after insert");
+      assert.equal(row.patch_id, "patch-001");
+      assert.equal(row.requested_by_fp, "SHA256:author");
+      assert.equal(row.repo, "acme/widget");
+      assert.equal(row.seat_1_holder, null);
+      assert.equal(row.seat_2_holder, null);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("appendEvent inserts a row retrievable via select", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-evt",
+        requested_by_fp: "SHA256:a",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      appendEvent(db, "p-evt", "pr-opened", "SHA256:a", { note: "test" });
+      const events = db
+        .prepare("SELECT event_type, actor_fp, payload FROM peer_review_events WHERE patch_id = 'p-evt'")
+        .all() as { event_type: string; actor_fp: string; payload: string }[];
+      assert.equal(events.length, 1);
+      assert.equal(events[0]?.event_type, "pr-opened");
+      assert.equal(events[0]?.actor_fp, "SHA256:a");
+      const parsed = JSON.parse(events[0]?.payload ?? "{}") as { note: string };
+      assert.equal(parsed.note, "test");
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("findPatch returns null for unknown patch_id", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      assert.equal(findPatch(db, "does-not-exist"), null);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("claimSeatTx (AGT-427)", () => {
+  it("first claimant gets seat 1, second gets seat 2", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-claim",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      const r1 = claimSeatTx(db, "p-claim", "SHA256:reviewer-1");
+      assert.deepStrictEqual(r1, { ok: true, seat: 1 });
+
+      const r2 = claimSeatTx(db, "p-claim", "SHA256:reviewer-2");
+      assert.deepStrictEqual(r2, { ok: true, seat: 2 });
+
+      const row = findPatch(db, "p-claim");
+      assert.equal(row?.seat_1_holder, "SHA256:reviewer-1");
+      assert.equal(row?.seat_2_holder, "SHA256:reviewer-2");
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("rejects when both seats are taken (seats_full)", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-full",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      claimSeatTx(db, "p-full", "SHA256:r1");
+      claimSeatTx(db, "p-full", "SHA256:r2");
+      const r3 = claimSeatTx(db, "p-full", "SHA256:r3");
+      assert.deepStrictEqual(r3, { ok: false, error: "seats_full" });
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("rejects the original author (author_cannot_claim_own_pr)", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-author",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      const r = claimSeatTx(db, "p-author", "SHA256:author");
+      assert.deepStrictEqual(r, { ok: false, error: "author_cannot_claim_own_pr" });
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("rejects a reviewer who already holds the other seat (already_holds_other_seat)", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-self",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      claimSeatTx(db, "p-self", "SHA256:reviewer");
+      const r2 = claimSeatTx(db, "p-self", "SHA256:reviewer");
+      assert.deepStrictEqual(r2, { ok: false, error: "already_holds_other_seat" });
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("returns patch_not_found for unknown patch", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      const r = claimSeatTx(db, "no-such-patch", "SHA256:reviewer");
+      assert.deepStrictEqual(r, { ok: false, error: "patch_not_found" });
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("releaseSeat (AGT-427)", () => {
+  it("clears a held seat and returns true", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-rel",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      claimSeatTx(db, "p-rel", "SHA256:r1");
+      const released = releaseSeat(db, "p-rel", "SHA256:r1");
+      assert.equal(released, true);
+      const row = findPatch(db, "p-rel");
+      assert.equal(row?.seat_1_holder, null);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("returns false when the claimant holds no seat", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-rel2",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      const released = releaseSeat(db, "p-rel2", "SHA256:nobody");
+      assert.equal(released, false);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("touchHeartbeat (AGT-427)", () => {
+  it("refreshes the timestamp and returns the seat number", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-hb",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      claimSeatTx(db, "p-hb", "SHA256:r1");
+      const before = findPatch(db, "p-hb")?.seat_1_claimed_at;
+      const seat = touchHeartbeat(db, "p-hb", "SHA256:r1", Date.now() + 5000);
+      assert.equal(seat, 1);
+      const after = findPatch(db, "p-hb")?.seat_1_claimed_at;
+      assert.ok(
+        after !== null && after !== undefined && (before === null || before === undefined || after >= before),
+        "seat_1_claimed_at should be refreshed",
+      );
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("returns null when the claimant holds no seat (404 case)", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      insertPatch(db, {
+        patch_id: "p-hb2",
+        requested_by_fp: "SHA256:author",
+        base_sha: "a".repeat(40),
+        head_sha: "b".repeat(40),
+        repo: "acme/foo",
+      });
+      const seat = touchHeartbeat(db, "p-hb2", "SHA256:nobody");
+      assert.equal(seat, null);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
   });
 });
