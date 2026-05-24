@@ -216,6 +216,10 @@ COPY server/list-trash /usr/local/bin/list-trash
 COPY server/stamp-server-pubkey /usr/local/bin/stamp-server-pubkey
 COPY server/stamp-ensure-repo-key /usr/local/sbin/stamp-ensure-repo-key
 COPY server/entrypoint.sh /entrypoint.sh
+# entrypoint.sh sources this guard via `. "$(dirname "$0")/lib/check-prompts-dir.sh"`
+# (i.e. /lib/check-prompts-dir.sh). Must be copied into the image or the
+# entrypoint aborts under `set -e` on boot (AGT-411 regression).
+COPY server/lib/check-prompts-dir.sh /lib/check-prompts-dir.sh
 
 # Sudoers fragment that grants the unprivileged git user passwordless
 # invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root
