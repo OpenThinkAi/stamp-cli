@@ -39,7 +39,38 @@ import { userConfigPath } from "./paths.js";
 
 export interface UserConfig {
   reviewers: Record<string, string>;
+  /**
+   * Base URL of a local OpenAI-compatible model server (LM Studio,
+   * llama.cpp `llama-server`, vLLM, …) used by reviewers whose model is
+   * configured with the `local:` scheme. Optional; when omitted the local
+   * client adapter falls back to its own default (LM Studio's
+   * http://localhost:1234/v1). Machine-specific, which is exactly why it
+   * lives here in per-user config rather than the hash-pinned per-repo
+   * `.stamp/config.yml`.
+   */
+  local_endpoint?: string;
 }
+
+/**
+ * A reviewer's value under `reviewers:` may carry this scheme prefix to
+ * route the review through the local OpenAI-compatible backend instead of
+ * the Anthropic API: `security: local:qwen2.5-coder-32b`. The suffix is the
+ * model id the local server expects; the endpoint comes from
+ * `local_endpoint` (or the adapter default). This keeps the existing
+ * `reviewers: { name: <string> }` shape — no structural config change —
+ * while letting an operator move any reviewer off the metered path.
+ */
+export const LOCAL_MODEL_PREFIX = "local:";
+
+/**
+ * Resolved execution backend for a reviewer. The trusted review path
+ * branches on `kind`: `anthropic` runs the existing agent-SDK reviewer (or
+ * SDK default when `model` is null); `local` runs the one-shot core against
+ * a local OpenAI-compatible endpoint (unmetered).
+ */
+export type ReviewerBackend =
+  | { kind: "anthropic"; model: string | null }
+  | { kind: "local"; model: string; endpoint: string | undefined };
 
 /**
  * Default reviewer-model assignments shipped to first-time operators.
@@ -170,7 +201,31 @@ export function parseUserConfig(
       reviewers[name] = id;
     }
   }
-  return { reviewers };
+
+  // Optional top-level local_endpoint. Validated as an http(s) URL so a
+  // typo surfaces at config-load rather than as a confusing fetch error
+  // mid-review. Absence is fine — the local adapter has its own default.
+  let local_endpoint: string | undefined;
+  const endpointRaw = obj.local_endpoint;
+  if (endpointRaw !== undefined && endpointRaw !== null) {
+    if (typeof endpointRaw !== "string" || endpointRaw.trim() === "") {
+      throw new Error(
+        `${contextPath}: local_endpoint must be a non-empty string (an OpenAI-compatible base URL like 'http://localhost:1234/v1')`,
+      );
+    }
+    const url = endpointRaw.trim();
+    if (!/^https?:\/\//.test(url)) {
+      throw new Error(
+        `${contextPath}: local_endpoint = ${JSON.stringify(endpointRaw)} must be an http(s) URL ` +
+          `(e.g. 'http://localhost:1234/v1' for LM Studio)`,
+      );
+    }
+    local_endpoint = url;
+  }
+
+  return local_endpoint !== undefined
+    ? { reviewers, local_endpoint }
+    : { reviewers };
 }
 
 /**
@@ -180,7 +235,11 @@ export function parseUserConfig(
  * `yaml` package's defaults (insertion order).
  */
 export function stringifyUserConfig(cfg: UserConfig): string {
-  return stringifyYaml({ reviewers: cfg.reviewers });
+  return stringifyYaml(
+    cfg.local_endpoint !== undefined
+      ? { reviewers: cfg.reviewers, local_endpoint: cfg.local_endpoint }
+      : { reviewers: cfg.reviewers },
+  );
 }
 
 /**
@@ -240,15 +299,46 @@ export function loadOrCreateUserConfig(): {
  * see the parse error when they explicitly inspect.
  */
 export function resolveReviewerModel(reviewer: string): string | null {
+  // Anthropic callers (the agent-SDK reviewer, the headless path) must never
+  // receive a `local:` value as a model id — it would fail at API-call time.
+  // Delegate to the backend resolver and surface a model only for the
+  // anthropic kind; local-configured reviewers resolve to null here (SDK
+  // default), and the trusted path routes them to the local backend instead.
+  const backend = resolveReviewerBackend(reviewer);
+  return backend.kind === "anthropic" ? backend.model : null;
+}
+
+/**
+ * Resolve a reviewer's execution backend from `~/.stamp/config.yml`. A
+ * value with the `local:` scheme prefix routes to the local OpenAI-
+ * compatible endpoint; anything else is an Anthropic model id (or null when
+ * unset → SDK default).
+ *
+ * Errors loading the file are swallowed and treated as "no config / SDK
+ * default" — this is on the hot path of every reviewer invocation, and a
+ * malformed config shouldn't break the review. The CLI surface (`stamp
+ * config reviewers show`) re-loads with throw-on-malformed semantics so
+ * operators see the parse error when they explicitly inspect.
+ */
+export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
   let cfg: UserConfig | null;
   try {
     cfg = loadUserConfig();
   } catch {
-    return null;
+    cfg = null;
   }
-  if (!cfg) return null;
-  const id = cfg.reviewers[reviewer];
-  return typeof id === "string" && id.length > 0 ? id : null;
+  const raw = cfg?.reviewers[reviewer];
+  if (typeof raw !== "string" || raw.length === 0) {
+    return { kind: "anthropic", model: null };
+  }
+  if (raw.startsWith(LOCAL_MODEL_PREFIX)) {
+    const model = raw.slice(LOCAL_MODEL_PREFIX.length).trim();
+    // A bare `local:` with no model id is a misconfiguration; fall back to
+    // anthropic-default rather than handing the local server an empty model.
+    if (model.length === 0) return { kind: "anthropic", model: null };
+    return { kind: "local", model, endpoint: cfg?.local_endpoint };
+  }
+  return { kind: "anthropic", model: raw };
 }
 
 /**
