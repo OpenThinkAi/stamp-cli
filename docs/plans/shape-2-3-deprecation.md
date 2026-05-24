@@ -13,12 +13,12 @@ Status: ready · Owner: maintainer · Ticket: AGT-407
 > spawns. AGT-406 landed on `main` as merge `fcd90723` on 2026-05-23 —
 > dependency satisfied.
 >
-> Companion: [`docs/plans/shape-5-peer-review.md`](./shape-5-peer-review.md)
+> Companion: [`docs/plans/peer-agentic-reviews.md`](./peer-agentic-reviews.md)
 > (the Phase 4 work this cleanup unblocks).
 
 ## Why this exists
 
-Phase 2 of the Shape 5 rollout deprecates two deployment topologies:
+Phase 2 of the Peer-agentic reviews rollout deprecates two deployment topologies:
 
 - **Shape 2 (mirror-mode PR)** — `stamp init --pr-mode` scaffolds a
   `.github/workflows/stamp-mirror.yml` Action that mirrors every GitHub

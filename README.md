@@ -45,16 +45,18 @@ npm audit signatures
 
 ## Quick start
 
-**Pick your deployment shape first** — it determines which command you run and
+**Pick your trust model first** — it determines which command you run and
 what trust guarantees you actually get. In 2.x, the trust ladder is explicit:
 
-| Shape | Origin is… | Trust source | Enforcement |
+| Mode | Origin is… | Trust source | Enforcement |
 |---|---|---|---|
-| **Server-gated** (Shape 1, recommended) | A stamp server you deployed | Server signs every verdict; admin-cap keys gate `.stamp/**` changes | Pre-receive hook rejects unstamped pushes; v4 envelope verified end-to-end |
-| **Local-only** (no server, no trust) | Anywhere | None — `--plan` / `--headless` produce no attestation | Discipline-only; signs merges but the remote doesn't enforce anything |
+| **Server-gated attestations** (trust model, recommended) | A stamp server you deployed | Server signs every verdict; admin-cap keys gate `.stamp/**` changes | Pre-receive hook rejects unstamped pushes; v4 envelope verified end-to-end |
+| **Attested PRs** (trust model) | GitHub | Server signs every verdict; verified in CI against a public key (asymmetric) | `stamp/verify-attestation@v1` required PR check |
+| **Local-only** (advisory, no trust) | Anywhere | None — `--plan` / `--headless` produce no attestation | Discipline-only; signs merges but the remote doesn't enforce anything |
 
-Server-gated rides on server-attested verdicts and produces verifying v4
-attestations. Local-only is for fast reviewer iteration when you haven't
+The two **trust models** are server-gated attestations and Attested PRs;
+both ride on server-attested verdicts and produce verifying v4 attestations.
+Local-only is an advisory mode for fast reviewer iteration when you haven't
 deployed a server — it makes no trust claim. **Pick deliberately**; they're
 not interchangeable.
 
@@ -65,7 +67,7 @@ content-addressed (survives squash + rebase + merge-commit), and the PR's
 green-check requirement keeps the human in the merge loop. No server to
 host, no on-call, no separate trust root.
 
-### Server-gated path (Shape 1)
+### Server-gated path
 
 If you've deployed a stamp server (see [`docs/quickstart-server.md`](./docs/quickstart-server.md)
 for the full Railway walkthrough), the from-zero flow is three commands:
@@ -89,7 +91,7 @@ Migrating an existing 1.x repo? Use `stamp init --migrate-to-server-attested`
 config without touching your reviewer prompts. See the
 [migration guide](./docs/migration-1.x-to-2.x.md) for the full walkthrough.
 
-### GitHub-primary path (PR verification)
+### GitHub-primary path — Attested PRs
 
 For teams whose source of truth is GitHub, `stamp init` against a github.com
 origin auto-scaffolds `.github/workflows/stamp-verify.yml` (the verifier that
@@ -170,7 +172,7 @@ Local-only mode is a sibling pathway focused on fast reviewer feedback during it
 ### Local-test (no server, on-disk bare repo)
 
 Run everything on one machine using a bare git repo on disk as the "remote".
-Useful for learning the shape before deploying a real server.
+Useful for learning the flow before deploying a real server.
 
 ```sh
 # Install + initialize a fresh project
@@ -239,8 +241,8 @@ See [`DESIGN.md`](./DESIGN.md) for the full spec and [`docs/ROADMAP.md`](./docs/
 **Core review cycle:**
 
 ```
-stamp init [--mode <shape>]                # scaffold .stamp/ + keypair; idempotent. Also ensures
-                                           #   AGENTS.md at repo root with deployment-shape-aware
+stamp init [--mode <mode>]                 # scaffold .stamp/ + keypair; idempotent. Also ensures
+                                           #   AGENTS.md at repo root with deployment-mode-aware
                                            #   guidance. --mode is server-gated|local-only;
                                            #   auto-detected from origin if omitted (forge-direct
                                            #   origins default to local-only with a loud warning).
@@ -525,10 +527,12 @@ walks both `failed-runs/` and `failed-parses/`. See
 [`docs/troubleshooting.md`](./docs/troubleshooting.md) for the full
 runbook.
 
-## Deployment shapes
+## Deployment topologies
 
 Three ways to run stamp-cli in a real setting, trading setup cost for
-enforcement strength. Pick based on whether your remote can run a
+enforcement strength. This is the *topology* axis (where the remote lives
+and what can enforce a gate) — orthogonal to the trust model you pick in
+the quick-start above. Choose based on whether your remote can run a
 pre-receive hook — GitHub can't, so the choice matters.
 
 **1. Self-hosted remote — full enforcement (recommended).**
