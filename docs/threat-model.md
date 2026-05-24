@@ -150,13 +150,15 @@ reviewer agents into approving, or by escaping their intended scope.
   flags the residual: a sufficiently sophisticated injection
   *could* fool a reviewer.
 - *Inject a reviewer, then exfiltrate via reviewer tools.* Read
-  `~/.aws/credentials` or `.git/stamp/state.db`, then WebFetch the
-  contents to an allowed host. Defenses: `Read`/`Grep`/`Glob` are
-  scoped to `repoRoot` by `denyIfOutsideRepo` AND
+  `~/.aws/credentials`, `.git/config` (credential-bearing remote
+  URLs / `credential.helper` caches), or `.git/stamp/state.db`, then
+  WebFetch the contents to an allowed host. Defenses: `Read`/`Grep`/`Glob`
+  are scoped to `repoRoot` by `denyIfOutsideRepo` AND
   `denyIfRealpathOutsideRepo` (which follows symlinks before the
   check, closing the audit M-S1 / M-LL1 bypass), reviewer-internal
-  paths (`.git/stamp/`, `.stamp/trusted-keys/`) are denylisted
-  even inside the repo, WebFetch enforces both host allowlist and
+  paths (all of `.git/` and `.stamp/trusted-keys/`) are denylisted
+  even inside the repo — for Read, Grep, AND Glob (AGT-418) — WebFetch
+  enforces both host allowlist and
   optional `path_prefix`, MCP launches are gated by an allowlist.
 - *Inject a reviewer that approves a `.stamp/` change.* Modifying
   `.stamp/config.yml` or a reviewer prompt is a way to change
