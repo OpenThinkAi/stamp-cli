@@ -168,6 +168,14 @@ function runStampReview(
   };
   if (harness.promptCacheRoot) {
     env.STAMP_PROMPTS_DIR = harness.promptCacheRoot;
+    // AGT-411: custom promptCacheRoot is a non-default STAMP_PROMPTS_DIR.
+    // The resolver's prod guard rejects non-default dirs unless STAMP_ENV
+    // is non-prod AND STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is set.
+    // Callers can override via envOverrides if they want to assert the
+    // refusal path itself.
+    env.STAMP_ENV = env.STAMP_ENV ?? "test";
+    env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY =
+      env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY ?? "1";
   }
   if (harness.signingKeyPath) {
     env.REVIEW_SIGNING_KEY_PATH = harness.signingKeyPath;

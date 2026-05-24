@@ -45,7 +45,7 @@ import {
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, it } from "node:test";
+import { afterEach, before, describe, it } from "node:test";
 
 import {
   canonicalSerializeApproval,
@@ -733,14 +733,26 @@ describe("runReviewPipeline — env-var caps", () => {
       "../src/server/reviewPipeline.ts"
     );
     const saved = process.env.STAMP_PROMPTS_DIR;
+    const savedEnv = process.env.STAMP_ENV;
+    const savedToggle = process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
     try {
       delete process.env.STAMP_PROMPTS_DIR;
+      delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      // Default path is allowed without any toggle, regardless of STAMP_ENV.
+      delete process.env.STAMP_ENV;
       assert.equal(resolvePromptCacheRoot(), "/etc/stamp/reviewers");
+      // Custom path requires non-prod env + insecure toggle (AGT-411).
+      process.env.STAMP_ENV = "test";
+      process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = "1";
       process.env.STAMP_PROMPTS_DIR = "/tmp/custom-prompts";
       assert.equal(resolvePromptCacheRoot(), "/tmp/custom-prompts");
     } finally {
       if (saved === undefined) delete process.env.STAMP_PROMPTS_DIR;
       else process.env.STAMP_PROMPTS_DIR = saved;
+      if (savedEnv === undefined) delete process.env.STAMP_ENV;
+      else process.env.STAMP_ENV = savedEnv;
+      if (savedToggle === undefined) delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      else process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = savedToggle;
     }
   });
 
@@ -770,6 +782,8 @@ describe("runReviewPipeline — env-var caps", () => {
     );
     const savedRepoUrl = process.env.STAMP_PROMPTS_REPO_URL;
     const savedDir = process.env.STAMP_PROMPTS_DIR;
+    const savedEnv = process.env.STAMP_ENV;
+    const savedToggle = process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
     try {
       // (a + b at root-pick layer): REPO_URL set → Phase B path,
       // regardless of whether STAMP_PROMPTS_DIR is also set. The
@@ -780,13 +794,16 @@ describe("runReviewPipeline — env-var caps", () => {
       assert.equal(PHASE_B_CACHE_ROOT, "/srv/git/.prompts-cache");
 
       // REPO_URL set takes precedence even when DIR is also set —
-      // setting the URL is the operator's signal that they're on
-      // the Phase B provisioning channel.
+      // AGT-411 Phase B carve-out: non-default STAMP_PROMPTS_DIR is NOT
+      // refused when STAMP_PROMPTS_REPO_URL is set (the resolver ignores it).
       process.env.STAMP_PROMPTS_DIR = "/tmp/should-be-ignored";
       assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
 
       // (c): REPO_URL unset, DIR set → Phase A path honors DIR.
+      // Requires non-prod env + toggle (AGT-411).
       delete process.env.STAMP_PROMPTS_REPO_URL;
+      process.env.STAMP_ENV = "test";
+      process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = "1";
       process.env.STAMP_PROMPTS_DIR = "/tmp/custom-phase-a";
       assert.equal(resolvePromptCacheRoot(), "/tmp/custom-phase-a");
 
@@ -798,6 +815,10 @@ describe("runReviewPipeline — env-var caps", () => {
       else process.env.STAMP_PROMPTS_REPO_URL = savedRepoUrl;
       if (savedDir === undefined) delete process.env.STAMP_PROMPTS_DIR;
       else process.env.STAMP_PROMPTS_DIR = savedDir;
+      if (savedEnv === undefined) delete process.env.STAMP_ENV;
+      else process.env.STAMP_ENV = savedEnv;
+      if (savedToggle === undefined) delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      else process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = savedToggle;
     }
   });
 
@@ -822,5 +843,150 @@ describe("runReviewPipeline — env-var caps", () => {
       if (savedDir === undefined) delete process.env.STAMP_PROMPTS_DIR;
       else process.env.STAMP_PROMPTS_DIR = savedDir;
     }
+  });
+
+  // ─── AGT-411: production refusal for STAMP_PROMPTS_DIR override ────────
+  //
+  // Nine-case matrix for resolvePromptCacheRoot() under the new guard:
+  //
+  //   Prod context (STAMP_ENV absent or 'production'):
+  //     1. default dir, no toggle     → allowed (no change from pre-AGT-411)
+  //     2. non-default dir, no toggle → throws (AC #2)
+  //     3. non-default dir + toggle   → throws (AC #2 — toggle rejected in prod)
+  //     4. default dir + toggle set   → throws (AC #3 — toggle rejected in prod)
+  //     5. Phase B URL set + stale DIR → allowed (AC Phase B carve-out)
+  //
+  //   Non-prod context (STAMP_ENV=dev or STAMP_ENV=test):
+  //     6. default dir, no toggle     → allowed
+  //     7. non-default dir, no toggle → throws (toggle required)
+  //     8. non-default dir + toggle   → allowed (AC #1 — dev/test unlock)
+  //     9. default dir + toggle set   → allowed (toggle harmless on default)
+  describe("AGT-411: resolvePromptCacheRoot prod refusal", () => {
+    let savedDir: string | undefined;
+    let savedEnv: string | undefined;
+    let savedToggle: string | undefined;
+    let savedRepoUrl: string | undefined;
+
+    before(() => {
+      savedDir = process.env.STAMP_PROMPTS_DIR;
+      savedEnv = process.env.STAMP_ENV;
+      savedToggle = process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      savedRepoUrl = process.env.STAMP_PROMPTS_REPO_URL;
+    });
+
+    afterEach(() => {
+      if (savedDir === undefined) delete process.env.STAMP_PROMPTS_DIR;
+      else process.env.STAMP_PROMPTS_DIR = savedDir;
+      if (savedEnv === undefined) delete process.env.STAMP_ENV;
+      else process.env.STAMP_ENV = savedEnv;
+      if (savedToggle === undefined) delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      else process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = savedToggle;
+      if (savedRepoUrl === undefined) delete process.env.STAMP_PROMPTS_REPO_URL;
+      else process.env.STAMP_PROMPTS_REPO_URL = savedRepoUrl;
+    });
+
+    it("case 1: prod + default dir + no toggle → allowed", async () => {
+      const { resolvePromptCacheRoot, DEFAULT_PROMPTS_DIR } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      delete process.env.STAMP_ENV;
+      delete process.env.STAMP_PROMPTS_DIR;
+      delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_DIR);
+    });
+
+    it("case 2: prod (STAMP_ENV absent) + non-default dir + no toggle → throws", async () => {
+      const { resolvePromptCacheRoot } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      delete process.env.STAMP_ENV;
+      process.env.STAMP_PROMPTS_DIR = "/tmp/attacker-prompts";
+      delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      assert.throws(() => resolvePromptCacheRoot(), /non-default path/);
+    });
+
+    it("case 3: prod + non-default dir + toggle set → still throws (toggle rejected in prod)", async () => {
+      const { resolvePromptCacheRoot } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      delete process.env.STAMP_ENV;
+      process.env.STAMP_PROMPTS_DIR = "/tmp/attacker-prompts";
+      process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = "1";
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      // Toggle is rejected in prod (checked before DIR) → throws about toggle.
+      assert.throws(() => resolvePromptCacheRoot(), /STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY.*production/);
+    });
+
+    it("case 4: prod + default dir + toggle set → throws (toggle rejected in prod, AC #3)", async () => {
+      const { resolvePromptCacheRoot } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      delete process.env.STAMP_ENV;
+      delete process.env.STAMP_PROMPTS_DIR;
+      process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = "1";
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      assert.throws(() => resolvePromptCacheRoot(), /STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY.*production/);
+    });
+
+    it("case 5: Phase B URL set + stale non-default STAMP_PROMPTS_DIR → allowed (Phase B carve-out)", async () => {
+      const { resolvePromptCacheRoot, PHASE_B_CACHE_ROOT } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      delete process.env.STAMP_ENV;
+      process.env.STAMP_PROMPTS_REPO_URL = "git@github.com:acme/stamp-prompts.git";
+      process.env.STAMP_PROMPTS_DIR = "/tmp/stale-phase-a-value";
+      delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      // No refusal — Phase B carve-out takes effect; STAMP_PROMPTS_DIR is ignored.
+      assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
+    });
+
+    it("case 6: non-prod + default dir + no toggle → allowed", async () => {
+      const { resolvePromptCacheRoot, DEFAULT_PROMPTS_DIR } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      process.env.STAMP_ENV = "dev";
+      delete process.env.STAMP_PROMPTS_DIR;
+      delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_DIR);
+    });
+
+    it("case 7: non-prod + non-default dir + no toggle → throws (toggle required)", async () => {
+      const { resolvePromptCacheRoot } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      process.env.STAMP_ENV = "test";
+      process.env.STAMP_PROMPTS_DIR = "/tmp/ci-prompts";
+      delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      assert.throws(
+        () => resolvePromptCacheRoot(),
+        /STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is not set/,
+      );
+    });
+
+    it("case 8: non-prod + non-default dir + toggle set → allowed (dev/test unlock, AC #1)", async () => {
+      const { resolvePromptCacheRoot } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      process.env.STAMP_ENV = "test";
+      process.env.STAMP_PROMPTS_DIR = "/tmp/ci-prompts";
+      process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = "1";
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      assert.equal(resolvePromptCacheRoot(), "/tmp/ci-prompts");
+    });
+
+    it("case 9: non-prod + default dir + toggle set → allowed (toggle harmless on default dir)", async () => {
+      const { resolvePromptCacheRoot, DEFAULT_PROMPTS_DIR } = await import(
+        "../src/server/reviewPipeline.ts"
+      );
+      process.env.STAMP_ENV = "dev";
+      delete process.env.STAMP_PROMPTS_DIR;
+      process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY = "1";
+      delete process.env.STAMP_PROMPTS_REPO_URL;
+      assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_DIR);
+    });
   });
 });

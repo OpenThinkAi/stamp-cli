@@ -412,6 +412,16 @@ write_env_var ANTHROPIC_API_KEY  # consumed by stamp-review.cjs via lib/serverEn
 # while the consumer side was reading the bundled fallback — a confusing
 # half-broken state.)
 write_env_var STAMP_PROMPTS_REPO_URL
+
+# AGT-411: production refusal guard for STAMP_PROMPTS_DIR override.
+# Must run before write_env_var STAMP_PROMPTS_DIR so a misconfigured prod
+# deployment is rejected before the var is persisted to /etc/stamp/env.
+# Phase B carve-out is handled inside check_prompts_dir: when
+# STAMP_PROMPTS_REPO_URL is set the resolver ignores STAMP_PROMPTS_DIR,
+# so a stale Phase A var is harmless and the guard is a no-op.
+. "$(dirname "$0")/lib/check-prompts-dir.sh"
+check_prompts_dir
+
 write_env_var STAMP_PROMPTS_DIR
 
 # SSH sessions strip env vars by default; sshd_config's SetEnv bypasses

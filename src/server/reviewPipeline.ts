@@ -162,6 +162,17 @@ export function resolveReviewTimeoutMs(): number {
 export const PHASE_B_CACHE_ROOT = "/srv/git/.prompts-cache";
 
 /**
+ * Default Phase A prompts directory — the path baked into the server image.
+ * Shared between `resolvePromptCacheRoot()` and `server/lib/check-prompts-dir.sh`
+ * (the shell side keeps its own copy; both MUST stay in sync).
+ *
+ * AGT-411: introduced as a single source of truth so the resolver, the
+ * entrypoint guard, and the tests all reference the same default without
+ * scattering the literal string.
+ */
+export const DEFAULT_PROMPTS_DIR = "/etc/stamp/reviewers";
+
+/**
  * Resolve the server-side prompt-cache directory from env or fall back
  * to the stamp-server default.
  *
@@ -217,10 +228,53 @@ export const PHASE_B_CACHE_ROOT = "/srv/git/.prompts-cache";
  */
 export function resolvePromptCacheRoot(): string {
   warnIfLegacyRepoRootSet();
+
+  // Phase B carve-out (AGT-411): when STAMP_PROMPTS_REPO_URL is set the
+  // resolver ignores STAMP_PROMPTS_DIR entirely — Phase B is the operator's
+  // authoritative channel, and a stale/unused Phase A var must NOT trigger
+  // the production refusal below.
   if (process.env["STAMP_PROMPTS_REPO_URL"]) {
     return PHASE_B_CACHE_ROOT;
   }
-  return process.env["STAMP_PROMPTS_DIR"] || "/etc/stamp/reviewers";
+
+  // AGT-411: production hard-error on any non-default STAMP_PROMPTS_DIR.
+  // Absent STAMP_ENV is treated as production (fail-closed).
+  const stampEnv = process.env["STAMP_ENV"];
+  const isProd = stampEnv !== "dev" && stampEnv !== "test";
+  const customDir = process.env["STAMP_PROMPTS_DIR"];
+  const insecureToggle = process.env["STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY"];
+
+  if (isProd) {
+    // In production: reject any non-default STAMP_PROMPTS_DIR, and also
+    // reject the insecure-test toggle if it is set at all (AC #3).
+    if (insecureToggle) {
+      throw new Error(
+        "STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is set in a production context " +
+          `(STAMP_ENV='${stampEnv ?? "<unset>"}'); this toggle is rejected in production. ` +
+          "Remove it from the production deployment.",
+      );
+    }
+    if (customDir && customDir !== DEFAULT_PROMPTS_DIR) {
+      throw new Error(
+        `STAMP_PROMPTS_DIR is set to a non-default path ('${customDir}') in a production context ` +
+          `(STAMP_ENV='${stampEnv ?? "<unset>"}'); the prompt-bytes trust property requires prompts to be ` +
+          "baked into the image. Remove STAMP_PROMPTS_DIR from the production deployment.",
+      );
+    }
+    return DEFAULT_PROMPTS_DIR;
+  }
+
+  // Non-production (STAMP_ENV=dev or STAMP_ENV=test): allow override only
+  // when the explicit insecure-test toggle is set.
+  if (customDir && customDir !== DEFAULT_PROMPTS_DIR && !insecureToggle) {
+    throw new Error(
+      `STAMP_PROMPTS_DIR is set to a non-default path ('${customDir}') but ` +
+        "STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is not set. Add STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY=1 to permit a custom " +
+        "prompts directory in dev/test environments.",
+    );
+  }
+
+  return customDir || DEFAULT_PROMPTS_DIR;
 }
 
 let legacyRepoRootWarned = false;
