@@ -217,10 +217,12 @@ describe("requireHumanMerge — diffStat display (AC#2)", () => {
 describe("requireHumanMerge — strict phrase (AC#3)", () => {
   let savedStdinIsTTY: unknown;
   let savedStdoutIsTTY: unknown;
+  let savedWrite: typeof process.stdout.write;
 
   beforeEach(() => {
     savedStdinIsTTY = (process.stdin as { isTTY?: boolean }).isTTY;
     savedStdoutIsTTY = (process.stdout as { isTTY?: boolean }).isTTY;
+    savedWrite = process.stdout.write.bind(process.stdout);
     (process.stdin as { isTTY?: boolean }).isTTY = true;
     (process.stdout as { isTTY?: boolean }).isTTY = true;
     // Silence stdout for these tests — we only care about throws/returns.
@@ -230,7 +232,7 @@ describe("requireHumanMerge — strict phrase (AC#3)", () => {
   afterEach(() => {
     (process.stdin as { isTTY?: boolean }).isTTY = savedStdinIsTTY as boolean;
     (process.stdout as { isTTY?: boolean }).isTTY = savedStdoutIsTTY as boolean;
-    (process.stdout as { write: unknown }).write = process.stdout.write.bind(process.stdout);
+    (process.stdout as { write: unknown }).write = savedWrite;
   });
 
   const strictRule: BranchRule = {

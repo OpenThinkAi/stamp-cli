@@ -41,7 +41,6 @@ import { buildPubkeyMap } from "../src/lib/sshReviewClient.ts";
 import { showAtRef, listFilesAtRef } from "../src/lib/git.ts";
 import { trustAnchorSigningBytes } from "../src/lib/trustAnchorPayload.ts";
 import {
-  TRUST_ANCHOR_NOTES_REF,
   writeNote,
   emptyNote,
   noteWithAppendedSignature,

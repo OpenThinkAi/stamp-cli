@@ -39,7 +39,10 @@ import {
   type AttestationPayloadV4,
   type CheckAttestationV4,
 } from "../lib/attestationV4.js";
-import { collectTrustAnchorSignatures } from "../lib/trustAnchorCollection.js";
+import {
+  collectTrustAnchorSignatures,
+  type CollectTrustAnchorResult,
+} from "../lib/trustAnchorCollection.js";
 import {
   hashMcpServers,
   hashPromptBytes,
@@ -298,33 +301,37 @@ export function runMerge(opts: MergeOptions): void {
     //
     // v3 (legacy) is preserved for repos without `review_server` — they
     // continue to ship operator-signed-only attestations as today.
-    const trailers = rule.review_server
-      ? (() => {
-          const v4Result = buildV4Trailers({
-            repoRoot,
-            revspec,
-            baseSha: resolved.base_sha,
-            headSha: resolved.head_sha,
-            diff: resolved.diff,
-            targetBranch: opts.into,
-            requiredReviewers: rule.required,
-            checks: checkAttestations,
-            operatorPrivateKeyPem: keypair.privateKeyPem,
-            operatorFingerprint: keypair.fingerprint,
-          });
-          matchedPathRules = v4Result.matchedPathRules;
-          return v4Result.trailers;
-        })()
-      : buildV3Trailers({
-          repoRoot,
-          baseSha: resolved.base_sha,
-          headSha: resolved.head_sha,
-          approvals,
-          checks: checkAttestations,
-          targetBranch: opts.into,
-          operatorPrivateKeyPem: keypair.privateKeyPem,
-          operatorFingerprint: keypair.fingerprint,
-        });
+    //
+    // v4 produces two outputs (trailers + matchedPathRules for the banner);
+    // use if/else so both can be assigned cleanly without an IIFE closure.
+    let trailers: string;
+    if (rule.review_server) {
+      const v4Result = buildV4Trailers({
+        repoRoot,
+        revspec,
+        baseSha: resolved.base_sha,
+        headSha: resolved.head_sha,
+        diff: resolved.diff,
+        targetBranch: opts.into,
+        requiredReviewers: rule.required,
+        checks: checkAttestations,
+        operatorPrivateKeyPem: keypair.privateKeyPem,
+        operatorFingerprint: keypair.fingerprint,
+      });
+      matchedPathRules = v4Result.matchedPathRules;
+      trailers = v4Result.trailers;
+    } else {
+      trailers = buildV3Trailers({
+        repoRoot,
+        baseSha: resolved.base_sha,
+        headSha: resolved.head_sha,
+        approvals,
+        checks: checkAttestations,
+        targetBranch: opts.into,
+        operatorPrivateKeyPem: keypair.privateKeyPem,
+        operatorFingerprint: keypair.fingerprint,
+      });
+    }
 
     const fullMessage = `${title}\n\n${trailers}\n`;
 
@@ -481,12 +488,9 @@ function buildV3Trailers(input: {
 /**
  * Matched path_rules info returned alongside the v4 trailer string.
  * Used by runMerge to print the banner lines (AC#4).
+ * Aliased from CollectTrustAnchorResult so the shape stays in one place.
  */
-interface MatchedPathRuleBanner {
-  pattern: string;
-  minimum_signatures: number;
-  qualifying_count: number;
-}
+type MatchedPathRuleBanner = CollectTrustAnchorResult["matchedPathRules"][number];
 
 function buildV4Trailers(input: {
   repoRoot: string;
