@@ -6,6 +6,9 @@
  *     pubkey, source provenance (env / bootstrap / invite / manual)
  *   - invites: single-use, time-bounded tokens an admin mints to onboard
  *     a teammate (phase 2)
+ *   - peer_review_patches: one row per broadcast PR (AGT-427)
+ *   - peer_review_events: append-only event log for peer-agentic reviews
+ *     (AGT-427)
  *
  * Two access modes:
  *   - Writable (boot-time seed, admin operations): opens the DB read/write,
@@ -195,7 +198,302 @@ function initSchema(db: DatabaseSync): void {
       created_at    INTEGER NOT NULL,
       PRIMARY KEY (reviewer, diff_sha256, prompt_sha256)
     );
+
+    -- AGT-427: peer-agentic review patches. One row per broadcast PR.
+    -- seat_N_holder is the fingerprint of the agent that claimed the seat;
+    -- seat_N_claimed_at is the unix-second timestamp of the last heartbeat
+    -- (or original claim), used by the seat-TTL sweep (future ticket).
+    CREATE TABLE IF NOT EXISTS peer_review_patches (
+      patch_id          TEXT PRIMARY KEY,
+      requested_by_fp   TEXT NOT NULL,
+      base_sha          TEXT NOT NULL,
+      head_sha          TEXT NOT NULL,
+      repo              TEXT NOT NULL,
+      broadcast_at      INTEGER NOT NULL,
+      seat_1_holder     TEXT,
+      seat_2_holder     TEXT,
+      seat_1_claimed_at INTEGER,
+      seat_2_claimed_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pr_patches_repo
+      ON peer_review_patches(repo);
+
+    -- AGT-427: append-only event log for peer-agentic review lifecycle.
+    -- payload is the full event JSON for future audit/replay.
+    -- NOTE: no row-level TTL sweep is scoped to this ticket; the
+    -- event log is unbounded in this release. A future ticket adds a sweep.
+    CREATE TABLE IF NOT EXISTS peer_review_events (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      patch_id    TEXT NOT NULL,
+      event_type  TEXT NOT NULL,
+      actor_fp    TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL,
+      payload     TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pr_events_patch_id
+      ON peer_review_events(patch_id);
   `);
+}
+
+// ─── Peer-review patch helpers (AGT-427) ────────────────────────────
+
+export interface PeerReviewPatchRow {
+  patch_id: string;
+  requested_by_fp: string;
+  base_sha: string;
+  head_sha: string;
+  repo: string;
+  broadcast_at: number;
+  seat_1_holder: string | null;
+  seat_2_holder: string | null;
+  seat_1_claimed_at: number | null;
+  seat_2_claimed_at: number | null;
+}
+
+export interface InsertPatchInput {
+  patch_id: string;
+  requested_by_fp: string;
+  base_sha: string;
+  head_sha: string;
+  repo: string;
+  broadcast_at?: number;
+}
+
+/** Insert a new peer-review patch row. Throws on duplicate patch_id. */
+export function insertPatch(
+  db: DatabaseSync,
+  input: InsertPatchInput,
+  now: number = Date.now(),
+): void {
+  db.prepare(
+    `INSERT INTO peer_review_patches
+       (patch_id, requested_by_fp, base_sha, head_sha, repo, broadcast_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    input.patch_id,
+    input.requested_by_fp,
+    input.base_sha,
+    input.head_sha,
+    input.repo,
+    input.broadcast_at ?? Math.floor(now / 1000),
+  );
+}
+
+/** Fetch a patch row by patch_id. Returns null when not found. */
+export function findPatch(
+  db: DatabaseSync,
+  patch_id: string,
+): PeerReviewPatchRow | null {
+  const row = db
+    .prepare(
+      `SELECT patch_id, requested_by_fp, base_sha, head_sha, repo,
+              broadcast_at, seat_1_holder, seat_2_holder,
+              seat_1_claimed_at, seat_2_claimed_at
+       FROM peer_review_patches WHERE patch_id = ?`,
+    )
+    .get(patch_id) as PeerReviewPatchRow | undefined;
+  return row
+    ? {
+        patch_id: row.patch_id,
+        requested_by_fp: row.requested_by_fp,
+        base_sha: row.base_sha,
+        head_sha: row.head_sha,
+        repo: row.repo,
+        broadcast_at: row.broadcast_at,
+        seat_1_holder: row.seat_1_holder ?? null,
+        seat_2_holder: row.seat_2_holder ?? null,
+        seat_1_claimed_at: row.seat_1_claimed_at ?? null,
+        seat_2_claimed_at: row.seat_2_claimed_at ?? null,
+      }
+    : null;
+}
+
+/** Append a row to the peer_review_events table. */
+export function appendEvent(
+  db: DatabaseSync,
+  patch_id: string,
+  event_type: string,
+  actor_fp: string,
+  payload: object,
+  now: number = Date.now(),
+): void {
+  db.prepare(
+    `INSERT INTO peer_review_events (patch_id, event_type, actor_fp, occurred_at, payload)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    patch_id,
+    event_type,
+    actor_fp,
+    Math.floor(now / 1000),
+    JSON.stringify(payload),
+  );
+}
+
+export type ClaimSeatError =
+  | { ok: false; error: "patch_not_found" }
+  | { ok: false; error: "author_cannot_claim_own_pr" }
+  | { ok: false; error: "already_holds_other_seat" }
+  | { ok: false; error: "seats_full" };
+
+export type ClaimSeatResult =
+  | ClaimSeatError
+  | { ok: true; seat: 1 | 2 };
+
+/**
+ * Atomically claim a seat on a peer-review patch (AGT-427).
+ *
+ * Runs entirely inside a BEGIN IMMEDIATE transaction (the write lock is
+ * acquired at the SELECT) so concurrent callers from different SSH-verb
+ * processes serialize rather than racing past the seat-count check.
+ * Caller must NOT already be inside a transaction.
+ *
+ * Rejection conditions (in evaluation order):
+ *   1. patch not found → patch_not_found
+ *   2. claimant fp === requested_by_fp → author_cannot_claim_own_pr
+ *   3. claimant fp already holds the OTHER seat → already_holds_other_seat
+ *   4. both seats occupied → seats_full
+ *   5. success → returns { ok: true, seat: 1 | 2 }
+ */
+export function claimSeatTx(
+  db: DatabaseSync,
+  patch_id: string,
+  claimant_fp: string,
+  now: number = Date.now(),
+): ClaimSeatResult {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const row = db
+      .prepare(
+        `SELECT requested_by_fp, seat_1_holder, seat_2_holder
+         FROM peer_review_patches WHERE patch_id = ?`,
+      )
+      .get(patch_id) as
+      | { requested_by_fp: string; seat_1_holder: string | null; seat_2_holder: string | null }
+      | undefined;
+
+    if (!row) {
+      db.exec("ROLLBACK");
+      return { ok: false, error: "patch_not_found" };
+    }
+
+    if (claimant_fp === row.requested_by_fp) {
+      db.exec("ROLLBACK");
+      return { ok: false, error: "author_cannot_claim_own_pr" };
+    }
+
+    const s1 = row.seat_1_holder ?? null;
+    const s2 = row.seat_2_holder ?? null;
+
+    // Self-collision: already holds the other seat
+    if ((s1 === claimant_fp) || (s2 === claimant_fp)) {
+      db.exec("ROLLBACK");
+      return { ok: false, error: "already_holds_other_seat" };
+    }
+
+    const nowSec = Math.floor(now / 1000);
+
+    if (!s1) {
+      db.prepare(
+        `UPDATE peer_review_patches
+         SET seat_1_holder = ?, seat_1_claimed_at = ?
+         WHERE patch_id = ?`,
+      ).run(claimant_fp, nowSec, patch_id);
+      db.exec("COMMIT");
+      return { ok: true, seat: 1 };
+    }
+
+    if (!s2) {
+      db.prepare(
+        `UPDATE peer_review_patches
+         SET seat_2_holder = ?, seat_2_claimed_at = ?
+         WHERE patch_id = ?`,
+      ).run(claimant_fp, nowSec, patch_id);
+      db.exec("COMMIT");
+      return { ok: true, seat: 2 };
+    }
+
+    db.exec("ROLLBACK");
+    return { ok: false, error: "seats_full" };
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw err;
+  }
+}
+
+/** Release a held seat (clear the column). Returns true when a seat was
+ *  cleared; false when the claimant holds no seat on this patch. */
+export function releaseSeat(
+  db: DatabaseSync,
+  patch_id: string,
+  claimant_fp: string,
+): boolean {
+  // No transaction needed: each SSH-verb process is the sole writer for this
+  // patch when it reaches release (seats serialize on claim, not release).
+  const row = db
+    .prepare(
+      `SELECT seat_1_holder, seat_2_holder FROM peer_review_patches WHERE patch_id = ?`,
+    )
+    .get(patch_id) as
+    | { seat_1_holder: string | null; seat_2_holder: string | null }
+    | undefined;
+
+  if (!row) return false;
+
+  if (row.seat_1_holder === claimant_fp) {
+    db.prepare(
+      `UPDATE peer_review_patches SET seat_1_holder = NULL, seat_1_claimed_at = NULL WHERE patch_id = ?`,
+    ).run(patch_id);
+    return true;
+  }
+
+  if (row.seat_2_holder === claimant_fp) {
+    db.prepare(
+      `UPDATE peer_review_patches SET seat_2_holder = NULL, seat_2_claimed_at = NULL WHERE patch_id = ?`,
+    ).run(patch_id);
+    return true;
+  }
+
+  return false;
+}
+
+/** Refresh the seat_N_claimed_at timestamp for a heartbeat. Returns the
+ *  seat number (1 or 2) that was refreshed; null when the claimant holds
+ *  no seat on this patch (404 case). */
+export function touchHeartbeat(
+  db: DatabaseSync,
+  patch_id: string,
+  claimant_fp: string,
+  now: number = Date.now(),
+): 1 | 2 | null {
+  const row = db
+    .prepare(
+      `SELECT seat_1_holder, seat_2_holder FROM peer_review_patches WHERE patch_id = ?`,
+    )
+    .get(patch_id) as
+    | { seat_1_holder: string | null; seat_2_holder: string | null }
+    | undefined;
+
+  if (!row) return null;
+
+  const nowSec = Math.floor(now / 1000);
+
+  if (row.seat_1_holder === claimant_fp) {
+    db.prepare(
+      `UPDATE peer_review_patches SET seat_1_claimed_at = ? WHERE patch_id = ?`,
+    ).run(nowSec, patch_id);
+    return 1;
+  }
+
+  if (row.seat_2_holder === claimant_fp) {
+    db.prepare(
+      `UPDATE peer_review_patches SET seat_2_claimed_at = ? WHERE patch_id = ?`,
+    ).run(nowSec, patch_id);
+    return 2;
+  }
+
+  return null;
 }
 
 /**

@@ -46,6 +46,17 @@ export default defineConfig([
       // unset (Phase A bundled-prompts path); clones/fetches the
       // external prompts repo into /srv/git/.prompts-cache otherwise.
       "server/prompts-cache-bootstrap": "src/server/prompts-cache-bootstrap.ts",
+      // Peer-agentic review SSH verbs (AGT-427). Each verb is a
+      // standalone CJS entry. All verbs are dark unless
+      // STAMP_PEER_REVIEWS_ENABLED=1 is set; the SQLite migration
+      // (peer_review_patches + peer_review_events tables) always runs
+      // at boot regardless of the env-gate.
+      "server/pr-opened": "src/server/pr-opened.ts",
+      "server/claim-seat": "src/server/claim-seat.ts",
+      "server/release-seat": "src/server/release-seat.ts",
+      "server/heartbeat": "src/server/heartbeat.ts",
+      "server/re-review-request": "src/server/re-review-request.ts",
+      "server/subscribe": "src/server/subscribe.ts",
     },
     format: ["cjs"],
     target: "node22",
