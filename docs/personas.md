@@ -252,7 +252,18 @@ tools:
     path_prefix: /repos/      # only /repos/* paths on api.github.com
 ```
 
-Query strings are never inspected — `?state=open&per_page=5` and similar legitimate API parameters pass through. Avoid listing bare broad hosts like `linear.app` or `github.com` without a `path_prefix` unless the reviewer genuinely needs the full domain; otherwise an injected diff could coerce a reviewer with `Read` access to encode repo bytes into a path on the allowed host. AGT-036 / audit M4.
+By default the query string is **not** inspected — `?state=open&per_page=5` and similar legitimate API parameters pass through. That makes an allowlisted host a **diff-exfil channel** under prompt injection: a reviewer with `Read` access can encode repo bytes into query values (e.g. `?title=<base64-blob>`), and the upstream host's request log captures the query whether or not the request succeeds. For hosts that don't need open-ended queries, constrain them with `query_param_allowlist` (permitted param names) and/or `query_param_max_length` (cap on total query-value length — long enough for an issue ID, too short for a meaningful exfil chunk):
+
+```yaml
+tools:
+  - name: WebFetch
+    allowed_hosts: [api.linear.app]
+    path_prefix: /api/
+    query_param_allowlist: [id, team]   # only these param names allowed
+    query_param_max_length: 64          # total chars across all query values
+```
+
+Avoid listing bare broad hosts like `linear.app` or `github.com` without a `path_prefix` unless the reviewer genuinely needs the full domain; otherwise an injected diff could coerce a reviewer with `Read` access to encode repo bytes into a path (or query) on the allowed host. AGT-036 / AGT-419 / audit M4.
 
 Tell the reviewer in its prompt what the tools are for. For example, in `standards.md`:
 

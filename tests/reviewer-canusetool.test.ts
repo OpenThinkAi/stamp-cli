@@ -29,7 +29,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { checkReviewerTool, denyIfOutsideRepo } from "../src/lib/reviewer.ts";
+import {
+  checkReviewerTool,
+  denyIfOutsideRepo,
+  type WebFetchHostPolicy,
+} from "../src/lib/reviewer.ts";
 
 describe("denyIfOutsideRepo (path-scope helper)", () => {
   const repoRoot = "/tmp/repo";
@@ -495,6 +499,87 @@ describe("checkReviewerTool — WebFetch path_prefix (AGT-036 / audit M4)", () =
     const r = checkReviewerTool({
       toolName: "WebFetch",
       toolInput: { url: "https://api.github.com/repos/" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, true);
+  });
+});
+
+describe("checkReviewerTool — WebFetch query controls (AGT-419)", () => {
+  // api.linear.app: allowlist a single param name. api.github.com: a length
+  // cap. linear.app: neither (back-compat — query unconstrained).
+  const policy = new Map<string, WebFetchHostPolicy>([
+    ["linear.app", {}],
+    ["api.linear.app", { query_param_allowlist: ["id"] }],
+    ["api.github.com", { query_param_max_length: 16 }],
+  ]);
+
+  it("allows a query whose params are all in the allowlist", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.linear.app/issues?id=ABC-123" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("denies a query param outside the allowlist", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.linear.app/issues?id=ABC-123&title=leak" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) {
+      assert.match(r.reason, /query param "title"/);
+      assert.match(r.reason, /query_param_allowlist/);
+    }
+  });
+
+  it("allows a within-cap query", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.github.com/x?a=short" },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("denies a query whose total value length exceeds the cap", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://api.github.com/x?blob=" + "y".repeat(64) },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) {
+      assert.match(r.reason, /query_param_max_length 16/);
+      assert.match(r.reason, /diff-exfil/);
+    }
+  });
+
+  it("sums value lengths across multiple params for the cap", () => {
+    // 10 + 10 = 20 > 16 even though no single value exceeds the cap.
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: {
+        url: "https://api.github.com/x?a=" + "p".repeat(10) + "&b=" + "q".repeat(10),
+      },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("leaves the query unconstrained on a host with neither control (back-compat)", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://linear.app/x?anything=" + "z".repeat(200) },
       repoRoot,
       webFetchPolicy: policy,
     });

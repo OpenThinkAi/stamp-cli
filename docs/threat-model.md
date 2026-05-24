@@ -73,11 +73,17 @@ data from the mirror.
 - *Bait WebFetch.* If a reviewer has WebFetch enabled with a
   permissive `allowed_hosts` and no `path_prefix`, an in-diff URL
   pointing at the attacker's domain could exfiltrate diff content
-  through a server log. Defense: WebFetch is opt-in per-reviewer in
-  `.stamp/config.yml` (gated by `stamp review` on config changes),
-  the runtime hook enforces both the host allowlist AND any
-  `path_prefix`, and operators are steered toward narrow path
-  prefixes in [`docs/personas.md`](./personas.md).
+  through a server log. Even a *narrowly* allowlisted host (e.g.
+  `api.github.com`, `api.linear.app`) is an exfil channel via the
+  **query string**, which the host's request log captures regardless
+  of whether the request succeeds. Defense: WebFetch is opt-in
+  per-reviewer in `.stamp/config.yml` (gated by `stamp review` on
+  config changes), the runtime hook enforces the host allowlist, any
+  `path_prefix`, and — for the query string — the optional
+  `query_param_allowlist` (permitted param names) and
+  `query_param_max_length` (total query-value length cap); operators
+  are steered toward narrow prefixes and query constraints in
+  [`docs/personas.md`](./personas.md).
 
 **Effective?** No path lands code on `main`. WebFetch exfiltration is
 real if a reviewer is configured loosely; the defense is the config
