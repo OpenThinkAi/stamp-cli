@@ -11,6 +11,8 @@ branches:
         run: npm run typecheck
       - name: test
         run: npm test
+      - name: docker-boot-smoke
+        run: bash scripts/docker-boot-smoke.sh
 reviewers:
   security:
     prompt: .stamp/reviewers/security.md
