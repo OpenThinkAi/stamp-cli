@@ -24,12 +24,15 @@ import {
   findUserByShortName,
   insertUser,
   openServerDb,
+  touchLastSeen,
   type Role,
   type UserRow,
 } from "../src/lib/serverDb.ts";
 import {
   listUsersForCaller,
+  pruneIdleUsers,
   removeUser,
+  setUserName,
   setUserRole,
 } from "../src/lib/userOps.ts";
 
@@ -506,6 +509,154 @@ describe("listUsersForCaller", () => {
     try {
       const r = listUsersForCaller(db, fx.users.member1);
       assert.equal(r.ok, true);
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+});
+
+describe("setUserName (AGT-422)", () => {
+  it("owner renames a member; old name freed, new name resolves", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      const r = setUserName(db, fx.users.owner1, "member1", "alice");
+      assert.ok(r.ok);
+      assert.ok(findUserByShortName(db, "alice"));
+      assert.equal(findUserByShortName(db, "member1"), null);
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("any user may rename THEMSELVES", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      assert.ok(setUserName(db, fx.users.member1, "member1", "myname").ok);
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("a member may not rename another user", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      const r = setUserName(db, fx.users.member1, "member2", "x");
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.reason, "caller_lacks_authority");
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("an admin may not rename an owner", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      const r = setUserName(db, fx.users.admin1, "owner1", "x");
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.reason, "caller_lacks_authority");
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("rejects a name already taken and an invalid name", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      const taken = setUserName(db, fx.users.owner1, "member1", "admin1");
+      assert.equal(taken.ok, false);
+      if (!taken.ok) assert.equal(taken.reason, "name_taken");
+      const bad = setUserName(db, fx.users.owner1, "member1", "bad name!");
+      assert.equal(bad.ok, false);
+      if (!bad.ok) assert.equal(bad.reason, "invalid_name");
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+});
+
+describe("pruneIdleUsers (AGT-422)", () => {
+  // 100 days ahead → every fixture row (created just now) is past any
+  // reasonable idle cutoff under this injected clock.
+  const FUTURE = Date.now() + 100 * 86400 * 1000;
+
+  it("owner prunes idle admins+members but never owners or self", () => {
+    const fx = buildFixture(2); // owner1 + owner2 are both owners
+    const db = open(fx.dbPath);
+    try {
+      const r = pruneIdleUsers(db, fx.users.owner1, 86400, FUTURE);
+      assert.ok(r.ok);
+      assert.ok(findUserByShortName(db, "owner1"), "caller kept");
+      assert.ok(findUserByShortName(db, "owner2"), "owner never pruned");
+      assert.equal(findUserByShortName(db, "admin1"), null);
+      assert.equal(findUserByShortName(db, "member1"), null);
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("admin caller prunes only members (not other admins)", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      const r = pruneIdleUsers(db, fx.users.admin1, 86400, FUTURE);
+      assert.ok(r.ok);
+      assert.ok(findUserByShortName(db, "admin2"), "admin not pruned by admin caller");
+      assert.equal(findUserByShortName(db, "member1"), null);
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("keeps a recently-seen user (COALESCE last_seen_at)", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      touchLastSeen(db, fx.users.member1.id, FUTURE); // seen "now"
+      const r = pruneIdleUsers(db, fx.users.owner1, 86400, FUTURE);
+      assert.ok(r.ok);
+      assert.ok(findUserByShortName(db, "member1"), "recently-seen kept");
+      assert.equal(findUserByShortName(db, "member2"), null, "idle pruned");
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("denies a member caller", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      const r = pruneIdleUsers(db, fx.users.member1, 86400, FUTURE);
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.reason, "caller_lacks_authority");
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+});
+
+describe("touchLastSeen (AGT-422)", () => {
+  it("sets last_seen_at (unix seconds) from the given clock", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      assert.equal(fx.users.member1.last_seen_at, null);
+      touchLastSeen(db, fx.users.member1.id, 1_700_000_000_000);
+      assert.equal(findUserByShortName(db, "member1")!.last_seen_at, 1_700_000_000);
     } finally {
       db.close();
       fx.cleanup();

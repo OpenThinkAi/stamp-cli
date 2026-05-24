@@ -26,21 +26,13 @@
  */
 
 import { openServerDb, suggestUniqueShortName, upsertUserByFingerprint } from "../lib/serverDb.js";
-import { parseSshPubkeyList } from "../lib/sshKeys.js";
+import {
+  contentAddressedShortName,
+  parseSshPubkeyList,
+  sshPubkeyBody,
+} from "../lib/sshKeys.js";
 
 const AUTHORIZED_KEYS = process.env["AUTHORIZED_KEYS"] ?? "";
-
-function deriveShortName(comment: string, index: number): string {
-  // SSH key comments are often "user@host" — extract a usable slug. Fall
-  // back to "env-key-N" for keys with empty/junk comments.
-  const trimmed = comment.trim();
-  if (trimmed.length === 0) return `env-key-${index + 1}`;
-  // Replace any char that isn't [A-Za-z0-9._-] with a dash. Keeps short_name
-  // friendly in CLI output without losing identifying info.
-  const slug = trimmed.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
-  if (slug.length === 0) return `env-key-${index + 1}`;
-  return slug;
-}
 
 function main(): void {
   if (AUTHORIZED_KEYS.trim().length === 0) {
@@ -68,11 +60,14 @@ function main(): void {
   try {
     for (let i = 0; i < pubkeys.length; i++) {
       const pk = pubkeys[i]!;
-      const desired = deriveShortName(pk.comment, i);
-      const short_name = suggestUniqueShortName(db, desired);
+      // AGT-422: default to a content-addressed, PII-free short_name and
+      // persist the comment-stripped key body (the comment is decorative
+      // PII; sshd matches on the blob, not the comment). A human name comes
+      // only from an explicit `stamp users set-name`.
+      const short_name = suggestUniqueShortName(db, contentAddressedShortName(pk));
       const result = upsertUserByFingerprint(db, {
         short_name,
-        ssh_pubkey: pk.full,
+        ssh_pubkey: sshPubkeyBody(pk),
         ssh_fp: pk.fingerprint,
         role: "admin",
         source: "env",

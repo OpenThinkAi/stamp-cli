@@ -21,6 +21,7 @@ import { describe, it } from "node:test";
 
 import { findInvite } from "../src/lib/invites.ts";
 import {
+  findUserBySshFingerprint,
   insertUser,
   listUsers,
   openServerDb,
@@ -126,6 +127,11 @@ describe("stamp-mint-invite — success path", () => {
         assert.equal(row.role, "member");
         assert.equal(row.consumed_at, null);
         assert.ok(row.expires_at > Math.floor(Date.now() / 1000));
+        // AGT-422: the verb stamped the caller's last_seen_at on this
+        // authenticated invocation (was NULL after the seed import). The
+        // caller authenticates as ADMIN_SSH_LINE → ADMIN_SSH_FP.
+        const caller = findUserBySshFingerprint(db, ADMIN_SSH_FP);
+        assert.ok(caller && caller.last_seen_at !== null, "last_seen_at should be set after an authenticated verb");
       } finally {
         db.close();
       }

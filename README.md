@@ -281,8 +281,20 @@ stamp users list                                    # enumerate enrolled users
 stamp users promote <name> --to <admin|owner>       # owner-only
 stamp users demote <name> --to <admin|member>       # owner-only
 stamp users remove <name>                           # owner / admin-removes-member
+stamp users set-name <name> --to <new-name>         # claim a human name (default is user-<hex>)
+stamp users prune --idle-for <Nd>                   # remove idle users (never owners/self)
 stamp trust grant <name>                            # stage a per-repo signing-trust PR
 ```
+
+> **Identity privacy (AGT-422).** `stamp users list` is readable by every
+> enrolled user, so short_names are visible to the whole team. To avoid
+> exposing the PII conventionally found in SSH key comments
+> (`firstname.lastname@laptop`), env-seeded keys default to a
+> **content-addressed** `user-<8-hex>` short_name and the key comment is
+> **stripped** before the pubkey is stored. A human-readable name is set
+> only when someone explicitly runs `stamp users set-name`. `last_seen_at`
+> is recorded on every authenticated command so `stamp users prune
+> --idle-for <Nd>` can retire stale accounts.
 
 **Browsing history:**
 

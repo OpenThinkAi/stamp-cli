@@ -217,3 +217,97 @@ export function listUsersForCaller(
     .all() as unknown as UserRow[];
   return { ok: true, users: rows };
 }
+
+// Same shape the invite-accept + mint paths validate (kept local, matching
+// the existing local copies in http-server.ts / mint-invite.ts).
+const SHORT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+
+export type SetNameDenial =
+  | "target_not_found"
+  | "caller_lacks_authority"
+  | "invalid_name"
+  | "name_taken";
+
+export type SetNameResult =
+  | { ok: true; old_name: string; new_name: string; no_change: boolean }
+  | { ok: false; reason: SetNameDenial };
+
+/**
+ * Set `target`'s human-readable short_name (AGT-422). The content-addressed
+ * default (`user-<hex>`) is meant to be replaced by a human name via this op.
+ * Authority: an owner may rename anyone; an admin may rename members; any
+ * user may rename THEMSELVES (low-risk, and the common case — claiming a
+ * name for your own content-addressed default).
+ */
+export function setUserName(
+  db: DatabaseSync,
+  caller: UserRow,
+  target_short_name: string,
+  newName: string,
+): SetNameResult {
+  if (!SHORT_NAME_RE.test(newName)) return { ok: false, reason: "invalid_name" };
+
+  const target = findUserByShortName(db, target_short_name);
+  if (!target) return { ok: false, reason: "target_not_found" };
+
+  const isSelf = target.id === caller.id;
+  const authority_ok =
+    caller.role === "owner" ||
+    isSelf ||
+    (caller.role === "admin" && target.role === "member");
+  if (!authority_ok) return { ok: false, reason: "caller_lacks_authority" };
+
+  if (target.short_name === newName) {
+    return { ok: true, old_name: target.short_name, new_name: newName, no_change: true };
+  }
+  // UNIQUE(short_name) — return a clean reason rather than a raw constraint throw.
+  const clash = findUserByShortName(db, newName);
+  if (clash && clash.id !== target.id) {
+    return { ok: false, reason: "name_taken" };
+  }
+  db.prepare(`UPDATE users SET short_name = ? WHERE id = ?`).run(newName, target.id);
+  return { ok: true, old_name: target.short_name, new_name: newName, no_change: false };
+}
+
+export type PruneIdleDenial = "caller_lacks_authority";
+export type PruneIdleResult =
+  | { ok: true; removed: UserRow[] }
+  | { ok: false; reason: PruneIdleDenial };
+
+/**
+ * Remove users idle for at least `idleForSecs` (AGT-422). Idleness uses
+ * COALESCE(last_seen_at, created_at) — both unix-seconds integers — so a
+ * freshly-imported-but-never-connected key (recent created_at) isn't
+ * instantly prunable. Safety carve-outs: NEVER prunes an owner
+ * (auto-removing an owner who simply hasn't run a verb recently would be
+ * catastrophic — hence no last-owner concern), never prunes the caller, and
+ * an admin caller may only prune members (owners may prune admins+members).
+ */
+export function pruneIdleUsers(
+  db: DatabaseSync,
+  caller: UserRow,
+  idleForSecs: number,
+  now: number = Date.now(),
+): PruneIdleResult {
+  if (caller.role !== "owner" && caller.role !== "admin") {
+    return { ok: false, reason: "caller_lacks_authority" };
+  }
+  const cutoff = Math.floor(now / 1000) - idleForSecs;
+  const rows = db
+    .prepare(
+      `SELECT id, short_name, ssh_pubkey, ssh_fp, stamp_pubkey, role, source,
+              invited_by, created_at, last_seen_at
+         FROM users
+        WHERE role != 'owner'
+          AND id != ?
+          AND COALESCE(last_seen_at, created_at) < ?`,
+    )
+    .all(caller.id, cutoff) as unknown as UserRow[];
+
+  const eligible =
+    caller.role === "admin" ? rows.filter((r) => r.role === "member") : rows;
+
+  const del = db.prepare(`DELETE FROM users WHERE id = ?`);
+  for (const r of eligible) del.run(r.id);
+  return { ok: true, removed: eligible };
+}

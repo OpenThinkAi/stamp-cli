@@ -92,9 +92,16 @@ describe("stamp-seed-users", () => {
         assert.equal(u.source, "env");
         assert.equal(u.stamp_pubkey, null);
       }
-      // short_names derived from the comments
+      // AGT-422: short_names are content-addressed (PII-free), NOT derived
+      // from the key comment, and the stored pubkey has the comment stripped.
       const names = users.map((u) => u.short_name).sort();
-      assert.deepEqual(names, ["alice-laptop", "bob-laptop"]);
+      assert.equal(names.length, 2);
+      for (const n of names) assert.match(n, /^user-[0-9a-f]{8}$/);
+      assert.notEqual(names[0], names[1]); // distinct
+      for (const u of users) {
+        assert.doesNotMatch(u.ssh_pubkey, /laptop/); // comment (alice@laptop / bob@laptop) stripped
+        assert.match(u.ssh_pubkey, /^ssh-ed25519 [A-Za-z0-9+/=]+$/); // bare <algo> <base64>
+      }
     } finally {
       t.cleanup();
     }
@@ -122,11 +129,11 @@ describe("stamp-seed-users", () => {
     try {
       runSeeder(t.dbPath, KEY_A);
 
-      // Simulate a phase-3 operator action: demote alice to member.
+      // Simulate a phase-3 operator action: demote alice to member. The
+      // short_name is now content-addressed, so demote the (single) row
+      // rather than hardcoding a name.
       const writer = openServerDb({ path: t.dbPath, skipChmod: true });
-      writer
-        .prepare("UPDATE users SET role = 'member' WHERE short_name = ?")
-        .run("alice-laptop");
+      writer.prepare("UPDATE users SET role = 'member'").run();
       writer.close();
 
       // Boot 2: env var unchanged. Re-running the seeder must not
@@ -185,10 +192,13 @@ describe("stamp-seed-users", () => {
     }
   });
 
-  it("auto-suffixes short_name on collision between keys with same comment", () => {
+  it("gives same-comment keys DISTINCT content-addressed names (AGT-422)", () => {
     const t = tmpDb();
     try {
-      // Same comment in both keys → derived short_name would collide.
+      // Two DIFFERENT keys with the SAME comment. Pre-AGT-422 the
+      // comment-derived slug collided (→ -2 suffix); now the short_name is
+      // content-addressed from the keyblob, so identical comments are
+      // irrelevant and the two keys get distinct, PII-free names.
       const a = KEY_A.replace("alice@laptop", "shared@host");
       const b = KEY_B.replace("bob@laptop", "shared@host");
       const r = runSeeder(t.dbPath, [a, b].join("\n"));
@@ -199,7 +209,10 @@ describe("stamp-seed-users", () => {
       db.close();
       assert.equal(users.length, 2);
       const names = users.map((u) => u.short_name).sort();
-      assert.deepEqual(names, ["shared-host", "shared-host-2"]);
+      for (const n of names) assert.match(n, /^user-[0-9a-f]{8}$/);
+      assert.notEqual(names[0], names[1]);
+      // and no PII from the shared comment leaked into either name
+      for (const n of names) assert.doesNotMatch(n, /shared|host/);
     } finally {
       t.cleanup();
     }

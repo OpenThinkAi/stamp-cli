@@ -31,6 +31,7 @@ const EXIT = {
   NOT_FOUND: 4,
   LAST_OWNER: 5,
   CANNOT_REMOVE_SELF: 6,
+  NAME_TAKEN: 7,
 } as const;
 
 interface ListUsersOptions {
@@ -50,6 +51,16 @@ export interface DemoteUserOptions {
 
 export interface RemoveUserOptions {
   shortName: string;
+}
+
+export interface SetNameOptions {
+  shortName: string;
+  to: string;
+}
+
+export interface PruneUsersOptions {
+  /** Idle window as `<N>d` (whole days), passed through to the server verb. */
+  idleFor: string;
 }
 
 function resolveServer(): ServerConfig {
@@ -119,6 +130,11 @@ function explainExit(
       return new UsageError(
         `${context}: you can't remove your own account. Ask another admin ` +
           `or owner to do it — prevents accidentally locking yourself out.`,
+      );
+    case EXIT.NAME_TAKEN:
+      return new UsageError(
+        `${context}: that short_name is already in use on ${details.server.host}. ` +
+          `Pick a different name (\`stamp users list\` shows what's taken).`,
       );
     case EXIT.USAGE:
       return new UsageError(
@@ -305,6 +321,29 @@ export function runUsersRemove(opts: RemoveUserOptions): void {
     throw explainExit(result.status, `stamp users remove ${opts.shortName}`, {
       server,
       shortName: opts.shortName,
+    });
+  }
+}
+
+// ─── set-name / prune (AGT-422) ──────────────────────────────────────
+
+export function runUsersSetName(opts: SetNameOptions): void {
+  const server = resolveServer();
+  const result = callRemote(server, ["set-name", opts.shortName, "--to", opts.to]);
+  if (result.status !== 0) {
+    throw explainExit(result.status, `stamp users set-name ${opts.shortName}`, {
+      server,
+      shortName: opts.shortName,
+    });
+  }
+}
+
+export function runUsersPrune(opts: PruneUsersOptions): void {
+  const server = resolveServer();
+  const result = callRemote(server, ["prune", "--idle-for", opts.idleFor]);
+  if (result.status !== 0) {
+    throw explainExit(result.status, `stamp users prune --idle-for ${opts.idleFor}`, {
+      server,
     });
   }
 }

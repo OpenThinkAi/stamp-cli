@@ -25,6 +25,8 @@ import {
   runUsersList,
   runUsersPromote,
   runUsersRemove,
+  runUsersSetName,
+  runUsersPrune,
 } from "./commands/users.js";
 import {
   runServerRepoDelete,
@@ -1117,6 +1119,34 @@ users
   .action((shortName: string) => {
     try {
       runUsersRemove({ shortName });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("set-name <short-name>")
+  .description(
+    "set a user's human-readable short_name (default is a content-addressed user-<hex> slug). Owners may rename anyone; admins may rename members; anyone may rename themselves.",
+  )
+  .requiredOption("--to <new-name>", "the new short_name (alphanumerics + . _ -, start with alnum, max 63 chars)")
+  .action((shortName: string, opts: { to: string }) => {
+    try {
+      runUsersSetName({ shortName, to: opts.to });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("prune")
+  .description(
+    "remove users idle for at least the given window (by last_seen_at, falling back to created_at). Owners may prune admins+members; admins may prune members. Never prunes owners or yourself.",
+  )
+  .requiredOption("--idle-for <Nd>", "idle window in whole days, e.g. 30d")
+  .action((opts: { idleFor: string }) => {
+    try {
+      runUsersPrune({ idleFor: opts.idleFor });
     } catch (err) {
       handleCliError(err);
     }
