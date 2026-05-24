@@ -39,6 +39,17 @@ check_prompts_dir() {
     return 0
   fi
 
+  # AGT-411 AC #3: in a production context (STAMP_PROMPTS_REPO_URL absent,
+  # STAMP_ENV not dev/test), reject the insecure-test toggle unconditionally,
+  # even when STAMP_PROMPTS_DIR is unset or default.  Must be checked BEFORE
+  # the default-dir early-exit so that prod + default-dir + toggle → exit 1
+  # (mirrors the TypeScript resolver's ordering).
+  if [ "$STAMP_ENV" != "dev" ] && [ "$STAMP_ENV" != "test" ] && \
+     [ -n "$STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY" ]; then
+    echo "error: STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is set in a production context (STAMP_ENV='${STAMP_ENV:-<unset>}'); this toggle is rejected in production. Remove it from the production deployment." >&2
+    exit 1
+  fi
+
   # Nothing to check if STAMP_PROMPTS_DIR is unset or equals the default.
   if [ -z "$STAMP_PROMPTS_DIR" ] || [ "$STAMP_PROMPTS_DIR" = "$DEFAULT_PROMPTS_DIR" ]; then
     return 0
@@ -50,7 +61,7 @@ check_prompts_dir() {
   if [ "$STAMP_ENV" = "dev" ] || [ "$STAMP_ENV" = "test" ]; then
     # Non-production: allow ONLY when the explicit insecure-test toggle is set.
     if [ -z "$STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY" ]; then
-      echo "error: STAMP_PROMPTS_DIR is set to a non-default path ('$STAMP_PROMPTS_DIR') in a non-production environment, but STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is not set. Set both to use a custom prompts directory in dev/test." >&2
+      echo "error: STAMP_PROMPTS_DIR is set to a non-default path ('$STAMP_PROMPTS_DIR') in a non-production environment, but STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is not set. Add STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY=1 to permit a custom prompts directory in dev/test." >&2
       exit 1
     fi
     # Both vars set in non-prod: allowed.

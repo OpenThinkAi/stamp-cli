@@ -269,7 +269,7 @@ export function resolvePromptCacheRoot(): string {
   if (customDir && customDir !== DEFAULT_PROMPTS_DIR && !insecureToggle) {
     throw new Error(
       `STAMP_PROMPTS_DIR is set to a non-default path ('${customDir}') but ` +
-        "STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is not set. Set both to use a custom " +
+        "STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY is not set. Add STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY=1 to permit a custom " +
         "prompts directory in dev/test environments.",
     );
   }

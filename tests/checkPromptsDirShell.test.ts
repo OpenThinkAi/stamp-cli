@@ -6,20 +6,23 @@
  * booting the whole container.  Each test case sources the file and calls
  * check_prompts_dir with a specific env; we assert exit code and stderr.
  *
- * Nine-case matrix (mirrors serverReviewPipeline.test.ts AGT-411 block):
+ * Ten-case matrix (mirrors serverReviewPipeline.test.ts AGT-411 block):
  *
  *   Prod context (STAMP_ENV absent or 'production'):
- *     1. default dir, no override           → exit 0
+ *     1. default dir, no override            → exit 0
  *     2. non-default dir, no toggle          → exit 1, stderr match
- *     3. non-default dir + toggle set        → exit 1 (toggle unrecognised in prod)
- *     4. Phase B URL set + stale DIR         → exit 0 (Phase B carve-out)
+ *     3. non-default dir + toggle set        → exit 1 (toggle rejected in prod)
+ *     4. default dir + toggle set            → exit 1 (AC #3: toggle rejected in prod
+ *                                               even when dir is default; checked
+ *                                               before the default-dir early-exit)
+ *     5. Phase B URL set + stale DIR         → exit 0 (Phase B carve-out)
  *
  *   Non-prod context (STAMP_ENV=dev or STAMP_ENV=test):
- *     5. default dir, no toggle              → exit 0
- *     6. non-default dir, no toggle          → exit 1 (toggle required)
- *     7. non-default dir + toggle set        → exit 0 (allowed)
- *     8. Phase B URL + non-default DIR       → exit 0 (Phase B carve-out)
- *     9. STAMP_ENV=production explicit       → exit 1 for non-default dir
+ *     6. default dir, no toggle              → exit 0
+ *     7. non-default dir, no toggle          → exit 1 (toggle required)
+ *     8. non-default dir + toggle set        → exit 0 (allowed)
+ *     9. Phase B URL + non-default DIR       → exit 0 (Phase B carve-out)
+ *    10. STAMP_ENV=production explicit       → exit 1 for non-default dir
  */
 
 import { strict as assert } from "node:assert";
@@ -88,7 +91,18 @@ describe("AGT-411: check-prompts-dir.sh boot-time guard", () => {
     assert.equal(r.status, 1, `Expected exit 1, got ${r.status}. stderr: ${r.stderr}`);
   });
 
-  it("case 4: Phase B URL set + stale non-default STAMP_PROMPTS_DIR → exit 0 (Phase B carve-out)", () => {
+  it("case 4: prod (STAMP_ENV absent) + default dir + toggle set → exit 1 (AC #3: toggle rejected even with default dir)", () => {
+    // The toggle-in-production check fires BEFORE the default-dir early-exit,
+    // so this case exits 1 even though STAMP_PROMPTS_DIR equals the default.
+    const r = runCheck({
+      STAMP_PROMPTS_DIR: DEFAULT_DIR,
+      STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY: "1",
+    });
+    assert.equal(r.status, 1, `Expected exit 1, got ${r.status}. stderr: ${r.stderr}`);
+    assert.match(r.stderr, /error:.*STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY.*production/i);
+  });
+
+  it("case 5: Phase B URL set + stale non-default STAMP_PROMPTS_DIR → exit 0 (Phase B carve-out)", () => {
     const r = runCheck({
       STAMP_PROMPTS_REPO_URL: "git@github.com:acme/stamp-prompts.git",
       STAMP_PROMPTS_DIR: CUSTOM_DIR,
@@ -97,7 +111,7 @@ describe("AGT-411: check-prompts-dir.sh boot-time guard", () => {
     assert.equal(r.status, 0, `Expected exit 0, got ${r.status}. stderr: ${r.stderr}`);
   });
 
-  it("case 5: non-prod (STAMP_ENV=test) + default dir → exit 0", () => {
+  it("case 6: non-prod (STAMP_ENV=test) + default dir → exit 0", () => {
     const r = runCheck({
       STAMP_ENV: "test",
       STAMP_PROMPTS_DIR: DEFAULT_DIR,
@@ -105,7 +119,7 @@ describe("AGT-411: check-prompts-dir.sh boot-time guard", () => {
     assert.equal(r.status, 0, `Expected exit 0, got ${r.status}. stderr: ${r.stderr}`);
   });
 
-  it("case 6: non-prod (STAMP_ENV=dev) + non-default dir + no toggle → exit 1 (toggle required)", () => {
+  it("case 7: non-prod (STAMP_ENV=dev) + non-default dir + no toggle → exit 1 (toggle required)", () => {
     const r = runCheck({
       STAMP_ENV: "dev",
       STAMP_PROMPTS_DIR: CUSTOM_DIR,
@@ -114,7 +128,7 @@ describe("AGT-411: check-prompts-dir.sh boot-time guard", () => {
     assert.match(r.stderr, /error:/i);
   });
 
-  it("case 7: non-prod (STAMP_ENV=test) + non-default dir + toggle set → exit 0 (allowed)", () => {
+  it("case 8: non-prod (STAMP_ENV=test) + non-default dir + toggle set → exit 0 (allowed)", () => {
     const r = runCheck({
       STAMP_ENV: "test",
       STAMP_PROMPTS_DIR: CUSTOM_DIR,
@@ -123,7 +137,7 @@ describe("AGT-411: check-prompts-dir.sh boot-time guard", () => {
     assert.equal(r.status, 0, `Expected exit 0, got ${r.status}. stderr: ${r.stderr}`);
   });
 
-  it("case 8: Phase B URL + non-default STAMP_PROMPTS_DIR in non-prod → exit 0 (Phase B carve-out)", () => {
+  it("case 9: Phase B URL + non-default STAMP_PROMPTS_DIR in non-prod → exit 0 (Phase B carve-out)", () => {
     const r = runCheck({
       STAMP_ENV: "dev",
       STAMP_PROMPTS_REPO_URL: "git@github.com:acme/stamp-prompts.git",
@@ -132,7 +146,7 @@ describe("AGT-411: check-prompts-dir.sh boot-time guard", () => {
     assert.equal(r.status, 0, `Expected exit 0, got ${r.status}. stderr: ${r.stderr}`);
   });
 
-  it("case 9: STAMP_ENV=production explicit + non-default dir + no toggle → exit 1", () => {
+  it("case 10: STAMP_ENV=production explicit + non-default dir + no toggle → exit 1", () => {
     const r = runCheck({
       STAMP_ENV: "production",
       STAMP_PROMPTS_DIR: CUSTOM_DIR,
