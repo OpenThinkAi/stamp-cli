@@ -338,6 +338,14 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
    - `MAX_INVITES_PER_HOUR` — **optional** (default `10`). Per-admin
      token-bucket cap on `stamp invites mint` (AGT-420), bounding a
      compromised admin key's ability to flood invites.
+   - `STAMP_TRASH_TTL_DAYS` — **optional** (default `30`). Soft-deleted bare
+     repos in `/srv/git/.trash/` are auto-purged once older than this (AGT-423)
+     by an in-process sweep — so a repo "deleted" to erase committed PII
+     doesn't linger forever. On-demand purge: `stamp server-repos purge
+     --older-than <N>d` (`0d` = all). A bad value falls back to the default.
+   - `STAMP_TRASH_SWEEP_INTERVAL_SEC` — **optional** (default `21600`, i.e.
+     6h). How often the in-process trash sweep runs; `0` disables it (rely on
+     the on-demand purge instead).
 6. **Expose port 22** via Railway's TCP proxy:
    - Settings → Networking → Public Networking → TCP Proxy → create one
      pointing at container port 22. Railway gives you a public host +

@@ -201,6 +201,11 @@ COPY --from=builder /build/dist/server/mint-invite.cjs /usr/local/bin/stamp-mint
 # stamp-mint-invite; rejects callers below role=member. AGT-330 fills
 # in the Anthropic call; AGT-331 fills in the real signature.
 COPY --from=builder /build/dist/server/stamp-review.cjs /usr/local/bin/stamp-review
+# Trash-retention purge SSH command (AGT-423). `git@server purge-trash
+# --older-than <N>d` removes soft-deleted bare repos older than the TTL.
+# Wrapped by `stamp server-repos purge`; symlinked into git-shell-commands
+# below. SSH-access-gated only, like its delete/restore/list-trash siblings.
+COPY --from=builder /build/dist/server/purge-trash.cjs /usr/local/bin/purge-trash
 # HTTP listener for invite/accept. Started by entrypoint.sh as the git
 # user, runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
 # the hosting platform's job (Railway terminates at its edge proxy).
@@ -263,6 +268,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/stamp-server-pubkey \
              /usr/local/bin/stamp-mint-invite \
              /usr/local/bin/stamp-review \
+             /usr/local/bin/purge-trash \
              /usr/local/bin/stamp-users \
              /usr/local/sbin/stamp-ensure-repo-key \
              /usr/local/sbin/stamp-authorized-keys \
@@ -295,6 +301,7 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/stamp-server-pubkey /home/git/git-shell-commands/stamp-server-pubkey \
  && ln -s /usr/local/bin/stamp-mint-invite /home/git/git-shell-commands/stamp-mint-invite \
  && ln -s /usr/local/bin/stamp-review /home/git/git-shell-commands/stamp-review \
+ && ln -s /usr/local/bin/purge-trash /home/git/git-shell-commands/purge-trash \
  && ln -s /usr/local/bin/stamp-users /home/git/git-shell-commands/stamp-users \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands

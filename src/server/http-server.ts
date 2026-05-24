@@ -44,6 +44,11 @@ import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
 import { insertUser, openServerDb } from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
 import {
+  DEFAULT_TRASH_DIR,
+  purgeTrash,
+  resolveTrashTtlDays,
+} from "./trashPurge.js";
+import {
   cloneOrFetchPromptsCache,
   scrubGitUrlCredentials,
   type CloneOrFetchOpts,
@@ -938,6 +943,129 @@ export function __resetPollStateForTests(): void {
   pollState.tickCount = 0;
 }
 
+// ─── trash-sweep worker (AGT-423) ────────────────────────────────────
+//
+// Periodically purge soft-deleted bare repos older than STAMP_TRASH_TTL_DAYS.
+// In-process (not a system cron — there's no cron in the image) and mirrors
+// the poll-worker shape above: unref'd interval, inflight guard, a tick
+// counter + test seams. The purge logic + destructive-delete containment
+// live in trashPurge.ts (shared with the on-demand `purge-trash` verb).
+
+/** Default sweep cadence: every 6 hours. Trash TTL is in days, so a sub-day
+ *  sweep interval is plenty timely without log noise. */
+export const DEFAULT_TRASH_SWEEP_INTERVAL_SEC = 6 * 3600;
+const MIN_TRASH_SWEEP_INTERVAL_SEC = 60;
+
+interface TrashSweepState {
+  handle: ReturnType<typeof setInterval> | null;
+  inflight: boolean;
+  /** Test-only: bumped per tick so a test can assert ticks fired. */
+  tickCount: number;
+}
+
+const trashSweepState: TrashSweepState = {
+  handle: null,
+  inflight: false,
+  tickCount: 0,
+};
+
+/**
+ * Resolve the sweep interval from STAMP_TRASH_SWEEP_INTERVAL_SEC. Literal
+ * `"0"` disables the sweep; anything non-integer/non-positive falls back to
+ * the default (never silently disables on a typo — same discipline as the
+ * poll interval). Sub-floor values clamp up.
+ */
+export function resolveTrashSweepIntervalSec(): number {
+  const raw = process.env["STAMP_TRASH_SWEEP_INTERVAL_SEC"];
+  if (raw === undefined || raw === "") return DEFAULT_TRASH_SWEEP_INTERVAL_SEC;
+  if (raw === "0") return 0;
+  if (!/^-?\d+$/.test(raw)) {
+    logLine(
+      "warn",
+      `STAMP_TRASH_SWEEP_INTERVAL_SEC=${JSON.stringify(raw)} is not an integer; falling back to default ${DEFAULT_TRASH_SWEEP_INTERVAL_SEC}s`,
+    );
+    return DEFAULT_TRASH_SWEEP_INTERVAL_SEC;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return DEFAULT_TRASH_SWEEP_INTERVAL_SEC;
+  if (n < MIN_TRASH_SWEEP_INTERVAL_SEC) return MIN_TRASH_SWEEP_INTERVAL_SEC;
+  return n;
+}
+
+/** One sweep tick: purge trash older than the TTL. Errors are caught +
+ *  logged so a transient fs hiccup never crashes the listener. Exported
+ *  (`__runTrashSweepTickForTests`) so tests fire a tick without setInterval. */
+function runTrashSweepTick(): void {
+  if (trashSweepState.inflight) return;
+  trashSweepState.inflight = true;
+  trashSweepState.tickCount += 1;
+  try {
+    const trashDir = process.env["STAMP_TRASH_DIR"] || DEFAULT_TRASH_DIR;
+    const ttlDays = resolveTrashTtlDays();
+    const { purged, skipped } = purgeTrash(trashDir, ttlDays);
+    if (purged.length > 0) {
+      logLine(
+        "info",
+        `trash-sweep: purged ${purged.length} trashed repo(s) older than ${ttlDays}d: ${purged.join(", ")}`,
+      );
+    }
+    if (skipped.length > 0) {
+      logLine(
+        "warn",
+        `trash-sweep: skipped ${skipped.length} entr(y/ies) that failed a containment check: ${skipped.join(", ")}`,
+      );
+    }
+  } catch (err) {
+    logLine(
+      "error",
+      `trash-sweep: tick failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  } finally {
+    trashSweepState.inflight = false;
+  }
+}
+
+export const __runTrashSweepTickForTests = runTrashSweepTick;
+
+/** Arm the periodic trash sweep. Idempotent; disabled by
+ *  STAMP_TRASH_SWEEP_INTERVAL_SEC=0. unref'd so an idle daemon still exits. */
+export function startTrashSweepWorker(): void {
+  if (trashSweepState.handle !== null) {
+    logLine("warn", "trash-sweep: already started — ignoring duplicate start");
+    return;
+  }
+  const intervalSec = resolveTrashSweepIntervalSec();
+  if (intervalSec === 0) {
+    logLine("info", "trash-sweep: disabled (STAMP_TRASH_SWEEP_INTERVAL_SEC=0)");
+    return;
+  }
+  const handle = setInterval(() => runTrashSweepTick(), intervalSec * 1000);
+  handle.unref();
+  trashSweepState.handle = handle;
+  logLine(
+    "info",
+    `trash-sweep: started (interval=${intervalSec}s, ttl=${resolveTrashTtlDays()}d)`,
+  );
+}
+
+export function stopTrashSweepWorker(): void {
+  if (trashSweepState.handle === null) return;
+  clearInterval(trashSweepState.handle);
+  trashSweepState.handle = null;
+  trashSweepState.inflight = false;
+}
+
+export function __resetTrashSweepStateForTests(): void {
+  if (trashSweepState.handle !== null) clearInterval(trashSweepState.handle);
+  trashSweepState.handle = null;
+  trashSweepState.inflight = false;
+  trashSweepState.tickCount = 0;
+}
+
+export function __getTrashSweepTickCountForTests(): number {
+  return trashSweepState.tickCount;
+}
+
 /**
  * Test-only direct fire of one poll tick. Fake timers + an async
  * `setInterval` callback is a known-finicky combination — driving the
@@ -1002,6 +1130,9 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     // a no-op when STAMP_PROMPTS_REPO_URL is unset, so Phase A
     // deployments see no behavior change.
     startPromptsPollWorker();
+    // AGT-423: arm the trash-retention sweep (independent of Phase B; runs
+    // whenever STAMP_TRASH_SWEEP_INTERVAL_SEC != 0).
+    startTrashSweepWorker();
   });
   // Symmetric shutdown: when the server closes (operator-driven or test
   // cleanup), stop the poll worker so the interval doesn't leak into
@@ -1010,6 +1141,7 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
   // shutdown supervisors.
   server.once("close", () => {
     stopPromptsPollWorker();
+    stopTrashSweepWorker();
   });
   return server;
 }
