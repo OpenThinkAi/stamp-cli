@@ -25,6 +25,12 @@ import {
 } from "../lib/reviewer.js";
 import { maybePrintLlmNotice } from "../lib/llmNotice.js";
 import {
+  assertDataFlowConfirmed,
+  printDataFlowDisclosure,
+  printDiffSentMarker,
+  printNoRetainWarning,
+} from "../lib/dataFlow.js";
+import {
   buildReviewPlan,
   PLAN_NO_TRUST_BANNER,
   type ReviewPlan,
@@ -404,6 +410,24 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         `review subsequent diffs.`,
     );
   }
+
+  // AGT-415 data-flow disclosure + consent. Positioned at the common
+  // point AFTER the diff-size cap and config parse but BEFORE the
+  // transport split below, so it covers BOTH the direct-Anthropic and
+  // `review_server` paths and fires before any diff leaves the host:
+  //   1. confirmed gate — refuse (throw) for regulated repos that armed
+  //      `data_flow.require_confirmation` without committing `confirmed`.
+  //      `config` here is parsed from the merge-base tree (base_sha), so a
+  //      feature branch cannot ship its own `confirmed: true` to bypass
+  //      the gate on its own introduction.
+  //   2. no-retain warning — loud no-op notice when STAMP_ANTHROPIC_NO_RETAIN=1.
+  //   3. per-invocation marker — fires on every review (distinct from the
+  //      once-per-repo notice in maybePrintLlmNotice below).
+  //   4. disclosure echo — operator-authored data_flow.disclosure block.
+  assertDataFlowConfirmed(config.data_flow);
+  printNoRetainWarning();
+  printDiffSentMarker(reviewerNames.length);
+  printDataFlowDisclosure(config.data_flow);
 
   // Stamp 2.x server-attested transport (AGT-332). When `review_server`
   // is configured on the target branch's rule, route each reviewer
