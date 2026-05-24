@@ -51,7 +51,11 @@ import {
   canonicalSerializeApproval,
 } from "../src/lib/attestationV4.ts";
 import { fingerprintFromPem } from "../src/lib/keys.ts";
-import { openServerDb, type UserRow } from "../src/lib/serverDb.ts";
+import {
+  openServerDb,
+  recordServerVerdict,
+  type UserRow,
+} from "../src/lib/serverDb.ts";
 import {
   PromptFetchFailedError,
   runReviewPipeline,
@@ -1067,6 +1071,35 @@ describe("runReviewPipeline — server verdict cache (AGT-420)", () => {
       assert.equal(first.verdict, "changes_requested");
       assert.equal(second.verdict, "approved");
       assert.equal(calls, 2, "the error path must not be cached; the retry must hit the LLM");
+    } finally {
+      db.close();
+      rmSync(dbDir, { recursive: true, force: true });
+      fx.cleanup();
+    }
+  });
+});
+
+describe("runReviewPipeline — cached verdict validation (AGT-420 security review)", () => {
+  it("refuses to sign a cached row with a garbage verdict string", async () => {
+    const fx = makeFixtureCache();
+    const dbDir = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-badverdict-"));
+    const db = openServerDb({ path: path.join(dbDir, "users.db"), skipChmod: true });
+    try {
+      const diff = Buffer.from("diff --git a/foo b/foo\n+x\n");
+      // Pre-seed the cache with a tampered verdict for this exact triple.
+      const diffSha = createHash("sha256").update(diff).digest("hex");
+      const promptSha = sha256Hex(fx.promptBytes);
+      recordServerVerdict(db, "security", diffSha, promptSha, "totally-bogus", "x");
+
+      // A client that would blow up if reached — proves we throw on the
+      // cache path before any LLM call.
+      const client = rejectingClient(new Error("should not be called"));
+      const input = { ...fixtureInput(fx, diff, { anthropic: client }), db };
+
+      await assert.rejects(
+        runReviewPipeline(input),
+        /cached server verdict is not a recognized value/,
+      );
     } finally {
       db.close();
       rmSync(dbDir, { recursive: true, force: true });

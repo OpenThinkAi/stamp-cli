@@ -609,6 +609,14 @@ export class SigningKeyUnavailableError extends Error {
  *      approval and verifies the signature against the same canonical
  *      bytes — byte identity is the contract.
  */
+/** The only verdict strings a signed ApprovalV4 may carry. Used to
+ *  validate a cached verdict before re-signing it (AGT-420). */
+const VALID_VERDICTS = new Set<string>([
+  "approved",
+  "changes_requested",
+  "denied",
+]);
+
 export async function runReviewPipeline(
   input: ReviewPipelineInput,
 ): Promise<ReviewPipelineResult> {
@@ -665,6 +673,15 @@ export async function runReviewPipeline(
 
   let parsed: { verdict: ApprovalV4["verdict"]; prose: string };
   if (cached) {
+    // Defense-in-depth: the cache row's verdict is a free-form TEXT column.
+    // Validate before slotting it into a signed approval, so a tampered/
+    // corrupt server_verdicts row can't get a garbage verdict signed.
+    // AGT-420 security review.
+    if (!VALID_VERDICTS.has(cached.verdict)) {
+      throw new Error(
+        `cached server verdict is not a recognized value: ${JSON.stringify(cached.verdict)}`,
+      );
+    }
     parsed = {
       verdict: cached.verdict as ApprovalV4["verdict"],
       prose: cached.prose,

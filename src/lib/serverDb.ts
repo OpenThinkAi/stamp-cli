@@ -115,6 +115,13 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
 
   const db = new DatabaseSync(path, { readOnly });
 
+  // Each SSH verb is its own process with its own connection to the same DB
+  // file. busy_timeout makes a concurrent BEGIN IMMEDIATE (e.g. the AGT-420
+  // rate-limit transaction) WAIT for the write lock instead of failing fast
+  // with SQLITE_BUSY — the held region is microseconds, so writers serialize
+  // cleanly under contention rather than erroring out.
+  db.exec("PRAGMA busy_timeout = 5000");
+
   if (!readOnly) {
     db.exec("PRAGMA foreign_keys = ON");
     initSchema(db);
@@ -207,33 +214,51 @@ export function checkAndConsumeToken(
   now: number = Date.now(),
 ): boolean {
   const nowSec = Math.floor(now / 1000);
-  const row = db
-    .prepare(
-      `SELECT tokens, updated_at FROM rate_limits WHERE subject_id = ? AND action = ?`,
-    )
-    .get(subjectId, action) as
-    | { tokens: number; updated_at: number }
-    | undefined;
+  // The read-modify-write MUST be atomic: each SSH verb is its own process
+  // with its own connection, so without a transaction two concurrent callers
+  // can both SELECT tokens=1, both decide allowed, and both write 0 — letting
+  // a flood exceed the cap by ~1 per racing pair (the exact spend-amplification
+  // this bounds). BEGIN IMMEDIATE takes the write lock at the SELECT, so
+  // concurrent callers serialize (busy_timeout makes them wait, not error).
+  // Caller must NOT already be inside a transaction. AGT-420 security review.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const row = db
+      .prepare(
+        `SELECT tokens, updated_at FROM rate_limits WHERE subject_id = ? AND action = ?`,
+      )
+      .get(subjectId, action) as
+      | { tokens: number; updated_at: number }
+      | undefined;
 
-  let tokens: number;
-  if (!row) {
-    tokens = capPerHour; // first call for this subject/action: full bucket
-  } else {
-    const elapsed = Math.max(0, nowSec - row.updated_at);
-    tokens = Math.min(capPerHour, row.tokens + elapsed * (capPerHour / 3600));
+    let tokens: number;
+    if (!row) {
+      tokens = capPerHour; // first call for this subject/action: full bucket
+    } else {
+      const elapsed = Math.max(0, nowSec - row.updated_at);
+      tokens = Math.min(capPerHour, row.tokens + elapsed * (capPerHour / 3600));
+    }
+
+    const allowed = tokens >= 1;
+    if (allowed) tokens -= 1;
+
+    db.prepare(
+      `INSERT INTO rate_limits (subject_id, action, tokens, updated_at)
+         VALUES (?, ?, ?, ?)
+       ON CONFLICT(subject_id, action)
+         DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
+    ).run(subjectId, action, tokens, nowSec);
+
+    db.exec("COMMIT");
+    return allowed;
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // already rolled back / no active txn — nothing to do
+    }
+    throw err;
   }
-
-  const allowed = tokens >= 1;
-  if (allowed) tokens -= 1;
-
-  db.prepare(
-    `INSERT INTO rate_limits (subject_id, action, tokens, updated_at)
-       VALUES (?, ?, ?, ?)
-     ON CONFLICT(subject_id, action)
-       DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
-  ).run(subjectId, action, tokens, nowSec);
-
-  return allowed;
 }
 
 export interface CachedServerVerdict {
