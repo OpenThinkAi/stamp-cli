@@ -145,6 +145,22 @@ export function runMerge(opts: MergeOptions): void {
     // and *before* the signing key is loaded or any git ref moves. Throws
     // on cancel or no-TTY-without-opt-out; the throw bubbles to the caller
     // before any state changes, so no rollback is needed.
+
+    // AC#2: compute git diff --stat for display in the confirm prompt.
+    // Best-effort: if git fails (e.g. detached HEAD edge case), skip
+    // the stat block rather than aborting a valid merge. The stat shows
+    // filenames + churn counts (not diff content), so it's low injection
+    // risk when printed as plain text.
+    let diffStat: string | undefined;
+    try {
+      diffStat = runGit(
+        ["diff", "--stat", `${resolved.base_sha}..${resolved.head_sha}`],
+        repoRoot,
+      );
+    } catch {
+      diffStat = undefined;
+    }
+
     requireHumanMerge({
       target: opts.into,
       source: opts.branch,
@@ -152,6 +168,7 @@ export function runMerge(opts: MergeOptions): void {
       head_sha: resolved.head_sha,
       branchRule: rule,
       yes: opts.yes ?? false,
+      diffStat,
     });
 
     // Build the skeletal approvals list from required reviewers (not all
@@ -207,6 +224,12 @@ export function runMerge(opts: MergeOptions): void {
   // output_sha). Capturing into the v3-shaped list and shaping into a
   // v4 list inside `buildV4Trailers` keeps the checks runner above
   // schema-agnostic.
+  // Hoisted so the banner code after the try-block can read it (AC#4).
+  let matchedPathRules: Array<{
+    pattern: string;
+    minimum_signatures: number;
+    qualifying_count: number;
+  }> = [];
 
   try {
     // 5. Re-load config from the working tree NOW (post-merge) rather than
@@ -276,18 +299,22 @@ export function runMerge(opts: MergeOptions): void {
     // v3 (legacy) is preserved for repos without `review_server` — they
     // continue to ship operator-signed-only attestations as today.
     const trailers = rule.review_server
-      ? buildV4Trailers({
-          repoRoot,
-          revspec,
-          baseSha: resolved.base_sha,
-          headSha: resolved.head_sha,
-          diff: resolved.diff,
-          targetBranch: opts.into,
-          requiredReviewers: rule.required,
-          checks: checkAttestations,
-          operatorPrivateKeyPem: keypair.privateKeyPem,
-          operatorFingerprint: keypair.fingerprint,
-        })
+      ? (() => {
+          const v4Result = buildV4Trailers({
+            repoRoot,
+            revspec,
+            baseSha: resolved.base_sha,
+            headSha: resolved.head_sha,
+            diff: resolved.diff,
+            targetBranch: opts.into,
+            requiredReviewers: rule.required,
+            checks: checkAttestations,
+            operatorPrivateKeyPem: keypair.privateKeyPem,
+            operatorFingerprint: keypair.fingerprint,
+          });
+          matchedPathRules = v4Result.matchedPathRules;
+          return v4Result.trailers;
+        })()
       : buildV3Trailers({
           repoRoot,
           baseSha: resolved.base_sha,
@@ -331,6 +358,12 @@ export function runMerge(opts: MergeOptions): void {
   if (checkAttestations.length > 0) {
     console.log(
       `  checks:     ${checkAttestations.map((c) => `${c.name}=exit${c.exit_code}`).join(", ")}`,
+    );
+  }
+  // AC#4: one line per matched path_rule, v4 path only, silent when none.
+  for (const pr of matchedPathRules) {
+    console.log(
+      `  path_rules: ${pr.pattern} (${pr.qualifying_count}/${pr.minimum_signatures} admin sigs)`,
     );
   }
   console.log(bar);
@@ -445,6 +478,16 @@ function buildV3Trailers(input: {
  * Each error message names the actionable next step (re-run `stamp
  * review --diff <revspec>`).
  */
+/**
+ * Matched path_rules info returned alongside the v4 trailer string.
+ * Used by runMerge to print the banner lines (AC#4).
+ */
+interface MatchedPathRuleBanner {
+  pattern: string;
+  minimum_signatures: number;
+  qualifying_count: number;
+}
+
 function buildV4Trailers(input: {
   repoRoot: string;
   revspec: string;
@@ -456,7 +499,7 @@ function buildV4Trailers(input: {
   checks: CheckAttestation[];
   operatorPrivateKeyPem: string;
   operatorFingerprint: string;
-}): string {
+}): { trailers: string; matchedPathRules: MatchedPathRuleBanner[] } {
   // Compute the canonical diff_sha256 over the same bytes the server
   // hashed. resolveDiff returned `diff` as a utf-8 string; encode the
   // same way the SSH client did when it streamed bytes to the server.
@@ -725,7 +768,7 @@ function buildV4Trailers(input: {
   // `trustAnchorSigningBytes` builder.
   const manifestSnapshot = snapshotSha256(manifest);
 
-  const trustAnchorSigs = collectTrustAnchorSignatures({
+  const trustAnchorResult = collectTrustAnchorSignatures({
     repoRoot: input.repoRoot,
     baseSha: input.baseSha,
     headSha: input.headSha,
@@ -738,6 +781,7 @@ function buildV4Trailers(input: {
     manifest,
     pubkeyByFingerprint,
   });
+  const trustAnchorSigs = trustAnchorResult.signatures;
 
   const payload: AttestationPayloadV4 = {
     schema_version: CURRENT_V4_SCHEMA_VERSION,
@@ -759,7 +803,10 @@ function buildV4Trailers(input: {
   // is byte-stable across serialize → trailer-encode → trailer-decode.
   const payloadBytes = canonicalSerializePayload(payload);
   const signature = signBytes(input.operatorPrivateKeyPem, payloadBytes);
-  return formatTrailersV4(payload, signature);
+  return {
+    trailers: formatTrailersV4(payload, signature),
+    matchedPathRules: trustAnchorResult.matchedPathRules,
+  };
 }
 
 function readReviewerSource(

@@ -575,7 +575,8 @@ function buildV3Envelope(input: V3BuildInput): EnvelopeBuildResult {
   // touches a path_rules glob, the helper throws an actionable
   // "needs N admin signature(s)" error pointing at `stamp admin sign
   // --pending <head>` for the recovery path.
-  const trustAnchorSignatures = collectTrustAnchorSignatures({
+  // PR-mode discards matchedPathRules — there's no merge banner in attest.
+  const { signatures: trustAnchorSignatures } = collectTrustAnchorSignatures({
     repoRoot: input.repoRoot,
     baseSha: input.baseSha,
     headSha: input.headSha,

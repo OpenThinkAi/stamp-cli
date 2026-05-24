@@ -30,8 +30,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
+import { stringify as yamlStringify } from "yaml";
 import { findMissingDotstampReads } from "../src/lib/reviewer.ts";
-import { parseConfigFromYaml } from "../src/lib/config.ts";
+import { DEFAULT_CONFIG, parseConfigFromYaml } from "../src/lib/config.ts";
 
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" });
@@ -252,5 +253,43 @@ reviewers:
         `expected ${label} timeout_ms (${bad}) to be rejected`,
       );
     }
+  });
+});
+
+// AC#1 (AGT-414): scaffold default for enforce_reads_on_dotstamp.
+describe("DEFAULT_CONFIG — enforce_reads_on_dotstamp scaffold default", () => {
+  it("security reviewer has enforce_reads_on_dotstamp: true in DEFAULT_CONFIG (AC#1)", () => {
+    assert.strictEqual(
+      DEFAULT_CONFIG.reviewers.security?.enforce_reads_on_dotstamp,
+      true,
+      "DEFAULT_CONFIG.reviewers.security must have enforce_reads_on_dotstamp: true " +
+        "(scaffold default — operators can override via committed config)",
+    );
+  });
+
+  it("standards and product reviewers do NOT have enforce_reads_on_dotstamp in DEFAULT_CONFIG (name-agnostic field)", () => {
+    // The field is name-agnostic — operators with custom reviewer sets opt in
+    // their own. Only the security scaffold default is flipped.
+    assert.strictEqual(
+      DEFAULT_CONFIG.reviewers.standards?.enforce_reads_on_dotstamp,
+      undefined,
+    );
+    assert.strictEqual(
+      DEFAULT_CONFIG.reviewers.product?.enforce_reads_on_dotstamp,
+      undefined,
+    );
+  });
+
+  it("DEFAULT_CONFIG round-trips through YAML stringify and parseConfigFromYaml preserving the flag", () => {
+    const yaml = yamlStringify({
+      branches: DEFAULT_CONFIG.branches,
+      reviewers: DEFAULT_CONFIG.reviewers,
+    });
+    const reparsed = parseConfigFromYaml(yaml);
+    assert.strictEqual(
+      reparsed.reviewers.security?.enforce_reads_on_dotstamp,
+      true,
+      "enforce_reads_on_dotstamp: true must survive a YAML round-trip",
+    );
   });
 });

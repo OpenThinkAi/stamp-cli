@@ -22,8 +22,15 @@ export interface BranchRule {
    * residual risk) by making operator awareness the default — the value
    * lives in committed config so changing it itself goes through stamp
    * review.
+   *
+   * When set to `"strict"`, the confirmation prompt is sharpened: instead
+   * of a bare y/N, the operator must type the exact phrase
+   * `merge <source> -> <target>` to confirm. Useful for branches where an
+   * accidental confirmation is especially costly. Does NOT override the
+   * --yes / STAMP_REQUIRE_HUMAN_MERGE=0 / require_human_merge: false
+   * opt-outs — those still bypass the prompt entirely.
    */
-  require_human_merge?: boolean;
+  require_human_merge?: boolean | "strict";
   /**
    * PR-check mode only. When true, `stamp verify-pr` requires that the
    * tip of the target branch is the SAME as it was when the reviewer
@@ -274,14 +281,18 @@ function validateConfig(input: unknown): StampConfig {
 
     const required_checks = parseChecks(r.required_checks, name);
 
-    let require_human_merge: boolean | undefined;
+    let require_human_merge: boolean | "strict" | undefined;
     if (r.require_human_merge !== undefined) {
-      if (typeof r.require_human_merge !== "boolean") {
+      if (r.require_human_merge === "strict") {
+        require_human_merge = "strict";
+      } else if (typeof r.require_human_merge === "boolean") {
+        require_human_merge = r.require_human_merge;
+      } else {
         throw new Error(
-          `config.branches.${name}.require_human_merge must be a boolean`,
+          `config.branches.${name}.require_human_merge must be a boolean or "strict" ` +
+            `(got ${JSON.stringify(r.require_human_merge)})`,
         );
       }
-      require_human_merge = r.require_human_merge;
     }
 
     let strict_base: boolean | undefined;
@@ -724,7 +735,10 @@ export const DEFAULT_CONFIG: StampConfig = {
     },
   },
   reviewers: {
-    security: { prompt: ".stamp/reviewers/security.md" },
+    security: {
+      prompt: ".stamp/reviewers/security.md",
+      enforce_reads_on_dotstamp: true,
+    },
     standards: { prompt: ".stamp/reviewers/standards.md" },
     product: { prompt: ".stamp/reviewers/product.md" },
   },

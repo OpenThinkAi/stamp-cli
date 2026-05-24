@@ -46,11 +46,30 @@ export interface RequireHumanMergeArgs {
   branchRule: BranchRule;
   /** Whether the operator passed --yes on the command line. */
   yes: boolean;
+  /**
+   * Output of `git diff --stat <base>..<head>` for the merge. When
+   * present, printed above the confirmation prompt so the operator sees
+   * diff-shaped content (filenames + churn counts, not raw diff text)
+   * before confirming. Injected by the merge caller (which has repoRoot
+   * and can run git) so this function stays unit-testable without a
+   * live git repo.
+   *
+   * AC#2 (audit H1 residual hardening).
+   */
+  diffStat?: string;
+  /**
+   * Test seam: inject a line-reader so tests can exercise the prompt path
+   * in-process without spawning a subprocess or attaching a real TTY.
+   * Production callers omit this; it defaults to `readLineSync`.
+   */
+  _readLine?: () => string;
 }
 
 export function requireHumanMerge(args: RequireHumanMergeArgs): void {
   // Any of these three opts out; check order is incidental — all three
   // are operator-declared intent and return silently.
+  // IMPORTANT: use strict equality (=== false, not falsy) so that the
+  // string value "strict" is never truthy-coerced into bypassing the gate.
   if (args.branchRule.require_human_merge === false) return;
   if (args.yes) return;
   if (process.env.STAMP_REQUIRE_HUMAN_MERGE === "0") return;
@@ -72,6 +91,36 @@ export function requireHumanMerge(args: RequireHumanMergeArgs): void {
     );
   }
 
+  const readLine = args._readLine ?? readLineSync;
+
+  // AC#2: Show git diff --stat above the prompt when available.
+  // Filenames + churn counts, not raw diff text — low injection risk;
+  // still printed as plain text, never interpolated into a shell.
+  if (args.diffStat && args.diffStat.trim()) {
+    process.stdout.write(args.diffStat.trimEnd() + "\n");
+  }
+
+  // AC#3: strict mode — require the operator to type the exact phrase
+  // `merge <source> -> <target>` rather than a bare y/N.
+  if (args.branchRule.require_human_merge === "strict") {
+    const expectedPhrase = `merge ${args.source} -> ${args.target}`;
+    const prompt =
+      `Sign + merge '${args.source}' (${args.head_sha.slice(0, 8)}) ` +
+      `→ '${args.target}' (base ${args.base_sha.slice(0, 8)})?\n` +
+      `Type "${expectedPhrase}" to confirm: `;
+    process.stdout.write(prompt);
+    const answer = readLine().trim();
+    if (answer !== expectedPhrase) {
+      throw new Error(
+        `merge cancelled: strict confirmation required — expected ` +
+          `"${expectedPhrase}" but got '${answer || "<empty>"}'. ` +
+          `Merge ${args.source} → ${args.target} aborted.`,
+      );
+    }
+    return;
+  }
+
+  // Standard y/N confirmation.
   // Show base→head SHAs so the operator confirms what's actually about
   // to be signed. The head_sha is the load-bearing one — a stale or
   // attacker-shifted source ref shows up here as a SHA the operator
@@ -80,7 +129,7 @@ export function requireHumanMerge(args: RequireHumanMergeArgs): void {
     `Sign + merge '${args.source}' (${args.head_sha.slice(0, 8)}) ` +
     `→ '${args.target}' (base ${args.base_sha.slice(0, 8)})? [y/N] `;
   process.stdout.write(prompt);
-  const answer = readLineSync().trim().toLowerCase();
+  const answer = readLine().trim().toLowerCase();
   if (answer !== "y" && answer !== "yes") {
     throw new Error(
       `merge cancelled: operator answered '${answer || "<empty>"}' to the ` +
