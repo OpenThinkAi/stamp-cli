@@ -3,7 +3,7 @@
 Status: complete · Owner: maintainer · Ticket: AGT-406
 
 > Working doc landed under `stamp-cli-hardening`. Companion to
-> [`docs/plans/shape-5-peer-review.md`](./shape-5-peer-review.md). The
+> [`docs/plans/peer-agentic-reviews.md`](./peer-agentic-reviews.md). The
 > Shape 2/3 cleanup work itself lives in AGT-407 (per-PR removal plan);
 > this doc establishes the *test safety net* AGT-407's removal tickets
 > land against.

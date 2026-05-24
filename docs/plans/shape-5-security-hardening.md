@@ -13,12 +13,12 @@ Status: ready · Owner: maintainer · Ticket: AGT-408
 > strictly blocked by it — none of the threads below touch the
 > `--pr-mode` scaffold being removed.
 >
-> Companion: [`docs/plans/shape-5-peer-review.md`](./shape-5-peer-review.md)
+> Companion: [`docs/plans/peer-agentic-reviews.md`](./peer-agentic-reviews.md)
 > (the Phase 4 work this hardening precedes).
 
 ## Why this exists
 
-Before Phase 4 (Shape 5 peer-review) lands on stamp-cli, the existing
+Before Phase 4 (Peer-agentic reviews) lands on stamp-cli, the existing
 surface should have its sharp edges scored and sequenced into landable
 tickets — so Phase 4 doesn't build on top of unaddressed gaps.
 
@@ -29,7 +29,7 @@ Two independent passes, reconciled:
 1. **Surface scan** — a structured read of the 8 threat surfaces named in
    AGT-408's AC #1 (path_rules, prompt-fetch boundary, v4/v5 verification,
    signature timing, revocation concurrency, SSH-verb validation,
-   migrate-existing whitelist, Shape-5 PR-body injection).
+   migrate-existing whitelist, Peer-agentic-reviews PR-body injection).
 2. **External audit** — the `2026-05-22` five-spec audit
    (`trusted/security`, `trusted/llm-security`, `trusted/privacy`,
    `trusted/infra`, `trusted/supply-chain`), 9 findings MEDIUM+ across the
@@ -73,13 +73,13 @@ ticketed; sequenced among the HIGHs given the trust-anchor blast radius.
 | **Reviewer prose persisted indefinitely.** `reviews.issues` archives diff quotes forever; `stamp prune` is opt-in. Default prune schedule / TTL env / `--no-prose` flag. `src/lib/db.ts:270` | Attacker: local shell access. Asset: archived sensitive diff snippets. | MEDIUM | M | **AGT-421** |
 | **SSH key-comment PII in membership DB.** `firstname.lastname@host` imported verbatim, readable via `stamp users list`, never pruned. Strip comment on seed-import; content-addressed short_name; populate `last_seen_at`. `src/server/seed-users.ts:31` | Attacker: any enrolled user. Asset: teammates' real-name PII. | MEDIUM | M | **AGT-422** |
 | **Soft-deleted repos retain full history in `.trash/`.** No GC, no max age; PII-bearing repos persist after "delete". TTL sweep + `server-repos purge-old`. `src/commands/serverRepo.ts:38` | Attacker: server-disk access / future operator. Asset: committed PII in deleted repos. | MEDIUM | M | **AGT-423** |
-| **Shape 5 triage-call PR-body injection (FUTURE).** When Shape 5's Haiku triage ships, the operator-controlled PR body feeds the LLM context. Build-time requirement: body must be delimited/escaped untrusted data, never concatenated into rules. `docs/plans/shape-5-peer-review.md` | Attacker: PR author. Asset: triage disposition integrity. | MEDIUM | S | **AGT-412**³ |
+| **Peer-agentic-reviews triage-call PR-body injection (FUTURE).** When the Peer-agentic-reviews Haiku triage ships, the operator-controlled PR body feeds the LLM context. Build-time requirement: body must be delimited/escaped untrusted data, never concatenated into rules. `docs/plans/peer-agentic-reviews.md` | Attacker: PR author. Asset: triage disposition integrity. | MEDIUM | S | **AGT-412**³ |
 
 ² Appears as `trusted/security` LOW and `trusted/llm-security` MEDIUM —
 taken at the higher rating, the two findings grouped into one ticket.
 
-³ Not buildable today (Shape 5 unbuilt). The ticket gates Shape 5
-Phase 4d; listed here so the requirement isn't lost.
+³ Not buildable today (Peer-agentic reviews unbuilt). The ticket gates
+Peer-agentic-reviews Phase 4d; listed here so the requirement isn't lost.
 
 ### Already resolved this session
 
@@ -160,7 +160,7 @@ threads are interleaved by severity, not by subsystem.
 9. **AGT-421** (MED) — reviewer prose retention.
 10. **AGT-422** (MED) — SSH key-comment PII (+ LOW short_name logging).
 11. **AGT-423** (MED) — trash retention sweep.
-12. **AGT-412** (MED) — Shape 5 PR-body injection — **blocked** on Shape 5 Phase 4d; lands as a build-time requirement there.
+12. **AGT-412** (MED) — Peer-agentic-reviews PR-body injection — **blocked** on Peer-agentic-reviews Phase 4d; lands as a build-time requirement there.
 13. **AGT-413** (LOW) — migrate-existing whitelist negative tests — opportunistic.
 
 LOW items 4f-style (logging, HEALTHCHECK, SDK dedupe) fold into the

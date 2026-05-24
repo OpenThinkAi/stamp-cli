@@ -60,29 +60,29 @@ If you rely on the dropped surfaces (e.g. a `product` reviewer that does Linear 
 
 ---
 
-## Pick your deployment shape
+## Pick your trust model
 
-stamp 2.x supports four deployment shapes. Pick deliberately — the upgrade path differs.
+stamp 2.x has two trust models — **server-gated attestations** and **Attested PRs** — plus an advisory **local-only** mode (no server, no trust) and the removed **mirror-mode PR** path. Pick deliberately — the upgrade path differs.
 
-### Shape 1 — stamp-server as the primary git remote
+### Server-gated attestations — stamp-server as the primary git remote
 
 You push directly to stamp-server; the pre-receive hook is the source of truth. Best fit if you already deployed stamp-server in 1.x or if you want the strongest enforcement and don't need GitHub's PR UI in the loop.
 
-Go to [Upgrade walkthrough — Shape 1](#upgrade-walkthrough--shape-1-stamp-server-primary).
+Go to [Upgrade walkthrough — Server-gated](#upgrade-walkthrough--server-gated-stamp-server-primary).
 
-### Shape 2 — removed (was: GitHub primary, stamp-server mirrors for review)
+### Mirror-mode PR — removed (was: GitHub primary, stamp-server mirrors for review)
 
-Shape 2 (mirror-mode PR — a GitHub Action mirrored every push to stamp-server) was **removed**, superseded by **Shape 4**, which delivers the same server-attested PR verification without mirroring your full source. If you're on Shape 2, see [Shape 2 (mirror-mode PR) — removed](#shape-2-mirror-mode-pr--removed) for the migration steps.
+Mirror-mode PR (a GitHub Action mirrored every push to stamp-server) was **removed**, superseded by **Attested PRs**, which delivers the same server-attested PR verification without mirroring your full source. If you were on mirror-mode PR, see [Mirror-mode PR — removed](#mirror-mode-pr--removed) for the migration steps.
 
 ### Local-only (no server — iteration feedback, no trust)
 
 No server. `stamp review --plan` emits a structured plan for a parent Claude Code session to dispatch, or `stamp review --headless` calls Anthropic directly with `ANTHROPIC_API_KEY`. **Produces no attestation in 2.x** — verdicts are advisory.
 
-If your 1.x deployment was already operator-trust-only without a server, this is your natural landing shape. The functional behavior doesn't change; the framing does ("no trust" is now explicit rather than implicit-and-unfortunate).
+If your 1.x deployment was already operator-trust-only without a server, this is your natural landing spot. The functional behavior doesn't change; the framing does ("no trust" is now explicit rather than implicit-and-unfortunate).
 
 Go to [Local-only operators](#local-only-operators).
 
-### Shape 4 — GitHub primary, server-attested without code transfer (private repos)
+### Attested PRs — GitHub primary, server-attested without code transfer (private repos)
 
 GitHub holds the source of truth and runs the PR UI. **stamp-server never receives a clone** — `stamp review` SSHes only the diff plus identifying metadata; the server reads its own bundled reviewer prompts from `/etc/stamp/reviewers/` (baked into the Docker image at build time), hashes them, runs the LLM, and signs the verdict. The signed verdict travels back over SSH; the operator folds it into a v4 envelope locally and `stamp/verify-attestation@v1` validates it as a required PR check.
 
@@ -90,11 +90,11 @@ Best fit if your code must not leave its git host — private/internal codebases
 
 Trust model: the server's review-signing key controls the prompt bytes (because prompts are image-baked, not host-mounted), and the verifier validates the server's signature against the manifest at base_sha — with no mirror workflow and no bare-repo clone on stamp-server.
 
-Go to [Upgrade walkthrough — Shape 4](#upgrade-walkthrough--shape-4-server-attested-without-code-transfer).
+Go to [Upgrade walkthrough — Attested PRs](#upgrade-walkthrough--attested-prs-server-attested-without-code-transfer).
 
 ---
 
-## Upgrade walkthrough — Shape 1 (stamp-server primary)
+## Upgrade walkthrough — Server-gated (stamp-server primary)
 
 ### Step 0 — Pin operator workstations on a 2.x-aware stamp
 
@@ -253,21 +253,21 @@ Steps 3–5 are per-repo. Different repos can be on different stamp lines simult
 
 ---
 
-## Shape 2 (mirror-mode PR) — removed
+## Mirror-mode PR — removed
 
-> **Shape 2 was removed.** `stamp init --pr-mode` / `--pr-mode-force`, the scaffolded `.github/workflows/stamp-mirror.yml`, and the `STAMP_MIRROR_KEY` org secret are gone. Shape 2 mirrored your full source into stamp-server on every push; **Shape 4 (server-attested without code transfer)** delivers the same server-signed PR attestation without that mirror.
+> **Mirror-mode PR was removed.** `stamp init --pr-mode` / `--pr-mode-force`, the scaffolded `.github/workflows/stamp-mirror.yml`, and the `STAMP_MIRROR_KEY` org secret are gone. Mirror-mode PR mirrored your full source into stamp-server on every push; **Attested PRs (server-attested without code transfer)** delivers the same server-signed PR attestation without that mirror.
 >
-> **If you were on Shape 2:**
-> 1. Migrate to Shape 4 — follow the [Shape 4 walkthrough](#upgrade-walkthrough--shape-4-server-attested-without-code-transfer).
+> **If you were on mirror-mode PR:**
+> 1. Migrate to Attested PRs — follow the [Attested PRs walkthrough](#upgrade-walkthrough--attested-prs-server-attested-without-code-transfer).
 > 2. Delete `.github/workflows/stamp-mirror.yml` from your repo.
 > 3. Remove the `STAMP_MIRROR_KEY` org secret (no longer used).
-> 4. The `stamp/verify-attestation@v1` required check stays — Shape 4 uses the same verification.
+> 4. The `stamp/verify-attestation@v1` required check stays — Attested PRs uses the same verification.
 >
 > No attestation history is lost: existing signed merges verify unchanged.
 
-### v3 PR-attestation envelope (shared verifier shape, AGT-338 + AGT-355)
+### v3 PR-attestation envelope (shared verifier, AGT-338 + AGT-355)
 
-The Action's verifier ships in 2.x at envelope `schema_version: 3`, used by the server-attested PR flow (Shape 4). v3 envelopes carry the same v4-trust fields the server-gated commit-trailer envelope does — per-approval server attestations (one per required reviewer, byte-canonical `ApprovalV4` shape), a top-level `diff_sha256` binding the operator's outer signature to the actual diff, the manifest snapshot hash for lenient revocation, and `trust_anchor_signatures` (admin counter-signatures) populated when the diff touches a `path_rules` glob. The shared `verifyV4*` phase helpers in `src/lib/v4Trust.ts` run against both the v3 PR-envelope's embedded fields and the v4 commit-trailer envelope, but the PR-attestation flow runs a deliberate **subset** of the phases (`PR_MODE_PHASES_V4` omits `verifyV4MergeStructure` because the PR flow runs BEFORE a 2-parent merge commit exists). The shared phase logic is identical; the phase set differs.
+The Action's verifier ships in 2.x at envelope `schema_version: 3`, used by the Attested PRs flow. v3 envelopes carry the same v4-trust fields the server-gated commit-trailer envelope does — per-approval server attestations (one per required reviewer, byte-canonical `ApprovalV4` shape), a top-level `diff_sha256` binding the operator's outer signature to the actual diff, the manifest snapshot hash for lenient revocation, and `trust_anchor_signatures` (admin counter-signatures) populated when the diff touches a `path_rules` glob. The shared `verifyV4*` phase helpers in `src/lib/v4Trust.ts` run against both the v3 PR-envelope's embedded fields and the v4 commit-trailer envelope, but the PR-attestation flow runs a deliberate **subset** of the phases (`PR_MODE_PHASES_V4` omits `verifyV4MergeStructure` because the PR flow runs BEFORE a 2-parent merge commit exists). The shared phase logic is identical; the phase set differs.
 
 The verifier rejects v2 envelopes (produced by 1.x `stamp attest` or by 2.x `stamp attest` against a branch rule without `review_server`) with a "schema_version too old" actionable error. v2 envelopes pre-date the v4 trust model and cannot be upgraded in place — re-attestation against a 2.x stamp-server is required.
 
@@ -293,17 +293,17 @@ If your 1.x deployment is purely local-only (`stamp init --mode local-only`, no 
 
 See [`local-only-mode.md`](./local-only-mode.md) for the full local-only contract, the security boundary, and the headless billing caveat.
 
-If you later decide you want the trust property, you can flip the same repo into Shape 1 or Shape 4 by deploying stamp-server and adding `review_server` — there's nothing to undo on the local-only side.
+If you later decide you want the trust property, you can flip the same repo into server-gated attestations or Attested PRs by deploying stamp-server and adding `review_server` — there's nothing to undo on the local-only side.
 
 ---
 
-## Upgrade walkthrough — Shape 4 (server-attested without code transfer)
+## Upgrade walkthrough — Attested PRs (server-attested without code transfer)
 
 For repos that need server-attested reviews but cannot mirror their code to stamp-server. Full server-attested trust properties; no mirror workflow, no bare repo on the server, no per-repo deploy key. The server reads canonical reviewer prompts from its bundled image directory; the operator's repo never carries `.stamp/reviewers/*.md`.
 
-The migration is a **single PR**. `stamp init --migrate-to-server-attested` scaffolds the complete Shape 4 surface (manifest, server pubkey, review_server URL, reviewer-cleanup, path_rules, verify workflow, reviewer-prompt deletions); `stamp attest --migrate-existing` produces the bootstrap envelope that lands in the same PR.
+The migration is a **single PR**. `stamp init --migrate-to-server-attested` scaffolds the complete Attested PRs surface (manifest, server pubkey, review_server URL, reviewer-cleanup, path_rules, verify workflow, reviewer-prompt deletions); `stamp attest --migrate-existing` produces the bootstrap envelope that lands in the same PR.
 
-### Step 1 — Same as Shape 1
+### Step 1 — Same as Server-gated
 
 Upgrade stamp-server to a 2.1+ build (server-bundled reviewer prompts require 2.1).
 
@@ -312,7 +312,7 @@ The server image bundles canonical reviewer prompts (`security.md`, `standards.m
 ### Step 2 — Per-repo: one-command scaffold
 
 ```sh
-git checkout -b stamp-shape-4-activation
+git checkout -b stamp-attested-prs-activation
 stamp init --migrate-to-server-attested --server <host:port>
 ```
 
@@ -335,9 +335,9 @@ The scaffold does ALL of the following in one command:
 1. Detects existing `.stamp/trusted-keys/*.pub` files and writes (or extends) `.stamp/trusted-keys/manifest.yml`. On a fresh 1.x repo with no manifest, the operator picks which keys gain `admin` capability via an interactive prompt; existing manifests are preserved entry-for-entry (the bootstrap whitelist refuses any modification of an existing entry).
 2. Fetches the stamp-server's review-signing public key over SSH (the wire protocol is `ssh -p <port> git@<host> stamp-server-pubkey --review-signing`; same SSH surface as the rest of stamp's server-side commands). Writes the pubkey to `.stamp/trusted-keys/review-server-prod.pub` and adds a `review-server-prod` manifest entry with `capabilities: [server]` and `role_source: server`.
 3. Adds `review_server: ssh://git@<host>:<port>` to the default branch's rule in `.stamp/config.yml` (prefers `main`; otherwise the first branch listed).
-4. Rewrites every reviewer entry in `.stamp/config.yml` to `{}` form (Shape 4 server-bundled prompt mode). The reviewer NAMES stay; the per-reviewer `prompt:`, `tools:`, `mcp_servers:` fields go.
+4. Rewrites every reviewer entry in `.stamp/config.yml` to `{}` form (Attested PRs server-bundled prompt mode). The reviewer NAMES stay; the per-reviewer `prompt:`, `tools:`, `mcp_servers:` fields go.
 5. Smart-defaults `path_rules: .stamp/**` `minimum_signatures` based on the admin-capability count: 1 when exactly one admin was selected (with a warning), 2 otherwise. A two-signature gate on a single-admin repo would deadlock every subsequent `.stamp/**` PR.
-6. Deletes every `.stamp/reviewers/*.md` file (Shape 4 retires the in-repo prompt copies; the server holds the canonical bytes).
+6. Deletes every `.stamp/reviewers/*.md` file (Attested PRs retires the in-repo prompt copies; the server holds the canonical bytes).
 7. Writes `.github/workflows/stamp-verify.yml` (if absent) so subsequent PRs get verified in CI.
 
 The combined effect produces a diff that `stamp attest --migrate-existing` accepts cleanly: the `.stamp/**` subset (config edit + manifest entry + new pubkey + reviewer-prompt deletions) is whitelisted by `validateShape4ActivationDiff`; the workflow file lives outside `.stamp/**` and is therefore outside the activation envelope (it doesn't need to be — the verifier runs in CI on the NEXT PR onward, not on the bootstrap PR itself).
@@ -355,9 +355,9 @@ The flow is idempotent: re-running on a partially-migrated repo skips writes tha
 
 **`--dry-run`** prints the proposed scaffold without writing or invoking the SSH fetch. The dry-run preview uses a `<SERVER_REVIEW_SIGNING_PUBKEY>` placeholder for the pubkey and a `sha256:<computed-at-real-run>` placeholder for the fingerprint, so the preview is offline-safe.
 
-If you're moving from Shape 2 (mirror) to Shape 4: also delete `.github/workflows/stamp-mirror.yml`, remove the `stamp-mirror-only` ruleset on GitHub, drop the `STAMP_MIRROR_KEY` org secret, and on stamp-server delete the now-orphan `/srv/git/<repo>.git` bare and disable the mirror SSH user. These changes ride alongside the activation diff in the same PR.
+If you're moving from mirror-mode PR to Attested PRs: also delete `.github/workflows/stamp-mirror.yml`, remove the `stamp-mirror-only` ruleset on GitHub, drop the `STAMP_MIRROR_KEY` org secret, and on stamp-server delete the now-orphan `/srv/git/<repo>.git` bare and disable the mirror SSH user. These changes ride alongside the activation diff in the same PR.
 
-**`required_checks` must be empty in PR mode.** PR-mode `stamp attest` writes `checks: []` into the v3 envelope by design — pre-merge tests run as GitHub Action checks (not at attest time), so duplicating them on the local side would produce a weaker signal at twice the cost (see [`src/commands/attest.ts`](../src/commands/attest.ts)'s file-level comment). If your repo's `.stamp/config.yml` carries a non-empty `required_checks: [...]` under the activated branch rule from a previous Shape 1 / 2.x deployment, the verifier will reject every Shape 4 attestation produced by `stamp attest` because the envelope's `checks: []` does not satisfy the rule. Set `required_checks: []` (or omit the key) on the activated branch rule as part of the Shape 4 activation diff. The whitelist accepts `required_checks` edits on the same branch rule that gains `review_server:`.
+**`required_checks` must be empty in PR mode.** PR-mode `stamp attest` writes `checks: []` into the v3 envelope by design — pre-merge tests run as GitHub Action checks (not at attest time), so duplicating them on the local side would produce a weaker signal at twice the cost (see [`src/commands/attest.ts`](../src/commands/attest.ts)'s file-level comment). If your repo's `.stamp/config.yml` carries a non-empty `required_checks: [...]` under the activated branch rule from a previous server-gated / 2.x deployment, the verifier will reject every Attested PRs attestation produced by `stamp attest` because the envelope's `checks: []` does not satisfy the rule. Set `required_checks: []` (or omit the key) on the activated branch rule as part of the Attested PRs activation diff. The whitelist accepts `required_checks` edits on the same branch rule that gains `review_server:`.
 
 ### Step 3 — SHA-pinning the verify Action
 
@@ -386,27 +386,27 @@ Then update both the `uses:` line and the trailing-comment line on `.github/work
 
 ### Step 4 — Land the activation PR with `stamp attest --migrate-existing`
 
-The Shape 4 activation commit deadlocks the normal flow because of a structural chicken-and-egg: `stamp review` sources `.stamp/config.yml` from `base_sha` (a security boundary — a feature branch cannot unilaterally point review at an attacker-controlled server), so review at base runs LOCALLY and the DB has no server signatures. `stamp attest` sources from the working tree, sees `review_server`, and demands a v3 envelope with the server signatures it cannot produce.
+The Attested PRs activation commit deadlocks the normal flow because of a structural chicken-and-egg: `stamp review` sources `.stamp/config.yml` from `base_sha` (a security boundary — a feature branch cannot unilaterally point review at an attacker-controlled server), so review at base runs LOCALLY and the DB has no server signatures. `stamp attest` sources from the working tree, sees `review_server`, and demands a v3 envelope with the server signatures it cannot produce.
 
 `stamp attest --migrate-existing` is the dedicated bootstrap flow for exactly this PR:
 
 ```sh
 git add .
-git commit -m "Shape 4: activate server-attested reviews"
+git commit -m "Attested PRs: activate server-attested reviews"
 stamp attest --into main --migrate-existing --push origin
 # Open the PR; stamp/verify-attestation@v1 accepts the bootstrap envelope.
 ```
 
 The bootstrap envelope is a v3-shaped envelope with empty `server_signatures`, a `migration_bootstrap` marker in the operator-signed payload naming the activated paths, and one operator-self admin counter-signature in `trust_anchor_signatures`. The verifier accepts it ONLY when ALL of:
 
-- the diff matches a narrow Shape 4 activation whitelist (adds `review_server:` to a branch rule + adds `[server]`+`role_source:server` entries to the manifest + adds new `*.pub` files + deletes `.stamp/reviewers/*.md` files);
+- the diff matches a narrow Attested PRs activation whitelist (adds `review_server:` to a branch rule + adds `[server]`+`role_source:server` entries to the manifest + adds new `*.pub` files + deletes `.stamp/reviewers/*.md` files);
 - the marker's `activated_paths` equals the actual changed files;
 - the operator outer signature verifies;
 - exactly one admin-capability signature is present, and it verifies against the bootstrap signing bytes;
 - `path_rules` at `base_sha` covers every activated path with `bypass_review_cycle: true`;
 - `approvals` is empty (a non-empty array is rejected as structurally invalid for a bootstrap envelope).
 
-The narrow whitelist is the security boundary: an attacker cannot smuggle non-trust-anchor changes through the bootstrap path. The whitelist refuses any file outside `.stamp/`, any modification (not addition) of an existing manifest entry or pubkey, any branch-rule change other than `review_server:` addition, and any add or modification of `.stamp/reviewers/*.md` (deletions only are accepted there, mirroring the Shape 4 retirement of in-repo prompts). Run `stamp attest --migrate-existing` only on a PR whose diff is exactly the Shape 4 activation that `stamp init --migrate-to-server-attested` produces.
+The narrow whitelist is the security boundary: an attacker cannot smuggle non-trust-anchor changes through the bootstrap path. The whitelist refuses any file outside `.stamp/`, any modification (not addition) of an existing manifest entry or pubkey, any branch-rule change other than `review_server:` addition, and any add or modification of `.stamp/reviewers/*.md` (deletions only are accepted there, mirroring the Attested PRs retirement of in-repo prompts). Run `stamp attest --migrate-existing` only on a PR whose diff is exactly the Attested PRs activation that `stamp init --migrate-to-server-attested` produces.
 
 The `.github/workflows/stamp-verify.yml` change rides in the same PR but is outside the activation envelope — that's fine, the verifier doesn't gate on it. The workflow file becomes active on the NEXT PR.
 
@@ -429,9 +429,9 @@ The wire protocol is the standard server-attested SSH flow — `stamp review` se
 
 Each repo independently opts into server-attested review via its own `review_server` config. Mix-and-match across the org is supported against the same stamp-server.
 
-### Verifier behavior (Shape 4 specifics)
+### Verifier behavior (Attested PRs specifics)
 
-`stamp/verify-attestation@v1` validates each approval's signature against the server key resolved from the manifest at base_sha, and re-runs the envelope-level `manifest_snapshot_sha256` check. It does NOT recompute `prompt_sha256` from the merge-base tree — in Shape 4 the prompts are not in the operator's repo, so there's nothing to recompute against. The trust chain for prompt bytes is: manifest (at base_sha) → server key with `server` capability → signed approval body → `prompt_sha256`. The recompute step that the server-gated path (Shape 1) runs was a belt-and-suspenders second-line defense; in Shape 4 it's structurally impossible and the signed chain is the trust anchor. See [`src/lib/v4Trust.ts`](../src/lib/v4Trust.ts) `verifyV4ApprovalSignatures` for the in-code rationale.
+`stamp/verify-attestation@v1` validates each approval's signature against the server key resolved from the manifest at base_sha, and re-runs the envelope-level `manifest_snapshot_sha256` check. It does NOT recompute `prompt_sha256` from the merge-base tree — in Attested PRs the prompts are not in the operator's repo, so there's nothing to recompute against. The trust chain for prompt bytes is: manifest (at base_sha) → server key with `server` capability → signed approval body → `prompt_sha256`. The recompute step that the server-gated path runs was a belt-and-suspenders second-line defense; in Attested PRs it's structurally impossible and the signed chain is the trust anchor. See [`src/lib/v4Trust.ts`](../src/lib/v4Trust.ts) `verifyV4ApprovalSignatures` for the in-code rationale.
 
 ---
 
@@ -586,13 +586,13 @@ Concretely:
 - **`.stamp/trusted-keys/manifest.yml`** on each reviewed repo: unchanged. The server's review-signing key entry has the same `[server]` capability + `role_source: server`; it does NOT need a new capability for Phase B.
 - **`path_rules` for `.stamp/**`:** unchanged. Trust-anchor changes still require admin counter-sigs; Phase B does not introduce a new gated path.
 - **`stamp/verify-attestation@v1` Action:** unchanged. The verifier resolves `prompt_sha256` against the server-signed approval body; the storage layer behind the server is opaque to it.
-- **Shape selection (1/4):** unchanged. Phase B sits orthogonally to topology — you can run Phase B on Shape 1 or Shape 4. Shape 4 is the most common pairing (since both reach for "the prompts are server-owned, not repo-owned"), but nothing about the trust model requires it.
+- **Trust-model selection (server-gated / Attested PRs):** unchanged. Phase B sits orthogonally to topology — you can run Phase B on server-gated attestations or Attested PRs. Attested PRs is the most common pairing (since both reach for "the prompts are server-owned, not repo-owned"), but nothing about the trust model requires it.
 
 If you had a working v4 setup before opting into Phase B, you have a working v4 setup after. The migration is purely on the server's prompt-storage layer.
 
 ### Per-repo opt-in is unchanged
 
-A reviewed repo's `.stamp/config.yml` does NOT change between Phase A and Phase B. The Shape 4 convention — empty-object reviewer entries that defer prompt bytes to the server — applies identically:
+A reviewed repo's `.stamp/config.yml` does NOT change between Phase A and Phase B. The Attested PRs convention — empty-object reviewer entries that defer prompt bytes to the server — applies identically:
 
 ```yaml
 reviewers:
