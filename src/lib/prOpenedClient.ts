@@ -49,7 +49,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { loadServerConfig } from "./serverConfig.js";
 import type { ServerConfig } from "./serverConfig.js";
 
 export type { ServerConfig };
@@ -256,27 +255,6 @@ export async function broadcastPrOpened(
   };
 }
 
-/**
- * Resolve the stamp-server config for the broadcast.
- * Uses `loadServerConfig()` if no override is provided via `--server`.
- * Returns null when no config is available — caller must surface an error.
- */
-export function resolveServerConfig(serverFlag?: string): ServerConfig | null {
-  if (serverFlag) {
-    // Inline parse for CLI --server <host:port> overrides.
-    const m = serverFlag.trim().match(/^([^:]+):(\d+)$/);
-    if (!m) return null;
-    const port = Number(m[2]);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-    return {
-      host: m[1]!,
-      port,
-      user: "git",
-      repoRootPrefix: "/srv/git",
-    };
-  }
-  return loadServerConfig();
-}
 
 function exitCodeHint(exitCode: number | null): string {
   switch (exitCode) {

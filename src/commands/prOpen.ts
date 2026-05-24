@@ -21,7 +21,6 @@
 
 import { spawnSync } from "node:child_process";
 import { findRepoRoot } from "../lib/paths.js";
-import { checkGhAvailable } from "../lib/ghRuleset.js";
 import { loadUserKeypair, type Keypair } from "../lib/keys.js";
 import { signBytes } from "../lib/signing.js";
 import {
@@ -81,8 +80,8 @@ export async function runPrOpen(opts: PrOpenOptions): Promise<void> {
     // spawn error = ENOENT, i.e. gh is not on PATH at all.
     process.stderr.write(
       `error: 'gh' (GitHub CLI) not found on PATH\n` +
-        `        install: https://cli.github.com\n` +
-        `        then re-run: stamp pr open ${branch}\n`,
+        `  install: https://cli.github.com\n` +
+        `  then re-run: stamp pr open ${branch}\n`,
     );
     process.exit(127);
   }
@@ -321,7 +320,8 @@ export async function runPrOpen(opts: PrOpenOptions): Promise<void> {
   const broadcastResult = await broadcastPrOpened(broadcastInput);
 
   if (broadcastResult.ok) {
-    // Full success.
+    // Full success. Print the PR URL to stdout (primary artifact; agents capture stdout).
+    process.stdout.write(`${prUrl}\n`);
     process.stderr.write(
       `✓ broadcast pr-opened to stamp-server (patch_id ${broadcastResult.patch_id})\n`,
     );
@@ -330,18 +330,25 @@ export async function runPrOpen(opts: PrOpenOptions): Promise<void> {
 
   if (broadcastResult.reason === "peer_reviews_not_configured") {
     // AC #8: server has peer reviews disabled — informational, not an error.
+    // Still print the PR URL so the caller can capture it.
+    process.stdout.write(`${prUrl}\n`);
     process.stderr.write(
       `note: stamp-server has peer reviews disabled; broadcast acknowledged but no fanout will occur\n`,
     );
     process.exit(0);
   }
 
-  // Broadcast failed — AC #6.
+  // Broadcast failed — AC #6. The PR is already live; do NOT suggest
+  // `stamp pr open` as a retry path — that would re-run `gh pr create`
+  // which would fail with "PR already exists" and exit 3, leaving the
+  // caller confused about whether the PR was opened. A dedicated broadcast-
+  // only recovery path (e.g. `stamp pr broadcast <url>`) is planned for a
+  // future ticket.
   process.stderr.write(
     `error: broadcast to stamp-server failed.\n` +
       `  ${broadcastResult.message.split("\n").join("\n  ")}\n` +
       `  The PR is live on GitHub but listeners were not notified.\n` +
-      `  To retry: stamp pr open ${branch}\n`,
+      `  A broadcast-only retry path is not yet available; contact your stamp-server operator.\n`,
   );
   process.exit(4);
 }

@@ -789,7 +789,7 @@ pr
     "after",
     `
 Three-step sequence:
-  1. git push origin <branch>             — push the branch to the remote
+  1. git push <remote> <branch>           — push the branch to the remote (default: origin)
   2. gh pr create --head <branch> --fill  — open the GitHub PR
   3. broadcast signed pr-opened payload   — notify stamp-server listeners
 
