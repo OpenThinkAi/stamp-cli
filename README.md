@@ -480,6 +480,48 @@ models pinned, each operator records their own verdict in their own
 state.db (same as today's reviewer-prompt model). Stamp does not assume
 verdicts are model-portable.
 
+#### Local-model reviewer backend (unmetered)
+
+A reviewer can run against a **local** OpenAI-compatible model server (LM
+Studio, llama.cpp's `llama-server`, vLLM, …) instead of the Anthropic API.
+Pin the reviewer's model with the `local:` scheme and the review runs
+entirely on your own machine — no Anthropic Agent SDK, no `claude -p`, no
+API call, nothing metered:
+
+```yaml
+reviewers:
+  security: local:qwen2.5-coder-32b      # runs on the local endpoint
+  standards: claude-sonnet-4-6           # still Anthropic
+local_endpoint: http://localhost:1234/v1  # optional; defaults to LM Studio
+```
+
+`stamp config reviewers set security local:qwen2.5-coder-32b` works through
+the same CLI; `local_endpoint` is hand-edited (it's machine-specific).
+Mix and match — some reviewers local, some Anthropic — per reviewer.
+
+**Trust posture is identical to the Anthropic local-LLM path.** A local
+reviewer produces a verdict that gates `stamp merge` exactly like the SDK
+reviewer; the trust anchor is unchanged — your machine produces the verdict,
+the signed merge + the server's pre-receive hook are what get verified.
+Moving inference to a local model doesn't touch that boundary, it just takes
+the review off the metered path. (And because an all-local run sends nothing
+off-host, it skips the Anthropic data-flow consent gate — useful for
+regulated / air-gapped repos.)
+
+**Setup (LM Studio):** load the model → **Developer** → **Start Server** →
+`curl http://localhost:1234/v1/models` to get the exact model id → put that
+id after `local:`.
+
+**v1 limitations.** The local reviewer is one-shot (a single model turn, no
+agentic file-reading tools): it sees the diff, not the surrounding tree. For
+a reviewer with `enforce_reads_on_dotstamp` (the `security` default), stamp
+auto-includes the full content of changed `.stamp/*` files in the prompt so
+trust-anchor changes are still inspected. The model should support
+tool-calling for the structured `submit_verdict`; if it doesn't, end the
+reviewer prompt with a `VERDICT: <choice>` line (stamp parses that as a
+fallback). The prior-review "ratchet" prose is Anthropic-path-only for now —
+the local path still gets the narrowed delta diff across rounds.
+
 ### Reviewer execution budgets
 
 Each reviewer subprocess runs under bounds that can be set in three
