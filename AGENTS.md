@@ -137,27 +137,21 @@ This doc is for the **first-contact "what is this?"** scenario specifically.
 - [`server/README.md`](./server/README.md) — Railway deployment walkthrough for the self-hosted remote
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev setup, PR process, stamp flow for maintainers
 
-<!-- stamp:begin (managed by stamp-cli — do not edit between markers) -->
+<!-- stamp:begin (managed by `stamp init` — do not edit between markers) -->
 
-## Stamp-protected repository — agent instructions (READ THIS BEFORE ANY GIT COMMAND)
+## Stamp-protected repository — read before changing code
 
-**You — the AI agent reading this — are required to use the stamp flow for any
-change to this repository's protected branches (typically `main`).** Direct
-`git commit` to `main` and direct `git push origin main` are explicit
-violations of this repo's process, even though the remote will technically
-accept them.
+This repository is gated by [stamp-cli](https://github.com/OpenThinkAi/stamp-cli).
+Direct commits to protected branches (typically `main`) **will be rejected by
+the server-side pre-receive hook**, even with valid credentials. Every change
+to a protected branch must be a `stamp merge` signed locally and pushed via
+`stamp push`.
 
-The remote does not reject unsigned pushes (this is local-only / advisory mode
-— see "How enforcement works here" below). That means **enforcement is on you,
-not the server**. Bypassing the stamp flow because "the push will succeed
-anyway" is the most common failure mode and is exactly what this notice exists
-to prevent.
-
-### The required workflow for every change to a protected branch
+### The canonical workflow
 
 ```sh
 git checkout -b feature
-# ...edit, commit, repeat on the feature branch...
+# ...edit, commit, repeat...
 
 stamp review --diff main..feature       # all configured reviewers run in parallel
 stamp status --diff main..feature       # exit 0 if every required reviewer approved
@@ -165,65 +159,65 @@ stamp status --diff main..feature       # exit 0 if every required reviewer appr
 # When green:
 git checkout main
 stamp merge feature --into main         # signs an Ed25519 attestation into the merge trailer
-git push origin main                    # plain git push — remote accepts anything,
-                                        # but the merge commit now carries a verifiable signature
+stamp push main                         # server hook verifies; main advances on the remote
 ```
 
 If a reviewer returns `changes_requested`, read its prose in the `stamp review`
-output (or via `stamp log --reviews --limit 1`), fix on the feature branch,
-commit, and re-review. Verdicts are bound to `(base_sha, head_sha)`, so a new
-commit invalidates prior approvals.
+output (or via `stamp log --reviews --limit 1`), fix the code, commit, and
+re-review. Verdicts are bound to the exact `(base_sha, head_sha)` pair, so a
+new commit invalidates prior approvals.
 
-### What you must NOT do
+### What NOT to do
 
-- **Do not** `git commit` directly to `main`. Always work on a feature branch.
-- **Do not** `git push origin main` of a commit that wasn't produced by `stamp merge`.
-- **Do not** use `--no-verify` to skip hooks.
-- **Do not** edit `.stamp/config.yml` or `.stamp/reviewers/*.md` outside the stamp
-  review/merge cycle. Those changes go through the same reviewer gate.
-- **Do not** rationalize bypassing the gate because "this is local-only mode
-  so it doesn't matter." The mode describes who enforces the gate
-  (server vs. agent discipline), not whether the gate exists. **The gate exists.**
+- **Do not** `git push origin main` directly — bypasses the gate; will be rejected.
+- **Do not** commit to `main` directly — same.
+- **Do not** use `--no-verify` to skip hooks. Investigate hook failures, don't bypass them.
+- **Do not** edit `.stamp/config.yml` or `.stamp/reviewers/*.md` casually — those changes
+  go through the same reviewer gate as any other code change. Treat them as security-sensitive
+  edits.
+- **Do not** delete `.stamp/trusted-keys/*.pub` files unless you genuinely intend to revoke
+  a signer; doing so locks that signer out of all future merges.
 
 ### The one exception: the bootstrap commit
 
-When `stamp init` runs on a repo that doesn't have stamp installed yet, the
-commit that ADDS `.stamp/` + `AGENTS.md` + `CLAUDE.md` is a chicken-and-egg
-case — there is no prior trusted state to review against, so `stamp review`
-has no meaningful base. That single commit is allowed to land directly on the
-current branch. Recent versions of stamp-cli handle this commit automatically
-inside `stamp init`; if you're working with an older version, make exactly
-that one commit + push by hand and then go through the stamp flow for
-everything afterward. **This exception is for the literal first stamp commit
-only**, not for any subsequent change to `.stamp/` or any other code.
-
-### How enforcement works here (and why you have to be the enforcer)
-
-This repo's origin is a public forge (GitHub / GitLab / etc.) directly, not a
-stamp server with a pre-receive hook. So:
-
-- The remote will accept any push, including unsigned ones, force-pushes, and
-  direct GitHub web-UI merges.
-- The reviewer prompts and config in `.stamp/` are committed code-as-policy,
-  not server-enforced rules.
-- **The agent following these instructions is the gate.**
-
-If the operator wants real server-side enforcement, they need to migrate to a
-stamp server: deploy [stamp-cli's server image](./docs/quickstart-server.md),
-repoint `origin` at it, configure GitHub as a downstream mirror with a Ruleset
-locking direct pushes, and regenerate this guidance via
-`stamp init --mode server-gated`. Until that happens, the rules above are
-mandatory but unenforced — your job is to follow them anyway.
-
-`stamp verify <sha>` works on any clone to validate a merge commit's
-attestation, so the audit trail is preserved even without server-side rejection.
+The single commit that ADDS `.stamp/` + `AGENTS.md` + `CLAUDE.md` to a fresh
+repo for the first time is the chicken-and-egg moment — `stamp review` has
+no base tree to read prompts from. That one commit can land directly on
+`main`. Recent `stamp init` runs do this commit automatically; older
+versions need it done by hand. Every subsequent change to `.stamp/` (or
+anything else) goes through the normal stamp flow.
 
 ### Where things live
 
 - `.stamp/config.yml` — branch rules (which reviewers are required, optional `required_checks`)
-- `.stamp/reviewers/*.md` — reviewer prompt files
-- `.stamp/trusted-keys/*.pub` — Ed25519 public keys (would be enforced by a server hook if one existed)
-- `~/.stamp/keys/ed25519{,.pub}` — your local signing keypair
+- `.stamp/reviewers/*.md` — reviewer prompt files; this is your project's review policy as code
+- `.stamp/trusted-keys/*.pub` — Ed25519 public keys allowed to sign merges into protected branches
+- `~/.stamp/keys/ed25519{,.pub}` — your local signing keypair (generated by `stamp init` /
+  `stamp keys generate`; never committed)
+
+### Useful commands
+
+```sh
+stamp --help                              # full command list
+stamp reviewers list                      # configured reviewers + prompt file status
+stamp reviewers test <name> --diff <rev>  # iterate on a reviewer prompt without polluting the DB
+stamp log                                 # recent stamped merges with attestation summaries
+stamp verify <sha>                        # re-verify a specific merge commit's attestation
+stamp bootstrap                           # land real reviewers in a freshly-provisioned repo (placeholder→real swap)
+```
+
+### When stamp blocks you
+
+See [`docs/troubleshooting.md`](./docs/troubleshooting.md) if it exists in this repo, or the
+upstream copy at https://github.com/OpenThinkAi/stamp-cli/blob/main/docs/troubleshooting.md.
+Common cases:
+
+- `gate CLOSED: missing approved verdicts` — re-run `stamp review` (verdicts are SHA-bound;
+  every new commit invalidates prior approvals)
+- `pre-merge checks failed` — a `required_check` exited non-zero; the merge was rolled back
+- `remote: stamp-verify: rejecting refs/heads/main` — server hook caught a bypass attempt
+- `required by rule but not defined` — chicken-and-egg on a reviewer config change; see the
+  troubleshooting entry, or use `stamp bootstrap` for the placeholder→real swap case
 
 ### Knowing when to stop the review loop (diminishing returns)
 
