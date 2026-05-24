@@ -397,12 +397,13 @@ function runPrune(parsed: ParsedPrune): void {
     if (result.removed.length === 0) {
       process.stderr.write(`note: no users idle for ≥ ${days}d; nothing pruned\n`);
     } else {
+      // Write op → stdout stays empty (per this file's header contract; only
+      // `list` emits JSON). The stderr note carries the removed names for
+      // both agents (parse the note) and humans. AGT-422 product review.
       process.stderr.write(
         `note: pruned ${result.removed.length} idle user${result.removed.length === 1 ? "" : "s"} (≥ ${days}d): ${result.removed.map((u) => u.short_name).join(", ")}\n`,
       );
     }
-    // stdout: machine-readable list of removed short_names.
-    process.stdout.write(JSON.stringify({ removed: result.removed.map((u) => u.short_name) }) + "\n");
   } finally {
     db.close();
   }

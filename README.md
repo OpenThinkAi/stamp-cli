@@ -282,7 +282,7 @@ stamp users promote <name> --to <admin|owner>       # owner-only
 stamp users demote <name> --to <admin|member>       # owner-only
 stamp users remove <name>                           # owner / admin-removes-member
 stamp users set-name <name> --to <new-name>         # claim a human name (default is user-<hex>)
-stamp users prune --idle-for <N>d                   # remove idle users (never owners/self)
+stamp users prune --idle-for <Nd>                   # remove idle users (never owners/self)
 stamp trust grant <name>                            # stage a per-repo signing-trust PR
 ```
 
@@ -294,7 +294,7 @@ stamp trust grant <name>                            # stage a per-repo signing-t
 > **stripped** before the pubkey is stored. A human-readable name is set
 > only when someone explicitly runs `stamp users set-name`. `last_seen_at`
 > is recorded on every authenticated command so `stamp users prune
-> --idle-for <N>d` can retire stale accounts.
+> --idle-for <Nd>` can retire stale accounts.
 
 **Browsing history:**
 
