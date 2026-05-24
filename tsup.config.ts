@@ -37,6 +37,9 @@ export default defineConfig([
       "server/users-cli": "src/server/users-cli.ts",
       "server/bootstrap-review-key": "src/server/bootstrap-review-key.ts",
       "server/stamp-review": "src/server/stamp-review.ts",
+      // On-demand trash-purge SSH verb (AGT-423). `git@host purge-trash
+      // --older-than <N>d`; wrapped by `stamp server-repos purge`.
+      "server/purge-trash": "src/server/purge-trash.ts",
       // Boot-time prompts-cache populator. Invoked by entrypoint.sh as
       // root, after stamp-bootstrap-review-key and before the HTTP
       // server / sshd launch. No-op when STAMP_PROMPTS_REPO_URL is

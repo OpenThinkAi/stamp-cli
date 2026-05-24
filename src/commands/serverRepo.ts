@@ -96,6 +96,12 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
     console.log(`Recovery:`);
     console.log(`  stamp server-repos restore ${name}                 # bring it back`);
     console.log(`  stamp server-repos delete ${name} --purge          # nuke for real`);
+    // AGT-423: soft-delete is NOT erasure. The full git history (incl. any
+    // accidentally-committed secrets/PII) persists in the server's trash
+    // until purged. Make that explicit so an operator deleting a repo TO
+    // erase sensitive content doesn't assume the data is gone.
+    console.log();
+    for (const line of formatDeletePersistenceReminder()) console.log(line);
   }
 
   if (opts.alsoGithub) {
@@ -125,6 +131,22 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
   }
 }
 
+/**
+ * The soft-delete persistence reminder (AGT-423). Exported + pure so the
+ * "delete output includes the persistence reminder" contract is testable
+ * without standing up an SSH server. Each line carries the `warning:`
+ * prefix (agent-parsable). The trash PATH itself is printed by the
+ * server-side delete-stamp-repo script (relayed via stdio inherit).
+ */
+export function formatDeletePersistenceReminder(): string[] {
+  return [
+    "warning: soft-delete is NOT erasure — the repo's full history persists in the",
+    "warning: server trash (the path printed above) until purged. It is auto-purged",
+    "warning: after STAMP_TRASH_TTL_DAYS (default 30d); to erase now, re-run with",
+    "warning: --purge, or run `stamp server-repos purge --older-than 0d`.",
+  ];
+}
+
 export async function runServerRepoRestore(opts: ServerRepoRestoreOptions): Promise<void> {
   // Validate inputs BEFORE resolving server config — so a bad name or
   // --from value surfaces as a UsageError (exit 2) regardless of whether
@@ -151,6 +173,61 @@ export async function runServerRepoRestore(opts: ServerRepoRestoreOptions): Prom
     throw new Error(
       `server-side restore failed (exit ${result.status}). ` +
         `Run \`stamp server-repos list --trash\` to see what's available.`,
+    );
+  }
+}
+
+export interface ServerRepoPurgeOptions extends ServerRepoBaseOptions {
+  /** Idle window as `<N>d` (whole days). `0d` purges ALL trash. */
+  olderThan: string;
+  /** Skip the typed confirmation (destructive). */
+  yes?: boolean;
+}
+
+/** Validate the `--older-than <N>d` spec client-side (UsageError → exit 2). */
+function validateOlderThanSpec(spec: string): void {
+  if (!/^\d+d$/.test(spec)) {
+    throw new UsageError(
+      `--older-than must be '<N>d' (whole days, e.g. 30d; 0d purges all) — got ${JSON.stringify(spec)}`,
+    );
+  }
+}
+
+export async function runServerRepoPurge(opts: ServerRepoPurgeOptions): Promise<void> {
+  validateOlderThanSpec(opts.olderThan);
+  const server = resolveServer(opts.server);
+
+  // Destructive + irreversible. Confirm with a typed phrase unless --yes,
+  // mirroring `delete`. `--older-than 0d` purges the entire trash.
+  if (!opts.yes) {
+    const expected = `purge ${opts.olderThan}`;
+    console.log(
+      `About to PERMANENTLY purge trashed repos older than ${opts.olderThan} on ${server.user}@${server.host}:${server.port} (irreversible).`,
+    );
+    const got = await prompt(`Type "${expected}" to confirm: `);
+    if (got.trim() !== expected) {
+      console.log("note: aborted");
+      return;
+    }
+  }
+
+  const result = spawnSync(
+    "ssh",
+    [
+      "-p",
+      String(server.port),
+      "--",
+      `${server.user}@${server.host}`,
+      "purge-trash",
+      "--older-than",
+      opts.olderThan,
+    ],
+    { stdio: ["ignore", "inherit", "inherit"] },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `server-side purge failed (exit ${result.status}). If you see "command not found", ` +
+        `the server image predates AGT-423 (trash TTL) — redeploy it first.`,
     );
   }
 }

@@ -422,6 +422,14 @@ write_env_var STAMP_PROMPTS_REPO_URL
 write_env_var MAX_REVIEWS_PER_HOUR
 write_env_var MAX_INVITES_PER_HOUR
 
+# AGT-423 — trash retention. STAMP_TRASH_TTL_DAYS is consumed by the
+# in-process sweep worker (which sees the container env directly via
+# stamp-http-server) AND by the `purge-trash` SSH verb's no-flag fallback
+# (SSH strips env, so it must be persisted here). Default 30 days; a bad
+# value falls back to the default (no boot guard — a typo must not
+# crash-loop the self-deploying server).
+write_env_var STAMP_TRASH_TTL_DAYS
+
 # AGT-411: production refusal guard for STAMP_PROMPTS_DIR override.
 # Must run before write_env_var STAMP_PROMPTS_DIR so a misconfigured prod
 # deployment is rejected before the var is persisted to /etc/stamp/env.

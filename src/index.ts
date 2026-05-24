@@ -31,6 +31,7 @@ import {
 import {
   runServerRepoDelete,
   runServerRepoList,
+  runServerRepoPurge,
   runServerRepoRestore,
 } from "./commands/serverRepo.js";
 import {
@@ -589,6 +590,26 @@ serverRepo
       }
     },
   );
+
+serverRepo
+  .command("purge")
+  .description(
+    "permanently delete soft-deleted (trashed) bare repos older than --older-than (irreversible). The server also auto-purges on a schedule (STAMP_TRASH_TTL_DAYS, default 30d); this is the on-demand path. `--older-than 0d` purges ALL trash.",
+  )
+  .requiredOption("--older-than <Nd>", "purge trash older than this many whole days, e.g. 30d (0d = all)")
+  .option("--server <host:port>", "override ~/.stamp/server.yml")
+  .option("--yes", "skip the typed confirmation (destructive)")
+  .action(async (opts: { olderThan: string; server?: string; yes?: boolean }) => {
+    try {
+      await runServerRepoPurge({
+        olderThan: opts.olderThan,
+        server: opts.server,
+        yes: opts.yes,
+      });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
 
 program
   .command("review")
