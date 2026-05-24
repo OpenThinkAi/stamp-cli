@@ -34,13 +34,16 @@
  *   2 — usage error (missing/bad argv)
  *   3 — caller's role doesn't permit minting (not admin/owner)
  *   4 — short_name already taken in users table
+ *   5 — rate limited: caller is over the per-hour invite cap (AGT-420)
  */
 
 import { mintInvite } from "../lib/invites.js";
 import {
+  checkAndConsumeToken,
   findUserByShortName,
   findUserBySshFingerprint,
   openServerDb,
+  resolveInviteRateCap,
   type InviteRole,
 } from "../lib/serverDb.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
@@ -175,6 +178,18 @@ function main(): void {
         `short_name ${JSON.stringify(args.short_name)} is already in use (id=${existing.id} role=${existing.role}). ` +
           `Pick a different name or remove the existing user first.`,
         4,
+      );
+    }
+
+    // AGT-420: per-admin invite rate limit — bounds a compromised admin
+    // key's ability to flood invites. Same token-bucket as stamp-review;
+    // exit 5 = back off.
+    if (!checkAndConsumeToken(db, callerRow.id, "mint_invite", resolveInviteRateCap())) {
+      fail(
+        `rate limit exceeded: ${callerRow.short_name} is over the per-hour invite cap ` +
+          `(${resolveInviteRateCap()}/hour). Back off and retry later; an operator can raise ` +
+          `MAX_INVITES_PER_HOUR on the server if this is legitimate.`,
+        5,
       );
     }
 

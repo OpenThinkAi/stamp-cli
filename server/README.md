@@ -330,6 +330,14 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
    - `GITHUB_BOT_TOKEN` — **optional**, only needed if you want to mirror
      verified commits to a GitHub repo (see "GitHub mirror" below). A
      fine-scoped GitHub PAT with `contents: write` on the target repo(s).
+   - `MAX_REVIEWS_PER_HOUR` — **optional** (default `30`). Per-caller
+     token-bucket cap on the `stamp-review` SSH verb (AGT-420), bounding
+     the Anthropic spend any one enrolled member can drive. `admin`/`owner`
+     get 5× this. A bad value falls back to the default (never crashes
+     boot). Over-cap calls exit 5 so clients back off.
+   - `MAX_INVITES_PER_HOUR` — **optional** (default `10`). Per-admin
+     token-bucket cap on `stamp invites mint` (AGT-420), bounding a
+     compromised admin key's ability to flood invites.
 6. **Expose port 22** via Railway's TCP proxy:
    - Settings → Networking → Public Networking → TCP Proxy → create one
      pointing at container port 22. Railway gives you a public host +

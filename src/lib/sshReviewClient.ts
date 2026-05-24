@@ -694,6 +694,8 @@ function exitCodeHint(exitCode: number | null): string {
       return "the SSH key you connected with isn't enrolled as a member on this stamp server. Run `stamp invites accept <url>` or ask an admin to enroll you.";
     case 4:
       return "request validation failed (diff size cap or sha256 mismatch) — check `stamp review` isn't being asked to review an unbounded diff.";
+    case 5:
+      return "rate limited — you're over the server's per-hour review cap (AGT-420). Back off and retry later; an operator can raise MAX_REVIEWS_PER_HOUR if this is legitimate.";
     default:
       return `unrecognized exit code ${exitCode} — surface the stderr verbatim and check the server logs.`;
   }

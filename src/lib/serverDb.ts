@@ -164,7 +164,152 @@ function initSchema(db: DatabaseSync): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_invites_expires ON invites(expires_at);
+
+    -- AGT-420: per-(caller, action) token-bucket rate-limit state. Lazy
+    -- refill (computed on read), so no cron is needed. Brand-new table;
+    -- additive, never ALTERed here.
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      subject_id  INTEGER NOT NULL,
+      action      TEXT NOT NULL,
+      tokens      REAL NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (subject_id, action)
+    );
+
+    -- AGT-420: server-side verdict cache, symmetric to the client's local
+    -- reviews cache (lib/db.ts findCachedVerdict). Keyed on the same triple
+    -- (reviewer, diff_sha256, prompt_sha256); one row per key (upserted).
+    CREATE TABLE IF NOT EXISTS server_verdicts (
+      reviewer      TEXT NOT NULL,
+      diff_sha256   TEXT NOT NULL,
+      prompt_sha256 TEXT NOT NULL,
+      verdict       TEXT NOT NULL,
+      prose         TEXT NOT NULL,
+      created_at    INTEGER NOT NULL,
+      PRIMARY KEY (reviewer, diff_sha256, prompt_sha256)
+    );
   `);
+}
+
+/**
+ * Token-bucket rate limit keyed on `(subjectId, action)` (AGT-420). Lazy
+ * refill: tokens accrue at `capPerHour/3600` per second since the last
+ * touch, capped at `capPerHour`. Consumes one token and returns true when
+ * allowed, false when the bucket is empty. Always persists the recomputed
+ * tokens + timestamp so the accounting is correct across calls. `now` is
+ * injectable for deterministic tests.
+ */
+export function checkAndConsumeToken(
+  db: DatabaseSync,
+  subjectId: number,
+  action: string,
+  capPerHour: number,
+  now: number = Date.now(),
+): boolean {
+  const nowSec = Math.floor(now / 1000);
+  const row = db
+    .prepare(
+      `SELECT tokens, updated_at FROM rate_limits WHERE subject_id = ? AND action = ?`,
+    )
+    .get(subjectId, action) as
+    | { tokens: number; updated_at: number }
+    | undefined;
+
+  let tokens: number;
+  if (!row) {
+    tokens = capPerHour; // first call for this subject/action: full bucket
+  } else {
+    const elapsed = Math.max(0, nowSec - row.updated_at);
+    tokens = Math.min(capPerHour, row.tokens + elapsed * (capPerHour / 3600));
+  }
+
+  const allowed = tokens >= 1;
+  if (allowed) tokens -= 1;
+
+  db.prepare(
+    `INSERT INTO rate_limits (subject_id, action, tokens, updated_at)
+       VALUES (?, ?, ?, ?)
+     ON CONFLICT(subject_id, action)
+       DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
+  ).run(subjectId, action, tokens, nowSec);
+
+  return allowed;
+}
+
+export interface CachedServerVerdict {
+  verdict: string;
+  prose: string;
+}
+
+/** Look up a cached server verdict for an identical (reviewer, diff, prompt)
+ * triple (AGT-420). Mirrors lib/db.ts findCachedVerdict. */
+export function findCachedServerVerdict(
+  db: DatabaseSync,
+  reviewer: string,
+  diff_sha256: string,
+  prompt_sha256: string,
+): CachedServerVerdict | null {
+  const row = db
+    .prepare(
+      `SELECT verdict, prose FROM server_verdicts
+        WHERE reviewer = ? AND diff_sha256 = ? AND prompt_sha256 = ?`,
+    )
+    .get(reviewer, diff_sha256, prompt_sha256) as
+    | CachedServerVerdict
+    | undefined;
+  // Reconstruct as a plain object — node:sqlite `.get()` returns a
+  // null-prototype row, which trips deepStrictEqual and is awkward for
+  // callers. Return a clean { verdict, prose } or null.
+  return row ? { verdict: row.verdict, prose: row.prose } : null;
+}
+
+/** Persist a server verdict for future cache hits (AGT-420). Upsert: the
+ * latest successful evaluation for a triple wins. Callers MUST NOT record
+ * an API-error-path verdict — only a real model response. */
+export function recordServerVerdict(
+  db: DatabaseSync,
+  reviewer: string,
+  diff_sha256: string,
+  prompt_sha256: string,
+  verdict: string,
+  prose: string,
+): void {
+  db.prepare(
+    `INSERT INTO server_verdicts (reviewer, diff_sha256, prompt_sha256, verdict, prose, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(reviewer, diff_sha256, prompt_sha256)
+       DO UPDATE SET verdict = excluded.verdict, prose = excluded.prose, created_at = excluded.created_at`,
+  ).run(
+    reviewer,
+    diff_sha256,
+    prompt_sha256,
+    verdict,
+    prose,
+    Math.floor(Date.now() / 1000),
+  );
+}
+
+/** Defensive positive-int env reader: bad/absent value → default, never
+ * throws (a typo must not crash the boot/request path — AGT-420). */
+function positiveIntEnv(name: string, def: number): number {
+  const raw = process.env[name];
+  if (!raw) return def;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : def;
+}
+
+/** Per-hour review cap by role (AGT-420). `member` (broadly granted by
+ * single-use invite — the spend-amplification blast radius) uses
+ * MAX_REVIEWS_PER_HOUR (default 30); admin/owner get 5× headroom so the
+ * operator isn't throttled while a compromised elevated key stays bounded. */
+export function resolveReviewRateCap(role: Role): number {
+  const base = positiveIntEnv("MAX_REVIEWS_PER_HOUR", 30);
+  return role === "member" ? base : base * 5;
+}
+
+/** Per-admin invite cap (AGT-420). MAX_INVITES_PER_HOUR, default 10. */
+export function resolveInviteRateCap(): number {
+  return positiveIntEnv("MAX_INVITES_PER_HOUR", 10);
 }
 
 export interface InsertUserInput {

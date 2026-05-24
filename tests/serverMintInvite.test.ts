@@ -309,3 +309,24 @@ describe("stamp-mint-invite — input validation", () => {
     }
   });
 });
+
+describe("stamp-mint-invite — rate limit (AGT-420)", () => {
+  it("rejects the over-cap invite with exit 5 (per-admin cap)", () => {
+    // Shared STAMP_SERVER_DB_PATH persists the token bucket across the two
+    // subprocess mints. MAX_INVITES_PER_HOUR=1 → first mint consumes the
+    // token, second is throttled. Distinct short_names so neither trips the
+    // short_name-taken (exit 4) check before the rate check.
+    const h = setup("admin");
+    try {
+      const env = { MAX_INVITES_PER_HOUR: "1" };
+      const first = runMintInvite(h, ["dev-one"], env);
+      assert.equal(first.status, 0, `first mint should succeed: ${first.stderr}`);
+      const second = runMintInvite(h, ["dev-two"], env);
+      assert.equal(second.status, 5, `stderr=${second.stderr}`);
+      assert.match(second.stderr, /rate limit exceeded/);
+      assert.match(second.stderr, /MAX_INVITES_PER_HOUR/);
+    } finally {
+      h.cleanup();
+    }
+  });
+});

@@ -25,12 +25,16 @@ import path from "node:path";
 import { describe, it, before, after } from "node:test";
 
 import {
+  checkAndConsumeToken,
   countByRole,
+  findCachedServerVerdict,
   findUserBySshFingerprint,
   findUserByShortName,
   insertUser,
   listUsers,
   openServerDb,
+  recordServerVerdict,
+  resolveReviewRateCap,
   suggestUniqueShortName,
   upsertUserByFingerprint,
 } from "../src/lib/serverDb.ts";
@@ -412,5 +416,133 @@ describe("findUserByShortName", () => {
     } finally {
       t.cleanup();
     }
+  });
+});
+
+describe("checkAndConsumeToken — token-bucket rate limit (AGT-420)", () => {
+  const T = 1_700_000_000_000; // fixed ms clock for determinism
+
+  it("allows up to `cap` calls, then rejects, with a fixed clock", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      const cap = 3;
+      for (let i = 0; i < cap; i++) {
+        assert.equal(
+          checkAndConsumeToken(db, 1, "review", cap, T),
+          true,
+          `call ${i + 1} should be allowed`,
+        );
+      }
+      assert.equal(
+        checkAndConsumeToken(db, 1, "review", cap, T),
+        false,
+        "the (cap+1)th call should be rejected",
+      );
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("refills over elapsed time (lazy refill)", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      const cap = 3; // rate = 3/hour → one token per 1200s
+      for (let i = 0; i < cap; i++) checkAndConsumeToken(db, 1, "review", cap, T);
+      assert.equal(checkAndConsumeToken(db, 1, "review", cap, T), false);
+      // advance 1200s → exactly one token refilled
+      assert.equal(
+        checkAndConsumeToken(db, 1, "review", cap, T + 1200_000),
+        true,
+        "one token should refill after 1200s at 3/hour",
+      );
+      assert.equal(
+        checkAndConsumeToken(db, 1, "review", cap, T + 1200_000),
+        false,
+        "the refilled token is already spent",
+      );
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("isolates buckets per subject and per action", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      assert.equal(checkAndConsumeToken(db, 1, "review", 1, T), true);
+      assert.equal(checkAndConsumeToken(db, 1, "review", 1, T), false); // subject 1 review exhausted
+      assert.equal(checkAndConsumeToken(db, 2, "review", 1, T), true); // different subject — fresh
+      assert.equal(checkAndConsumeToken(db, 1, "mint_invite", 1, T), true); // same subject, different action — fresh
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("server verdict cache (AGT-420)", () => {
+  it("returns null on a miss, the stored verdict on a hit, and upserts", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      assert.equal(findCachedServerVerdict(db, "security", "d1", "p1"), null);
+
+      recordServerVerdict(db, "security", "d1", "p1", "approved", "looks good");
+      assert.deepEqual(findCachedServerVerdict(db, "security", "d1", "p1"), {
+        verdict: "approved",
+        prose: "looks good",
+      });
+
+      // upsert: same triple, new verdict wins
+      recordServerVerdict(db, "security", "d1", "p1", "changes_requested", "nit");
+      assert.deepEqual(findCachedServerVerdict(db, "security", "d1", "p1"), {
+        verdict: "changes_requested",
+        prose: "nit",
+      });
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("keys on the full (reviewer, diff_sha256, prompt_sha256) triple", () => {
+    const t = tmpDbPath();
+    try {
+      const db = openServerDb({ path: t.path, skipChmod: true });
+      recordServerVerdict(db, "security", "d1", "p1", "approved", "ok");
+      // any single key component differing → miss
+      assert.equal(findCachedServerVerdict(db, "standards", "d1", "p1"), null);
+      assert.equal(findCachedServerVerdict(db, "security", "d2", "p1"), null);
+      assert.equal(findCachedServerVerdict(db, "security", "d1", "p2"), null);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+describe("resolveReviewRateCap (AGT-420)", () => {
+  const saved = process.env.MAX_REVIEWS_PER_HOUR;
+  after(() => {
+    if (saved === undefined) delete process.env.MAX_REVIEWS_PER_HOUR;
+    else process.env.MAX_REVIEWS_PER_HOUR = saved;
+  });
+
+  it("defaults to 30 for member, 5x for admin/owner", () => {
+    delete process.env.MAX_REVIEWS_PER_HOUR;
+    assert.equal(resolveReviewRateCap("member"), 30);
+    assert.equal(resolveReviewRateCap("admin"), 150);
+    assert.equal(resolveReviewRateCap("owner"), 150);
+  });
+
+  it("honors MAX_REVIEWS_PER_HOUR and falls back to default on a bad value", () => {
+    process.env.MAX_REVIEWS_PER_HOUR = "10";
+    assert.equal(resolveReviewRateCap("member"), 10);
+    process.env.MAX_REVIEWS_PER_HOUR = "not-a-number";
+    assert.equal(resolveReviewRateCap("member"), 30);
   });
 });

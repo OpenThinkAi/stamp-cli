@@ -413,6 +413,15 @@ write_env_var ANTHROPIC_API_KEY  # consumed by stamp-review.cjs via lib/serverEn
 # half-broken state.)
 write_env_var STAMP_PROMPTS_REPO_URL
 
+# AGT-420 — per-caller rate-limit caps consumed by stamp-review.cjs /
+# stamp-mint-invite.cjs via loadServerEnvFile(). sshd strips these from the
+# SSH session env, so without persisting them here the verbs silently fall
+# back to their built-in defaults (30 reviews/hr, 10 invites/hr). A bad
+# value is tolerated (the TS resolvers fall back to the default — no boot
+# guard, deliberately, so a typo can't crash-loop the self-deploying server).
+write_env_var MAX_REVIEWS_PER_HOUR
+write_env_var MAX_INVITES_PER_HOUR
+
 # AGT-411: production refusal guard for STAMP_PROMPTS_DIR override.
 # Must run before write_env_var STAMP_PROMPTS_DIR so a misconfigured prod
 # deployment is rejected before the var is persisted to /etc/stamp/env.
