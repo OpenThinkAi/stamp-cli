@@ -23,8 +23,6 @@
 import { spawn } from "node:child_process";
 import type { ServerConfig } from "./serverConfig.js";
 
-export type { ServerConfig };
-
 // ─── SSH spawn seam ─────────────────────────────────────────────────
 
 export interface SshSpawnResult {

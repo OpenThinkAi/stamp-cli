@@ -833,8 +833,8 @@ pr
     `
 Subscribes the operator's stamp identity to PR-opened events for the given orgs,
 then loops indefinitely:
-  - Receives pr-opened events via the in-process fanout registry (AGT-429 wire-frame;
-    real cross-process delivery via WebSocket transport is deferred to AGT-434)
+  - Receives pr-opened events via the in-process fanout registry (wire-frame;
+    real cross-process delivery via WebSocket transport is not yet implemented)
   - Applies author-exclusion (skips own PRs)
   - Claims a reviewer seat; runs the builtin-default review via the Claude Agent SDK
   - Posts the result via 'gh pr review --comment'

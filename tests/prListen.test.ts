@@ -505,6 +505,60 @@ describe("AC #7: gh pr review failure → release-seat called", () => {
   });
 });
 
+// ─── Security: pr_url validation ─────────────────────────────────────
+
+describe("Security: pr_url validation — flag-shaped or empty pr_url skipped", () => {
+  it("skips event with flag-shaped pr_url (e.g. '-H')", async () => {
+    const fakeKeypair = genKeypair();
+    let sdkCalled = false;
+
+    const { stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async (_diff) => { sdkCalled = true; return "body"; },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [
+          makeEvent({ payloadOverrides: { pr_url: "-H" } }),
+        ],
+      }),
+    );
+
+    assert.ok(
+      stderr.includes("does not match expected"),
+      `expected pr_url validation message in stderr, got: ${stderr}`,
+    );
+    assert.equal(sdkCalled, false, "SDK should NOT be called for flag-shaped pr_url");
+  });
+
+  it("skips event with empty pr_url", async () => {
+    const fakeKeypair = genKeypair();
+    let sdkCalled = false;
+
+    const { stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async (_diff) => { sdkCalled = true; return "body"; },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [
+          makeEvent({ payloadOverrides: { pr_url: "" } }),
+        ],
+      }),
+    );
+
+    assert.ok(
+      stderr.includes("does not match expected"),
+      `expected pr_url validation message in stderr, got: ${stderr}`,
+    );
+    assert.equal(sdkCalled, false, "SDK should NOT be called for empty pr_url");
+  });
+});
+
 // ─── STAMP_NO_LLM=1 (AC #6 consistency) ─────────────────────────────
 
 describe("STAMP_NO_LLM=1: builtin review refuses before SDK call", () => {

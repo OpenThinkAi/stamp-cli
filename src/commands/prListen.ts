@@ -84,16 +84,27 @@ function stubSignature(keypair: Keypair, ...parts: string[]): string {
   return signBytes(keypair.privateKeyPem, data);
 }
 
-/** Resolve the ServerConfig from options or the user config file. */
-function resolveServerConfig(server?: string): ServerConfig | null {
+/**
+ * Resolve the ServerConfig from options or the user config file.
+ * Returns a discriminated result so the caller can emit distinct error messages
+ * for "invalid --server format" vs "no server configured at all".
+ */
+function resolveServerConfig(
+  server?: string,
+): { cfg: ServerConfig } | { cfg: null; reason: "invalid_format" | "not_configured" } {
   if (server) {
     const m = server.trim().match(/^([^:]+):(\d+)$/);
-    if (!m) return null;
+    if (!m) return { cfg: null, reason: "invalid_format" };
     const port = Number(m[2]);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-    return { host: m[1]!, port, user: "git", repoRootPrefix: "/srv/git" };
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+      return { cfg: null, reason: "invalid_format" };
+    return {
+      cfg: { host: m[1]!, port, user: "git", repoRootPrefix: "/srv/git" },
+    };
   }
-  return loadServerConfig();
+  const loaded = loadServerConfig();
+  if (!loaded) return { cfg: null, reason: "not_configured" };
+  return { cfg: loaded };
 }
 
 // ─── Event loop ───────────────────────────────────────────────────────
@@ -119,13 +130,21 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     process.exit(1);
   }
 
-  const serverCfg = resolveServerConfig(opts.server);
-  if (!serverCfg) {
-    process.stderr.write(
-      `error: no stamp-server configured. Run 'stamp server config <host:port>' or pass --server.\n`,
-    );
+  const serverResult = resolveServerConfig(opts.server);
+  if (!serverResult.cfg) {
+    if (serverResult.reason === "invalid_format") {
+      process.stderr.write(
+        `error: invalid --server format ${JSON.stringify(opts.server)} — expected host:port ` +
+          `(e.g. stamp.example.com:2222)\n`,
+      );
+    } else {
+      process.stderr.write(
+        `error: no stamp-server configured. Run 'stamp server config <host:port>' or pass --server.\n`,
+      );
+    }
     process.exit(1);
   }
+  const serverCfg: ServerConfig = serverResult.cfg;
 
   // ─── Subscribe: register in-process listener ──────────────────────
   // The subscription call goes to the server's `subscribe` verb. For the
@@ -240,7 +259,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       typeof payload["pr_number"] === "number"
         ? payload["pr_number"]
         : typeof payload["patch_id"] === "string"
-          ? `(patch ${(payload["patch_id"] as string).slice(0, 8)})`
+          ? `(patch ${payload["patch_id"].slice(0, 8)})`
           : "?";
     const patchId =
       typeof payload["patch_id"] === "string"
@@ -248,25 +267,39 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         : event.patch_id;
     const baseSha =
       typeof payload["base_sha"] === "string"
-        ? (payload["base_sha"] as string)
+        ? payload["base_sha"]
         : "0".repeat(40);
     const repo =
       typeof payload["repo"] === "string"
-        ? (payload["repo"] as string)
+        ? payload["repo"]
         : "unknown/unknown";
-    const prUrl =
+    const prUrlRaw =
       typeof payload["pr_url"] === "string"
-        ? (payload["pr_url"] as string)
+        ? payload["pr_url"]
         : "";
+    // Security: validate pr_url before passing to `gh` as an argv element.
+    // A flag-shaped pr_url (e.g. `-H` or `--hostname=evil`) would be
+    // interpreted as a CLI option by gh rather than a positional argument,
+    // since `--` is absent. The regex also catches the empty/absent fallback.
+    const PR_URL_REGEX =
+      /^https:\/\/(?:[a-zA-Z0-9.-]+)\/[^/]+\/[^/]+\/pull\/\d+$/;
+    if (!PR_URL_REGEX.test(prUrlRaw)) {
+      process.stderr.write(
+        `note: skipping event for PR #${prNumber} — pr_url ${JSON.stringify(prUrlRaw)} ` +
+          `does not match expected https://<host>/<owner>/<repo>/pull/<n> shape\n`,
+      );
+      continue;
+    }
+    const prUrl = prUrlRaw;
     const diff =
       typeof payload["diff"] === "string"
-        ? (payload["diff"] as string)
+        ? payload["diff"]
         : typeof payload["body"] === "string"
-          ? (payload["body"] as string)
+          ? payload["body"]
           : `PR diff for patch_id=${patchId}`;
     const requestedByFp =
       typeof payload["requested_by_fp"] === "string"
-        ? (payload["requested_by_fp"] as string)
+        ? payload["requested_by_fp"]
         : event.actor_fp;
 
     process.stderr.write(`⟳ triaging event for PR #${prNumber}\n`);
@@ -350,7 +383,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         process.stderr.write(
           `✗ builtin-default review failed: ${reviewResult.message}; releasing seat\n`,
         );
-        clearHeartbeat();
+        // clearHeartbeat() is called in finally — no explicit call needed here.
         currentSeatPatchId = null;
         await callReleaseSeat({
           patch_id: patchId,
