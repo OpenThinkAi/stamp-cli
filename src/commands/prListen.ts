@@ -63,7 +63,7 @@ import {
   resolveNamedPrompt,
   type ResolveNamedPromptInput,
 } from "../lib/namedPrompt.js";
-import { appendTriplet } from "../lib/peerWatchLog.js";
+import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -100,14 +100,7 @@ export interface PrListenOptions {
   _resolveNamedPromptForTest?: (input: ResolveNamedPromptInput) => ReturnType<typeof resolveNamedPrompt>;
   /** Test-only: inject a fake triplet-append function.
    *  Called with the full triplet record instead of writing to disk. */
-  _appendTripletForTest?: (record: {
-    ts: string;
-    repo: string;
-    pr_url: string;
-    rules_hash: string;
-    event_payload: Record<string, unknown>;
-    decision: TriageDecision;
-  }) => void;
+  _appendTripletForTest?: (record: TripletRecord) => void;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -361,7 +354,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           : "";
     const prPaths: string[] =
       Array.isArray(payload["paths_changed"])
-        ? (payload["paths_changed"] as string[]).filter((p): p is string => typeof p === "string")
+        ? (payload["paths_changed"] as unknown[]).filter((p): p is string => typeof p === "string")
         : [];
 
     let rulesResult: { rules: string; hash: string } | null;

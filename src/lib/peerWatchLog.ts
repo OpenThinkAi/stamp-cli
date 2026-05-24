@@ -12,9 +12,9 @@
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import type { TriageDecision } from "./peerTriage.js";
+import { peerWatchLogPath } from "./paths.js";
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -39,12 +39,6 @@ export interface AppendTripletInput extends TripletRecord {
    * Receives (path, line) where `line` is the NDJSON string including trailing newline.
    */
   _appendForTest?: (path: string, line: string) => void;
-}
-
-// ─── Log path ────────────────────────────────────────────────────────
-
-export function peerWatchLogPath(): string {
-  return join(homedir(), ".stamp", "peer-watch.log");
 }
 
 // ─── Append ──────────────────────────────────────────────────────────

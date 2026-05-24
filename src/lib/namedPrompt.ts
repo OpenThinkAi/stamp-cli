@@ -8,8 +8,8 @@
  */
 
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { peersDir } from "./paths.js";
 
 // ─── Name validation ─────────────────────────────────────────────────
 
@@ -20,10 +20,12 @@ import { join } from "node:path";
 const NAME_REGEX = /^[A-Za-z0-9._-]+$/;
 
 function isValidPromptName(name: string): boolean {
+  // NAME_REGEX excludes `.`, `..`, slashes, backslashes, and all non-alphanumeric
+  // characters except `.`, `_`, and `-`. The only additional edge cases that
+  // pass the regex are the single-dot and double-dot names, which are explicitly
+  // blocked here to prevent directory-traversal via `.` or `..` as a bare name.
   if (!NAME_REGEX.test(name)) return false;
   if (name === "." || name === "..") return false;
-  // Belt-and-suspenders: reject if it contains any separator after normalization.
-  if (name.includes("/") || name.includes("\\")) return false;
   return true;
 }
 
@@ -66,7 +68,7 @@ export function resolveNamedPrompt(
     return { ok: false, reason: "invalid_name" };
   }
 
-  const resolvedPath = join(homedir(), ".stamp", "personal", "peers", `${name}.md`);
+  const resolvedPath = join(peersDir(), `${name}.md`);
 
   try {
     const readFn = input._readFileForTest ?? ((p: string) => readFileSync(p, "utf8"));

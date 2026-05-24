@@ -24,10 +24,9 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { peerWatchPath } from "./paths.js";
 
 // ─── Constants ────────────────────────────────────────────────────────
 
@@ -133,7 +132,7 @@ export function sha256Hex(s: string): string {
  * caller applies the fallback decision and logs a `⟳` notice).
  */
 export function loadPeerWatchRules(): LoadRulesResult | null {
-  const p = join(homedir(), ".stamp", "peer-watch.md");
+  const p = peerWatchPath();
   try {
     const rules = readFileSync(p, "utf8");
     const hash = sha256Hex(rules);

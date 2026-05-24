@@ -105,15 +105,6 @@ export function peersDir(): string {
 }
 
 /**
- * Absolute path to a named peer-review prompt file.
- * NOTE: callers must independently validate `name` before use — this function
- * does not perform path-traversal checks.
- */
-export function peerPromptPath(name: string): string {
-  return join(homedir(), ".stamp", "personal", "peers", `${name}.md`);
-}
-
-/**
  * Per-user stamp-server config. Holds {host, port, user, repo_root_prefix}
  * so commands like `stamp provision` can reach the operator's stamp server
  * without making the agent guess at SSH endpoints.

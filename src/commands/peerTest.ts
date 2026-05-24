@@ -56,6 +56,16 @@ export interface PeerTestOptions {
 export async function runPeerTest(opts: PeerTestOptions): Promise<void> {
   const exitFn = opts._exitForTest ?? ((code: number) => process.exit(code) as never);
 
+  // ─── STAMP_NO_LLM guard (exit 3, design doc table) ───────────────────
+  // Check before touching the SDK so the error is clean and there's only one
+  // log line. runTriage also checks this env var, but checking it here first
+  // avoids the double-log (⟳ from runTriage + ✗ from here) when STAMP_NO_LLM=1.
+  if (process.env["STAMP_NO_LLM"] === "1" && !opts._haikuRunnerForTest) {
+    process.stderr.write(`✗ dry-run failed: STAMP_NO_LLM=1 prevents triage call\n`);
+    exitFn(3);
+    return;
+  }
+
   // ─── Load peer-watch.md ───────────────────────────────────────────
   let rulesResult: { rules: string; hash: string } | null;
   if (opts._peerWatchRulesForTest !== undefined) {
@@ -127,40 +137,13 @@ export async function runPeerTest(opts: PeerTestOptions): Promise<void> {
   });
 
   // ─── Detect triage failure (AC #7 exit 3) ────────────────────────
-  // If the decision is skip AND there was no explicit "skip" in the fixture
-  // (i.e., the Haiku call or schema validation failed), exit 3.
-  // We detect this by checking: if no _haikuRunnerForTest was provided
-  // (so we'd have made a real call) and STAMP_NO_LLM=1 is not set, and
-  // the result is skip, we can't distinguish "triage said skip" from
-  // "triage failed". In test mode with an injected runner, the runner
-  // either returns valid JSON or throws; we detect failure via the runner
-  // throwing (which runTriage catches and returns SKIP_DECISION).
-  //
-  // Conservative approach: if the result is SKIP and STAMP_NO_LLM is not set,
-  // treat it as a potential failure and exit 3 unless the runner was injected
-  // AND we know it succeeded.
-  //
-  // For the test seam: if the runner was injected, runTriage already emitted
-  // a ✗ log on failure and returned SKIP. We check for skip + runner threw
-  // by noting runTriage never rejects, so a skip from an injected runner
-  // that returned invalid JSON is still a triage failure.
-  //
   // Design-doc intent: exit 3 = "Haiku call fails (network/auth/schema)".
-  // We map: claim_seat === "skip" when STAMP_NO_LLM is not set → exit 3.
-  // (If the operator genuinely sets claim_seat:"skip" in rules, that is
-  //  valid output and the decision will also say skip — this is a known
-  //  ambiguity in the spec, and the conservative choice is exit 3.)
+  // On the real-SDK path (no seam injected), a `skip` result is ambiguous —
+  // it could mean the model decided to skip, or it could mean the call/parse
+  // failed. The conservative choice is exit 3, consistent with the design
+  // doc's intent that exit 3 covers network/auth/schema failures.
   //
-  // When STAMP_NO_LLM=1: exit 3 (the call was refused, which is a failure
-  // for dry-run purposes).
-
-  if (process.env["STAMP_NO_LLM"] === "1") {
-    // runTriage already logged ⟳ about STAMP_NO_LLM.
-    process.stderr.write(`✗ dry-run failed: STAMP_NO_LLM=1 prevents triage call\n`);
-    exitFn(3);
-    return;
-  }
-
+  // The STAMP_NO_LLM path is already handled before the triage call above.
   if (decision.claim_seat === SKIP_DECISION.claim_seat &&
       decision.post_mode === SKIP_DECISION.post_mode &&
       decision.prompt === SKIP_DECISION.prompt &&
@@ -170,11 +153,6 @@ export async function runPeerTest(opts: PeerTestOptions): Promise<void> {
     exitFn(3);
     return;
   }
-
-  // For injected runner path: check that we didn't get an unexpected skip
-  // that matches SKIP_DECISION exactly (means the runner threw or returned bad JSON).
-  // But if the runner explicitly returns {"claim_seat":"skip",...} that's valid.
-  // We cannot distinguish these in runPeerTest — print the decision and exit 0.
 
   // ─── Print result ─────────────────────────────────────────────────
   process.stdout.write(JSON.stringify(decision, null, 2) + "\n");
