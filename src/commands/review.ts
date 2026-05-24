@@ -728,67 +728,81 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       console.log();
     }
 
-    const results = await Promise.allSettled(
-      reviewerNames.map((name) => {
-        const cached = cacheHits.get(name);
-        if (cached) {
-          // Cache hit: synthesize a ReviewerInvocation from the stored row.
-          // tool_calls is empty by design — no fresh tool invocations happened
-          // this run. The original tool_calls audit trail (if any) is still
-          // on the source row. retros likewise — cached runs don't generate
-          // new retro candidates.
-          return Promise.resolve<ReviewerInvocation>({
-            reviewer: name,
-            prose: cached.issues ?? "",
-            verdict: cached.verdict,
-            tool_calls: [],
-            retros: [],
-          });
-        }
-        const prior = priorByReviewer.get(name);
-        // Per-reviewer diff scoping: when a prior verdict is in scope and
-        // we have a delta computed, the reviewer sees only the delta. The
-        // base_sha + head_sha args still describe the full range (used for
-        // attestation / display); only the bytes the model evaluates are
-        // narrowed. deltaScope flag is threaded honestly so the prompt
-        // builders gate their narrowing-language correctly — fallback path
-        // gets the 1.7.0 prompt-only ratchet wording instead.
-        const isDeltaScope = deltaDiffs.has(name);
-        const diffForReviewer = deltaDiffs.get(name) ?? resolved.diff;
-        // Per-reviewer backend (per-user ~/.stamp/config.yml), resolved
-        // once above. A `local:` model routes to the unmetered one-shot
-        // local-model path; anything else stays on the agent-SDK reviewer.
-        // The prior-review ratchet prose is agent-SDK-only for now — the
-        // local path still gets the narrowed delta diff (so it can't
-        // re-flag unchanged code) but not the prior-verdict prompt
-        // context. v1 limitation.
-        const backend = backendByReviewer.get(name) ?? { kind: "anthropic", model: null };
-        if (backend.kind === "local") {
-          return invokeLocalReviewer({
-            reviewer: name,
-            systemPrompt: promptBytesByReviewer.get(name)!,
-            diff: diffForReviewer,
-            base_sha: resolved.base_sha,
-            head_sha: resolved.head_sha,
-            model: backend.model,
-            endpoint: backend.endpoint,
-            repoRoot,
-            enforceReadsOnDotstamp:
-              config.reviewers[name]?.enforce_reads_on_dotstamp ?? false,
-          });
-        }
-        return invokeReviewer({
+    // Per-reviewer task: returns a ReviewerInvocation promise. Cache hits
+    // short-circuit with the stored row; a `local:` backend routes through
+    // the unmetered one-shot local path, everything else the agent SDK.
+    const runReviewerTask = (name: string): Promise<ReviewerInvocation> => {
+      const cached = cacheHits.get(name);
+      if (cached) {
+        // Cache hit: synthesize from the stored row. tool_calls/retros empty
+        // — no fresh invocation this run (the source row keeps the original
+        // audit trail).
+        return Promise.resolve<ReviewerInvocation>({
           reviewer: name,
-          config,
-          repoRoot,
+          prose: cached.issues ?? "",
+          verdict: cached.verdict,
+          tool_calls: [],
+          retros: [],
+        });
+      }
+      const prior = priorByReviewer.get(name);
+      // Per-reviewer diff scoping: with a prior verdict in scope and a delta
+      // computed, the reviewer sees only the delta (base/head still describe
+      // the full range for attestation). deltaScope is threaded honestly so
+      // the prompt builders gate their narrowing language.
+      const isDeltaScope = deltaDiffs.has(name);
+      const diffForReviewer = deltaDiffs.get(name) ?? resolved.diff;
+      // Per-reviewer backend (per-user ~/.stamp/config.yml). `local:` →
+      // unmetered one-shot local path; otherwise the agent-SDK reviewer. The
+      // prior-review ratchet prose is agent-SDK-only for now — the local path
+      // still gets the narrowed delta diff but not the prior-verdict context.
+      const backend = backendByReviewer.get(name) ?? {
+        kind: "anthropic",
+        model: null,
+      };
+      if (backend.kind === "local") {
+        return invokeLocalReviewer({
+          reviewer: name,
+          systemPrompt: promptBytesByReviewer.get(name)!,
           diff: diffForReviewer,
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
-          systemPrompt: promptBytesByReviewer.get(name)!,
-          ...(prior ? { priorReview: prior, deltaScope: isDeltaScope } : {}),
+          model: backend.model,
+          endpoint: backend.endpoint,
+          repoRoot,
+          enforceReadsOnDotstamp:
+            config.reviewers[name]?.enforce_reads_on_dotstamp ?? false,
         });
-      }),
+      }
+      return invokeReviewer({
+        reviewer: name,
+        config,
+        repoRoot,
+        diff: diffForReviewer,
+        base_sha: resolved.base_sha,
+        head_sha: resolved.head_sha,
+        systemPrompt: promptBytesByReviewer.get(name)!,
+        ...(prior ? { priorReview: prior, deltaScope: isDeltaScope } : {}),
+      });
+    };
+
+    // A single local model server holds one model on the GPU and OOMs under
+    // concurrent large-context requests (observed: 3 reviewers × ~28K-token
+    // diff crashed mlx_lm.server with a Metal out-of-memory). So when any
+    // reviewer uses a local backend, run reviewers SEQUENTIALLY. All-Anthropic
+    // runs keep the parallel fan-out — the API handles concurrency fine.
+    const anyLocal = reviewerNames.some(
+      (n) => (backendByReviewer.get(n)?.kind ?? "anthropic") === "local",
     );
+    let results: PromiseSettledResult<ReviewerInvocation>[];
+    if (anyLocal) {
+      results = [];
+      for (const name of reviewerNames) {
+        results.push(await settleResult(runReviewerTask(name)));
+      }
+    } else {
+      results = await Promise.allSettled(reviewerNames.map(runReviewerTask));
+    }
 
     let anyFailed = false;
     for (let i = 0; i < reviewerNames.length; i++) {
@@ -832,6 +846,19 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
 
 function sha256(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+/** Settle a promise into a PromiseSettledResult without rejecting — used by
+ *  the sequential (local-backend) review path so one reviewer's failure
+ *  doesn't abort the rest, matching Promise.allSettled's contract. */
+async function settleResult<T>(
+  p: Promise<T>,
+): Promise<PromiseSettledResult<T>> {
+  try {
+    return { status: "fulfilled", value: await p };
+  } catch (reason) {
+    return { status: "rejected", reason };
+  }
 }
 
 function chooseReviewers(config: StampConfig, only?: string): string[] {
