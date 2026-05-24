@@ -83,6 +83,32 @@ export interface CollectTrustAnchorSignaturesInput {
 }
 
 /**
+ * Return value of `collectTrustAnchorSignatures`. Exposes both the
+ * verified signatures (for folding into the attestation envelope) and the
+ * matched path rules (for surfacing in the merge banner — AC#4).
+ */
+export interface CollectTrustAnchorResult {
+  /** Verified admin trust-anchor signatures to fold into the envelope. */
+  signatures: TrustAnchorSignatureV4[];
+  /**
+   * Path rules that matched the diff, along with the qualifying
+   * admin-signature count that passed threshold. Empty when no rule
+   * matched. Used by the merge banner to surface
+   * `path_rules: <pattern> (<n>/<min> admin sigs)` per matched rule.
+   *
+   * Note: the threshold gate fires inside this function BEFORE it
+   * returns — a rule in this list already passed its minimum_signatures
+   * requirement (otherwise the function would have thrown). The
+   * qualifying_count here is the count that satisfied the threshold.
+   */
+  matchedPathRules: Array<{
+    pattern: string;
+    minimum_signatures: number;
+    qualifying_count: number;
+  }>;
+}
+
+/**
  * Read the collected admin signatures from the trust-anchor notes-ref
  * and assemble the verified subset for the v4/v3 envelope.
  *
@@ -95,18 +121,22 @@ export interface CollectTrustAnchorSignaturesInput {
  *
  * Path-rule discovery uses path_rules at base_sha (matching the
  * verifier's snapshot semantics). If no rule matches the diff, we
- * return [] and short-circuit — the diff isn't gated by `path_rules`,
- * the verifier won't require sigs, and a stale note from a previous
- * iteration doesn't get folded in.
+ * return an empty result and short-circuit — the diff isn't gated by
+ * `path_rules`, the verifier won't require sigs, and a stale note from
+ * a previous iteration doesn't get folded in.
  */
 export function collectTrustAnchorSignatures(
   input: CollectTrustAnchorSignaturesInput,
-): TrustAnchorSignatureV4[] {
+): CollectTrustAnchorResult {
   const command = input.errorContext?.command ?? "stamp merge";
+  const emptyResult: CollectTrustAnchorResult = {
+    signatures: [],
+    matchedPathRules: [],
+  };
 
   // Read path_rules at base_sha. If none configured or none match the
   // diff, the verifier's `verifyV4StampPathsGuard` won't require sigs;
-  // emit an empty list and skip both the note read and the gate check.
+  // emit an empty result and skip both the note read and the gate check.
   // This preserves back-compat for repos pre-path_rules.
   let configYaml: string;
   try {
@@ -114,18 +144,18 @@ export function collectTrustAnchorSignatures(
   } catch {
     // No config at base — caller's earlier phases would already have
     // failed. Defensive: treat as no path_rules.
-    return [];
+    return emptyResult;
   }
   let parsedYaml: unknown;
   try {
     parsedYaml = parseYaml(configYaml);
   } catch {
-    return [];
+    return emptyResult;
   }
-  if (!parsedYaml || typeof parsedYaml !== "object") return [];
+  if (!parsedYaml || typeof parsedYaml !== "object") return emptyResult;
   const rawPathRules = (parsedYaml as { path_rules?: unknown }).path_rules;
   const { rules: pathRules } = parsePathRules(rawPathRules);
-  if (pathRules.length === 0) return [];
+  if (pathRules.length === 0) return emptyResult;
 
   // Enumerate changed files and find matching rules.
   const changedFiles = listChangedFiles(
@@ -133,11 +163,11 @@ export function collectTrustAnchorSignatures(
     input.baseSha,
     input.headSha,
   );
-  if (!changedFiles) return [];
+  if (!changedFiles) return emptyResult;
   const matchingRules = pathRules.filter((r) =>
     changedFiles.some((f) => pathRuleMatches(f, r.pattern)),
   );
-  if (matchingRules.length === 0) return [];
+  if (matchingRules.length === 0) return emptyResult;
 
   // Read the note keyed by the feature-branch head SHA — that's where
   // `stamp admin sign --pending <head>` deposited the signatures.
@@ -222,6 +252,9 @@ export function collectTrustAnchorSignatures(
   // required capability. Same logic as `verifyV4StampPathsGuard`,
   // applied here so a too-low count surfaces at producer time with a
   // clean operator message rather than via a pre-receive rejection.
+  // Also accumulate the qualifying counts for the merge banner (AC#4).
+  const matchedPathRulesBanner: CollectTrustAnchorResult["matchedPathRules"] =
+    [];
   for (const rule of matchingRules) {
     let qualifying = 0;
     for (const sig of verified) {
@@ -241,9 +274,15 @@ export function collectTrustAnchorSignatures(
           `Collect more with \`stamp admin sign --pending ${input.headSha.slice(0, 12)}\` (and have admins re-sign if previously stale), then re-run \`${command}\`.`,
       );
     }
+    // Rule passed — record qualifying count for the merge banner.
+    matchedPathRulesBanner.push({
+      pattern: rule.pattern,
+      minimum_signatures: rule.minimum_signatures,
+      qualifying_count: qualifying,
+    });
   }
 
-  return verified;
+  return { signatures: verified, matchedPathRules: matchedPathRulesBanner };
 }
 
 /** Local copy of the verifier's path-glob → regex semantics. Kept
