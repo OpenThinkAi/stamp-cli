@@ -134,7 +134,7 @@ async function main(): Promise<void> {
 
   if (!resolvePeerReviewsEnabled()) {
     process.stderr.write(
-      "info: STAMP_PEER_REVIEWS_ENABLED is not set; pr-opened is a no-op\n",
+      "note: STAMP_PEER_REVIEWS_ENABLED is not set; pr-opened is a no-op\n",
     );
     process.stdout.write(notConfiguredResponse() + "\n");
     process.exit(0);
@@ -186,9 +186,28 @@ async function main(): Promise<void> {
     const raw = await readBoundedStdin(maxBodyBytes);
     const payload = parsePayload(raw);
 
+    // Security: bind the payload fingerprint to the SSH-authenticated caller.
+    // Without this check any legitimate operator can impersonate another by
+    // supplying a different `requested_by_fp` in the JSON payload.
+    if (payload.requested_by_fp !== caller.fingerprint) {
+      fail(
+        `requested_by_fp in payload (${payload.requested_by_fp}) does not match ` +
+          `the SSH-authenticated caller's fingerprint (${caller.fingerprint})`,
+        4,
+      );
+    }
+
     if (payload.paths_changed.length > maxPaths) {
       fail(
         `paths_changed has ${payload.paths_changed.length} entries — exceeds MAX_PATHS_CHANGED (${maxPaths})`,
+        4,
+      );
+    }
+
+    // Validate repo format before path resolution to prevent path traversal.
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(payload.repo)) {
+      fail(
+        `repo must be <org>/<name> with alphanumeric/dash/dot/underscore only (got ${JSON.stringify(payload.repo)})`,
         4,
       );
     }

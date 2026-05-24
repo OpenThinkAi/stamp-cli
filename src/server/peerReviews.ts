@@ -30,7 +30,6 @@ import {
   resolveCapability,
   MANIFEST_RELATIVE_PATH,
 } from "../lib/trustedKeysManifest.js";
-import { verifyBytes } from "../lib/signing.js";
 
 // ─── Feature gate ───────────────────────────────────────────────────
 
@@ -136,29 +135,6 @@ export function verifyOperatorAtBase(
   }
 
   return { ok: true };
-}
-
-// ─── Payload signature verification ─────────────────────────────────
-
-/**
- * Verify an Ed25519 signature over the canonical form of a JSON payload.
- * The canonical form is JSON.stringify with sorted keys (shallow — callers
- * own deep-sort if needed). Returns true on valid signature, false otherwise.
- *
- * The signing convention for peer-review payloads: the client signs
- * `JSON.stringify(payloadWithoutSignature)` as UTF-8 bytes.
- */
-export function verifyPayloadSignature(
-  pubkeyPem: string,
-  payloadWithoutSig: object,
-  signatureBase64: string,
-): boolean {
-  const data = Buffer.from(JSON.stringify(payloadWithoutSig), "utf8");
-  try {
-    return verifyBytes(pubkeyPem, data, signatureBase64);
-  } catch {
-    return false;
-  }
 }
 
 // ─── In-memory listener registry ────────────────────────────────────

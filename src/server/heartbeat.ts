@@ -73,7 +73,7 @@ async function main(): Promise<void> {
 
   if (!resolvePeerReviewsEnabled()) {
     process.stderr.write(
-      "info: STAMP_PEER_REVIEWS_ENABLED is not set; heartbeat is a no-op\n",
+      "note: STAMP_PEER_REVIEWS_ENABLED is not set; heartbeat is a no-op\n",
     );
     process.stdout.write(notConfiguredResponse() + "\n");
     process.exit(0);
@@ -100,12 +100,21 @@ async function main(): Promise<void> {
     const raw = await readStdin();
     const payload = parsePayload(raw);
 
+    // Security: bind the payload fingerprint to the SSH-authenticated caller.
+    if (payload.claimant_fp !== caller.fingerprint) {
+      fail(
+        `claimant_fp in payload (${payload.claimant_fp}) does not match ` +
+          `the SSH-authenticated caller's fingerprint (${caller.fingerprint})`,
+        4,
+      );
+    }
+
     const now = Date.now();
     const seat = touchHeartbeat(db, payload.patch_id, payload.claimant_fp, now);
 
     if (seat === null) {
       fail(
-        `404: ${payload.claimant_fp} holds no seat for patch ${payload.patch_id}`,
+        `${payload.claimant_fp} holds no seat for patch ${payload.patch_id}`,
         4,
       );
     }

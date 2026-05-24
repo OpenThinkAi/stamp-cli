@@ -85,7 +85,7 @@ async function main(): Promise<void> {
 
   if (!resolvePeerReviewsEnabled()) {
     process.stderr.write(
-      "info: STAMP_PEER_REVIEWS_ENABLED is not set; claim-seat is a no-op\n",
+      "note: STAMP_PEER_REVIEWS_ENABLED is not set; claim-seat is a no-op\n",
     );
     process.stdout.write(notConfiguredResponse() + "\n");
     process.exit(0);
@@ -112,6 +112,23 @@ async function main(): Promise<void> {
     const raw = await readStdin();
     const payload = parsePayload(raw);
 
+    // Security: bind the payload fingerprint to the SSH-authenticated caller.
+    if (payload.claimant_fp !== caller.fingerprint) {
+      fail(
+        `claimant_fp in payload (${payload.claimant_fp}) does not match ` +
+          `the SSH-authenticated caller's fingerprint (${caller.fingerprint})`,
+        4,
+      );
+    }
+
+    // Validate repo format before path resolution to prevent path traversal.
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(payload.repo)) {
+      fail(
+        `repo must be <org>/<name> with alphanumeric/dash/dot/underscore only (got ${JSON.stringify(payload.repo)})`,
+        4,
+      );
+    }
+
     // Auth: verify claimant has operator capability at base_sha.
     const gitDir = bareRepoPath(payload.repo);
     const authResult = verifyOperatorAtBase(gitDir, payload.base_sha, payload.claimant_fp);
@@ -123,10 +140,8 @@ async function main(): Promise<void> {
     const result = claimSeatTx(db, payload.patch_id, payload.claimant_fp, now);
 
     if (!result.ok) {
-      const httpLike =
-        result.error === "already_holds_other_seat" || result.error === "seats_full" ? 409 : 403;
       fail(
-        `claim rejected (${httpLike}): ${result.error}`,
+        `claim rejected: ${result.error}`,
         5,
       );
     }

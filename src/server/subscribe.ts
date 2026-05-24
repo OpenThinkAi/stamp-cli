@@ -83,7 +83,7 @@ async function main(): Promise<void> {
 
   if (!resolvePeerReviewsEnabled()) {
     process.stderr.write(
-      "info: STAMP_PEER_REVIEWS_ENABLED is not set; subscribe is a no-op\n",
+      "note: STAMP_PEER_REVIEWS_ENABLED is not set; subscribe is a no-op\n",
     );
     process.stdout.write(notConfiguredResponse() + "\n");
     process.exit(0);

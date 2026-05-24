@@ -22,7 +22,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import {
-  mkdirSync,
   mkdtempSync,
   rmSync,
   writeFileSync,

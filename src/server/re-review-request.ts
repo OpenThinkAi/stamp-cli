@@ -76,7 +76,7 @@ async function main(): Promise<void> {
 
   if (!resolvePeerReviewsEnabled()) {
     process.stderr.write(
-      "info: STAMP_PEER_REVIEWS_ENABLED is not set; re-review-request is a no-op\n",
+      "note: STAMP_PEER_REVIEWS_ENABLED is not set; re-review-request is a no-op\n",
     );
     process.stdout.write(notConfiguredResponse() + "\n");
     process.exit(0);
@@ -103,15 +103,24 @@ async function main(): Promise<void> {
     const raw = await readStdin();
     const payload = parsePayload(raw);
 
+    // Security: bind the payload fingerprint to the SSH-authenticated caller.
+    if (payload.requester_fp !== caller.fingerprint) {
+      fail(
+        `requester_fp in payload (${payload.requester_fp}) does not match ` +
+          `the SSH-authenticated caller's fingerprint (${caller.fingerprint})`,
+        4,
+      );
+    }
+
     const patch = findPatch(db, payload.patch_id);
     if (!patch) {
-      fail(`404: patch ${payload.patch_id} not found`, 4);
+      fail(`patch ${payload.patch_id} not found`, 4);
     }
 
     // Only the original author may request a re-review.
     if (payload.requester_fp !== patch.requested_by_fp) {
       fail(
-        `403: requester_fp ${payload.requester_fp} is not the original author ` +
+        `requester_fp ${payload.requester_fp} is not the original author ` +
           `(requested_by_fp=${patch.requested_by_fp}) — re-review request refused`,
         5,
       );
