@@ -84,6 +84,26 @@ export function userKeysDir(): string {
   return join(homedir(), ".stamp", "keys");
 }
 
+/** Root of the user's stamp home directory (`~/.stamp`). */
+export function userStampDir(): string {
+  return join(homedir(), ".stamp");
+}
+
+/** Path to `~/.stamp/peer-watch.md` (operator triage rules). */
+export function peerWatchPath(): string {
+  return join(homedir(), ".stamp", "peer-watch.md");
+}
+
+/** Path to `~/.stamp/peer-watch.log` (triage triplet log). */
+export function peerWatchLogPath(): string {
+  return join(homedir(), ".stamp", "peer-watch.log");
+}
+
+/** Directory containing named peer-review prompt files (`~/.stamp/personal/peers/`). */
+export function peersDir(): string {
+  return join(homedir(), ".stamp", "personal", "peers");
+}
+
 /**
  * Per-user stamp-server config. Holds {host, port, user, repo_root_prefix}
  * so commands like `stamp provision` can reach the operator's stamp server

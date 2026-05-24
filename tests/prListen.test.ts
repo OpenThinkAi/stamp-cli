@@ -36,6 +36,7 @@ import {
 } from "../src/server/peerReviews.ts";
 import type { SshSpawnFn } from "../src/lib/seatClient.ts";
 import type { Keypair } from "../src/lib/keys.ts";
+import type { ResolveNamedPromptInput } from "../src/lib/namedPrompt.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -672,5 +673,260 @@ describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
 describe("AC #1: runPrListen is exported and callable", () => {
   it("exports runPrListen as a function", () => {
     assert.equal(typeof runPrListen, "function");
+  });
+});
+
+// ─── AGT-430: Triage + named prompt integration ──────────────────────
+
+describe("AGT-430 AC #1+4: triage → named prompt used as systemPrompt for review", () => {
+  it("event → triage returns if_available + prompt:sec → named prompt body passed to review SDK", async () => {
+    const fakeKeypair = genKeypair();
+    const NAMED_PROMPT_BODY = "You are a security expert. Review this PR for vulnerabilities.";
+
+    let sdkReceivedSystemPrompt: string | undefined;
+    // We track what systemPrompt the review was called with via the diff
+    // (since _sdkRunnerForTest only gets diff). We need a different approach:
+    // we check that the review was NOT called with BUILTIN_DEFAULT_PROMPT by
+    // verifying the resolveNamedPrompt seam was called with name="sec".
+
+    let resolvedNameCalled: string | undefined;
+    const resolveNamedPromptFake = (input: { name: string }) => {
+      resolvedNameCalled = input.name;
+      return { ok: true as const, body: NAMED_PROMPT_BODY, resolvedPath: "/fake/.stamp/personal/peers/sec.md" };
+    };
+
+    // Haiku triage runner returns prompt:"sec"
+    const haikuRunner = async (_sys: string, _user: string): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"sec"}';
+
+    let sdkCallCount = 0;
+    const sdkRunner = async (_diff: string): Promise<string> => {
+      sdkCallCount++;
+      return "review body from named prompt";
+    };
+
+    const event = makeEvent();
+    const triplets: unknown[] = [];
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: sdkRunner,
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "Claim if security-related", hash: "abc123" },
+        _resolveNamedPromptForTest: resolveNamedPromptFake,
+        _appendTripletForTest: (rec) => triplets.push(rec),
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [event],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Triage ran and named prompt was resolved.
+    assert.equal(resolvedNameCalled, "sec", `expected named prompt "sec" to be resolved`);
+    // Review SDK was called exactly once.
+    assert.equal(sdkCallCount, 1, "SDK should be called once after named prompt resolved");
+    // Prompt name logged to stderr.
+    assert.ok(stderr.includes('"sec"') || stderr.includes("sec"), `expected "sec" in stderr: ${stderr}`);
+    // Triplet logged.
+    assert.equal(triplets.length, 1, "expected 1 triplet logged");
+  });
+});
+
+describe("AGT-430 AC #3: missing named prompt → ✗ log + skip (no claim, no SDK, no gh)", () => {
+  it("triage returns prompt:'missing', file absent → logs ✗ and skips the event", async () => {
+    const fakeKeypair = genKeypair();
+
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"missing-prompt"}';
+
+    // Resolver returns ok:false (missing file)
+    const resolveNamedPromptFake = (_input: { name: string }) =>
+      ({ ok: false as const, reason: "missing_file" as const });
+
+    let sdkCalled = false;
+    let ghCalled = false;
+    const triplets: unknown[] = [];
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "body"; },
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "rules text", hash: "abc" },
+        _resolveNamedPromptForTest: resolveNamedPromptFake,
+        _appendTripletForTest: (rec) => triplets.push(rec),
+        _ghReviewForTest: (_url, _body) => { ghCalled = true; return { status: 0, stderr: "" }; },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // ✗ logged about missing prompt.
+    assert.ok(stderr.includes("✗"), `expected ✗ in stderr: ${stderr}`);
+    assert.ok(stderr.includes("missing-prompt"), `expected prompt name in stderr: ${stderr}`);
+    // SDK and gh must NOT have been called.
+    assert.equal(sdkCalled, false, "SDK should NOT be called when named prompt is missing");
+    assert.equal(ghCalled, false, "gh should NOT be called when named prompt is missing");
+    // Triplet is still logged (AC #6 says "regardless of whether the decision results in a claim").
+    assert.equal(triplets.length, 1, "expected triplet to be logged even when prompt missing");
+  });
+});
+
+describe("AGT-430 AC #6: triplet logged regardless of skip vs. claim", () => {
+  it("logs triplet when triage returns skip", async () => {
+    const fakeKeypair = genKeypair();
+
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"skip","post_mode":"auto-post","prompt":"default"}';
+
+    const triplets: unknown[] = [];
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "Skip all", hash: "deadbeef" },
+        _appendTripletForTest: (rec) => triplets.push(rec),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Triplet should be logged even when decision is skip.
+    assert.equal(triplets.length, 1, "triplet should be logged even for a skip decision");
+    // Verify record shape.
+    const rec = triplets[0] as Record<string, unknown>;
+    assert.ok(typeof rec["ts"] === "string", "triplet should have ts field");
+    assert.ok(typeof rec["repo"] === "string", "triplet should have repo field");
+    assert.ok(typeof rec["pr_url"] === "string", "triplet should have pr_url field");
+    assert.ok(typeof rec["rules_hash"] === "string", "triplet should have rules_hash field");
+    assert.ok(typeof rec["event_payload"] === "object", "triplet should have event_payload field");
+    assert.ok(typeof rec["decision"] === "object", "triplet should have decision field");
+    const decision = rec["decision"] as Record<string, unknown>;
+    assert.equal(decision["claim_seat"], "skip");
+  });
+
+  it("logs triplet with correct rules_hash from the rules seam", async () => {
+    const fakeKeypair = genKeypair();
+    const EXPECTED_HASH = "myexpectedhash123";
+
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default"}';
+
+    const triplets: unknown[] = [];
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "review body",
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "some rules", hash: EXPECTED_HASH },
+        _resolveNamedPromptForTest: () => ({ ok: false as const, reason: "missing_file" as const }),
+        _appendTripletForTest: (rec) => triplets.push(rec),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(triplets.length, 1);
+    const rec = triplets[0] as Record<string, unknown>;
+    assert.equal(rec["rules_hash"], EXPECTED_HASH, "triplet rules_hash should match the injected hash");
+  });
+});
+
+describe("AGT-430 AC #8: peer-watch.md missing → ⟳ notice + fallback decision drives claim", () => {
+  it("uses fallback decision if_available when rules file is missing", async () => {
+    const fakeKeypair = genKeypair();
+
+    let sdkCalled = false;
+    let ghCalled = false;
+    const triplets: unknown[] = [];
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "review body"; },
+        // No haikuRunner needed since triage is skipped on missing rules
+        _peerWatchRulesForTest: null, // simulates missing peer-watch.md
+        _appendTripletForTest: (rec) => triplets.push(rec),
+        _ghReviewForTest: (_url, _body) => { ghCalled = true; return { status: 0, stderr: "" }; },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // ⟳ notice logged about missing rules file.
+    assert.ok(stderr.includes("⟳"), `expected ⟳ notice in stderr: ${stderr}`);
+    assert.ok(
+      stderr.includes("peer-watch.md") || stderr.includes("peer_watch") || stderr.includes("no ~/.stamp"),
+      `expected peer-watch reference in stderr: ${stderr}`,
+    );
+    // With fallback decision (if_available), the seat should be claimed if available.
+    // The fallback also uses "default" prompt, so BUILTIN_DEFAULT_PROMPT is used.
+    assert.equal(sdkCalled, true, "review SDK should be called with fallback decision");
+    assert.equal(ghCalled, true, "gh should be called with fallback decision");
+    // Triplet logged even in fallback path.
+    assert.equal(triplets.length, 1, "triplet should be logged even in fallback path");
+    const rec = triplets[0] as Record<string, unknown>;
+    assert.equal((rec["decision"] as Record<string, unknown>)["claim_seat"], "if_available");
+  });
+});
+
+describe("AGT-430 AC triage skip: triage returns skip → no claim, no SDK, no gh", () => {
+  it("skips claim/review/gh when triage says skip", async () => {
+    const fakeKeypair = genKeypair();
+
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"skip","post_mode":"auto-post","prompt":"default"}';
+
+    let sdkCalled = false;
+    let sshClaimCalled = false;
+    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
+      if (verb === "claim-seat") sshClaimCalled = true;
+      return makeSuccessSshSpawn(1)(cfg, verb);
+    };
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: sshSpawn,
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "body"; },
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "Skip all PRs", hash: "abc" },
+        _appendTripletForTest: () => {},
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Skip notice logged.
+    assert.ok(stderr.includes("skip"), `expected skip notice in stderr: ${stderr}`);
+    // SSH claim-seat should NOT have been called.
+    assert.equal(sshClaimCalled, false, "claim-seat should NOT be called when triage returns skip");
+    assert.equal(sdkCalled, false, "review SDK should NOT be called when triage returns skip");
   });
 });

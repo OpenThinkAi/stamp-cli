@@ -51,6 +51,7 @@ import { runAttest } from "./commands/attest.js";
 import { runMerge } from "./commands/merge.js";
 import { runPrOpen } from "./commands/prOpen.js";
 import { runPrListen } from "./commands/prListen.js";
+import { runPeerTest } from "./commands/peerTest.js";
 import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
@@ -858,6 +859,37 @@ Prerequisites:
       process.exit(2);
     }
     await runPrListen({ orgs, server: opts.server });
+  });
+
+const peer = program
+  .command("peer")
+  .description(
+    "Operator tools for the peer-agentic review system — triage, prompt management, and dry-runs.",
+  );
+
+peer
+  .command("test")
+  .description(
+    "dry-run the triage call against a saved event fixture and print the TriageDecision to stdout",
+  )
+  .requiredOption(
+    "--event <path>",
+    "path to a saved pr-opened event JSON fixture",
+  )
+  .addHelpText(
+    "after",
+    `
+Loads ~/.stamp/peer-watch.md and the given event JSON fixture, makes the Haiku
+triage call, and pretty-prints the resulting TriageDecision to stdout.
+
+Exit codes:
+  0   — success; TriageDecision JSON on stdout
+  1   — peer-watch.md missing or event fixture unreadable/invalid
+  3   — Haiku call or schema validation failed
+`,
+  )
+  .action(async (opts: { event: string }) => {
+    await runPeerTest({ eventPath: opts.event });
   });
 
 program

@@ -1,5 +1,5 @@
 /**
- * `stamp pr listen --org <org>...` — foreground peer-review listener (AGT-429).
+ * `stamp pr listen --org <org>...` — foreground peer-review listener (AGT-429/AGT-430).
  *
  * Subscribes the operator's fingerprint + org list against the in-process
  * listener registry (`registerListener` in peerReviews.ts) and enters an
@@ -8,13 +8,20 @@
  *   1. Waits for the next `pr-opened` event via a Promise resolved by the
  *      registered `onEvent` callback.
  *   2. Skips events where `requested_by_fp` matches the operator's own
- *      fingerprint (author-exclusion, AC #3).
- *   3. Claims a reviewer seat via `claim-seat` (seatClient.ts).
- *   4. Starts a 60-second heartbeat interval while the review runs.
- *   5. Runs the built-in peer review via `runBuiltinReview` (BUILTIN_DEFAULT_PROMPT).
- *   6. Posts the result via `gh pr review <pr_url> --comment -b "<body>"`.
- *   7. Releases the seat on `gh` failure; loops back to step 1.
- *   8. On SIGINT: emits "note: shutting down", releases any held seat, exits 0.
+ *      fingerprint (author-exclusion).
+ *   3. Runs the Haiku triage call against `~/.stamp/peer-watch.md` (AGT-430).
+ *      If `peer-watch.md` is missing, falls back to a default claim decision.
+ *      If triage returns `claim_seat: "skip"`, skips the event.
+ *   4. Resolves the named prompt from `~/.stamp/personal/peers/<name>.md`.
+ *      Missing prompt → logs `✗` and skips (AC #3).
+ *   5. Logs the triage triplet to `~/.stamp/peer-watch.log` (AC #6).
+ *   6. Claims a reviewer seat via `claim-seat` (seatClient.ts).
+ *   7. Starts a 60-second heartbeat interval while the review runs.
+ *   8. Runs the peer review via `runBuiltinReview` using the resolved named
+ *      prompt as the system prompt (AC #4).
+ *   9. Posts the result via `gh pr review <pr_url> --comment -b "<body>"`.
+ *  10. Releases the seat on `gh` failure; loops back to step 1.
+ *  11. On SIGINT: emits "note: shutting down", releases any held seat, exits 0.
  *
  * Exit codes:
  *   0   — clean shutdown (SIGINT / ctrl-C)
@@ -41,9 +48,22 @@ import {
 } from "../lib/seatClient.js";
 import {
   runBuiltinReview,
+  BUILTIN_DEFAULT_PROMPT,
   BUILTIN_PROMPT_NAME,
   type RunBuiltinReviewInput,
 } from "../lib/builtinReviewPrompt.js";
+import {
+  runTriage,
+  loadPeerWatchRules,
+  FALLBACK_DECISION,
+  type TriageDecision,
+  type TriageInput,
+} from "../lib/peerTriage.js";
+import {
+  resolveNamedPrompt,
+  type ResolveNamedPromptInput,
+} from "../lib/namedPrompt.js";
+import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -55,8 +75,10 @@ export interface PrListenOptions {
   _sshSpawnForTest?: SshSpawnFn;
   /** Test-only: inject a fake `gh pr review` spawn result. */
   _ghReviewForTest?: (prUrl: string, body: string) => { status: number; stderr: string };
-  /** Test-only: inject a fake SDK runner. */
+  /** Test-only: inject a fake SDK runner for the Sonnet review call. */
   _sdkRunnerForTest?: (diff: string) => Promise<string>;
+  /** Test-only: inject a fake Haiku runner for the triage call. */
+  _haikuRunnerForTest?: (system: string, user: string) => Promise<string>;
   /** Test-only: inject a keypair directly to skip reading from disk.
    *  Pass `null` to simulate the "no keypair" error path. */
   _keypairForTest?: Keypair | null;
@@ -72,6 +94,13 @@ export interface PrListenOptions {
    * loop in-process with no timers or background goroutines.
    */
   _eventQueueForTest?: PeerReviewEvent[];
+  /** Test-only: inject a fake peer-watch.md read result. `null` → file missing. */
+  _peerWatchRulesForTest?: { rules: string; hash: string } | null;
+  /** Test-only: inject a fake named-prompt resolver. */
+  _resolveNamedPromptForTest?: (input: ResolveNamedPromptInput) => ReturnType<typeof resolveNamedPrompt>;
+  /** Test-only: inject a fake triplet-append function.
+   *  Called with the full triplet record instead of writing to disk. */
+  _appendTripletForTest?: (record: TripletRecord) => void;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -304,7 +333,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     process.stderr.write(`⟳ triaging event for PR #${prNumber}\n`);
 
-    // ─── AC #3: author-exclusion ─────────────────────────────────
+    // ─── Author-exclusion ────────────────────────────────────────
     if (requestedByFp === keypair.fingerprint) {
       process.stderr.write(
         `note: skipping event for PR #${prNumber} — author matches own fingerprint\n`,
@@ -312,7 +341,107 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       continue;
     }
 
-    // ─── AC #4: claim seat ───────────────────────────────────────
+    // ─── AGT-430: Haiku triage call ──────────────────────────────
+    // Load operator rules from ~/.stamp/peer-watch.md.
+    // If missing, fall back to the default decision (AC #8).
+    const prTitle =
+      typeof payload["title"] === "string" ? payload["title"] : "";
+    const prBody =
+      typeof payload["body"] === "string"
+        ? payload["body"]
+        : typeof payload["diff"] === "string"
+          ? payload["diff"]
+          : "";
+    const prPaths: string[] =
+      Array.isArray(payload["paths_changed"])
+        ? (payload["paths_changed"] as unknown[]).filter((p): p is string => typeof p === "string")
+        : [];
+
+    let rulesResult: { rules: string; hash: string } | null;
+    if (opts._peerWatchRulesForTest !== undefined) {
+      rulesResult = opts._peerWatchRulesForTest;
+    } else {
+      rulesResult = loadPeerWatchRules();
+    }
+
+    let triageDecision: TriageDecision;
+    let rulesHash: string;
+
+    if (rulesResult === null) {
+      // AC #8: peer-watch.md missing → log ⟳ notice + use fallback decision.
+      process.stderr.write(
+        `⟳ no ~/.stamp/peer-watch.md found; using default claim policy (if_available)\n`,
+      );
+      triageDecision = { ...FALLBACK_DECISION };
+      rulesHash = "";
+    } else {
+      rulesHash = rulesResult.hash;
+      const triageInput: TriageInput = {
+        rules: rulesResult.rules,
+        event: {
+          repo,
+          title: prTitle,
+          body: prBody,
+          paths: prPaths,
+        },
+        cwd: opts._cwdForTest ?? process.cwd(),
+        _haikuRunnerForTest: opts._haikuRunnerForTest,
+      };
+      triageDecision = await runTriage(triageInput);
+    }
+
+    // ─── Log triplet (AC #6) ─────────────────────────────────────
+    // Append regardless of whether we skip or claim.
+    {
+      const tripletRecord = {
+        ts: new Date().toISOString(),
+        repo,
+        pr_url: prUrl,
+        rules_hash: rulesHash,
+        event_payload: payload as Record<string, unknown>,
+        decision: triageDecision,
+      };
+      if (opts._appendTripletForTest) {
+        opts._appendTripletForTest(tripletRecord);
+      } else {
+        appendTriplet(tripletRecord);
+      }
+    }
+
+    // ─── Triage decision: skip? ──────────────────────────────────
+    if (triageDecision.claim_seat === "skip") {
+      process.stderr.write(
+        `note: triage decision is skip for PR #${prNumber}; not claiming seat\n`,
+      );
+      continue;
+    }
+
+    // ─── Resolve named prompt (AC #3) ────────────────────────────
+    let systemPrompt: string;
+    let promptName: string;
+    const promptNameRaw = triageDecision.prompt;
+
+    if (promptNameRaw === "default") {
+      // Use built-in default prompt.
+      systemPrompt = BUILTIN_DEFAULT_PROMPT;
+      promptName = BUILTIN_PROMPT_NAME;
+    } else {
+      const resolveInput: ResolveNamedPromptInput = { name: promptNameRaw };
+      const resolveFn = opts._resolveNamedPromptForTest ?? resolveNamedPrompt;
+      const resolved = resolveFn(resolveInput);
+
+      if (!resolved.ok) {
+        const reason = resolved.reason;
+        process.stderr.write(
+          `✗ named prompt "${promptNameRaw}" not found or invalid (${reason}) for PR #${prNumber}; skipping\n`,
+        );
+        continue;
+      }
+      systemPrompt = resolved.body;
+      promptName = promptNameRaw;
+    }
+
+    // ─── Claim seat ──────────────────────────────────────────────
     const claimResult = await callClaimSeat({
       patch_id: patchId,
       claimant_fp: keypair.fingerprint,
@@ -368,20 +497,22 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       });
     }, 60_000);
 
-    // ─── AC #6: run review ───────────────────────────────────────
+    // ─── Run review with named prompt (AC #4) ───────────────────
     const reviewInput: RunBuiltinReviewInput = {
       diff,
       cwd: opts._cwdForTest ?? process.cwd(),
+      systemPrompt,
+      promptName,
       _sdkRunnerForTest: opts._sdkRunnerForTest,
     };
 
     let reviewBody: string;
     try {
-      process.stderr.write(`⟳ running review with prompt "${BUILTIN_PROMPT_NAME}"\n`);
+      process.stderr.write(`⟳ running review with prompt "${promptName}"\n`);
       const reviewResult = await runBuiltinReview(reviewInput);
       if (!reviewResult.ok) {
         process.stderr.write(
-          `✗ builtin-default review failed: ${reviewResult.message}; releasing seat\n`,
+          `✗ review failed (prompt: ${promptName}): ${reviewResult.message}; releasing seat\n`,
         );
         // clearHeartbeat() is called in finally — no explicit call needed here.
         currentSeatPatchId = null;
