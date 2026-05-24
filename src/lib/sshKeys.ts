@@ -102,6 +102,30 @@ export function sshFingerprintFromBlob(keyBlob: Buffer): string {
 }
 
 /**
+ * The comment-stripped wire form: `<algorithm> <base64(keyBlob)>` (AGT-422).
+ * An OpenSSH pubkey line's trailing comment is decorative — conventionally
+ * `firstname.lastname@laptop`, i.e. PII — and is NOT used by sshd for key
+ * matching (sshd decodes and compares the blob). Persisting this form drops
+ * the PII without affecting auth or the fingerprint. The re-encoded base64
+ * is canonical (parseSshPubkey already round-trip-validates it), so the
+ * decoded blob — and thus the sshd match — is byte-identical.
+ */
+export function sshPubkeyBody(pk: SshPubkey): string {
+  return `${pk.algorithm} ${pk.keyBlob.toString("base64")}`;
+}
+
+/**
+ * Content-addressed, PII-free default short_name: `user-<8 hex of the
+ * keyBlob's sha256>` (AGT-422). Deterministic + collision-resistant;
+ * replaces the comment-slug default so real names / hostnames don't land in
+ * a table every enrolled user can read via `stamp users list`. A human name
+ * is set only when an operator explicitly runs `stamp users set-name`.
+ */
+export function contentAddressedShortName(pk: SshPubkey): string {
+  return `user-${createHash("sha256").update(pk.keyBlob).digest("hex").slice(0, 8)}`;
+}
+
+/**
  * Split a multi-line authorized_keys-style blob into individual valid pubkey
  * lines, dropping blanks and `#` comments. Returns parsed pubkeys and any
  * parse failures alongside their source line numbers — callers decide

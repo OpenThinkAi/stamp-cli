@@ -62,6 +62,7 @@ import {
   findUserBySshFingerprint,
   openServerDb,
   resolveReviewRateCap,
+  touchLastSeen,
   type Role,
   type UserRow,
 } from "../lib/serverDb.js";
@@ -285,6 +286,8 @@ function resolveAuth(): AuthContext {
     );
   }
 
+  // AGT-422: record activity on every authenticated verb invocation.
+  touchLastSeen(db, callerRow.id);
   return { caller: callerRow, db };
 }
 

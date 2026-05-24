@@ -44,6 +44,7 @@ import {
   findUserBySshFingerprint,
   openServerDb,
   resolveInviteRateCap,
+  touchLastSeen,
   type InviteRole,
 } from "../lib/serverDb.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
@@ -171,6 +172,9 @@ function main(): void {
         3,
       );
     }
+
+    // AGT-422: record activity on this authenticated verb invocation.
+    touchLastSeen(db, callerRow.id);
 
     const existing = findUserByShortName(db, args.short_name);
     if (existing) {

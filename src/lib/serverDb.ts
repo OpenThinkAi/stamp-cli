@@ -430,6 +430,25 @@ export function countByRole(db: DatabaseSync, role: Role): number {
 }
 
 /**
+ * Stamp `users.last_seen_at` (unix seconds) for a user on every
+ * authenticated invocation (AGT-422). The column already existed in the
+ * schema but was never written; this is the writer. `now` is injectable for
+ * tests. Call from the writable verb paths (stamp-review / mint-invite /
+ * users-cli) — NOT the read-only per-handshake AuthorizedKeysCommand
+ * resolver, which fires far more often and opens the DB read-only.
+ */
+export function touchLastSeen(
+  db: DatabaseSync,
+  userId: number,
+  now: number = Date.now(),
+): void {
+  db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`).run(
+    Math.floor(now / 1000),
+    userId,
+  );
+}
+
+/**
  * Generate a short_name that doesn't collide with any existing row. If
  * `desired` is free, returns it; otherwise appends `-2`, `-3`, ... until
  * a free slot is found. Used by the env-sync path where the proposed

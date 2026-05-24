@@ -21,6 +21,7 @@
  *   4 — target not found
  *   5 — last-owner-would-be-lost guard
  *   6 — cannot remove self
+ *   7 — set-name: requested name already taken (AGT-422)
  *
  * stdout = machine-readable payload (a JSON object for `list`, an empty
  * body for write operations). stderr = human-readable prose using the
@@ -30,16 +31,21 @@
 
 import {
   listUsersForCaller,
+  pruneIdleUsers,
   removeUser,
+  setUserName,
   setUserRole,
   type ListUsersDenial,
+  type PruneIdleDenial,
   type RemoveUserDenial,
+  type SetNameDenial,
   type SetRoleDenial,
 } from "../lib/userOps.js";
 import {
   findUserByShortName,
   findUserBySshFingerprint,
   openServerDb,
+  touchLastSeen,
   type Role,
   type UserRow,
 } from "../lib/serverDb.js";
@@ -53,6 +59,7 @@ const EXIT = {
   NOT_FOUND: 4,
   LAST_OWNER: 5,
   CANNOT_REMOVE_SELF: 6,
+  NAME_TAKEN: 7,
 } as const;
 
 function fail(message: string, code: number): never {
@@ -67,6 +74,8 @@ function usage(): never {
       "  stamp-users promote          <short_name> --to <admin|owner>\n" +
       "  stamp-users demote           <short_name> --to <admin|member>\n" +
       "  stamp-users remove           <short_name>\n" +
+      "  stamp-users set-name         <short_name> --to <new_name>\n" +
+      "  stamp-users prune            --idle-for <N>d\n" +
       "  stamp-users get-stamp-pubkey <short_name>\n",
   );
   process.exit(EXIT.USAGE);
@@ -92,11 +101,24 @@ interface ParsedGetStampPubkey {
   short_name: string;
 }
 
+interface ParsedSetName {
+  subcommand: "set-name";
+  short_name: string;
+  to: string;
+}
+
+interface ParsedPrune {
+  subcommand: "prune";
+  idleForSecs: number;
+}
+
 type Parsed =
   | ParsedSetRole
   | ParsedRemove
   | ParsedList
-  | ParsedGetStampPubkey;
+  | ParsedGetStampPubkey
+  | ParsedSetName
+  | ParsedPrune;
 
 const VALID_PROMOTE_TARGETS: ReadonlySet<Role> = new Set(["admin", "owner"]);
 const VALID_DEMOTE_TARGETS: ReadonlySet<Role> = new Set(["admin", "member"]);
@@ -149,6 +171,46 @@ function parseArgs(argv: string[]): Parsed {
     if (rest.length > 1) fail(`unexpected positional argument: ${rest[1]}`, EXIT.USAGE);
     return { subcommand: "get-stamp-pubkey", short_name: rest[0]! };
   }
+  if (sub === "set-name") {
+    let short_name = "";
+    let to = "";
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i]!;
+      if (arg === "--to") {
+        const next = rest[i + 1];
+        if (!next) fail(`'--to' requires a value`, EXIT.USAGE);
+        to = next;
+        i++;
+      } else if (arg.startsWith("--")) {
+        fail(`unknown flag: ${arg}`, EXIT.USAGE);
+      } else if (!short_name) {
+        short_name = arg;
+      } else {
+        fail(`unexpected positional argument: ${arg}`, EXIT.USAGE);
+      }
+    }
+    if (!short_name) fail(`missing <short_name>`, EXIT.USAGE);
+    if (!to) fail(`'set-name' requires --to <new_name>`, EXIT.USAGE);
+    return { subcommand: "set-name", short_name, to };
+  }
+  if (sub === "prune") {
+    let idle = "";
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i]!;
+      if (arg === "--idle-for") {
+        const next = rest[i + 1];
+        if (!next) fail(`'--idle-for' requires a value`, EXIT.USAGE);
+        idle = next;
+        i++;
+      } else {
+        fail(`unexpected argument: ${arg}`, EXIT.USAGE);
+      }
+    }
+    if (!idle) fail(`'prune' requires --idle-for <N>d`, EXIT.USAGE);
+    const m = /^(\d+)d$/.exec(idle);
+    if (!m) fail(`--idle-for must be '<N>d' (whole days, e.g. 30d) — got ${JSON.stringify(idle)}`, EXIT.USAGE);
+    return { subcommand: "prune", idleForSecs: Number(m[1]) * 86400 };
+  }
   fail(`unknown subcommand: ${sub}`, EXIT.USAGE);
 }
 
@@ -182,6 +244,23 @@ function exitFromListDenial(_reason: ListUsersDenial): number {
   return EXIT.AUTHORITY;
 }
 
+function exitFromSetNameDenial(reason: SetNameDenial): number {
+  switch (reason) {
+    case "target_not_found":
+      return EXIT.NOT_FOUND;
+    case "caller_lacks_authority":
+      return EXIT.AUTHORITY;
+    case "invalid_name":
+      return EXIT.USAGE;
+    case "name_taken":
+      return EXIT.NAME_TAKEN;
+  }
+}
+
+function exitFromPruneDenial(_reason: PruneIdleDenial): number {
+  return EXIT.AUTHORITY;
+}
+
 function resolveCaller(): UserRow {
   const pubkey = readAuthenticatedPubkey();
   if (!pubkey) {
@@ -203,6 +282,10 @@ function resolveCaller(): UserRow {
         EXIT.CONFIG,
       );
     }
+    // AGT-422: record activity on this authenticated verb invocation. Done
+    // here (the one writable handle every users-cli verb opens) so it fires
+    // for list/promote/demote/remove/set-name/prune alike.
+    touchLastSeen(db, caller.id);
     return caller;
   } finally {
     db.close();
@@ -281,6 +364,50 @@ function runRemove(parsed: ParsedRemove): void {
   }
 }
 
+function runSetName(parsed: ParsedSetName): void {
+  const caller = resolveCaller();
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const result = setUserName(db, caller, parsed.short_name, parsed.to);
+    if (!result.ok) {
+      fail(
+        `set-name ${parsed.short_name} --to ${parsed.to}: ${result.reason}`,
+        exitFromSetNameDenial(result.reason),
+      );
+    }
+    if (result.no_change) {
+      process.stderr.write(`note: ${parsed.short_name} is already named ${result.new_name} (no change)\n`);
+    } else {
+      process.stderr.write(`note: ${result.old_name} → ${result.new_name}\n`);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+function runPrune(parsed: ParsedPrune): void {
+  const caller = resolveCaller();
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const result = pruneIdleUsers(db, caller, parsed.idleForSecs);
+    if (!result.ok) {
+      fail(`prune: ${result.reason}`, exitFromPruneDenial(result.reason));
+    }
+    const days = Math.round(parsed.idleForSecs / 86400);
+    if (result.removed.length === 0) {
+      process.stderr.write(`note: no users idle for ≥ ${days}d; nothing pruned\n`);
+    } else {
+      process.stderr.write(
+        `note: pruned ${result.removed.length} idle user${result.removed.length === 1 ? "" : "s"} (≥ ${days}d): ${result.removed.map((u) => u.short_name).join(", ")}\n`,
+      );
+    }
+    // stdout: machine-readable list of removed short_names.
+    process.stdout.write(JSON.stringify({ removed: result.removed.map((u) => u.short_name) }) + "\n");
+  } finally {
+    db.close();
+  }
+}
+
 function runGetStampPubkey(parsed: ParsedGetStampPubkey): void {
   // Identity binding still required (so this surface stays consistent
   // with the rest of stamp-users — only authenticated users can read
@@ -326,6 +453,12 @@ function main(): void {
       break;
     case "remove":
       runRemove(parsed);
+      break;
+    case "set-name":
+      runSetName(parsed);
+      break;
+    case "prune":
+      runPrune(parsed);
       break;
     case "get-stamp-pubkey":
       runGetStampPubkey(parsed);
