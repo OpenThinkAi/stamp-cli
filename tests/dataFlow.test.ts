@@ -198,9 +198,11 @@ describe("disclosure echo (AC #2)", () => {
     assert.equal(formatDataFlowDisclosure({ disclosure: "  " }), null);
   });
 
-  it("renders the committed disclosure text", () => {
+  it("renders the committed disclosure text with the note: prefix", () => {
     const block = formatDataFlowDisclosure({ disclosure: "PHI under review." });
     assert.ok(block);
+    // Leads with `note:` like every other stderr advisory (agent parsability).
+    assert.match(block!, /^note: /);
     assert.match(block!, /PHI under review\./);
   });
 

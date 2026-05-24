@@ -61,7 +61,10 @@ export function formatDataFlowDisclosure(
 ): string | null {
   const text = dataFlow?.disclosure?.trim();
   if (!text) return null;
-  return `data-flow disclosure (from .stamp/config.yml):\n${text}`;
+  // Lead with the `note:` prefix like every other stderr advisory in
+  // stamp-cli (marker, warnings, errors) so an agent scanning stderr by
+  // prefix can classify the line. AGT-415 product review.
+  return `note: data-flow disclosure (from .stamp/config.yml):\n${text}`;
 }
 
 /** Echo the committed disclosure block to stderr unless notices are suppressed. */
