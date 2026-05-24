@@ -189,7 +189,10 @@ describe("runHeadlessReview — API failure path", () => {
     const client = rejectingClient(new Error("rate_limit_error: 429"));
     const r = await runHeadlessReview(baseOpts(client));
     assert.equal(r.verdict, null);
-    assert.match(r.error ?? "", /Anthropic API call failed/);
+    // Backend-neutral wording: the error is generated in the shared
+    // one-shot core (oneShotReview.ts), which serves local backends too,
+    // so it says "model call failed" rather than naming Anthropic.
+    assert.match(r.error ?? "", /model call failed/);
     assert.match(r.error ?? "", /rate_limit_error/);
     assert.equal(r.prose, "");
   });
