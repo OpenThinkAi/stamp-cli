@@ -367,10 +367,15 @@ new `required_checks.run` string. Conservative guidance:
    entries like `[linear.app]` permit any path on the host. To pin the
    URL path too, set `path_prefix:` on the entry (e.g. `path_prefix:
    /repos/` on `api.github.com`) — the hook then denies any URL whose
-   `URL.pathname` does not begin with that prefix. Query strings are
-   intentionally not inspected (legitimate API parameters use them).
-   Consider an MCP server with narrowly scoped tools as an alternative
-   when a single host serves multiple unrelated surfaces.
+   `URL.pathname` does not begin with that prefix. The query string is
+   not inspected by default (legitimate API parameters use it), which
+   makes an allowlisted host a diff-exfil channel under prompt injection
+   — its request log captures attacker-encoded query values regardless
+   of whether the request succeeds. Constrain it with
+   `query_param_allowlist` (permitted param names) and/or
+   `query_param_max_length` (cap on total query-value length) on the
+   entry. Consider an MCP server with narrowly scoped tools as an
+   alternative when a single host serves multiple unrelated surfaces.
 3. Do not share MCP API keys across reviewers if a single-reviewer
    compromise shouldn't imply access to everything.
 

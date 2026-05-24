@@ -209,12 +209,22 @@ function denyIfReviewerInternal(
  * `checkReviewerTool` on every WebFetch invocation.
  *
  * `path_prefix`, when set, pins the URL shape past the hostname: only
- * URLs whose `URL.pathname` starts with that prefix are allowed. Query
- * strings are intentionally NOT inspected — GitHub/Linear/Notion APIs
- * use them legitimately. AGT-036 / audit M4.
+ * URLs whose `URL.pathname` starts with that prefix are allowed. AGT-036 /
+ * audit M4.
+ *
+ * `query_param_allowlist` / `query_param_max_length` (AGT-419) constrain
+ * the query string, which is otherwise uninspected and so an exfil channel
+ * under prompt injection: an allowlisted host's request log captures
+ * attacker-encoded query values regardless of whether the request
+ * succeeds. When `query_param_allowlist` is set, any query param outside it
+ * is rejected; when `query_param_max_length` is set, the sum of decoded
+ * query-value lengths must not exceed it. Absent fields = no query
+ * constraint (back-compat).
  */
 export interface WebFetchHostPolicy {
   path_prefix?: string;
+  query_param_allowlist?: string[];
+  query_param_max_length?: number;
 }
 
 /**
@@ -276,11 +286,9 @@ export function checkReviewerTool(args: {
           `in .stamp/config.yml if intentional.`,
       };
     }
-    // Optional per-host URL-shape pin. Plain string-prefix on URL.pathname
-    // — query strings are excluded by URL parsing, so they never affect
-    // this check. Operators who want to constrain the path put a
-    // `path_prefix:` on the WebFetch entry; absence means host-only
-    // (today's behavior). AGT-036 / audit M4.
+    // Optional per-host URL-shape pin. Plain string-prefix on URL.pathname.
+    // Operators who want to constrain the path put a `path_prefix:` on the
+    // WebFetch entry; absence means host-only (today's behavior). AGT-036.
     if (policy.path_prefix && !parsed.pathname.startsWith(policy.path_prefix)) {
       return {
         allow: false,
@@ -290,6 +298,40 @@ export function checkReviewerTool(args: {
           `"${parsed.hostname}". Widen path_prefix in .stamp/config.yml ` +
           `or fetch a URL within the configured prefix.`,
       };
+    }
+    // AGT-419: constrain the query string — otherwise an allowlisted host
+    // is a diff-exfil channel (its request log captures attacker-encoded
+    // query values whether or not the request succeeds). Both controls are
+    // opt-in and independent; absence leaves query strings unconstrained.
+    if (policy.query_param_allowlist) {
+      const allow = new Set(policy.query_param_allowlist);
+      for (const key of parsed.searchParams.keys()) {
+        if (!allow.has(key)) {
+          return {
+            allow: false,
+            reason:
+              `WebFetch URL "${url}" carries query param "${key}" which is ` +
+              `not in query_param_allowlist [${policy.query_param_allowlist.join(", ")}] ` +
+              `for host "${parsed.hostname}". Query params are a diff-exfil ` +
+              `channel; add "${key}" to the allowlist in .stamp/config.yml if ` +
+              `legitimately needed.`,
+          };
+        }
+      }
+    }
+    if (policy.query_param_max_length !== undefined) {
+      let total = 0;
+      for (const value of parsed.searchParams.values()) total += value.length;
+      if (total > policy.query_param_max_length) {
+        return {
+          allow: false,
+          reason:
+            `WebFetch URL "${url}" query values total ${total} chars, exceeding ` +
+            `query_param_max_length ${policy.query_param_max_length} for host ` +
+            `"${parsed.hostname}". Query params are a diff-exfil channel; raise ` +
+            `the cap in .stamp/config.yml if a longer query is legitimately needed.`,
+        };
+      }
     }
     return { allow: true };
   }
@@ -650,6 +692,12 @@ export async function invokeReviewer(params: {
       for (const h of spec.allowed_hosts) {
         webFetchPolicy.set(h.toLowerCase(), {
           ...(spec.path_prefix ? { path_prefix: spec.path_prefix } : {}),
+          ...(spec.query_param_allowlist
+            ? { query_param_allowlist: spec.query_param_allowlist }
+            : {}),
+          ...(spec.query_param_max_length !== undefined
+            ? { query_param_max_length: spec.query_param_max_length }
+            : {}),
         });
       }
     }

@@ -1608,6 +1608,59 @@ reviewers:
       /must be a string/,
     );
   });
+
+  // AGT-419 query controls
+  it("accepts WebFetch with query_param_allowlist + query_param_max_length", () => {
+    const c = parseConfigFromYaml(
+      cfg([
+        {
+          name: "WebFetch",
+          allowed_hosts: ["api.linear.app"],
+          query_param_allowlist: ["id", "team"],
+          query_param_max_length: 64,
+        },
+      ]),
+    );
+    const t = c.reviewers.r!.tools![0]! as {
+      query_param_allowlist?: string[];
+      query_param_max_length?: number;
+    };
+    assert.deepEqual(t.query_param_allowlist, ["id", "team"]);
+    assert.equal(t.query_param_max_length, 64);
+  });
+
+  it("rejects query_param_allowlist / query_param_max_length on non-WebFetch tools", () => {
+    assert.throws(
+      () => parseConfigFromYaml(cfg([{ name: "Read", query_param_allowlist: ["id"] }])),
+      /only valid on WebFetch/,
+    );
+    assert.throws(
+      () => parseConfigFromYaml(cfg([{ name: "Grep", query_param_max_length: 10 }])),
+      /only valid on WebFetch/,
+    );
+  });
+
+  it("rejects a non-positive-integer query_param_max_length", () => {
+    for (const bad of [0, -5, 1.5]) {
+      assert.throws(
+        () =>
+          parseConfigFromYaml(
+            cfg([{ name: "WebFetch", allowed_hosts: ["x.com"], query_param_max_length: bad }]),
+          ),
+        /must be a positive integer/,
+      );
+    }
+  });
+
+  it("rejects non-string entries in query_param_allowlist", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          cfg([{ name: "WebFetch", allowed_hosts: ["x.com"], query_param_allowlist: [1, 2] }]),
+        ),
+      /must be non-empty strings/,
+    );
+  });
 });
 
 describe("checkMcpCommand (MCP launcher allowlist)", () => {
@@ -1719,6 +1772,38 @@ describe("hashTools (backward-compat between string and object forms)", () => {
       },
     ]);
     assert.notEqual(before, withPrefix);
+  });
+
+  // AGT-419: adding the optional query_param_allowlist / query_param_max_length
+  // fields must NOT drift the hash of entries that don't use them — same
+  // invariant as path_prefix above, so existing v3/v4 attestations keep
+  // verifying.
+  it("adding query controls doesn't drift the hash of entries that don't use them", () => {
+    const before = hashTools([
+      { name: "WebFetch", allowed_hosts: ["api.github.com"] },
+    ]);
+    const same = hashTools([
+      { name: "WebFetch", allowed_hosts: ["api.github.com"] },
+    ]);
+    assert.equal(before, same);
+    // Each query control IS a security-meaningful config change → different hash.
+    const withAllowlist = hashTools([
+      {
+        name: "WebFetch",
+        allowed_hosts: ["api.github.com"],
+        query_param_allowlist: ["id"],
+      },
+    ]);
+    const withCap = hashTools([
+      {
+        name: "WebFetch",
+        allowed_hosts: ["api.github.com"],
+        query_param_max_length: 64,
+      },
+    ]);
+    assert.notEqual(before, withAllowlist);
+    assert.notEqual(before, withCap);
+    assert.notEqual(withAllowlist, withCap);
   });
 });
 

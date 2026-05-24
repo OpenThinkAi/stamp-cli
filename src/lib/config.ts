@@ -83,12 +83,37 @@ export interface BranchRule {
  *     too — e.g. only `/repos/` paths on `api.github.com` — set
  *     `path_prefix` on the same entry. When present, the runtime hook
  *     rejects any URL whose `URL.pathname` does not begin with that prefix.
- *     Query strings are never inspected (GitHub/Linear/Notion APIs use them
- *     legitimately). AGT-036 / audit M4.
+ *     AGT-036 / audit M4.
+ *
+ *     The query string is NOT inspected by default (GitHub/Linear/Notion
+ *     APIs use it legitimately), which makes an allowlisted host a
+ *     diff-exfil channel under prompt injection. Constrain it with
+ *     `query_param_allowlist` (permitted param names) and/or
+ *     `query_param_max_length` (cap on total query-value length). AGT-419.
  */
 export type ToolSpec =
   | string
-  | { name: string; allowed_hosts?: string[]; path_prefix?: string };
+  | {
+      name: string;
+      allowed_hosts?: string[];
+      path_prefix?: string;
+      /**
+       * WebFetch only (AGT-419). Per-host allowlist of permitted query
+       * parameter NAMES. When set, a URL carrying any query param outside
+       * this set is rejected — closing the exfil channel where a
+       * prompt-injected reviewer encodes context into query values on an
+       * otherwise-allowlisted host (whose request log captures the query
+       * regardless of whether the request succeeds).
+       */
+      query_param_allowlist?: string[];
+      /**
+       * WebFetch only (AGT-419). Cap on the total length (chars) summed
+       * across all decoded query *values*. Long enough for legitimate
+       * issue IDs, too short for meaningful exfil chunks. Independent of
+       * `query_param_allowlist`; either or both may be set.
+       */
+      query_param_max_length?: number;
+    };
 
 /**
  * Loose, policy-free ToolSpec parser used wherever the SAFE_TOOLS policy
@@ -113,6 +138,8 @@ export function parseToolsLoose(input: unknown[]): ToolSpec[] {
         name: string;
         allowed_hosts?: string[];
         path_prefix?: string;
+        query_param_allowlist?: string[];
+        query_param_max_length?: number;
       } = { name: e.name };
       if (Array.isArray(e.allowed_hosts)) {
         const hosts = e.allowed_hosts.filter(
@@ -130,6 +157,22 @@ export function parseToolsLoose(input: unknown[]): ToolSpec[] {
         e.path_prefix.startsWith("/")
       ) {
         spec.path_prefix = e.path_prefix;
+      }
+      // AGT-419: mirror the strict parser's canonical form for the query
+      // controls so loose- and strict-parsed specs hash identically.
+      // Drop-when-empty on the allowlist; only carry a positive-integer cap.
+      if (Array.isArray(e.query_param_allowlist)) {
+        const params = e.query_param_allowlist.filter(
+          (p): p is string => typeof p === "string" && p.length > 0,
+        );
+        if (params.length > 0) spec.query_param_allowlist = params;
+      }
+      if (
+        typeof e.query_param_max_length === "number" &&
+        Number.isInteger(e.query_param_max_length) &&
+        e.query_param_max_length > 0
+      ) {
+        spec.query_param_max_length = e.query_param_max_length;
       }
       out.push(spec);
     }
@@ -598,10 +641,24 @@ function parseTools(input: unknown, reviewerName: string): ToolSpec[] | undefine
             `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
         );
       }
+      if (e.query_param_allowlist !== undefined && e.name !== "WebFetch") {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}].query_param_allowlist is only valid on WebFetch ` +
+            `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
+        );
+      }
+      if (e.query_param_max_length !== undefined && e.name !== "WebFetch") {
+        throw new Error(
+          `config.reviewers.${reviewerName}.tools[${i}].query_param_max_length is only valid on WebFetch ` +
+            `(got name="${e.name}"). Remove the field or change the entry to use WebFetch.`,
+        );
+      }
       const spec: {
         name: string;
         allowed_hosts?: string[];
         path_prefix?: string;
+        query_param_allowlist?: string[];
+        query_param_max_length?: number;
       } = { name: e.name };
       if (e.allowed_hosts !== undefined) {
         if (!Array.isArray(e.allowed_hosts)) {
@@ -648,6 +705,35 @@ function parseTools(input: unknown, reviewerName: string): ToolSpec[] | undefine
         }
         spec.path_prefix = e.path_prefix;
       }
+      // query_param_allowlist (AGT-419): array of non-empty param-name
+      // strings. Drop-when-empty to match parseToolsLoose's canonical form
+      // (an empty allowlist would be indistinguishable from "no allowlist"
+      // and must hash the same).
+      if (e.query_param_allowlist !== undefined) {
+        if (!Array.isArray(e.query_param_allowlist)) {
+          throw new Error(
+            `config.reviewers.${reviewerName}.tools[${i}].query_param_allowlist must be an array of strings`,
+          );
+        }
+        const params: string[] = [];
+        for (const p of e.query_param_allowlist) {
+          if (typeof p !== "string" || !p) {
+            throw new Error(
+              `config.reviewers.${reviewerName}.tools[${i}].query_param_allowlist entries must be non-empty strings`,
+            );
+          }
+          params.push(p);
+        }
+        if (params.length > 0) spec.query_param_allowlist = params;
+      }
+      // query_param_max_length (AGT-419): positive integer cap on total
+      // decoded query-value length. parsePositiveInt throws on a non-
+      // positive-integer and returns undefined when absent.
+      const qpml = parsePositiveInt(
+        e.query_param_max_length,
+        `config.reviewers.${reviewerName}.tools[${i}].query_param_max_length`,
+      );
+      if (qpml !== undefined) spec.query_param_max_length = qpml;
       // WebFetch requires non-empty allowed_hosts (the bare-string and
       // empty-array paths both fail here). The runtime PreToolUse hook
       // assumes allowed_hosts is present and non-empty for any WebFetch
