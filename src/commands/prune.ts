@@ -1,7 +1,13 @@
 import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-import { openDb, peekPrunable, pruneReviews } from "../lib/db.js";
+import {
+  countProseToExpire,
+  expireProse,
+  openDb,
+  peekPrunable,
+  pruneReviews,
+} from "../lib/db.js";
 import { parseRetentionDuration } from "../lib/duration.js";
 import { findRepoRoot, gitCommonDir, stampStateDbPath } from "../lib/paths.js";
 
@@ -45,6 +51,12 @@ export function runPrune(opts: PruneOptions): void {
     opts.olderThan,
   );
 
+  // AGT-421: an independent, opt-in prose-retention pass driven by
+  // STAMP_REVIEW_PROSE_TTL_DAYS. When set, prune ALSO nulls reviewer prose
+  // on rows older than the TTL (keeping the row + verdict + hashes). This is
+  // orthogonal to --older-than's row delete; both run when both apply.
+  const proseTtl = parseProseTtlEnv();
+
   const repoRoot = findRepoRoot();
   const dbPath = stampStateDbPath(repoRoot);
 
@@ -79,6 +91,16 @@ export function runPrune(opts: PruneOptions): void {
           any = true;
         }
       }
+      if (db && proseTtl) {
+        const n = countProseToExpire(db, proseTtl.sqliteModifier);
+        if (n > 0) {
+          if (any) console.log("");
+          console.log(
+            `would null prose on ${n} review row${n === 1 ? "" : "s"} older than ${proseTtl.days}d (STAMP_REVIEW_PROSE_TTL_DAYS), keeping the verdict rows`,
+          );
+          any = true;
+        }
+      }
       for (const [label, dir] of [
         ["failed-parse", parsesDir],
         ["failed-run", runsDir],
@@ -105,17 +127,27 @@ export function runPrune(opts: PruneOptions): void {
     if (db) {
       const sizeBefore = statSync(dbPath).size;
       const result = pruneReviews(db, sqliteModifier);
-      if (result.total > 0) {
+      // AGT-421: prose-TTL pass on the surviving rows (runs after the
+      // row-delete so it only touches rows that weren't pruned outright).
+      const prosed = proseTtl ? expireProse(db, proseTtl.sqliteModifier) : 0;
+      if (result.total > 0 || prosed > 0) {
         // VACUUM rewrites the whole file; must run outside any
-        // transaction. Run it before reading the after-size so the
-        // on-disk size reflects the post-VACUUM state, not the pre-
-        // VACUUM (page-tombstoned) state.
+        // transaction. One VACUUM covers both the row-delete and the
+        // prose-nulling. Run it before reading the after-size so the
+        // on-disk size reflects the post-VACUUM state.
         db.exec("VACUUM");
         const sizeAfter = statSync(dbPath).size;
-        console.log(
-          `${result.total} review row${result.total === 1 ? "" : "s"} pruned (${result.perReviewer.length} reviewer${result.perReviewer.length === 1 ? "" : "s"} affected); db size ${sizeBefore} → ${sizeAfter} bytes`,
-        );
-        printPerReviewer(result.perReviewer);
+        if (result.total > 0) {
+          console.log(
+            `${result.total} review row${result.total === 1 ? "" : "s"} pruned (${result.perReviewer.length} reviewer${result.perReviewer.length === 1 ? "" : "s"} affected); db size ${sizeBefore} → ${sizeAfter} bytes`,
+          );
+          printPerReviewer(result.perReviewer);
+        }
+        if (prosed > 0) {
+          console.log(
+            `prose nulled on ${prosed} review row${prosed === 1 ? "" : "s"} older than ${proseTtl!.days}d (STAMP_REVIEW_PROSE_TTL_DAYS); verdict rows kept`,
+          );
+        }
         any = true;
       }
     }
@@ -189,6 +221,25 @@ function pruneSpools(spoolDir: string, cutoffMs: number): number {
  * this batch (clamped to 16 to match log.ts when names are short), so
  * mixed-width reviewer slugs line up.
  */
+/**
+ * Read STAMP_REVIEW_PROSE_TTL_DAYS (AGT-421). Returns the SQLite
+ * `datetime('now', ?)` modifier + the day count when set to a positive
+ * integer; null when unset/empty. Throws on a set-but-invalid value so an
+ * operator typo is visible (this is the client-side prune CLI — no
+ * boot-crash concern, unlike the server env caps).
+ */
+function parseProseTtlEnv(): { sqliteModifier: string; days: number } | null {
+  const raw = process.env["STAMP_REVIEW_PROSE_TTL_DAYS"];
+  if (raw === undefined || raw === "") return null;
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days <= 0) {
+    throw new Error(
+      `STAMP_REVIEW_PROSE_TTL_DAYS must be a positive integer number of days (got ${JSON.stringify(raw)})`,
+    );
+  }
+  return { sqliteModifier: `-${days} days`, days };
+}
+
 function printPerReviewer(rows: Array<{ reviewer: string; count: number }>): void {
   const maxNameLen = Math.max(16, ...rows.map((r) => r.reviewer.length));
   for (const row of rows) {

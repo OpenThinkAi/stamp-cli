@@ -79,6 +79,15 @@ export interface ReviewOptions {
    */
   noCache?: boolean;
   /**
+   * AGT-421: record only verdict + diff/prompt hashes, omitting reviewer
+   * prose from the `issues` column, for regulated repos that don't want
+   * quoted diff snippets persisted in `.git/stamp/state.db`. The verdict,
+   * gate, cache, and attestation are unaffected (prose is human-facing
+   * only). Note: a later normal `stamp review` on the same (diff, prompt,
+   * reviewer) tuple will cache-hit and replay empty prose unless --no-cache.
+   */
+  noProse?: boolean;
+  /**
    * Local-only mode (design.md "Local-only mode (Option E)"). When true,
    * emit a structured JSON plan on stdout instead of calling the LLM. The
    * parent agent (typically a Claude Code session) consumes the plan and
@@ -731,7 +740,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
           verdict: outcome.value.verdict,
-          issues: outcome.value.prose,
+          issues: opts.noProse ? null : outcome.value.prose,
           // For cache hits no fresh tool calls happened; persist null so the
           // row honestly reflects "this verdict was served from cache".
           tool_calls: cached
@@ -983,7 +992,7 @@ async function runServerAttestedReviews(input: {
           base_sha: resolved.base_sha,
           head_sha: resolved.head_sha,
           verdict: verdict.verdict,
-          issues: verdict.prose,
+          issues: opts.noProse ? null : verdict.prose,
           // The local LLM path's cache index uses (diff_hash, prompt_hash)
           // — server-attested rows still get the diff hash populated so
           // the cache index has a meaningful entry, even though trusted-

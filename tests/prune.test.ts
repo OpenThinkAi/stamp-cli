@@ -405,6 +405,59 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     }
   });
 
+  // ---- AGT-421: STAMP_REVIEW_PROSE_TTL_DAYS prose-retention pass ----
+
+  it("STAMP_REVIEW_PROSE_TTL_DAYS nulls old prose but keeps the rows + verdict", () => {
+    insertAt(dbPath, "security", "2024-01-01 00:00:00"); // old → prose nulled
+    const recent = new Date(Date.now() + 60_000)
+      .toISOString()
+      .replace("T", " ")
+      .slice(0, 19);
+    insertAt(dbPath, "security", recent); // recent → prose kept
+    process.chdir(repo);
+
+    const saved = process.env["STAMP_REVIEW_PROSE_TTL_DAYS"];
+    process.env["STAMP_REVIEW_PROSE_TTL_DAYS"] = "30";
+    try {
+      // Huge --older-than so the ROW-delete pass removes nothing; only the
+      // prose-TTL pass acts, isolating its behavior.
+      const stdout = captureStdout(() => runPrune({ olderThan: "9999d" }));
+      assert.match(stdout, /prose nulled on 1 review row older than 30d/);
+    } finally {
+      if (saved === undefined) delete process.env["STAMP_REVIEW_PROSE_TTL_DAYS"];
+      else process.env["STAMP_REVIEW_PROSE_TTL_DAYS"] = saved;
+    }
+
+    const db = openDb(dbPath);
+    try {
+      const rows = recentReviewsByReviewer(db, "security", 10);
+      // Both rows survive (TTL nulls prose, does NOT delete) and keep verdict.
+      assert.equal(rows.length, 2);
+      assert.ok(rows.every((r) => r.verdict === "approved"));
+      const nulled = rows.filter((r) => r.issues === null);
+      const kept = rows.filter((r) => r.issues === "sample prose");
+      assert.equal(nulled.length, 1, "old row's prose should be nulled");
+      assert.equal(kept.length, 1, "recent row's prose should be kept");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects a non-positive-integer STAMP_REVIEW_PROSE_TTL_DAYS", () => {
+    process.chdir(repo);
+    const saved = process.env["STAMP_REVIEW_PROSE_TTL_DAYS"];
+    process.env["STAMP_REVIEW_PROSE_TTL_DAYS"] = "garbage";
+    try {
+      assert.throws(
+        () => runPrune({ olderThan: "30d" }),
+        /STAMP_REVIEW_PROSE_TTL_DAYS must be a positive integer/,
+      );
+    } finally {
+      if (saved === undefined) delete process.env["STAMP_REVIEW_PROSE_TTL_DAYS"];
+      else process.env["STAMP_REVIEW_PROSE_TTL_DAYS"] = saved;
+    }
+  });
+
   // ---- v4 audit L-PR1: failed-parse spool auto-prune ----
 
   // Stage a spool file under .git/stamp/failed-parses/ with a controlled

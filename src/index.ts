@@ -615,6 +615,10 @@ program
     "--headless",
     "headless local-only mode (sibling to --plan, for cron / git hooks / scripts): stamp calls the Anthropic Messages API directly for each reviewer (one shot, no tool-use loop, no MCP) and emits a JSON plan on stdout with each reviewer's verdict + prose folded in. Requires ANTHROPIC_API_KEY (otherwise exits with usage error 2). Output JSON is a superset of --plan so downstream tooling doesn't branch. No attestation is produced; the stderr banner flags API-key metering separate from Claude Code subscription billing. Mutually exclusive with --plan. See docs/local-only-mode.md.",
   )
+  .option(
+    "--no-prose",
+    "record only the verdict + diff/prompt hashes, omitting reviewer prose from `.git/stamp/state.db` (for regulated repos that don't want quoted diff snippets persisted). The gate, cache, and attestation are unaffected. Note: a later cached hit on the same (diff, prompt, reviewer) replays empty prose unless --no-cache.",
+  )
   .action(
     async (opts: {
       diff: string;
@@ -624,17 +628,19 @@ program
       cache?: boolean;
       plan?: boolean;
       headless?: boolean;
+      prose?: boolean;
     }) => {
       try {
         // commander's --no-cache sets opts.cache = false; absent flag leaves
         // it undefined (default-on). Normalize to noCache: true on the
-        // runReview side.
+        // runReview side. --no-prose behaves the same way (opts.prose).
         await runReview({
           diff: opts.diff,
           only: opts.only,
           into: opts.into,
           allowLarge: opts.allowLarge,
           noCache: opts.cache === false,
+          noProse: opts.prose === false,
           plan: opts.plan === true,
           headless: opts.headless === true,
         });
