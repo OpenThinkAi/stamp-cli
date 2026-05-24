@@ -141,7 +141,23 @@ export interface InitOptions {
  * CLI is invasive, surprising for an agent-run `stamp init`, and has no
  * clean uninstall path. Platform-selected: launchd on macOS, cron elsewhere.
  */
+/** POSIX single-quote a string for safe interpolation into a shell command
+ *  (handles spaces / `;` / `$()` etc. in a path). AGT-421 security review. */
+function shSingleQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
 function printProseRetentionSnippet(repoRoot: string): void {
+  // This snippet is copy-pasted into a privileged crontab. A newline or
+  // control char in repoRoot (reachable via a crafted clone path) would
+  // split the pasted text into a SECOND cron entry — cron splits on
+  // newlines at the file level, which shell-quoting can't undo — so refuse
+  // to interpolate such a path and fall back to a placeholder. For safe
+  // paths, single-quote so shell metacharacters in the path can't be
+  // reinterpreted when cron runs `cd`. AGT-421 security review.
+  const hasControl = [...repoRoot].some((c) => c.charCodeAt(0) < 0x20);
+  const cdTarget = hasControl ? "<your repo path>" : shSingleQuote(repoRoot);
+
   console.log();
   console.log(
     "Retention: reviewer prose (quoted file:line diff snippets) persists in",
@@ -157,7 +173,7 @@ function printProseRetentionSnippet(repoRoot: string): void {
     );
     console.log("  # then `launchctl load` it. Key fields:");
     console.log(
-      `  #   ProgramArguments: [<abs stamp path>, prune, --older-than, 60d]  (cd ${repoRoot})`,
+      `  #   ProgramArguments: [<abs stamp path>, prune, --older-than, 60d]  (run in ${cdTarget})`,
     );
     console.log(
       "  #   StartCalendarInterval: { Weekday: 0, Hour: 3 }   # Sundays 03:00",
@@ -167,7 +183,7 @@ function printProseRetentionSnippet(repoRoot: string): void {
       "  # crontab -e  (cron has a bare PATH — use the absolute stamp path):",
     );
     console.log(
-      `  0 3 * * 0  cd ${repoRoot} && "$(command -v stamp)" prune --older-than 60d`,
+      `  0 3 * * 0  cd ${cdTarget} && "$(command -v stamp)" prune --older-than 60d`,
     );
   }
   console.log();
