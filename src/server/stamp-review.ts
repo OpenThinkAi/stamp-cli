@@ -51,13 +51,17 @@
  *   2 — usage error (missing/bad argv)
  *   3 — caller's role doesn't permit reviews (below member)
  *   4 — request validation failure (diff size cap, sha mismatch)
+ *   5 — rate limited: caller is over the per-hour review cap (AGT-420);
+ *       client should back off and retry later
  */
 
 import { createHash } from "node:crypto";
 
 import {
+  checkAndConsumeToken,
   findUserBySshFingerprint,
   openServerDb,
+  resolveReviewRateCap,
   type Role,
   type UserRow,
 } from "../lib/serverDb.js";
@@ -351,6 +355,18 @@ async function main(): Promise<void> {
   const params = parseRequest(process.argv.slice(2));
   const { caller, db } = resolveAuth();
 
+  // AGT-420: per-caller token-bucket rate limit. Checked BEFORE reading the
+  // (up to 5MB) diff stdin and BEFORE any Anthropic call, so a throttled
+  // caller can't amplify the operator's API spend. Exit 5 = back off.
+  if (!checkAndConsumeToken(db, caller.id, "review", resolveReviewRateCap(caller.role))) {
+    fail(
+      `rate limit exceeded: ${caller.short_name} (role=${caller.role}) is over the ` +
+        `per-hour review cap (${resolveReviewRateCap(caller.role)}/hour). Back off and retry later; ` +
+        `an operator can raise MAX_REVIEWS_PER_HOUR on the server if this is legitimate.`,
+      5,
+    );
+  }
+
   try {
     const diff = await readBoundedStdin(MAX_DIFF_BYTES);
 
@@ -377,6 +393,7 @@ async function main(): Promise<void> {
       diff,
       params,
       caller,
+      db, // AGT-420: enables the server-side verdict cache
     });
     process.stdout.write(JSON.stringify(result) + "\n");
   } finally {

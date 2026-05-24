@@ -442,3 +442,29 @@ describe("stamp-review — request validation", () => {
     }
   });
 });
+
+describe("stamp-review — rate limit (AGT-420)", () => {
+  it("rejects the over-cap call with exit 5 (back off)", () => {
+    // The token-bucket check runs after auth and BEFORE stdin/pipeline,
+    // and persists in the shared STAMP_SERVER_DB_PATH across the two
+    // subprocess calls. With MAX_REVIEWS_PER_HOUR=1 the first call
+    // consumes the only token (it then fails downstream on missing
+    // ANTHROPIC_API_KEY — irrelevant here), and the second is throttled.
+    const h = setup("member");
+    try {
+      const diff = Buffer.from("diff --git a/x b/x\n+y\n");
+      const argv = argvFor(diff);
+      const env = {
+        MAX_REVIEWS_PER_HOUR: "1",
+        ANTHROPIC_API_KEY: undefined,
+      };
+      runStampReview(h, argv, { stdin: diff, envOverrides: env }); // consumes the token
+      const second = runStampReview(h, argv, { stdin: diff, envOverrides: env });
+      assert.equal(second.status, 5, `stderr=${second.stderr}`);
+      assert.match(second.stderr, /rate limit exceeded/);
+      assert.match(second.stderr, /MAX_REVIEWS_PER_HOUR/);
+    } finally {
+      h.cleanup();
+    }
+  });
+});

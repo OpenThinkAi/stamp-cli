@@ -51,7 +51,11 @@ import {
   canonicalSerializeApproval,
 } from "../src/lib/attestationV4.ts";
 import { fingerprintFromPem } from "../src/lib/keys.ts";
-import type { UserRow } from "../src/lib/serverDb.ts";
+import {
+  openServerDb,
+  recordServerVerdict,
+  type UserRow,
+} from "../src/lib/serverDb.ts";
 import {
   PromptFetchFailedError,
   runReviewPipeline,
@@ -988,5 +992,118 @@ describe("runReviewPipeline — env-var caps", () => {
       delete process.env.STAMP_PROMPTS_REPO_URL;
       assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_DIR);
     });
+  });
+});
+
+describe("runReviewPipeline — server verdict cache (AGT-420)", () => {
+  it("serves an identical second request from cache without re-calling the LLM", async () => {
+    const fx = makeFixtureCache();
+    const dbDir = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-cache-"));
+    const db = openServerDb({ path: path.join(dbDir, "users.db"), skipChmod: true });
+    try {
+      const diff = Buffer.from("diff --git a/foo b/foo\n+hello\n");
+      let calls = 0;
+      const client: AnthropicClientShape = {
+        messages: {
+          create: async () => {
+            calls++;
+            return {
+              content: [
+                {
+                  type: "tool_use",
+                  name: "submit_verdict",
+                  input: { verdict: "approved", prose: "cached me" },
+                },
+              ],
+            };
+          },
+        },
+      };
+      const input = { ...fixtureInput(fx, diff, { anthropic: client }), db };
+
+      const first = await runReviewPipeline(input);
+      const second = await runReviewPipeline(input);
+
+      assert.equal(calls, 1, "LLM must be called once; the second run is a cache hit");
+      assert.equal(first.verdict, "approved");
+      assert.equal(second.verdict, "approved");
+      assert.equal(second.prose, "cached me");
+      // Re-signed fresh: same verdict + hashes, independently valid signature.
+      assert.equal(first.approval.diff_sha256, second.approval.diff_sha256);
+      assert.equal(first.approval.prompt_sha256, second.approval.prompt_sha256);
+      assert.match(second.signature, /^[A-Za-z0-9+/]+=*$/);
+    } finally {
+      db.close();
+      rmSync(dbDir, { recursive: true, force: true });
+      fx.cleanup();
+    }
+  });
+
+  it("does NOT cache an API-error-path verdict (a transient failure isn't frozen in)", async () => {
+    const fx = makeFixtureCache();
+    const dbDir = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-cache-err-"));
+    const db = openServerDb({ path: path.join(dbDir, "users.db"), skipChmod: true });
+    try {
+      const diff = Buffer.from("diff --git a/foo b/foo\n+err\n");
+      let calls = 0;
+      const flaky: AnthropicClientShape = {
+        messages: {
+          create: async () => {
+            calls++;
+            if (calls === 1) throw new Error("transient upstream error");
+            return {
+              content: [
+                {
+                  type: "tool_use",
+                  name: "submit_verdict",
+                  input: { verdict: "approved", prose: "recovered" },
+                },
+              ],
+            };
+          },
+        },
+      };
+      const input = { ...fixtureInput(fx, diff, { anthropic: flaky }), db };
+
+      const first = await runReviewPipeline(input); // errors → changes_requested, NOT cached
+      const second = await runReviewPipeline(input); // calls LLM again → approved
+
+      assert.equal(first.verdict, "changes_requested");
+      assert.equal(second.verdict, "approved");
+      assert.equal(calls, 2, "the error path must not be cached; the retry must hit the LLM");
+    } finally {
+      db.close();
+      rmSync(dbDir, { recursive: true, force: true });
+      fx.cleanup();
+    }
+  });
+});
+
+describe("runReviewPipeline — cached verdict validation (AGT-420 security review)", () => {
+  it("refuses to sign a cached row with a garbage verdict string", async () => {
+    const fx = makeFixtureCache();
+    const dbDir = mkdtempSync(path.join(os.tmpdir(), "stamp-pipeline-badverdict-"));
+    const db = openServerDb({ path: path.join(dbDir, "users.db"), skipChmod: true });
+    try {
+      const diff = Buffer.from("diff --git a/foo b/foo\n+x\n");
+      // Pre-seed the cache with a tampered verdict for this exact triple.
+      const diffSha = createHash("sha256").update(diff).digest("hex");
+      const promptSha = sha256Hex(fx.promptBytes);
+      recordServerVerdict(db, "security", diffSha, promptSha, "totally-bogus", "x");
+
+      // A client that would blow up if reached — proves we throw on the
+      // cache path before any LLM call.
+      const client = rejectingClient(new Error("should not be called"));
+      const input = { ...fixtureInput(fx, diff, { anthropic: client }), db };
+
+      await assert.rejects(
+        runReviewPipeline(input),
+        /cached server verdict is not a recognized value/,
+      );
+    } finally {
+      db.close();
+      rmSync(dbDir, { recursive: true, force: true });
+      fx.cleanup();
+    }
   });
 });

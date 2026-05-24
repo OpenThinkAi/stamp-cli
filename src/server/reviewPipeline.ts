@@ -89,7 +89,12 @@ import {
   ReviewSigningKeyError,
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
-import type { UserRow } from "../lib/serverDb.js";
+import type { DatabaseSync } from "node:sqlite";
+import {
+  findCachedServerVerdict,
+  recordServerVerdict,
+  type UserRow,
+} from "../lib/serverDb.js";
 
 import {
   defaultPromptCacheResolver,
@@ -403,6 +408,11 @@ export interface ReviewPipelineInput {
   diff: Buffer;
   params: ParsedReviewRequest;
   caller: UserRow;
+  /** Open server DB handle for the verdict cache (AGT-420). When provided,
+   *  an identical (reviewer, diff_sha256, prompt_sha256) triple short-
+   *  circuits the Anthropic call and reuses the saved verdict (re-signed
+   *  fresh). Optional so cache-less callers / tests still run. */
+  db?: DatabaseSync;
   /** Optional dependency injection for tests. Production callers leave
    *  unset and the pipeline uses the on-disk bare-repo resolver +
    *  process-env-derived Anthropic client. */
@@ -599,6 +609,14 @@ export class SigningKeyUnavailableError extends Error {
  *      approval and verifies the signature against the same canonical
  *      bytes — byte identity is the contract.
  */
+/** The only verdict strings a signed ApprovalV4 may carry. Used to
+ *  validate a cached verdict before re-signing it (AGT-420). */
+const VALID_VERDICTS = new Set<string>([
+  "approved",
+  "changes_requested",
+  "denied",
+]);
+
 export async function runReviewPipeline(
   input: ReviewPipelineInput,
 ): Promise<ReviewPipelineResult> {
@@ -638,56 +656,103 @@ export async function runReviewPipeline(
   // freshly-rotated identity.
   const signingMaterial = deps.signingKey ?? loadSigningMaterialFromEnv();
 
-  // Stage 3: build the Anthropic client (or use the injected one for
-  // tests). Missing-API-key fails fast with a typed error.
-  const anthropic = deps.anthropic ?? buildAnthropicFromEnv();
-  const model = deps.model ?? SERVER_DEFAULT_MODEL;
-  const timeoutMs = deps.timeoutMs ?? resolveReviewTimeoutMs();
+  // AGT-420: server-side verdict cache. Compute the diff hash now (also
+  // reused as `approval.diff_sha256` below) and look up a saved verdict for
+  // this exact (reviewer, diff_sha256, prompt_sha256) triple. A hit skips
+  // the Anthropic call entirely — we still re-sign fresh in Stage 6-7, so
+  // the response shape + issued_at are identical to a non-cached run.
+  const diffSha256 = createHash("sha256").update(input.diff).digest("hex");
+  const cached = input.db
+    ? findCachedServerVerdict(
+        input.db,
+        input.params.reviewer,
+        diffSha256,
+        prompt.sha256,
+      )
+    : null;
 
-  // Build prompts. Random-hex fence marker is generated per-call so an
-  // attacker who guessed last call's marker can't smuggle "END-DIFF" +
-  // injection inside their diff. Mirrors the convention in
-  // `src/lib/reviewer.ts` and `src/lib/headlessReviewer.ts`.
-  const fenceHex = randomFenceHex();
-  const systemPrompt = buildServerSystemPrompt(prompt.bytes.toString("utf-8"), fenceHex);
-  const userPrompt = buildServerUserPrompt({
-    diff: input.diff.toString("utf-8"),
-    baseSha: input.params.baseSha,
-    headSha: input.params.headSha,
-    fenceHex,
-  });
-
-  // Stage 5: run the API call with a timeout. AbortSignal.timeout
-  // gives the SDK a clean cancellation surface; we don't need to spin
-  // up a manual setTimeout race.
   let parsed: { verdict: ApprovalV4["verdict"]; prose: string };
-  try {
-    const response = await anthropic.messages.create(
-      {
-        model,
-        max_tokens: SERVER_MAX_TOKENS,
-        system: systemPrompt,
-        messages: [{ role: "user" as const, content: userPrompt }],
-        tools: [SUBMIT_VERDICT_TOOL],
-      },
-      { signal: AbortSignal.timeout(timeoutMs) },
-    );
-    parsed = extractVerdictFromResponse(response, timeoutMs);
-  } catch (err) {
-    // Any API error (network, rate limit, abort/timeout, etc.) folds
-    // into a safe "changes_requested" verdict with the error in the
-    // prose so the operator can see it in `stamp log --reviews`. We do
-    // NOT promote API errors to a top-level throw: a transient hiccup
-    // shouldn't crash the pipeline and lose the rest of the request
-    // context. Operators iterate locally and retry.
-    //
-    // Even on the error path we still sign — the signature commits to
-    // a real changes_requested verdict from this server, which is a
-    // safe and verifiable outcome the client can persist.
+  if (cached) {
+    // Defense-in-depth: the cache row's verdict is a free-form TEXT column.
+    // Validate before slotting it into a signed approval, so a tampered/
+    // corrupt server_verdicts row can't get a garbage verdict signed.
+    // AGT-420 security review.
+    if (!VALID_VERDICTS.has(cached.verdict)) {
+      throw new Error(
+        `cached server verdict is not a recognized value: ${JSON.stringify(cached.verdict)}`,
+      );
+    }
     parsed = {
-      verdict: "changes_requested",
-      prose: formatApiError(err, timeoutMs),
+      verdict: cached.verdict as ApprovalV4["verdict"],
+      prose: cached.prose,
     };
+  } else {
+    // Stage 3: build the Anthropic client (or use the injected one for
+    // tests). Missing-API-key fails fast with a typed error.
+    const anthropic = deps.anthropic ?? buildAnthropicFromEnv();
+    const model = deps.model ?? SERVER_DEFAULT_MODEL;
+    const timeoutMs = deps.timeoutMs ?? resolveReviewTimeoutMs();
+
+    // Build prompts. Random-hex fence marker is generated per-call so an
+    // attacker who guessed last call's marker can't smuggle "END-DIFF" +
+    // injection inside their diff. Mirrors the convention in
+    // `src/lib/reviewer.ts` and `src/lib/headlessReviewer.ts`.
+    const fenceHex = randomFenceHex();
+    const systemPrompt = buildServerSystemPrompt(prompt.bytes.toString("utf-8"), fenceHex);
+    const userPrompt = buildServerUserPrompt({
+      diff: input.diff.toString("utf-8"),
+      baseSha: input.params.baseSha,
+      headSha: input.params.headSha,
+      fenceHex,
+    });
+
+    // Stage 5: run the API call with a timeout. AbortSignal.timeout
+    // gives the SDK a clean cancellation surface; we don't need to spin
+    // up a manual setTimeout race.
+    let apiOk = false;
+    try {
+      const response = await anthropic.messages.create(
+        {
+          model,
+          max_tokens: SERVER_MAX_TOKENS,
+          system: systemPrompt,
+          messages: [{ role: "user" as const, content: userPrompt }],
+          tools: [SUBMIT_VERDICT_TOOL],
+        },
+        { signal: AbortSignal.timeout(timeoutMs) },
+      );
+      parsed = extractVerdictFromResponse(response, timeoutMs);
+      apiOk = true;
+    } catch (err) {
+      // Any API error (network, rate limit, abort/timeout, etc.) folds
+      // into a safe "changes_requested" verdict with the error in the
+      // prose so the operator can see it in `stamp log --reviews`. We do
+      // NOT promote API errors to a top-level throw: a transient hiccup
+      // shouldn't crash the pipeline and lose the rest of the request
+      // context. Operators iterate locally and retry.
+      //
+      // Even on the error path we still sign — the signature commits to
+      // a real changes_requested verdict from this server, which is a
+      // safe and verifiable outcome the client can persist.
+      parsed = {
+        verdict: "changes_requested",
+        prose: formatApiError(err, timeoutMs),
+      };
+    }
+
+    // Cache ONLY a real model response — never the API-error fallback
+    // (caching a transient failure would freeze it into a replayed
+    // verdict for every identical request).
+    if (apiOk && input.db) {
+      recordServerVerdict(
+        input.db,
+        input.params.reviewer,
+        diffSha256,
+        prompt.sha256,
+        parsed.verdict,
+        parsed.prose,
+      );
+    }
   }
 
   // Stage 6: compose the approval body. issued_at is the server's
@@ -698,15 +763,12 @@ export async function runReviewPipeline(
   // to "the bytes I actually reviewed" structurally rather than by
   // convention (closing the AGT-328-flagged echoed-input footgun).
   const issued_at = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  const observedDiffSha256 = createHash("sha256")
-    .update(input.diff)
-    .digest("hex");
 
   const approval: ApprovalV4 = {
     reviewer: input.params.reviewer,
     verdict: parsed.verdict,
     prompt_sha256: prompt.sha256,
-    diff_sha256: observedDiffSha256,
+    diff_sha256: diffSha256,
     base_sha: input.params.baseSha,
     head_sha: input.params.headSha,
     issued_at,
