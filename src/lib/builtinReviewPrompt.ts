@@ -29,6 +29,17 @@ export interface RunBuiltinReviewInput {
   /** Optional model override (passed through to query options). */
   model?: string;
   /**
+   * Override the system prompt used for the review SDK call.
+   * When supplied, `promptName` should also be provided for log lines.
+   * Defaults to `BUILTIN_DEFAULT_PROMPT` (AC #4).
+   */
+  systemPrompt?: string;
+  /**
+   * Display name for this prompt, used in stderr log lines.
+   * Defaults to `BUILTIN_PROMPT_NAME` (`"builtin-default"`).
+   */
+  promptName?: string;
+  /**
    * Test-only injection seam: replace the real SDK `query()` call.
    * The function receives the diff as the prompt and returns the review body
    * as a string (or throws on failure).
@@ -81,12 +92,13 @@ export async function runBuiltinReview(
   }
 
   // Production: call the real SDK.
+  const resolvedSystemPrompt = input.systemPrompt ?? BUILTIN_DEFAULT_PROMPT;
   try {
     const q = query({
       prompt: input.diff,
       options: {
         cwd: input.cwd,
-        systemPrompt: BUILTIN_DEFAULT_PROMPT,
+        systemPrompt: resolvedSystemPrompt,
         maxTurns: 1,
         persistSession: false,
         ...(input.model ? { model: input.model } : {}),
