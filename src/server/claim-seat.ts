@@ -22,7 +22,7 @@
  *   0 — success (or feature-not-configured)
  *   1 — server-side / unexpected error
  *   4 — validation / auth failure
- *   5 — seat claim rejected (author-exclusion / self-collision / seats-full)
+ *   5 — seat claim rejected (author-exclusion / self-collision / seats-full / rate limit exceeded)
  */
 
 import {
