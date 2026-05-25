@@ -76,12 +76,22 @@ export const PR_OPENED_RATE_CAP_DEFAULT = 60;
 
 // ─── Bare-repo path resolution ──────────────────────────────────────
 
-/** Server-side bare-repo layout: `/srv/git/<org>/<repo>.git`.
- *  Matches the `new-stamp-repo` and `delete-stamp-repo` convention. */
+/** Server-side bare-repo layout: `<base>/<org>/<repo>.git`.
+ *
+ *  The base directory defaults to `/srv/git` (the production convention used
+ *  by `new-stamp-repo` / `delete-stamp-repo`), but can be overridden via the
+ *  `STAMP_BARE_REPOS_DIR` environment variable. This allows a hermetic test
+ *  harness to point the seat verbs at a throwaway bare repo without needing
+ *  `/srv/git` to exist on the machine running the test.
+ *
+ *  When `STAMP_BARE_REPOS_DIR` is unset the behaviour is identical to the
+ *  previous hard-coded `/srv/git` path — no production behaviour changes.
+ */
 export function bareRepoPath(repo: string): string {
   // `repo` is expected to be `<org>/<name>` (e.g. "acme/widget-co").
   // Callers must validate the shape before calling — we don't sanitise here.
-  return path.join("/srv/git", `${repo}.git`);
+  const base = process.env["STAMP_BARE_REPOS_DIR"] ?? "/srv/git";
+  return path.join(base, `${repo}.git`);
 }
 
 // ─── Operator-at-base-sha manifest verification ─────────────────────
