@@ -770,11 +770,15 @@ required.
   lives in the git common dir). **On a machine reviewing PHI/PCI or other
   regulated content, treat `.git/stamp/state.db` (and the
   `.git/stamp/failed-parses/` spool) as carrying that classification** —
-  apply matching backup and retention controls. Three retention knobs:
+  apply matching backup and retention controls. Four retention knobs:
   `stamp init` prints a weekly `stamp prune` schedule snippet;
   `STAMP_REVIEW_PROSE_TTL_DAYS` makes `stamp prune` null prose older than
-  the TTL (keeping the verdict rows); and `stamp review --no-prose` records
-  verdict + hashes only, never persisting prose for that run.
+  the TTL (keeping the verdict rows); `stamp review --no-prose` records
+  verdict + hashes only, never persisting prose for that run; and the
+  committed `retention:` block in `.stamp/config.yml` fires an advisory (or
+  auto-prune when `retention.auto_prune: true`) after every `stamp review`
+  so you don't have to remember to schedule the prune manually. See
+  [troubleshooting.md](./docs/troubleshooting.md) for the `retention:` config syntax.
 - Your Ed25519 signing key (`~/.stamp/keys/`) never leaves your machine.
 
 **What gets attached to the merge commit and mirrored to GitHub:**

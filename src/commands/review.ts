@@ -64,6 +64,7 @@ import {
 } from "../lib/paths.js";
 import { formatRetroBlock } from "../lib/retro.js";
 import { serializeToolCalls } from "../lib/toolCalls.js";
+import { printRetentionAdvisory } from "../lib/retentionAdvisory.js";
 
 export interface ReviewOptions {
   diff: string;
@@ -850,6 +851,10 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       process.exitCode = 1;
     }
   } finally {
+    // AGT-112: post-review retention advisory (or auto-prune). Fires in the
+    // finally so it runs regardless of reviewer errors. Guarded on
+    // config.retention being present — no-ops when the field is absent.
+    printRetentionAdvisory(db, repoRoot, config.retention);
     db.close();
   }
 }
@@ -1119,6 +1124,10 @@ async function runServerAttestedReviews(input: {
       }
     }
   } finally {
+    // AGT-112: post-review retention advisory (or auto-prune). Fires in both
+    // the local and server-attested paths — retention applies regardless of
+    // provider. Same shared tail helper as the local-LLM path to avoid drift.
+    printRetentionAdvisory(db, repoRoot, config.retention);
     db.close();
   }
 
