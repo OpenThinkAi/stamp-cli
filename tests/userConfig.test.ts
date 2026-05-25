@@ -349,6 +349,102 @@ describe("resolveReviewerBackend + local: scheme", () => {
   });
 });
 
+describe("STAMP_REVIEWER_BACKEND=local override", () => {
+  function withEnv(env: Record<string, string | undefined>, fn: () => void) {
+    const keys = [
+      "STAMP_REVIEWER_BACKEND",
+      "STAMP_LOCAL_MODEL",
+      "STAMP_LOCAL_ENDPOINT",
+    ];
+    const saved: Record<string, string | undefined> = {};
+    for (const k of keys) saved[k] = process.env[k];
+    try {
+      for (const k of keys) {
+        if (env[k] === undefined) delete process.env[k];
+        else process.env[k] = env[k];
+      }
+      fn();
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  }
+
+  it("forces local with STAMP_LOCAL_MODEL + STAMP_LOCAL_ENDPOINT, ignoring anthropic config", () => {
+    writeUserConfig({ reviewers: { security: "claude-opus-4-7" } });
+    withEnv(
+      {
+        STAMP_REVIEWER_BACKEND: "local",
+        STAMP_LOCAL_MODEL: "qwen3-coder-30b",
+        STAMP_LOCAL_ENDPOINT: "http://127.0.0.1:8000/v1",
+      },
+      () => {
+        assert.deepEqual(resolveReviewerBackend("security"), {
+          kind: "local",
+          model: "qwen3-coder-30b",
+          endpoint: "http://127.0.0.1:8000/v1",
+        });
+      },
+    );
+  });
+
+  it("falls back to the configured local: model when STAMP_LOCAL_MODEL is unset", () => {
+    writeUserConfig({
+      reviewers: { security: `${LOCAL_MODEL_PREFIX}cfg-model` },
+      local_endpoint: "http://localhost:1234/v1",
+    });
+    withEnv({ STAMP_REVIEWER_BACKEND: "local" }, () => {
+      assert.deepEqual(resolveReviewerBackend("security"), {
+        kind: "local",
+        model: "cfg-model",
+        endpoint: "http://localhost:1234/v1",
+      });
+    });
+  });
+
+  it("STAMP_LOCAL_ENDPOINT overrides config local_endpoint", () => {
+    writeUserConfig({
+      reviewers: { security: `${LOCAL_MODEL_PREFIX}m` },
+      local_endpoint: "http://localhost:1234/v1",
+    });
+    withEnv(
+      {
+        STAMP_REVIEWER_BACKEND: "local",
+        STAMP_LOCAL_ENDPOINT: "http://localhost:9999/v1",
+      },
+      () => {
+        assert.equal(
+          resolveReviewerBackend("security").endpoint,
+          "http://localhost:9999/v1",
+        );
+      },
+    );
+  });
+
+  it("endpoint is undefined when neither env nor config set it (adapter defaults)", () => {
+    writeUserConfig({ reviewers: { security: "claude-opus-4-7" } });
+    withEnv({ STAMP_REVIEWER_BACKEND: "local", STAMP_LOCAL_MODEL: "m" }, () => {
+      assert.deepEqual(resolveReviewerBackend("security"), {
+        kind: "local",
+        model: "m",
+        endpoint: undefined,
+      });
+    });
+  });
+
+  it("falls back to anthropic default when forced local with no resolvable model", () => {
+    writeUserConfig({ reviewers: { security: "claude-opus-4-7" } });
+    withEnv({ STAMP_REVIEWER_BACKEND: "local" }, () => {
+      assert.deepEqual(resolveReviewerBackend("security"), {
+        kind: "anthropic",
+        model: null,
+      });
+    });
+  });
+});
+
 describe("deleteUserConfig", () => {
   it("returns false when the file doesn't exist", () => {
     assert.equal(deleteUserConfig(), false);
