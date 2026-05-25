@@ -329,21 +329,38 @@ export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
   }
   const raw = cfg?.reviewers[reviewer];
 
-  // Operator override: `STAMP_REVIEWER_BACKEND=anthropic` forces the Anthropic
-  // agent-SDK path for every reviewer regardless of any `local:` config. This
-  // is the escape hatch for "I normally run local, but this run I want Claude"
-  // — it uses the logged-in Claude session (no API key required) and accepts
-  // the post-June-15 metering. A `local:` value carries a local model id that
-  // isn't valid for Anthropic, so it drops to null (SDK default); a real
-  // Anthropic model id is preserved.
-  if (
-    process.env.STAMP_REVIEWER_BACKEND?.trim().toLowerCase() === "anthropic"
-  ) {
+  // Operator override via STAMP_REVIEWER_BACKEND — force a backend per-run
+  // regardless of config, and crucially WITHOUT mutating the shared
+  // ~/.stamp/config.yml (which would collide across concurrent runs, e.g.
+  // open-team's autonomous dispatch). Two values:
+  //   anthropic — force the agent-SDK path (logged-in Claude session, metered).
+  //   local     — force the local OpenAI-compatible backend (unmetered).
+  const backendOverride = process.env.STAMP_REVIEWER_BACKEND?.trim().toLowerCase();
+  if (backendOverride === "anthropic") {
+    // A `local:` value carries a local model id that isn't valid for Anthropic,
+    // so it drops to null (SDK default); a real Anthropic model id is preserved.
     return typeof raw === "string" &&
       raw.length > 0 &&
       !raw.startsWith(LOCAL_MODEL_PREFIX)
       ? { kind: "anthropic", model: raw }
       : { kind: "anthropic", model: null };
+  }
+  if (backendOverride === "local") {
+    // Model: STAMP_LOCAL_MODEL wins; else the reviewer's configured `local:`
+    // value (prefix stripped). Endpoint: STAMP_LOCAL_ENDPOINT wins; else
+    // config.local_endpoint; else undefined (the adapter's own default). If no
+    // model can be resolved at all, fall back to the anthropic default rather
+    // than handing the local server an empty model.
+    const envModel = process.env.STAMP_LOCAL_MODEL?.trim();
+    const cfgLocalModel =
+      typeof raw === "string" && raw.startsWith(LOCAL_MODEL_PREFIX)
+        ? raw.slice(LOCAL_MODEL_PREFIX.length).trim()
+        : "";
+    const model = envModel && envModel.length > 0 ? envModel : cfgLocalModel;
+    if (!model) return { kind: "anthropic", model: null };
+    const endpoint =
+      process.env.STAMP_LOCAL_ENDPOINT?.trim() || cfg?.local_endpoint;
+    return { kind: "local", model, endpoint };
   }
 
   if (typeof raw !== "string" || raw.length === 0) {

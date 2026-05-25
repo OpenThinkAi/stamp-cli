@@ -515,6 +515,25 @@ accepts the post-June-15 metering. A `local:` reviewer's model id isn't valid
 for Anthropic, so it falls back to the SDK default model; reviewers pinned to
 a real Anthropic model keep it.
 
+The symmetric `STAMP_REVIEWER_BACKEND=local` forces every reviewer onto the
+local backend for a single run, without editing `~/.stamp/config.yml`:
+
+```
+STAMP_REVIEWER_BACKEND=local \
+  STAMP_LOCAL_MODEL=qwen3-coder-30b \
+  STAMP_LOCAL_ENDPOINT=http://localhost:8000/v1 \
+  stamp review --diff main..feature
+```
+
+The model comes from `STAMP_LOCAL_MODEL` (falling back to the reviewer's
+configured `local:` value), and the endpoint from `STAMP_LOCAL_ENDPOINT`
+(falling back to `local_endpoint`, then the adapter default). If no local
+model can be resolved, it falls back to the Anthropic default rather than
+calling the local server with an empty model. Because it's per-run env — not
+a config write — it's safe to use from automation that runs concurrently
+(e.g. open-team dispatch), where mutating the shared `~/.stamp/config.yml`
+would race.
+
 **Trust posture is identical to the Anthropic local-LLM path.** A local
 reviewer produces a verdict that gates `stamp merge` exactly like the SDK
 reviewer; the trust anchor is unchanged — your machine produces the verdict,
