@@ -200,6 +200,14 @@ export function runMerge(opts: MergeOptions): void {
   // 4. Do the git merge --no-ff with a simple title; we'll amend the message
   //    with trailers once checks pass.
   const title = `Merge branch '${opts.branch}' into ${opts.into}`;
+
+  // Capture the pre-merge HEAD SHA before touching the ref. The rollback
+  // catch below resets to this exact SHA rather than HEAD~1, which is
+  // more explicit and safe: HEAD~1 would be wrong if the merge somehow
+  // produced a non-standard reflog entry, whereas the pre-merge SHA is
+  // always exactly where we want to land on failure.
+  const preMergeSha = git(["rev-parse", "HEAD"], repoRoot).trim();
+
   try {
     git(
       ["merge", "--no-ff", "--no-edit", "-m", title, opts.branch],
@@ -214,9 +222,9 @@ export function runMerge(opts: MergeOptions): void {
 
   // From here on the working tree contains the merge commit. Any failure —
   // checks, post-merge config validation, missing reviewer definitions,
-  // signing — must roll back HEAD~1 so the user is left exactly where they
-  // started. Without this wrapper, partial failures left a stale non-stamp
-  // merge commit on the target branch.
+  // signing — must roll back to preMergeSha so the user is left exactly
+  // where they started. Without this wrapper, partial failures left a
+  // stale non-stamp merge commit on the target branch.
   //
   // mergeSha + checkAttestations are hoisted so the success-summary code
   // after the try-block can read them once the post-merge phase succeeds.
@@ -339,14 +347,36 @@ export function runMerge(opts: MergeOptions): void {
 
     mergeSha = git(["rev-parse", "HEAD"], repoRoot).trim();
   } catch (err) {
-    // Roll back the merge commit so the repo ends up exactly as it was
-    // before `stamp merge` was called. Best-effort — if reset itself fails
-    // (extremely unlikely on a freshly-made HEAD~1), the original error
-    // still propagates; user can recover manually with `git reset --hard`.
+    // Roll back to the pre-merge SHA so the repo ends up exactly as it was
+    // before `stamp merge` was called. We reset to the explicit preMergeSha
+    // (captured before `git merge --no-ff`) rather than HEAD~1 so the
+    // rollback target is unambiguous regardless of reflog edge cases.
+    //
+    // If the reset itself fails (disk full, locked ref, etc.) we compose the
+    // reset error with the original error and surface both loudly — the
+    // operator needs to know about the orphaned unsigned merge commit and how
+    // to recover manually.
+    const unsignedSha = (() => {
+      try {
+        return git(["rev-parse", "HEAD"], repoRoot).trim();
+      } catch {
+        return "(unknown — git rev-parse failed)";
+      }
+    })();
+
     try {
-      git(["reset", "--hard", "HEAD~1"], repoRoot);
-    } catch {
-      // best-effort; original throw below still surfaces the real cause
+      git(["reset", "--hard", preMergeSha], repoRoot);
+    } catch (resetErr) {
+      const resetMsg =
+        resetErr instanceof Error ? resetErr.message : String(resetErr);
+      const origMsg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `stamp merge failed AND the rollback reset to ${preMergeSha} also failed. ` +
+          `An unsigned merge commit (${unsignedSha}) is now on the target branch. ` +
+          `Recover manually: git reset --hard ${preMergeSha}\n` +
+          `Original error: ${origMsg}\n` +
+          `Reset error: ${resetMsg}`,
+      );
     }
     throw err;
   }
