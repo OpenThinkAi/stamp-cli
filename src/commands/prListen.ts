@@ -282,6 +282,12 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       process.exit(0);
     }
 
+    // AGT-431 AC #11: handle re-review-requested identically to pr-opened
+    // (re-run triage → claim → review → post against the new patch_id).
+    // The only visible difference is the kind: "re-review" triplet log tag (AC #12).
+    // This branch is intentionally thin and localized — AGT-432 adds
+    // cost-cap enforcement to the same loop without needing to touch this code.
+
     // Extract PR metadata from the event payload.
     const payload = event.payload as Record<string, unknown>;
     const prNumber =
@@ -390,8 +396,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       triageDecision = await runTriage(triageInput);
     }
 
-    // ─── Log triplet (AC #6) ─────────────────────────────────────
+    // ─── Log triplet (AC #6 / AGT-431 AC #12) ───────────────────
     // Append regardless of whether we skip or claim.
+    // For re-review-requested events, tag with kind: "re-review" (AC #12).
     {
       const tripletRecord = {
         ts: new Date().toISOString(),
@@ -400,6 +407,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         rules_hash: rulesHash,
         event_payload: payload as Record<string, unknown>,
         decision: triageDecision,
+        ...(event.event_type === "re-review-requested" ? { kind: "re-review" as const } : {}),
       };
       if (opts._appendTripletForTest) {
         opts._appendTripletForTest(tripletRecord);

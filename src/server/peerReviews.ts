@@ -230,6 +230,43 @@ export function fanoutToSeatHolders(
   return notified;
 }
 
+/**
+ * Fan out an event to seat-holders with optional reviewer_filter support
+ * (AGT-431). `seatMap` is an array of `{ fp, seat }` pairs for the patch;
+ * `reviewerFilter` is a list of fingerprints to restrict delivery to (empty
+ * = deliver to all seat-holders). Each delivered event gets a per-receiver
+ * `seat` field injected into the payload so the listener knows which seat it
+ * holds. Returns the fingerprints of the notified listeners.
+ *
+ * Deliberately a sibling helper, not a replacement, so the existing
+ * `fanoutToSeatHolders` caller (tests + pr-opened path) is unaffected.
+ */
+export function fanoutToSeatHoldersFiltered(
+  seatMap: Array<{ fp: string; seat: 1 | 2 }>,
+  event: Omit<PeerReviewEvent, "payload"> & { payload: object },
+  reviewerFilter: string[],
+): string[] {
+  const notified: string[] = [];
+  for (const { fp, seat } of seatMap) {
+    // Apply reviewer_filter: skip if filter is non-empty and fp not listed.
+    if (reviewerFilter.length > 0 && !reviewerFilter.includes(fp)) continue;
+    const handle = listenerRegistry.get(fp);
+    if (handle) {
+      try {
+        const enrichedEvent: PeerReviewEvent = {
+          ...event,
+          payload: { ...(event.payload as Record<string, unknown>), seat },
+        };
+        handle.onEvent(enrichedEvent);
+        notified.push(fp);
+      } catch {
+        // Listener errors must not abort the caller.
+      }
+    }
+  }
+  return notified;
+}
+
 /** Clear the in-memory registry (test teardown helper). */
 export function clearListenerRegistry(): void {
   listenerRegistry.clear();

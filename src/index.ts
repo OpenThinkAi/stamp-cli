@@ -51,6 +51,7 @@ import { runAttest } from "./commands/attest.js";
 import { runMerge } from "./commands/merge.js";
 import { runPrOpen } from "./commands/prOpen.js";
 import { runPrListen } from "./commands/prListen.js";
+import { runPrPing } from "./commands/prPing.js";
 import { runPeerTest } from "./commands/peerTest.js";
 import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
@@ -859,6 +860,52 @@ Prerequisites:
       process.exit(2);
     }
     await runPrListen({ orgs, server: opts.server });
+  });
+
+pr
+  .command("ping [pr-url]")
+  .description(
+    "notify prior reviewers that a PR has been updated with new commits. " +
+      "Sends a signed re-review-request to the stamp-server for the patch_id " +
+      "resolved from the current branch (or from <pr-url> when given). " +
+      "Without --reviewer, all active seat-holders are pinged.",
+  )
+  .option(
+    "--reviewer <name>",
+    "restrict re-review notification to this reviewer (repeat for multiple)",
+    (v: string, acc: string[]) => { acc.push(v); return acc; },
+    [] as string[],
+  )
+  .option(
+    "--server <host:port>",
+    "override ~/.stamp/server.yml with an inline endpoint",
+  )
+  .addHelpText(
+    "after",
+    `
+Resolves the patch_id from the current branch's open PR (via 'gh pr view')
+or from <pr-url> when given, then sends a signed re-review-request to the
+stamp-server. Each active seat-holder whose listener is online receives a
+re-review-requested event and re-runs their triage + review flow.
+
+Exit codes:
+  0  — success (including when no active seat-holders exist — a stderr note
+       is printed)
+  1  — auth failure: no signing key, or operator is not the original PR author
+  2  — reserved for arg-parse errors (Commander only; not set by this command)
+  3  — patch_id resolution failed: no open PR for current HEAD, or <pr-url>
+       is unknown to the stamp-server (was the PR opened via 'stamp pr open'?)
+
+Prerequisites:
+  - 'gh' must be installed: https://cli.github.com
+  - stamp signing key at ~/.stamp/keys/ed25519 ('stamp keys generate' to create)
+  - stamp-server config at ~/.stamp/server.yml ('stamp server config <host:port>' to set)
+  - PR must have been opened via 'stamp pr open' (plain 'gh pr create' does not register
+    a patch_id on the stamp-server)
+`,
+  )
+  .action(async (prUrl: string | undefined, opts: { reviewer: string[]; server?: string }) => {
+    await runPrPing({ prUrl, reviewer: opts.reviewer, server: opts.server });
   });
 
 const peer = program

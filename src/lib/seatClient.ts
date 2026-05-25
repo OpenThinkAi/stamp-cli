@@ -506,3 +506,139 @@ export async function callReleaseSeat(input: ReleaseSeatInput): Promise<ReleaseS
     serverStderr: result.stderr.trim(),
   };
 }
+
+// ─── re-review-request ────────────────────────────────────────────────
+//
+// Fifth parallel SSH-verb client (AGT-431), mirroring the four above
+// (subscribe / claim-seat / heartbeat / release-seat) without extracting
+// a shared helper — same deliberate parallel structure per retro convention.
+//
+// Server exit-code mapping:
+//   0 — success (or feature-not-configured)
+//   1 — server-side / unexpected error
+//   4 — patch not found or payload validation failure → reason: "patch_not_found"
+//       (CLI maps to exit 3)
+//   5 — caller is not the original author (403) → reason: "not_author"
+//       (CLI maps to exit 1)
+
+export interface ReReviewRequestSuccess {
+  ok: true;
+  patch_id: string;
+  seat_holders_notified: number;
+}
+
+export interface ReReviewRequestFailure {
+  ok: false;
+  reason: "not_author" | "patch_not_found" | "re_review_failed" | "peer_reviews_not_configured";
+  message: string;
+  serverStderr: string;
+}
+
+export type ReReviewRequestResult = ReReviewRequestSuccess | ReReviewRequestFailure;
+
+export interface ReReviewRequestInput {
+  patch_id: string;
+  requester_fp: string;
+  /** Raw reviewer short_names forwarded verbatim; resolved server-side. */
+  reviewer_filter: string[];
+  signature: string;
+  serverConfig: ServerConfig;
+  _sshSpawnForTest?: SshSpawnFn;
+}
+
+export async function callReReviewRequest(
+  input: ReReviewRequestInput,
+): Promise<ReReviewRequestResult> {
+  const spawnFn = input._sshSpawnForTest ?? defaultSshSpawn;
+  const payload = JSON.stringify({
+    patch_id: input.patch_id,
+    requester_fp: input.requester_fp,
+    reviewer_filter: input.reviewer_filter,
+    signature: input.signature,
+  });
+
+  let result: SshSpawnResult;
+  try {
+    result = await spawnFn(input.serverConfig, "re-review-request", payload);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "re_review_failed",
+      message: `ssh spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+      serverStderr: "",
+    };
+  }
+
+  if (result.exitCode === 5) {
+    // Server exit 5: caller is not the original author (403).
+    const stderr = result.stderr.trim();
+    return {
+      ok: false,
+      reason: "not_author",
+      message: `re-review refused: caller is not the PR author. ${stderr}`,
+      serverStderr: stderr,
+    };
+  }
+
+  if (result.exitCode === 4) {
+    // Server exit 4: patch not found or payload validation failure.
+    const stderr = result.stderr.trim();
+    return {
+      ok: false,
+      reason: "patch_not_found",
+      message: `patch_id resolution failed or payload invalid. ${stderr}`,
+      serverStderr: stderr,
+    };
+  }
+
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.trim();
+    return {
+      ok: false,
+      reason: "re_review_failed",
+      message:
+        `stamp-server re-review-request returned exit ${result.exitCode}. ` +
+        (stderr ? `server stderr: ${stderr}` : ""),
+      serverStderr: stderr,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout.trim());
+  } catch {
+    return {
+      ok: false,
+      reason: "re_review_failed",
+      message: `stamp-server returned malformed JSON: ${JSON.stringify(result.stdout.slice(0, 200))}`,
+      serverStderr: result.stderr.trim(),
+    };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+
+  if (obj.ok === false && obj.error === "peer_reviews_not_configured") {
+    return {
+      ok: false,
+      reason: "peer_reviews_not_configured",
+      message: "stamp-server has peer reviews disabled",
+      serverStderr: result.stderr.trim(),
+    };
+  }
+
+  if (obj.ok === true) {
+    const seat_holders_notified =
+      typeof obj.seat_holders_notified === "number" ? obj.seat_holders_notified : 0;
+    const patch_id =
+      typeof obj.patch_id === "string" ? obj.patch_id : input.patch_id;
+    return { ok: true, patch_id, seat_holders_notified };
+  }
+
+  const errMsg = typeof obj.error === "string" ? obj.error : JSON.stringify(obj);
+  return {
+    ok: false,
+    reason: "re_review_failed",
+    message: `stamp-server returned error: ${errMsg}`,
+    serverStderr: result.stderr.trim(),
+  };
+}

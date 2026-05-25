@@ -231,6 +231,7 @@ async function main(): Promise<void> {
       base_sha: payload.base_sha,
       head_sha: payload.head_sha,
       repo: payload.repo,
+      pr_url: payload.pr_url,
     }, now);
 
     const { signature: _sig, ...payloadWithoutSig } = payload;
