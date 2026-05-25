@@ -930,3 +930,203 @@ describe("AGT-430 AC triage skip: triage returns skip → no claim, no SDK, no g
     assert.equal(sdkCalled, false, "review SDK should NOT be called when triage returns skip");
   });
 });
+
+// ─── AGT-431: callReReviewRequest exit-code mapping ──────────────────
+
+describe("AGT-431: callReReviewRequest SSH exit-code mapping", () => {
+  const RE_REVIEW_INPUT = {
+    patch_id: "a".repeat(40),
+    requester_fp: "sha256:" + "a".repeat(64),
+    reviewer_filter: [] as string[],
+    signature: "sig",
+    serverConfig: { host: "stamp.example.com", port: 2222, user: "git", repoRootPrefix: "/srv/git" },
+  } as const;
+
+  it("maps server exit 5 → reason: 'not_author'", async () => {
+    const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
+    const result = await callReReviewRequest({
+      ...RE_REVIEW_INPUT,
+      _sshSpawnForTest: async () => ({
+        stdout: "",
+        stderr: "error: requester_fp is not the original author",
+        exitCode: 5,
+        signal: null,
+      }),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.reason, "not_author", `expected not_author, got ${result.reason}`);
+    }
+  });
+
+  it("maps server exit 4 → reason: 'patch_not_found'", async () => {
+    const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
+    const result = await callReReviewRequest({
+      ...RE_REVIEW_INPUT,
+      _sshSpawnForTest: async () => ({
+        stdout: "",
+        stderr: "error: patch xxx not found",
+        exitCode: 4,
+        signal: null,
+      }),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.reason, "patch_not_found", `expected patch_not_found, got ${result.reason}`);
+    }
+  });
+
+  it("maps peer_reviews_not_configured JSON → reason: 'peer_reviews_not_configured'", async () => {
+    const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
+    const result = await callReReviewRequest({
+      ...RE_REVIEW_INPUT,
+      _sshSpawnForTest: async () => ({
+        stdout: JSON.stringify({ ok: false, error: "peer_reviews_not_configured" }),
+        stderr: "",
+        exitCode: 0,
+        signal: null,
+      }),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.reason, "peer_reviews_not_configured");
+    }
+  });
+
+  it("returns ok:true with seat_holders_notified on success", async () => {
+    const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
+    const result = await callReReviewRequest({
+      ...RE_REVIEW_INPUT,
+      _sshSpawnForTest: async () => ({
+        stdout: JSON.stringify({ ok: true, patch_id: "a".repeat(40), seat_holders_notified: 2 }),
+        stderr: "",
+        exitCode: 0,
+        signal: null,
+      }),
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.seat_holders_notified, 2);
+    }
+  });
+});
+
+// ─── AGT-431 AC #11/#12: re-review-requested event handling ───────────
+
+describe("AGT-431 AC #11: re-review-requested event triggers re-triage + review + post", () => {
+  it("processes re-review-requested event identically to pr-opened (full loop)", async () => {
+    const fakeKeypair = genKeypair();
+    let sdkCallCount = 0;
+    let ghCallCount = 0;
+    const triplets: Array<Record<string, unknown>> = [];
+
+    const reReviewEvent: PeerReviewEvent = {
+      event_type: "re-review-requested",
+      patch_id: "d".repeat(40),
+      actor_fp: "sha256:" + "e".repeat(64),
+      payload: {
+        patch_id: "d".repeat(40),
+        requested_by_fp: "sha256:" + "f".repeat(64),
+        pr_url: "https://github.com/acme/widget/pull/99",
+        repo: "acme/widget",
+        seat: 1,
+      },
+    };
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => {
+          sdkCallCount++;
+          return "re-review body";
+        },
+        _ghReviewForTest: () => {
+          ghCallCount++;
+          return { status: 0, stderr: "" };
+        },
+        _peerWatchRulesForTest: null, // use fallback (if_available)
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [reReviewEvent],
+      }),
+    );
+
+    assert.equal(exitCode, 0, `expected exit 0, got ${exitCode}`);
+    // AC #11: review ran and was posted.
+    assert.equal(sdkCallCount, 1, "SDK should be called once for re-review-requested");
+    assert.equal(ghCallCount, 1, "gh should be called once for re-review-requested");
+    // AC #11: seat was claimed.
+    assert.ok(stderr.includes("⟳ claimed seat"), `expected seat claim in: ${stderr}`);
+    // AC #11: review posted.
+    assert.ok(stderr.includes("✓ posted review"), `expected posted review in: ${stderr}`);
+  });
+});
+
+describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'", () => {
+  it("logs triplet with kind='re-review' for re-review-requested events", async () => {
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+
+    const reReviewEvent: PeerReviewEvent = {
+      event_type: "re-review-requested",
+      patch_id: "d".repeat(40),
+      actor_fp: "sha256:" + "e".repeat(64),
+      payload: {
+        patch_id: "d".repeat(40),
+        requested_by_fp: "sha256:" + "f".repeat(64),
+        pr_url: "https://github.com/acme/widget/pull/99",
+        repo: "acme/widget",
+        seat: 1,
+      },
+    };
+
+    await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "review body",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _peerWatchRulesForTest: null,
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [reReviewEvent],
+      }),
+    );
+
+    assert.equal(triplets.length, 1, "expected exactly 1 triplet for re-review-requested");
+    const rec = triplets[0]!;
+    assert.equal(rec["kind"], "re-review", `expected kind='re-review' in triplet: ${JSON.stringify(rec)}`);
+  });
+
+  it("pr-opened triplet does NOT have kind field (backwards-compat)", async () => {
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+
+    await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "review body",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _peerWatchRulesForTest: null,
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()], // pr-opened event
+      }),
+    );
+
+    assert.equal(triplets.length, 1, "expected 1 triplet for pr-opened");
+    const rec = triplets[0]!;
+    assert.ok(
+      !("kind" in rec) || rec["kind"] === undefined,
+      `pr-opened triplet should NOT have kind field, got: ${JSON.stringify(rec)}`,
+    );
+  });
+});

@@ -235,6 +235,15 @@ function initSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_pr_events_patch_id
       ON peer_review_events(patch_id);
   `);
+
+  // AGT-431: additive boot-safe column — pr_url on peer_review_patches.
+  // SQLite lacks ADD COLUMN IF NOT EXISTS, so we guard with PRAGMA table_info.
+  // Pre-existing rows keep NULL pr_url; new pr-opened broadcasts populate it.
+  const cols = db.prepare("PRAGMA table_info(peer_review_patches)").all() as Array<{ name: string }>;
+  const hasPrUrl = cols.some((c) => c.name === "pr_url");
+  if (!hasPrUrl) {
+    db.exec("ALTER TABLE peer_review_patches ADD COLUMN pr_url TEXT");
+  }
 }
 
 // ─── Peer-review patch helpers (AGT-427) ────────────────────────────
@@ -246,6 +255,8 @@ export interface PeerReviewPatchRow {
   head_sha: string;
   repo: string;
   broadcast_at: number;
+  /** PR URL stored at broadcast time (AGT-431). NULL for rows predating AGT-431. */
+  pr_url: string | null;
   seat_1_holder: string | null;
   seat_2_holder: string | null;
   seat_1_claimed_at: number | null;
@@ -258,6 +269,8 @@ export interface InsertPatchInput {
   base_sha: string;
   head_sha: string;
   repo: string;
+  /** PR URL to persist alongside the patch row (AGT-431). */
+  pr_url?: string | null;
   broadcast_at?: number;
 }
 
@@ -269,8 +282,8 @@ export function insertPatch(
 ): void {
   db.prepare(
     `INSERT INTO peer_review_patches
-       (patch_id, requested_by_fp, base_sha, head_sha, repo, broadcast_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+       (patch_id, requested_by_fp, base_sha, head_sha, repo, broadcast_at, pr_url)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     input.patch_id,
     input.requested_by_fp,
@@ -278,6 +291,7 @@ export function insertPatch(
     input.head_sha,
     input.repo,
     input.broadcast_at ?? Math.floor(now / 1000),
+    input.pr_url ?? null,
   );
 }
 
@@ -289,7 +303,7 @@ export function findPatch(
   const row = db
     .prepare(
       `SELECT patch_id, requested_by_fp, base_sha, head_sha, repo,
-              broadcast_at, seat_1_holder, seat_2_holder,
+              broadcast_at, pr_url, seat_1_holder, seat_2_holder,
               seat_1_claimed_at, seat_2_claimed_at
        FROM peer_review_patches WHERE patch_id = ?`,
     )
@@ -302,6 +316,7 @@ export function findPatch(
         head_sha: row.head_sha,
         repo: row.repo,
         broadcast_at: row.broadcast_at,
+        pr_url: row.pr_url ?? null,
         seat_1_holder: row.seat_1_holder ?? null,
         seat_2_holder: row.seat_2_holder ?? null,
         seat_1_claimed_at: row.seat_1_claimed_at ?? null,

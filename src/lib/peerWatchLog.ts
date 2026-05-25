@@ -31,6 +31,12 @@ export interface TripletRecord {
   event_payload: Record<string, unknown>;
   /** The triage decision that was returned. */
   decision: TriageDecision;
+  /**
+   * Optional event-kind tag (AGT-431). "re-review" distinguishes a
+   * `re-review-requested` triage from a fresh `pr-opened` triage in the
+   * triplet log. Absent for pr-opened events (for backwards compatibility).
+   */
+  kind?: string;
 }
 
 export interface AppendTripletInput extends TripletRecord {
@@ -58,6 +64,7 @@ export function appendTriplet(input: AppendTripletInput): void {
     rules_hash: input.rules_hash,
     event_payload: input.event_payload,
     decision: input.decision,
+    ...(input.kind !== undefined ? { kind: input.kind } : {}),
   };
 
   const line = JSON.stringify(record) + "\n";

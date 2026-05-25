@@ -471,3 +471,159 @@ describe("resolvePeerReviewsEnabled (AC 8)", () => {
     }
   });
 });
+
+// ─── AGT-431 AC 7: reviewer_filter — fanoutToSeatHoldersFiltered ──────
+
+import {
+  fanoutToSeatHoldersFiltered,
+} from "../src/server/peerReviews.ts";
+
+describe("AGT-431 AC 7: fanoutToSeatHoldersFiltered — reviewer_filter", () => {
+  afterEach(() => clearListenerRegistry());
+
+  it("delivers to all seat-holders when filter is empty", () => {
+    const received1: object[] = [];
+    const received2: object[] = [];
+    registerListener("SHA256:r1", { orgs: [], onEvent: (ev) => received1.push(ev) });
+    registerListener("SHA256:r2", { orgs: [], onEvent: (ev) => received2.push(ev) });
+
+    const notified = fanoutToSeatHoldersFiltered(
+      [{ fp: "SHA256:r1", seat: 1 }, { fp: "SHA256:r2", seat: 2 }],
+      { event_type: "re-review-requested", patch_id: "p", actor_fp: "SHA256:author", payload: { pr_url: null, repo: "acme/w" } },
+      [], // empty filter = all
+    );
+    assert.deepStrictEqual(notified.sort(), ["SHA256:r1", "SHA256:r2"].sort());
+  });
+
+  it("restricts delivery when reviewer_filter is non-empty", () => {
+    const received: string[] = [];
+    registerListener("SHA256:r1", { orgs: [], onEvent: () => received.push("r1") });
+    registerListener("SHA256:r2", { orgs: [], onEvent: () => received.push("r2") });
+
+    const notified = fanoutToSeatHoldersFiltered(
+      [{ fp: "SHA256:r1", seat: 1 }, { fp: "SHA256:r2", seat: 2 }],
+      { event_type: "re-review-requested", patch_id: "p", actor_fp: "SHA256:author", payload: {} },
+      ["SHA256:r1"], // filter to r1 only
+    );
+    assert.deepStrictEqual(notified, ["SHA256:r1"]);
+    assert.deepStrictEqual(received, ["r1"], "only r1 should have received the event");
+  });
+
+  it("injects seat number into each delivered event payload", () => {
+    const events: object[] = [];
+    registerListener("SHA256:r1", { orgs: [], onEvent: (ev) => events.push(ev) });
+    registerListener("SHA256:r2", { orgs: [], onEvent: (ev) => events.push(ev) });
+
+    fanoutToSeatHoldersFiltered(
+      [{ fp: "SHA256:r1", seat: 1 }, { fp: "SHA256:r2", seat: 2 }],
+      { event_type: "re-review-requested", patch_id: "p", actor_fp: "SHA256:author", payload: { pr_url: "https://example.com/pull/1" } },
+      [],
+    );
+
+    assert.equal(events.length, 2);
+    const payloads = events.map((e) => (e as { payload: { seat?: number } }).payload);
+    const seats = payloads.map((p) => p.seat).sort();
+    assert.deepStrictEqual(seats, [1, 2]);
+  });
+
+  it("returns empty array when no seat-holders match the filter", () => {
+    registerListener("SHA256:r1", { orgs: [], onEvent: () => {} });
+
+    const notified = fanoutToSeatHoldersFiltered(
+      [{ fp: "SHA256:r1", seat: 1 }],
+      { event_type: "re-review-requested", patch_id: "p", actor_fp: "SHA256:author", payload: {} },
+      ["SHA256:completely-different"], // filter that matches nobody
+    );
+    assert.deepStrictEqual(notified, []);
+  });
+
+  it("does not propagate listener errors to caller", () => {
+    registerListener("SHA256:bad", { orgs: [], onEvent: () => { throw new Error("boom"); } });
+
+    assert.doesNotThrow(() => {
+      fanoutToSeatHoldersFiltered(
+        [{ fp: "SHA256:bad", seat: 1 }],
+        { event_type: "re-review-requested", patch_id: "p", actor_fp: "SHA256:author", payload: {} },
+        [],
+      );
+    });
+  });
+});
+
+// ─── AGT-431 AC 10: additive migration — pr_url column boot-safe ──────
+
+import {
+  insertPatch,
+  findPatch,
+  openServerDb,
+} from "../src/lib/serverDb.ts";
+import {
+  mkdtempSync,
+  rmSync,
+} from "node:fs";
+import os from "node:os";
+
+describe("AGT-431 AC 10: pr_url column — additive migration + boot-safe", () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(os.tmpdir() + "/stamp-pr-url-");
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("insertPatch persists pr_url and findPatch returns it", () => {
+    const dbPath = tmpDir + "/test.db";
+    const db = openServerDb({ path: dbPath, skipChmod: true });
+    try {
+      insertPatch(db, {
+        patch_id: "p".repeat(40),
+        requested_by_fp: "SHA256:fp",
+        base_sha: "b".repeat(40),
+        head_sha: "c".repeat(40),
+        repo: "acme/widget",
+        pr_url: "https://github.com/acme/widget/pull/7",
+      });
+
+      const row = findPatch(db, "p".repeat(40));
+      assert.ok(row !== null, "findPatch should return the row");
+      assert.equal(row!.pr_url, "https://github.com/acme/widget/pull/7");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("findPatch returns pr_url: null for rows with no pr_url (pre-AGT-431 rows)", () => {
+    const dbPath = tmpDir + "/test2.db";
+    const db = openServerDb({ path: dbPath, skipChmod: true });
+    try {
+      // Insert without pr_url (defaults to null).
+      insertPatch(db, {
+        patch_id: "q".repeat(40),
+        requested_by_fp: "SHA256:fp",
+        base_sha: "b".repeat(40),
+        head_sha: "c".repeat(40),
+        repo: "acme/widget",
+        // pr_url omitted
+      });
+
+      const row = findPatch(db, "q".repeat(40));
+      assert.ok(row !== null, "findPatch should return the row");
+      assert.equal(row!.pr_url, null, "pr_url should be null for rows without pr_url");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("initSchema is idempotent — opening an existing DB twice does not error", () => {
+    const dbPath = tmpDir + "/idempotent.db";
+    // First open: creates schema + adds pr_url column.
+    const db1 = openServerDb({ path: dbPath, skipChmod: true });
+    db1.close();
+    // Second open: initSchema runs again; ALTER TABLE should be skipped (column already exists).
+    assert.doesNotThrow(() => {
+      const db2 = openServerDb({ path: dbPath, skipChmod: true });
+      db2.close();
+    }, "Second openServerDb call should not throw on existing DB");
+  });
+});

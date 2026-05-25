@@ -1,5 +1,5 @@
 /**
- * SSH verb: request a re-review of a previously broadcast PR (AGT-427).
+ * SSH verb: request a re-review of a previously broadcast PR (AGT-427/AGT-431).
  *
  * Only the original PR author (`requested_by_fp`) may call this verb.
  * Fans out a `re-review-requested` event to the active listeners that
@@ -7,7 +7,15 @@
  * Returns success even when no seat-holders are currently active.
  *
  * Payload fields (JSON):
- *   patch_id, requester_fp, signature
+ *   patch_id, requester_fp, reviewer_filter (optional string[]), signature
+ *
+ * `reviewer_filter` is a list of short_names (e.g. ["alice", "bob"]). The
+ * server resolves them to fingerprints server-side via `findUserByShortName`
+ * (DB already open here). An empty or absent array means "ping all
+ * seat-holders". Unknown names are silently skipped (emit a stderr note).
+ *
+ * The `re-review-requested` event delivered to each listener contains
+ * the richer AC-8 payload: patch_id, requested_by_fp, pr_url, repo, seat.
  *
  * Exit codes:
  *   0 — success (or feature-not-configured)
@@ -20,6 +28,7 @@ import {
   appendEvent,
   findPatch,
   findUserBySshFingerprint,
+  findUserByShortName,
   openServerDb,
   touchLastSeen,
 } from "../lib/serverDb.js";
@@ -27,7 +36,7 @@ import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 
 import {
-  fanoutToSeatHolders,
+  fanoutToSeatHoldersFiltered,
   notConfiguredResponse,
   resolvePeerReviewsEnabled,
 } from "./peerReviews.js";
@@ -48,6 +57,8 @@ async function readStdin(): Promise<Buffer> {
 interface ReReviewPayload {
   patch_id: string;
   requester_fp: string;
+  /** Optional list of reviewer short_names (resolved server-side to fps). */
+  reviewer_filter?: string[];
   signature: string;
 }
 
@@ -66,6 +77,13 @@ function parsePayload(raw: Buffer): ReReviewPayload {
   const p = parsed as Record<string, unknown>;
   for (const k of ["patch_id", "requester_fp", "signature"]) {
     if (typeof p[k] !== "string") fail(`re-review-request payload missing or invalid field: ${k}`, 4);
+  }
+
+  // reviewer_filter is optional; validate as array-of-strings if present.
+  if ("reviewer_filter" in p) {
+    if (!Array.isArray(p["reviewer_filter"]) || !p["reviewer_filter"].every((x) => typeof x === "string")) {
+      fail("reviewer_filter must be an array of strings when present", 4);
+    }
   }
 
   return p as unknown as ReReviewPayload;
@@ -126,18 +144,65 @@ async function main(): Promise<void> {
       );
     }
 
+    // Resolve reviewer_filter: short_names → fingerprints (server-side, DB already open).
+    // AC-3/7: the CLI forwards raw --reviewer names; we resolve them here.
+    let resolvedFilter: string[] = [];
+    const rawFilter = payload.reviewer_filter ?? [];
+    if (rawFilter.length > 0) {
+      for (const name of rawFilter) {
+        const userRow = findUserByShortName(db, name);
+        if (userRow) {
+          resolvedFilter.push(userRow.ssh_fp);
+        } else {
+          process.stderr.write(`note: reviewer_filter name "${name}" not found in membership DB; skipping\n`);
+        }
+      }
+      // Fail-safe: if a non-empty filter was requested but ALL names failed to
+      // resolve, delivering to everyone would violate least-privilege — the
+      // caller intended a restricted ping but got a broadcast. Treat this as
+      // "notify nobody" rather than silently expanding to all seat-holders.
+      if (resolvedFilter.length === 0) {
+        process.stderr.write(
+          `note: none of the supplied reviewer_filter names resolved to a known user; no seat-holders notified\n`,
+        );
+        process.stdout.write(
+          JSON.stringify({
+            ok: true,
+            patch_id: payload.patch_id,
+            seat_holders_notified: 0,
+            note: "no reviewer_filter names resolved; no seat-holders notified",
+          }) + "\n",
+        );
+        process.exit(0);
+      }
+    }
+    // Empty resolvedFilter (rawFilter was empty) → no filter applied (all seat-holders notified).
+
+    // Build the seat map for the two seats with per-seat metadata.
+    const seatMap: Array<{ fp: string; seat: 1 | 2 }> = [];
+    if (patch.seat_1_holder) seatMap.push({ fp: patch.seat_1_holder, seat: 1 });
+    if (patch.seat_2_holder) seatMap.push({ fp: patch.seat_2_holder, seat: 2 });
+
     const now = Date.now();
-    const event = {
-      event_type: "re-review-requested",
+
+    // Build the richer AC-8 event payload.
+    const eventPayload = {
       patch_id: payload.patch_id,
-      actor_fp: payload.requester_fp,
-      payload: { patch_id: payload.patch_id, requester_fp: payload.requester_fp },
+      requested_by_fp: payload.requester_fp,
+      pr_url: patch.pr_url ?? null,
+      repo: patch.repo,
     };
 
-    // Fan out to active seat-holders (in-process stub; see peerReviews.ts).
-    const notified = fanoutToSeatHolders(
-      [patch.seat_1_holder, patch.seat_2_holder],
-      event,
+    // Fan out to active seat-holders with optional filter.
+    const notified = fanoutToSeatHoldersFiltered(
+      seatMap,
+      {
+        event_type: "re-review-requested",
+        patch_id: payload.patch_id,
+        actor_fp: payload.requester_fp,
+        payload: eventPayload,
+      },
+      resolvedFilter,
     );
 
     appendEvent(
@@ -145,9 +210,15 @@ async function main(): Promise<void> {
       payload.patch_id,
       "re-review-requested",
       payload.requester_fp,
-      { notified_fps: notified },
+      { notified_fps: notified, reviewer_filter: rawFilter },
       now,
     );
+
+    if (notified.length === 0) {
+      process.stderr.write(
+        `note: no active seat-holders to notify for patch ${payload.patch_id}\n`,
+      );
+    }
 
     process.stdout.write(
       JSON.stringify({
