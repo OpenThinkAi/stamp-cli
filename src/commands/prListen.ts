@@ -181,6 +181,35 @@ function canonicalSign(keypair: Keypair, payloadBody: object): string {
 }
 
 /**
+ * Build the WebSocket URL for the `/peer/listen` endpoint from a `ServerConfig`.
+ *
+ * Returns `{ ok: true, url }` when `wsUrl` is set (strips a trailing `/` from
+ * the origin before appending `/peer/listen`).
+ * Returns `{ ok: false, reason }` with an actionable error message when
+ * `wsUrl` is absent — the SSH host:port cannot be used for WS connections.
+ *
+ * Exported for unit testing.
+ */
+export function buildWsPeerListenUrl(
+  serverCfg: ServerConfig,
+): { ok: true; url: string } | { ok: false; reason: string } {
+  if (!serverCfg.wsUrl) {
+    return {
+      ok: false,
+      reason:
+        "WS transport requires 'ws_url' in ~/.stamp/server.yml " +
+        "(e.g. ws_url: wss://stamp-cli-production.up.railway.app). " +
+        "The SSH host:port cannot be used for WebSocket connections — " +
+        "the HTTP server lives at a different URL.",
+    };
+  }
+  return {
+    ok: true,
+    url: `${serverCfg.wsUrl.replace(/\/$/, "")}/peer/listen`,
+  };
+}
+
+/**
  * Connect to the stamp-server's WS `/peer/listen` endpoint, complete the
  * signed-challenge handshake, and return a Promise that resolves to a
  * readable event source: an async generator that yields `PeerReviewEvent`
@@ -205,9 +234,20 @@ async function connectWsTransport(
   | { ok: true; ws: WebSocket; nextEvent: () => Promise<PeerReviewEvent | null> }
   | { ok: false; reason: string }
 > {
-  // In-test: use the injected WS socket (skip the real connect).
-  const url = `ws://${serverCfg.host}:${serverCfg.port}/peer/listen`;
-  const ws: WebSocket = wsSocketOverride ?? new WebSocket(url);
+  // In-test: use the injected WS socket (skip URL resolution entirely.
+  // For real connections, resolve the URL via buildWsPeerListenUrl; it fails
+  // fast with an actionable error when wsUrl is missing (the SSH host:port
+  // cannot be used for WS — it speaks sshd, not HTTP).
+  let ws: WebSocket;
+  if (wsSocketOverride) {
+    ws = wsSocketOverride;
+  } else {
+    const urlResult = buildWsPeerListenUrl(serverCfg);
+    if (!urlResult.ok) {
+      return { ok: false, reason: urlResult.reason };
+    }
+    ws = new WebSocket(urlResult.url);
+  }
 
   return new Promise((resolve) => {
     let authenticated = false;

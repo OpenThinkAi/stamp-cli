@@ -29,7 +29,7 @@ import {
   createPublicKey,
 } from "node:crypto";
 
-import { runPrListen, type PrListenOptions } from "../src/commands/prListen.ts";
+import { runPrListen, buildWsPeerListenUrl, type PrListenOptions } from "../src/commands/prListen.ts";
 import {
   clearListenerRegistry,
   type PeerReviewEvent,
@@ -1526,6 +1526,156 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
       triplets[0]!["reason"],
       "daily cap hit",
       "re-review triplet reason should be 'daily cap hit' when cap is hit",
+    );
+  });
+});
+
+// ─── ws_url config: buildWsPeerListenUrl unit tests ──────────────────
+
+describe("buildWsPeerListenUrl: URL construction from ServerConfig", () => {
+  it("returns ok:false with actionable message when wsUrl is absent", () => {
+    const cfg = { host: "ssh.example.com", port: 2222, user: "git", repoRootPrefix: "/srv/git" };
+    const result = buildWsPeerListenUrl(cfg);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.ok(
+        result.reason.includes("ws_url"),
+        `reason should mention 'ws_url': ${result.reason}`,
+      );
+      assert.ok(
+        result.reason.includes("~/.stamp/server.yml"),
+        `reason should mention '~/.stamp/server.yml': ${result.reason}`,
+      );
+      assert.ok(
+        result.reason.includes("SSH host:port"),
+        `reason should mention 'SSH host:port': ${result.reason}`,
+      );
+    }
+  });
+
+  it("builds <wsUrl>/peer/listen when wsUrl is set (no trailing slash)", () => {
+    const cfg = {
+      host: "ssh.example.com",
+      port: 2222,
+      user: "git",
+      repoRootPrefix: "/srv/git",
+      wsUrl: "wss://stamp-cli-production.up.railway.app",
+    };
+    const result = buildWsPeerListenUrl(cfg);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.url, "wss://stamp-cli-production.up.railway.app/peer/listen");
+    }
+  });
+
+  it("strips trailing slash from wsUrl before appending /peer/listen", () => {
+    const cfg = {
+      host: "ssh.example.com",
+      port: 2222,
+      user: "git",
+      repoRootPrefix: "/srv/git",
+      wsUrl: "wss://stamp-cli-production.up.railway.app/",
+    };
+    const result = buildWsPeerListenUrl(cfg);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.url, "wss://stamp-cli-production.up.railway.app/peer/listen");
+    }
+  });
+
+  it("works with ws:// origin as well", () => {
+    const cfg = {
+      host: "ssh.example.com",
+      port: 2222,
+      user: "git",
+      repoRootPrefix: "/srv/git",
+      wsUrl: "ws://localhost:3000",
+    };
+    const result = buildWsPeerListenUrl(cfg);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.url, "ws://localhost:3000/peer/listen");
+    }
+  });
+});
+
+// ─── ws_url config: --ws with no wsUrl → exit 1 + actionable error ───
+
+describe("--ws transport: no wsUrl configured → exit 1 with actionable error", () => {
+  it("exits 1 and emits actionable error when useWsTransport=true but wsUrl is absent", async () => {
+    const fakeKeypair = genKeypair();
+
+    // Server config without wsUrl — simulates a server.yml that only has
+    // host/port (the SSH endpoint), not the HTTP ws_url.
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        useWsTransport: true,
+        _keypairForTest: fakeKeypair,
+        // No _wsSocketForTest → the code will try to build a real URL.
+        // No wsUrl on the config → buildWsPeerListenUrl returns ok:false.
+        _eventQueueForTest: [],
+      }),
+    );
+
+    assert.equal(exitCode, 1, `expected exit 1 when wsUrl is absent, got ${exitCode}`);
+    assert.ok(
+      stderr.includes("ws_url"),
+      `stderr should mention 'ws_url': ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("~/.stamp/server.yml"),
+      `stderr should mention '~/.stamp/server.yml': ${stderr}`,
+    );
+  });
+
+  it("succeeds (exit 0) when useWsTransport=true and _wsSocketForTest is provided (seam bypasses URL check)", async () => {
+    // When _wsSocketForTest is injected, URL resolution is skipped entirely —
+    // this is the path all existing WS tests use. Verify it still works when
+    // wsUrl is absent (the seam takes precedence).
+    const fakeKeypair = genKeypair();
+
+    // A minimal fake WebSocket that immediately closes (simulating auth failure
+    // so the test terminates quickly without a real server).
+    const { WebSocket: WsClass } = await import("ws");
+    const fakeWs = Object.assign(Object.create(WsClass.prototype), {
+      _listeners: {} as Record<string, ((...args: unknown[]) => void)[]>,
+      on(event: string, fn: (...args: unknown[]) => void) {
+        if (!this._listeners[event]) this._listeners[event] = [];
+        this._listeners[event]!.push(fn);
+        return this;
+      },
+      send() {},
+      close() {},
+      _emit(event: string, ...args: unknown[]) {
+        for (const fn of this._listeners[event] ?? []) fn(...args);
+      },
+    });
+
+    // Immediately emit a close before auth so connectWsTransport returns ok:false.
+    // This causes runPrListen to exit 1 (WS connect failed) — not 0 — but the
+    // key assertion is that it does NOT exit 1 with the "ws_url missing" error.
+    setTimeout(() => {
+      (fakeWs as { _emit: (e: string, ...a: unknown[]) => void })._emit("close", 4401, Buffer.from("test close"));
+    }, 0);
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        useWsTransport: true,
+        _keypairForTest: fakeKeypair,
+        _wsSocketForTest: fakeWs as unknown as import("ws").WebSocket,
+        _eventQueueForTest: [],
+      }),
+    );
+
+    // Should exit 1 due to WS close-before-auth, NOT due to missing ws_url.
+    assert.equal(exitCode, 1);
+    assert.ok(
+      !stderr.includes("'ws_url'") || stderr.includes("WS connect failed"),
+      `should NOT emit ws_url-missing error when socket seam is used: ${stderr}`,
     );
   });
 });
