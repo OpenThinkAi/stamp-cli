@@ -36,13 +36,18 @@
 
 import {
   createHmac,
+  randomBytes,
   timingSafeEqual,
   type BinaryLike,
 } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { WebSocketServer, type WebSocket } from "ws";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
 import { insertUser, openServerDb } from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
+import { verifyBytes } from "../lib/signing.js";
+import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import {
   DEFAULT_TRASH_DIR,
   purgeTrash,
@@ -54,6 +59,13 @@ import {
   type CloneOrFetchOpts,
   type RefreshResult,
 } from "./prompts-cache.js";
+import {
+  resolvePeerReviewsEnabled,
+  bareRepoPath,
+  verifyOperatorAtBase,
+  verifyPeerPayloadSignature,
+} from "./peerReviews.js";
+import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 
 const DEFAULT_PORT = 8080;
 const MAX_BODY_BYTES = 16 * 1024;
@@ -1101,6 +1113,372 @@ export function __getPollStateForTests(): {
   };
 }
 
+// ─── WebSocket peer-review transport (AGT-434) ───────────────────────
+//
+// Mounted on the same HTTP server as the invite-accept and webhook endpoints.
+// The WS endpoint is dark unless STAMP_PEER_REVIEWS_ENABLED=1. When enabled,
+// the upgrade flow is:
+//
+//   1. Client sends WS upgrade request to `/peer/listen`.
+//   2. Server issues a random nonce challenge (`{type:"challenge",nonce:<hex>}`).
+//   3. Client signs the nonce with its Ed25519 operator key and responds
+//      with `{type:"auth",fingerprint:<fp>,signature:<base64>}`.
+//   4. Server verifies the signature against the operator's `.pub` key in the
+//      global trusted-key store (no per-repo base_sha at handshake time;
+//      per-repo verification is deferred to per-message verify).
+//   5. Socket is bound to the verified fingerprint; subsequent inbound messages
+//      carry per-payload Ed25519 signatures that the server verifies against
+//      the repo's pubkey at base_sha (load-bearing per AC 3).
+//   6. Outbound: the server pushes PeerReviewEvent objects to the socket as
+//      `{type:"event",...event}` frames.
+//
+// Nonce TTL: NONCE_TTL_MS (default 30 s). The nonce is consumed on first use
+// (single-use) so a captured challenge cannot be replayed even within the TTL.
+
+const NONCE_TTL_MS = 30_000;
+const WS_HANDSHAKE_TIMEOUT_MS = 30_000;
+// Ed25519 fingerprints are `SHA256:<43-44 base64 chars>`.
+// Validated before any filesystem path construction to prevent path traversal.
+const WS_FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/=]{43,44}$/;
+// WS path that `stamp pr listen --ws` connects to.
+export const WS_PEER_LISTEN_PATH = "/peer/listen";
+// Server-managed trusted-key directory for the WS handshake. On the WS path
+// we load keys from the server-global location (not per-repo at base_sha —
+// that per-repo check happens on each inbound message).
+const SERVER_TRUSTED_KEYS_DIR = process.env["STAMP_TRUSTED_KEYS_DIR"] ?? "/srv/git/.stamp/trusted-keys";
+
+/** Pending nonce state (for single-use enforcement + TTL). */
+interface PendingNonce {
+  nonce: string;
+  expiresAt: number;
+}
+
+/** Per-socket state bound after successful handshake. */
+interface WsSocketState {
+  fingerprint: string;
+  orgs: string[];
+}
+
+// Module-scoped WS state for test seams.
+let _wssInstance: WebSocketServer | null = null;
+
+/** Map from WS socket → bound fingerprint+orgs (set after auth). */
+const wsSocketState = new WeakMap<WebSocket, WsSocketState>();
+/** Active WS connections keyed by fingerprint (for event fanout). */
+const wsConnections = new Map<string, WebSocket>();
+/** Single-use nonce store: nonce hex → PendingNonce. */
+const pendingNonces = new Map<string, PendingNonce>();
+
+/** Generate a fresh 32-byte nonce as a hex string. */
+function generateNonce(): string {
+  return randomBytes(32).toString("hex");
+}
+
+/** Expire stale nonces (called lazily before nonce operations). */
+function sweepNonces(): void {
+  const now = Date.now();
+  for (const [n, entry] of pendingNonces) {
+    if (entry.expiresAt <= now) pendingNonces.delete(n);
+  }
+}
+
+/**
+ * Verify the WS handshake auth message. Loads the operator's PEM from
+ * `SERVER_TRUSTED_KEYS_DIR/<fingerprint>.pub` (global store — same keys that
+ * SSH `authorized_keys` uses for the stamp-server).
+ *
+ * Returns `{ ok: true }` or `{ ok: false, reason }`.
+ */
+function verifyWsHandshake(
+  fingerprint: string,
+  nonce: string,
+  signatureBase64: string,
+): { ok: true } | { ok: false; reason: string } {
+  // Validate fingerprint format before any filesystem path construction.
+  // Ed25519 fingerprints are `SHA256:<43-44 base64 chars>`. Rejecting here
+  // prevents path traversal via a crafted fingerprint (e.g. `../../tmp/evil`).
+  if (!WS_FINGERPRINT_RE.test(fingerprint)) {
+    return { ok: false, reason: `fingerprint format invalid: ${fingerprint}` };
+  }
+
+  // Look up and consume the nonce.
+  sweepNonces();
+  const entry = pendingNonces.get(nonce);
+  if (!entry) return { ok: false, reason: "nonce not found or expired" };
+  if (entry.expiresAt <= Date.now()) {
+    pendingNonces.delete(nonce);
+    return { ok: false, reason: "nonce expired" };
+  }
+  // Consume: single-use enforcement.
+  pendingNonces.delete(nonce);
+
+  // Load PEM from global server trusted-keys dir.
+  let pem: string;
+  try {
+    // readFileSync from node:fs — the server-global dir is a real fs path,
+    // not a git-tree path (no base_sha needed for the handshake).
+    // The fingerprint is already validated above; path.basename is not needed.
+    pem = readFileSync(
+      `${SERVER_TRUSTED_KEYS_DIR}/${fingerprint}.pub`,
+      "utf8",
+    );
+  } catch {
+    return { ok: false, reason: `pubkey for ${fingerprint} not found` };
+  }
+
+  let valid: boolean;
+  try {
+    valid = verifyBytes(pem, Buffer.from(nonce, "utf8"), signatureBase64);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `signature verify threw: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return valid ? { ok: true } : { ok: false, reason: "signature invalid" };
+}
+
+/**
+ * Push a PeerReviewEvent to the WS client identified by `fingerprint`.
+ * Returns true when the socket was found and the message was queued;
+ * false when no active WS connection exists for that fingerprint.
+ */
+export function pushEventToWsClient(
+  fingerprint: string,
+  event: PeerReviewEvent,
+): boolean {
+  const ws = wsConnections.get(fingerprint);
+  if (!ws) return false;
+  try {
+    ws.send(JSON.stringify({ type: "event", ...event }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Handle an inbound WS message (post-auth).
+ * Expected shapes:
+ *   {type:"pr-opened", ...payload, signature}
+ *   {type:"claim-seat", ...payload, signature}
+ *   {type:"re-review-request", ...payload, signature}
+ *
+ * Verifies the Ed25519 signature against the repo's trusted-keys at base_sha
+ * (via `verifyPeerPayloadSignature` from peerReviews.ts), then verifies the
+ * sender has operator capability via `verifyOperatorAtBase`. Returns a JSON
+ * response string; a verified message returns `{ok:true}` (full peer-review
+ * fanout is a stub pending AGT-435). Returns a JSON error string on failure.
+ */
+function handleWsMessage(
+  state: WsSocketState,
+  raw: string,
+): string | null {
+  let msg: Record<string, unknown>;
+  try {
+    msg = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return JSON.stringify({ ok: false, error: "message_not_json" });
+  }
+
+  const msgType = typeof msg["type"] === "string" ? msg["type"] : null;
+  if (!msgType) {
+    return JSON.stringify({ ok: false, error: "message_type_required" });
+  }
+
+  // For pr-opened / claim-seat / re-review-request: verify the signature.
+  const verifiableTypes = ["pr-opened", "claim-seat", "re-review-request"];
+  if (verifiableTypes.includes(msgType)) {
+    const signature = typeof msg["signature"] === "string" ? msg["signature"] : null;
+    if (!signature) {
+      return JSON.stringify({ ok: false, error: "signature_required" });
+    }
+
+    // Get the repo and base_sha for the key lookup.
+    const repo = typeof msg["repo"] === "string" ? msg["repo"] : null;
+    const base_sha = typeof msg["base_sha"] === "string" ? msg["base_sha"] : null;
+
+    if (!repo || !base_sha) {
+      return JSON.stringify({ ok: false, error: "repo_and_base_sha_required" });
+    }
+
+    // Validate repo format (prevent path traversal).
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) {
+      return JSON.stringify({ ok: false, error: "repo_format_invalid" });
+    }
+
+    if (!/^[0-9a-f]{40}$/.test(base_sha)) {
+      return JSON.stringify({ ok: false, error: "base_sha_format_invalid" });
+    }
+
+    // Build the payload-without-signature for canonical serialization.
+    // `verifyPeerPayloadSignature` takes pre-serialized canonical bytes, so
+    // we produce them here (same serializer the client used in canonicalSign).
+    const { signature: _sig, type: _type, ...payloadWithoutSig } = msg;
+    const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
+
+    const gitDir = bareRepoPath(repo);
+    const verifyResult = verifyPeerPayloadSignature(
+      gitDir,
+      base_sha,
+      state.fingerprint,
+      canonicalBytes,
+      signature,
+    );
+
+    if (!verifyResult.ok) {
+      logLine(
+        "warn",
+        `WS ${msgType}: signature verification failed for fp=${state.fingerprint}: ${verifyResult.reason}`,
+      );
+      return JSON.stringify({ ok: false, error: "signature_verification_failed" });
+    }
+
+    // Also verify operator capability via manifest.
+    const authResult = verifyOperatorAtBase(gitDir, base_sha, state.fingerprint);
+    if (!authResult.ok) {
+      logLine(
+        "warn",
+        `WS ${msgType}: operator auth failed for fp=${state.fingerprint}: ${authResult.reason}`,
+      );
+      return JSON.stringify({ ok: false, error: "operator_auth_failed" });
+    }
+
+    logLine(
+      "info",
+      `WS ${msgType}: signature + operator-auth verified for fp=${state.fingerprint} repo=${repo}`,
+    );
+    return JSON.stringify({ ok: true, type: msgType, message: "verified" });
+  }
+
+  // Unrecognised message type — silently acknowledge.
+  return JSON.stringify({ ok: false, error: `unknown_message_type: ${msgType}` });
+}
+
+/**
+ * Attach a WebSocketServer to an existing HTTP server.
+ * Called from `startServer` when `resolvePeerReviewsEnabled()` is true.
+ * The WSS is also stored in `_wssInstance` for test access.
+ *
+ * The upgrade handler checks the request path is exactly WS_PEER_LISTEN_PATH
+ * and rejects all other upgrade requests.
+ */
+export function attachWsServer(
+  httpServer: ReturnType<typeof createServer>,
+): WebSocketServer {
+  const wss = new WebSocketServer({ noServer: true });
+  _wssInstance = wss;
+
+  httpServer.on("upgrade", (req, socket, head) => {
+    const url = req.url ?? "";
+    if (url !== WS_PEER_LISTEN_PATH) {
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
+  });
+
+  wss.on("connection", (ws: WebSocket) => {
+    logLine("info", "WS peer/listen: new connection, issuing challenge");
+
+    // Issue a nonce challenge.
+    sweepNonces();
+    const nonce = generateNonce();
+    pendingNonces.set(nonce, { nonce, expiresAt: Date.now() + NONCE_TTL_MS });
+    ws.send(JSON.stringify({ type: "challenge", nonce }));
+
+    // Set handshake timeout — drop the connection if auth doesn't arrive.
+    const handshakeTimer = setTimeout(() => {
+      if (!wsSocketState.has(ws)) {
+        logLine("warn", "WS peer/listen: handshake timeout — closing socket");
+        ws.close(4401, "handshake_timeout");
+      }
+    }, WS_HANDSHAKE_TIMEOUT_MS);
+
+    ws.on("message", (data: Buffer | string) => {
+      const raw = typeof data === "string" ? data : data.toString("utf8");
+
+      // Phase 1: handshake (socket not yet authenticated).
+      if (!wsSocketState.has(ws)) {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          ws.close(4400, "auth_message_not_json");
+          return;
+        }
+        if (msg["type"] !== "auth") {
+          ws.close(4400, "expected_auth_message");
+          return;
+        }
+        const fingerprint = typeof msg["fingerprint"] === "string" ? msg["fingerprint"] : null;
+        const signature = typeof msg["signature"] === "string" ? msg["signature"] : null;
+        const nonce = typeof msg["nonce"] === "string" ? msg["nonce"] : null;
+        if (!fingerprint || !signature || !nonce) {
+          ws.close(4400, "auth_fields_missing");
+          return;
+        }
+
+        const result = verifyWsHandshake(fingerprint, nonce, signature);
+        if (!result.ok) {
+          logLine("warn", `WS peer/listen: auth failed for fp=${fingerprint}: ${result.reason}`);
+          ws.close(4401, "auth_failed");
+          return;
+        }
+
+        clearTimeout(handshakeTimer);
+        const orgs = Array.isArray(msg["orgs"])
+          ? (msg["orgs"] as unknown[]).filter((o): o is string => typeof o === "string")
+          : [];
+        const state: WsSocketState = { fingerprint, orgs };
+        wsSocketState.set(ws, state);
+        wsConnections.set(fingerprint, ws);
+        logLine("info", `WS peer/listen: authenticated fp=${fingerprint} orgs=[${orgs.join(",")}]`);
+        ws.send(JSON.stringify({ type: "authenticated", fingerprint }));
+        return;
+      }
+
+      // Phase 2: authenticated message handling.
+      const state = wsSocketState.get(ws)!;
+      const response = handleWsMessage(state, raw);
+      if (response !== null) {
+        ws.send(response);
+      }
+    });
+
+    ws.on("close", () => {
+      clearTimeout(handshakeTimer);
+      const state = wsSocketState.get(ws);
+      if (state) {
+        wsConnections.delete(state.fingerprint);
+        wsSocketState.delete(ws);
+        logLine("info", `WS peer/listen: disconnected fp=${state.fingerprint}`);
+      }
+    });
+
+    ws.on("error", (err) => {
+      logLine("warn", `WS peer/listen: socket error: ${err.message}`);
+    });
+  });
+
+  logLine("info", `WS peer/listen: server attached at ${WS_PEER_LISTEN_PATH}`);
+  return wss;
+}
+
+/** Test-only: get the active WSS instance (null if not started). */
+export function __getWssForTests(): WebSocketServer | null {
+  return _wssInstance;
+}
+
+/** Test-only: clear all WS connections (for teardown). */
+export function __clearWsConnectionsForTests(): void {
+  wsConnections.clear();
+  pendingNonces.clear();
+}
+
 // ─── Server lifecycle ─────────────────────────────────────────────────
 
 export const HTTP_DEFAULT_PORT = DEFAULT_PORT;
@@ -1133,6 +1511,12 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     // AGT-423: arm the trash-retention sweep (independent of Phase B; runs
     // whenever STAMP_TRASH_SWEEP_INTERVAL_SEC != 0).
     startTrashSweepWorker();
+    // AGT-434: attach the WS peer-review transport only when the feature is
+    // enabled. The upgrade handler is inert when the flag is unset, so
+    // standard HTTP-only deploys see no behaviour change.
+    if (resolvePeerReviewsEnabled()) {
+      attachWsServer(server);
+    }
   });
   // Symmetric shutdown: when the server closes (operator-driven or test
   // cleanup), stop the poll worker so the interval doesn't leak into
@@ -1142,6 +1526,11 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
   server.once("close", () => {
     stopPromptsPollWorker();
     stopTrashSweepWorker();
+    // Close the WS server if it was attached.
+    if (_wssInstance) {
+      _wssInstance.close();
+      _wssInstance = null;
+    }
   });
   return server;
 }

@@ -832,13 +832,17 @@ pr
     "--server <host:port>",
     "override ~/.stamp/server.yml with an inline endpoint",
   )
+  .option(
+    "--ws",
+    "use the WebSocket transport instead of the default polling transport",
+  )
   .addHelpText(
     "after",
     `
 Subscribes the operator's stamp identity to PR-opened events for the given orgs,
 then loops indefinitely:
-  - Receives pr-opened events via the in-process fanout registry (wire-frame;
-    real cross-process delivery via WebSocket transport is not yet implemented)
+  - Receives pr-opened events via the WebSocket transport (--ws) or the default
+    polling transport
   - Applies author-exclusion (skips own PRs)
   - Claims a reviewer seat; runs the builtin-default review via the Claude Agent SDK
   - Posts the result via 'gh pr review --comment'
@@ -855,13 +859,13 @@ Prerequisites:
   - stamp-server config at ~/.stamp/server.yml ('stamp server config <host:port>' to set)
 `,
   )
-  .action(async (opts: { org: string[]; server?: string }) => {
+  .action(async (opts: { org: string[]; server?: string; ws?: boolean }) => {
     const orgs: string[] = Array.isArray(opts.org) ? opts.org : [opts.org];
     if (orgs.length === 0) {
       process.stderr.write(`error: --org is required (repeat for multiple orgs)\n`);
       process.exit(2);
     }
-    await runPrListen({ orgs, server: opts.server });
+    await runPrListen({ orgs, server: opts.server, useWsTransport: opts.ws ?? false });
   });
 
 pr

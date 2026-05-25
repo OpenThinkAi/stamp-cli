@@ -354,6 +354,21 @@ export function canonicalSerializePrOpened(body: PrOpenedPayloadBody): Buffer {
 }
 
 /**
+ * Generic canonical serialization for any peer-review payload body (AGT-434).
+ * Covers the seat/ping payload shapes: `claim-seat`, `heartbeat`,
+ * `release-seat`, and `re-review-request`. Callers MUST pass the body
+ * WITHOUT the `signature` field (omit it before serializing for signing,
+ * strip it before serializing for verification).
+ *
+ * Uses the same `sortKeysDeep` + `JSON.stringify` form as
+ * `canonicalSerializePrOpened` so the verifier bytes are identical
+ * regardless of which payload shape is being signed.
+ */
+export function canonicalSerializePeerPayload(body: object): Buffer {
+  return Buffer.from(JSON.stringify(sortKeysDeep(body)), "utf8");
+}
+
+/**
  * Serialize the full envelope to bytes for storage (e.g. into the
  * commit trailer via `payloadToTrailerValue`). Not the signing target
  * — the signature is over `canonicalSerializePayload(envelope.payload)`,
