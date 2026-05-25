@@ -22,6 +22,24 @@ export type Verdict = "approved" | "changes_requested" | "denied";
  */
 export const REVIEW_ROW_SCHEMA_V4 = 5;
 
+/**
+ * Per-server runtime status recorded when `invokeReviewer` reads the SDK
+ * `init` system message. Persisted as JSON in the `mcp_servers_at_init`
+ * column and surfaced in the per-review attestation field of the same name.
+ *
+ * `declared: true` = this server was listed in the reviewer's `mcp_servers`
+ * config (not stamp-internal). `optional` reflects the per-server flag from
+ * config at invocation time. `error` is the SDK-provided error string, only
+ * present when `status` is not `connected`.
+ */
+export interface McpServerAtInit {
+  name: string;
+  status: string;
+  optional: boolean;
+  declared: boolean;
+  error?: string;
+}
+
 export interface ReviewRow {
   id: number;
   reviewer: string;
@@ -32,6 +50,9 @@ export interface ReviewRow {
   /** JSON-encoded ToolCall[] (see lib/toolCalls.ts), or null for reviews
    *  recorded before Step 4 shipped or where no tools were invoked. */
   tool_calls: string | null;
+  /** JSON-encoded McpServerAtInit[] (see AGT-246), or null for reviews
+   *  recorded before this shipped or where no MCP servers were declared. */
+  mcp_servers_at_init: string | null;
   /** SHA-256 hex of the diff bytes the reviewer evaluated. Null for rows
    *  recorded before 1.8.0 shipped. Cache key with prompt_hash + reviewer. */
   diff_hash: string | null;
@@ -74,6 +95,8 @@ export interface RecordReviewInput {
   issues?: string | null;
   /** JSON-encoded ToolCall[] or null. See lib/toolCalls.ts. */
   tool_calls?: string | null;
+  /** JSON-encoded McpServerAtInit[] or null. See AGT-246. */
+  mcp_servers_at_init?: string | null;
   /** SHA-256 hex of the diff bytes (caller computes; see commands/review.ts).
    *  Optional for pre-1.8.0 call sites that haven't been updated yet. */
   diff_hash?: string | null;
@@ -203,6 +226,12 @@ function initSchema(db: DatabaseSync): void {
   if (!have.has("schema_version")) {
     db.exec("ALTER TABLE reviews ADD COLUMN schema_version INTEGER");
   }
+  // AGT-246: per-review MCP server runtime status. JSON-encoded
+  // McpServerAtInit[], null for rows recorded before this shipped or where
+  // no MCP servers were declared. Additive only — no NOT NULL, no DEFAULT.
+  if (!have.has("mcp_servers_at_init")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN mcp_servers_at_init TEXT");
+  }
   // Cache index created here (after the migration ALTERs above) so it works
   // on both fresh installs and upgrades. Repeat-safe.
   db.exec(`
@@ -231,8 +260,8 @@ export function recordReview(
        (reviewer, base_sha, head_sha, verdict, issues, tool_calls,
         diff_hash, prompt_hash,
         server_approval_json, server_signature_b64, server_key_id,
-        schema_version)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        schema_version, mcp_servers_at_init)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
     input.reviewer,
@@ -247,6 +276,7 @@ export function recordReview(
     sa?.signature_b64 ?? null,
     sa?.server_key_id ?? null,
     schemaVersion,
+    input.mcp_servers_at_init ?? null,
   );
   return Number(result.lastInsertRowid);
 }
@@ -377,10 +407,11 @@ export interface LatestReview {
   verdict: Verdict;
   issues: string | null;
   tool_calls: string | null;
+  mcp_servers_at_init: string | null;
 }
 
 const LATEST_VERDICTS_SQL = `
-  SELECT id, reviewer, verdict, issues, tool_calls
+  SELECT id, reviewer, verdict, issues, tool_calls, mcp_servers_at_init
   FROM (
     SELECT
       id,
@@ -388,6 +419,7 @@ const LATEST_VERDICTS_SQL = `
       verdict,
       issues,
       tool_calls,
+      mcp_servers_at_init,
       ROW_NUMBER() OVER (
         PARTITION BY reviewer
         ORDER BY created_at DESC, id DESC
@@ -497,7 +529,7 @@ export function reviewHistory(
     SELECT id, reviewer, base_sha, head_sha, verdict, issues,
            tool_calls, diff_hash, prompt_hash,
            server_approval_json, server_signature_b64, server_key_id,
-           schema_version, created_at
+           schema_version, mcp_servers_at_init, created_at
     FROM reviews
     ORDER BY created_at DESC, id DESC
     LIMIT ?

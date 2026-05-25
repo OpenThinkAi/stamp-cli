@@ -108,9 +108,11 @@ export async function invokeLocalReviewer(
     reviewer: params.reviewer,
     prose: result.prose,
     verdict: result.verdict,
-    // One-shot path makes no tool calls and has no retro channel.
+    // One-shot path makes no tool calls, has no retro channel, and runs
+    // outside the Claude Agent SDK loop — no MCP server status to record.
     tool_calls: [],
     retros: [],
+    mcp_servers_at_init: [],
   };
 }
 

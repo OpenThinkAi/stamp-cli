@@ -66,7 +66,7 @@ import {
   type TrustAnchorSignatureV4,
 } from "../lib/attestationV4.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
-import { latestReviews, openDb, serverApprovalsFor } from "../lib/db.js";
+import { latestReviews, openDb, serverApprovalsFor, type McpServerAtInit } from "../lib/db.js";
 import {
   listFilesAtRef,
   pathExistsAtRef,
@@ -679,11 +679,13 @@ function buildV2Envelope(input: V2BuildInput): EnvelopeBuildResult {
       const toolCalls = redactToolCallsForAttestation(
         parseToolCalls(rev.tool_calls),
       );
+      const mcpAtInit = parseMcpServersAtInitAttest(rev.mcp_servers_at_init);
       return {
         reviewer: rev.reviewer,
         verdict: rev.verdict,
         review_sha: hashHex(rev.issues ?? ""),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        ...(mcpAtInit.length > 0 ? { mcp_servers_at_init: mcpAtInit } : {}),
       };
     });
   } finally {
@@ -1130,6 +1132,23 @@ function pushBranchAndAttestation(
 
 function hashHex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+/**
+ * Parse the JSON-encoded McpServerAtInit[] from the DB column. Returns an
+ * empty array for null/invalid inputs (pre-AGT-246 rows or reviewers with
+ * no MCP servers). Named differently from merge.ts to avoid naming collisions
+ * when the two files are read together in tests.
+ */
+function parseMcpServersAtInitAttest(raw: string | null): McpServerAtInit[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as McpServerAtInit[];
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 function readReviewerSource(

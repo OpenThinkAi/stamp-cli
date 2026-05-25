@@ -743,6 +743,8 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           verdict: cached.verdict,
           tool_calls: [],
           retros: [],
+          // Cache hit: no fresh SDK init happened, so no MCP status to record.
+          mcp_servers_at_init: [],
         });
       }
       const prior = priorByReviewer.get(name);
@@ -823,6 +825,14 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
             : serializeToolCalls(outcome.value.tool_calls),
           diff_hash: diffHash,
           prompt_hash: promptHashes.get(name)!,
+          // AGT-246: persist MCP server runtime statuses. Null for cache hits
+          // (no fresh SDK init happened) and for reviewers that declared no
+          // MCP servers.
+          mcp_servers_at_init: cached
+            ? null
+            : outcome.value.mcp_servers_at_init.length > 0
+              ? JSON.stringify(outcome.value.mcp_servers_at_init)
+              : null,
         });
         printReview(
           outcome.value,

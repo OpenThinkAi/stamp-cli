@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { allPassed, runChecks } from "../lib/checks.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
-import { latestReviews, openDb, serverApprovalsFor } from "../lib/db.js";
+import { latestReviews, openDb, serverApprovalsFor, type McpServerAtInit } from "../lib/db.js";
 import {
   listFilesAtRef,
   pathExistsAtRef,
@@ -182,11 +182,13 @@ export function runMerge(opts: MergeOptions): void {
     approvals = rule.required.map((name) => {
       const rev = byReviewer.get(name)!;
       const toolCalls = redactToolCallsForAttestation(parseToolCalls(rev.tool_calls));
+      const mcpAtInit = parseMcpServersAtInit(rev.mcp_servers_at_init);
       return {
         reviewer: rev.reviewer,
         verdict: rev.verdict,
         review_sha: hashPart(rev.issues ?? ""),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        ...(mcpAtInit.length > 0 ? { mcp_servers_at_init: mcpAtInit } : {}),
       };
     });
   } finally {
@@ -410,6 +412,22 @@ export function runMerge(opts: MergeOptions): void {
 
 function hashPart(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+/**
+ * Parse the JSON-encoded McpServerAtInit[] from the DB column. Returns an
+ * empty array for null/invalid inputs (pre-AGT-246 rows or reviewers with
+ * no MCP servers).
+ */
+function parseMcpServersAtInit(raw: string | null): McpServerAtInit[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed as McpServerAtInit[];
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 /**

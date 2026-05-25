@@ -269,6 +269,21 @@ export interface McpServerDef {
    * (`[A-Za-z_][A-Za-z0-9_]*`) and are validated at config-load time.
    */
   allowed_env?: string[];
+  /**
+   * When true, a launch/connection failure for this MCP server is treated as
+   * a non-fatal degradation: stamp emits a stderr warning and proceeds with
+   * the reduced tool surface rather than aborting the review. Absent or false
+   * (the default) means any non-`connected` status after init hard-fails the
+   * reviewer with exit 1.
+   *
+   * IMPORTANT (hash stability): only emit this key in the parsed
+   * `McpServerDef` when the YAML explicitly sets it — `optional: true` or
+   * `optional: false` — so configs that omit the field hash byte-identically
+   * to their pre-AGT-246 forms (canonical JSON only includes present keys).
+   * Mirror the `...(allowed_env ? { allowed_env } : {})` omit-on-unset
+   * pattern used by every other optional field in parseMcpServers.
+   */
+  optional?: boolean;
 }
 
 /**
@@ -792,11 +807,25 @@ function parseMcpServers(
       r.allowed_env,
       `config.reviewers.${reviewerName}.mcp_servers.${serverName}.allowed_env`,
     );
+    // Omit-on-unset: only include `optional` in the parsed object when the
+    // YAML explicitly sets it. This keeps the canonical JSON (and thus
+    // mcp_sha256) byte-identical to pre-AGT-246 for configs that don't
+    // set `optional`. Mirrors the allowed_env + args omit-on-unset pattern.
+    let optional: boolean | undefined;
+    if (r.optional !== undefined) {
+      if (typeof r.optional !== "boolean") {
+        throw new Error(
+          `config.reviewers.${reviewerName}.mcp_servers.${serverName}.optional must be a boolean (got ${JSON.stringify(r.optional)})`,
+        );
+      }
+      optional = r.optional;
+    }
     out[serverName] = {
       command: r.command,
       ...(args ? { args } : {}),
       ...(env ? { env } : {}),
       ...(allowed_env ? { allowed_env } : {}),
+      ...(optional !== undefined ? { optional } : {}),
     };
   }
   return out;

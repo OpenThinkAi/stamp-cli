@@ -510,6 +510,19 @@ export interface ReviewerInvocation {
    * AGT-052 / agentic-iterative-learning.
    */
   retros: RetroCandidate[];
+  /**
+   * AGT-246: MCP server runtime statuses captured from the SDK init message.
+   * Each entry records the server name, SDK-reported status, whether it was
+   * declared in the reviewer's config (`declared`), whether it is optional,
+   * and any SDK-provided error string. Always present (possibly empty).
+   */
+  mcp_servers_at_init: Array<{
+    name: string;
+    status: string;
+    optional: boolean;
+    declared: boolean;
+    error?: string;
+  }>;
 }
 
 export async function invokeReviewer(params: {
@@ -854,8 +867,91 @@ export async function invokeReviewer(params: {
   // and we don't want to leak file paths into the public mirror).
   const readPaths = new Set<string>();
 
+  // AGT-246: MCP server runtime statuses captured from the SDK init message.
+  // Populated when we encounter the first `system`/`init` message, which
+  // carries the `mcp_servers` array. We defer the fail-fast check until after
+  // reading the init message so we can call q.mcpServerStatus() for the richer
+  // error string (only needed for non-connected servers; happy path adds zero
+  // extra control traffic).
+  const mcpServersAtInit: Array<{
+    name: string;
+    status: string;
+    optional: boolean;
+    declared: boolean;
+    error?: string;
+  }> = [];
+
   try {
   for await (const msg of q) {
+    // AGT-246: capture the SDK init message. It is always the first message
+    // in the stream, and its `mcp_servers` array reports the connection
+    // status for every MCP server the SDK attempted to launch (including
+    // stamp-verdict). We use classifyMcpServers to detect launch failures
+    // for operator-declared servers and determine fail-fast vs. warning.
+    if (msg.type === "system" && (msg as { subtype?: unknown }).subtype === "init") {
+      const initMsg = msg as {
+        subtype: "init";
+        mcp_servers: Array<{ name: string; status: string }>;
+      };
+      const initServers: Array<{ name: string; status: string }> =
+        Array.isArray(initMsg.mcp_servers) ? initMsg.mcp_servers : [];
+
+      // Identify any declared servers that are not `connected`. Fetch the
+      // richer McpServerStatus (with `error` string) only for those, to
+      // keep the happy-path free of extra control traffic.
+      const hasFailedDeclared = initServers.some(
+        (s) => Object.prototype.hasOwnProperty.call(def.mcp_servers ?? {}, s.name)
+          && s.status !== "connected",
+      );
+
+      // Fetch error details for all non-connected declared servers in one
+      // call. Gracefully handle the case where mcpServerStatus() throws
+      // (e.g. stub in tests) — fall back to the init message statuses.
+      let richStatuses: Array<{ name: string; status: string; error?: string }> = [];
+      if (hasFailedDeclared) {
+        try {
+          richStatuses = await q.mcpServerStatus();
+        } catch {
+          // Fallback: use the init message statuses without error strings.
+          richStatuses = initServers;
+        }
+      }
+
+      const { entries, nonOptionalFailures, optionalFailures } =
+        classifyMcpServers(initServers, def.mcp_servers ?? {}, richStatuses);
+
+      // Populate the audit record.
+      mcpServersAtInit.push(...entries);
+
+      // Emit warnings for optional failures and proceed.
+      for (const entry of optionalFailures) {
+        process.stderr.write(
+          `warning: reviewer "${params.reviewer}" mcp server "${entry.name}" ` +
+            `failed to connect ` +
+            `(status: ${entry.status}${entry.error ? `; error: ${entry.error}` : ""}); ` +
+            `proceeding with degraded tool surface\n`,
+        );
+      }
+
+      // Hard-fail on non-optional failures. The throw exits the for-await
+      // loop; the outer catch re-throws it (it's not an AbortController
+      // error) so it propagates to the Promise.allSettled in runReview.
+      for (const entry of nonOptionalFailures) {
+        const errorStr = entry.error ? `; SDK error: ${entry.error}` : "";
+        throw Object.assign(
+          new Error(
+            `reviewer "${params.reviewer}" mcp server "${entry.name}" failed to connect ` +
+              `(status: ${entry.status}${errorStr}). ` +
+              `Fix the server configuration or mark it \`optional: true\` ` +
+              `in .stamp/config.yml to allow degraded operation.`,
+          ),
+          { reviewer: params.reviewer, server: entry.name, status: entry.status, error: entry.error },
+        );
+      }
+
+      continue;
+    }
+
     // Capture tool-use blocks from assistant messages for the audit trace.
     // SDKAssistantMessage.message.content is an array of content blocks; the
     // tool_use ones carry { type: 'tool_use', name, input }.
@@ -998,6 +1094,7 @@ export async function invokeReviewer(params: {
     verdict,
     tool_calls: toolCalls,
     retros: submittedRetros,
+    mcp_servers_at_init: mcpServersAtInit,
   };
 }
 
@@ -1046,6 +1143,84 @@ export function findMissingDotstampReads(
     if (!readPaths.has(p)) missing.push(p);
   }
   return missing.sort();
+}
+
+/**
+ * AGT-246: Pure classification step for MCP server statuses from the SDK
+ * `init` message. Detached from `invokeReviewer` so it is directly
+ * unit-testable without a live SDK session.
+ *
+ * Returns:
+ *   - `entries`: the full per-server status list (for attestation)
+ *   - `nonOptionalFailures`: servers that must cause a hard abort
+ *   - `optionalFailures`: servers that should emit a warning + proceed
+ */
+export function classifyMcpServers(
+  /** Raw `mcp_servers` array from the SDK `system`/`init` message. */
+  initServers: Array<{ name: string; status: string }>,
+  /** Operator-declared MCP servers from the reviewer config (may be empty). */
+  declaredServers: Record<string, McpServerDef>,
+  /** Richer status from `q.mcpServerStatus()` (may be empty / unavailable). */
+  richStatuses: Array<{ name: string; status: string; error?: string }>,
+): {
+  entries: Array<{
+    name: string;
+    status: string;
+    optional: boolean;
+    declared: boolean;
+    error?: string;
+  }>;
+  nonOptionalFailures: Array<{
+    name: string;
+    status: string;
+    optional: false;
+    declared: true;
+    error?: string;
+  }>;
+  optionalFailures: Array<{
+    name: string;
+    status: string;
+    optional: true;
+    declared: true;
+    error?: string;
+  }>;
+} {
+  const richByName = new Map(richStatuses.map((s) => [s.name, s]));
+  const entries: ReturnType<typeof classifyMcpServers>["entries"] = [];
+  const nonOptionalFailures: ReturnType<
+    typeof classifyMcpServers
+  >["nonOptionalFailures"] = [];
+  const optionalFailures: ReturnType<
+    typeof classifyMcpServers
+  >["optionalFailures"] = [];
+
+  for (const s of initServers) {
+    const isDeclared = Object.prototype.hasOwnProperty.call(declaredServers, s.name);
+    const serverDef = isDeclared ? declaredServers[s.name] : undefined;
+    const rich = richByName.get(s.name);
+    const resolvedStatus = rich?.status ?? s.status;
+    const entry: ReturnType<typeof classifyMcpServers>["entries"][number] = {
+      name: s.name,
+      status: resolvedStatus,
+      optional: serverDef?.optional ?? false,
+      declared: isDeclared,
+      ...(rich?.error !== undefined ? { error: rich.error } : {}),
+    };
+    entries.push(entry);
+
+    if (!isDeclared || resolvedStatus === "connected") continue;
+    if (entry.optional) {
+      optionalFailures.push(
+        entry as ReturnType<typeof classifyMcpServers>["optionalFailures"][number],
+      );
+    } else {
+      nonOptionalFailures.push(
+        entry as ReturnType<typeof classifyMcpServers>["nonOptionalFailures"][number],
+      );
+    }
+  }
+
+  return { entries, nonOptionalFailures, optionalFailures };
 }
 
 function resolveMcpServers(
