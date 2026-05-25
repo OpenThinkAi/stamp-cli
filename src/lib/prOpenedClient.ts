@@ -50,6 +50,7 @@
 
 import { spawn } from "node:child_process";
 import type { ServerConfig } from "./serverConfig.js";
+import { PEER_SSH_VERBS } from "./peerSshVerbs.js";
 
 export type { ServerConfig };
 
@@ -73,9 +74,9 @@ async function defaultSshSpawn(
   cfg: ServerConfig,
   payload: string,
 ): Promise<SshSpawnResult> {
-  // ssh argv: `-p <port> -- user@host pr-opened`
+  // ssh argv: `-p <port> -- user@host stamp-pr-opened`
   // The `--` is the canonical guard against hostile option interpolation.
-  const sshArgv = ["-p", String(cfg.port), "--", `${cfg.user}@${cfg.host}`, "pr-opened"];
+  const sshArgv = ["-p", String(cfg.port), "--", `${cfg.user}@${cfg.host}`, PEER_SSH_VERBS.prOpened];
 
   return new Promise<SshSpawnResult>((resolvePromise, rejectPromise) => {
     const child = spawn("ssh", sshArgv, {

@@ -22,6 +22,7 @@
 
 import { spawn } from "node:child_process";
 import type { ServerConfig } from "./serverConfig.js";
+import { PEER_SSH_VERBS } from "./peerSshVerbs.js";
 
 // ─── SSH spawn seam ─────────────────────────────────────────────────
 
@@ -120,7 +121,7 @@ export async function callSubscribe(input: SubscribeInput): Promise<SubscribeRes
 
   let result: SshSpawnResult;
   try {
-    result = await spawnFn(input.serverConfig, "subscribe", payload);
+    result = await spawnFn(input.serverConfig, PEER_SSH_VERBS.subscribe, payload);
   } catch (err) {
     return {
       ok: false,
@@ -247,7 +248,7 @@ export async function callClaimSeat(input: ClaimSeatInput): Promise<ClaimSeatRes
 
   let result: SshSpawnResult;
   try {
-    result = await spawnFn(input.serverConfig, "claim-seat", payload);
+    result = await spawnFn(input.serverConfig, PEER_SSH_VERBS.claimSeat, payload);
   } catch (err) {
     return {
       ok: false,
@@ -355,7 +356,7 @@ export async function callHeartbeat(input: HeartbeatInput): Promise<HeartbeatRes
 
   let result: SshSpawnResult;
   try {
-    result = await spawnFn(input.serverConfig, "heartbeat", payload);
+    result = await spawnFn(input.serverConfig, PEER_SSH_VERBS.heartbeat, payload);
   } catch (err) {
     return {
       ok: false,
@@ -450,7 +451,7 @@ export async function callReleaseSeat(input: ReleaseSeatInput): Promise<ReleaseS
 
   let result: SshSpawnResult;
   try {
-    result = await spawnFn(input.serverConfig, "release-seat", payload);
+    result = await spawnFn(input.serverConfig, PEER_SSH_VERBS.releaseSeat, payload);
   } catch (err) {
     return {
       ok: false,
@@ -565,7 +566,7 @@ export async function callReReviewRequest(
 
   let result: SshSpawnResult;
   try {
-    result = await spawnFn(input.serverConfig, "re-review-request", payload);
+    result = await spawnFn(input.serverConfig, PEER_SSH_VERBS.reReviewRequest, payload);
   } catch (err) {
     return {
       ok: false,

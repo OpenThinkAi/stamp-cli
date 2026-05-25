@@ -148,7 +148,7 @@ function makeEvent(opts: {
 /** SSH spawn seam returning success for all seat verbs. */
 function makeSuccessSshSpawn(seatNum = 1): SshSpawnFn {
   return async (_cfg, verb) => {
-    if (verb === "subscribe") {
+    if (verb === "stamp-subscribe") {
       return {
         stdout: JSON.stringify({ ok: true, fingerprint: "fp", orgs: ["acme"] }),
         stderr: "",
@@ -156,7 +156,7 @@ function makeSuccessSshSpawn(seatNum = 1): SshSpawnFn {
         signal: null,
       };
     }
-    if (verb === "claim-seat") {
+    if (verb === "stamp-claim-seat") {
       return {
         stdout: JSON.stringify({ ok: true, seat: seatNum, patch_id: "a".repeat(40) }),
         stderr: "",
@@ -164,7 +164,7 @@ function makeSuccessSshSpawn(seatNum = 1): SshSpawnFn {
         signal: null,
       };
     }
-    if (verb === "heartbeat") {
+    if (verb === "stamp-heartbeat") {
       return {
         stdout: JSON.stringify({ ok: true, seat: seatNum, patch_id: "a".repeat(40) }),
         stderr: "",
@@ -172,7 +172,7 @@ function makeSuccessSshSpawn(seatNum = 1): SshSpawnFn {
         signal: null,
       };
     }
-    if (verb === "release-seat") {
+    if (verb === "stamp-release-seat") {
       return {
         stdout: JSON.stringify({ ok: true, released: true, patch_id: "a".repeat(40) }),
         stderr: "",
@@ -304,8 +304,8 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
     if (intervalFnRef) intervalFnRef();
 
     // AC #2: SSH calls include subscribe + claim-seat.
-    assert.ok(sshCalls.includes("subscribe"), `expected subscribe in: ${sshCalls}`);
-    assert.ok(sshCalls.includes("claim-seat"), `expected claim-seat in: ${sshCalls}`);
+    assert.ok(sshCalls.includes("stamp-subscribe"), `expected stamp-subscribe in: ${sshCalls}`);
+    assert.ok(sshCalls.includes("stamp-claim-seat"), `expected stamp-claim-seat in: ${sshCalls}`);
   });
 
   it("AC #13: stdout is empty on a normal run", async () => {
@@ -413,7 +413,7 @@ describe("AC #3: author-exclusion — own-fingerprint event skipped", () => {
 describe("AC #4: seat-claim rejections", () => {
   function makeSeatRejectionSshSpawn(stderrMsg: string): SshSpawnFn {
     return async (_cfg, verb) => {
-      if (verb === "subscribe") {
+      if (verb === "stamp-subscribe") {
         return {
           stdout: JSON.stringify({ ok: true, fingerprint: "fp", orgs: ["acme"] }),
           stderr: "",
@@ -421,7 +421,7 @@ describe("AC #4: seat-claim rejections", () => {
           signal: null,
         };
       }
-      if (verb === "claim-seat") {
+      if (verb === "stamp-claim-seat") {
         return { stdout: "", stderr: stderrMsg, exitCode: 5, signal: null };
       }
       return { stdout: "", stderr: "", exitCode: 0, signal: null };
@@ -527,8 +527,8 @@ describe("AC #7: gh pr review failure → release-seat called", () => {
     );
     // release-seat should have been called.
     assert.ok(
-      sshCalls.includes("release-seat"),
-      `expected release-seat in calls: ${sshCalls.join(",")}`,
+      sshCalls.includes("stamp-release-seat"),
+      `expected stamp-release-seat in calls: ${sshCalls.join(",")}`,
     );
   });
 });
@@ -936,7 +936,7 @@ describe("AGT-430 AC triage skip: triage returns skip → no claim, no SDK, no g
     let sdkCalled = false;
     let sshClaimCalled = false;
     const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "claim-seat") sshClaimCalled = true;
+      if (verb === "stamp-claim-seat") sshClaimCalled = true;
       return makeSuccessSshSpawn(1)(cfg, verb);
     };
 
@@ -1182,7 +1182,7 @@ describe("AGT-432 AC #3: cost-cap — cap NOT hit when dailySpend < cost_cap_usd
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
     const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "claim-seat") sshClaimCalled = true;
+      if (verb === "stamp-claim-seat") sshClaimCalled = true;
       return makeSuccessSshSpawn(1)(cfg, verb);
     };
 
@@ -1224,7 +1224,7 @@ describe("AGT-432 AC #3: cost-cap — cap HIT when _initialDailySpendForTest >= 
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
     const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "claim-seat") sshClaimCalled = true;
+      if (verb === "stamp-claim-seat") sshClaimCalled = true;
       return makeSuccessSshSpawn(1)(cfg, verb);
     };
 
@@ -1479,7 +1479,7 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
     const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "claim-seat") sshClaimCalled = true;
+      if (verb === "stamp-claim-seat") sshClaimCalled = true;
       return makeSuccessSshSpawn(1)(cfg, verb);
     };
 
