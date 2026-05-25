@@ -857,6 +857,11 @@ Prerequisites:
   - 'gh' must be installed: https://cli.github.com
   - stamp signing key at ~/.stamp/keys/ed25519 ('stamp keys generate' to create)
   - stamp-server config at ~/.stamp/server.yml ('stamp server config <host:port>' to set)
+  - ~/.stamp/peer-repos.yml: maps repo names (org/repo) to local clone paths for
+    operator verification. Events from unmapped repos are skipped with a note on
+    stderr. Example:
+      acme/widget: /home/you/dev/widget
+      acme/api: /home/you/dev/api
 `,
   )
   .action(async (opts: { org: string[]; server?: string; ws?: boolean }) => {

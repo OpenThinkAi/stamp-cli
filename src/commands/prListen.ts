@@ -70,6 +70,8 @@ import {
 import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
 import { firePeerNotification } from "../lib/peerNotify.js";
 import { draftsDir } from "../lib/paths.js";
+import { loadPeerReposConfig, resolveLocalRepoPath } from "../lib/peerReposConfig.js";
+import { verifyOperatorAtBaseLocal } from "../lib/peerOperatorVerify.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -129,6 +131,26 @@ export interface PrListenOptions {
    * (which would otherwise return costUsd: 0 via the test seam).
    */
   _initialDailySpendForTest?: number;
+  /**
+   * Test-only: override the client-side operator verification step (AGT-454).
+   * When provided, `verifyOperatorAtBaseLocal` is NOT called. The function
+   * receives (localRepoPath, baseSha, fingerprint) and returns the same shape
+   * as `verifyOperatorAtBaseLocal`. Use `() => ({ ok: true })` to bypass the
+   * gate for tests that pre-date AGT-454 and don't need operator verification.
+   */
+  _operatorVerifyForTest?: (
+    localRepoPath: string,
+    baseSha: string,
+    fingerprint: string,
+  ) => { ok: true } | { ok: false; reason: string };
+  /**
+   * Test-only: override the peer-repos map loaded from `~/.stamp/peer-repos.yml`
+   * (AGT-454). When provided, `loadPeerReposConfig()` is NOT called. Pass a
+   * `Map<string, string>` of `{ "org/repo" => "/absolute/path" }` to control
+   * which repos are considered mapped. Pass an empty Map to simulate an
+   * empty/missing config file.
+   */
+  _peerReposMapForTest?: Map<string, string>;
   /**
    * Select the WebSocket transport (AGT-434) instead of the SSH-verb long-poll
    * fallback. When true, `stamp pr listen` connects via WS to the stamp-server's
@@ -518,6 +540,13 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     return waitForNextSshEvent();
   }
 
+  // AGT-454: load peer-repos map once before the loop (fail-closed per-event).
+  // Prefer the injected test seam over the real config file.
+  const peerReposMap =
+    opts._peerReposMapForTest !== undefined
+      ? opts._peerReposMapForTest
+      : loadPeerReposConfig();
+
   for (;;) {
     const event = await nextEvent();
     // In queue mode, null means the queue is empty — exit the loop cleanly.
@@ -590,6 +619,29 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         `note: skipping event for PR #${prNumber} — author matches own fingerprint\n`,
       );
       continue;
+    }
+
+    // ─── AGT-454: Client-side operator verification ──────────────
+    // Verify the PR author (requested_by_fp) is an operator in the manifest
+    // at base_sha of this listener's own local clone. Fail-closed: skip if
+    // the repo is unmapped in peer-repos.yml or if the sha is not present.
+    if (event.event_type === "pr-opened") {
+      const localRepoPath = resolveLocalRepoPath(repo, peerReposMap);
+      if (localRepoPath === null) {
+        process.stderr.write(
+          `note: skipping event for PR #${prNumber} — repo "${repo}" is not mapped in ` +
+            `~/.stamp/peer-repos.yml; add it to enable operator verification for this repo\n`,
+        );
+        continue;
+      }
+      const verifyFn = opts._operatorVerifyForTest ?? verifyOperatorAtBaseLocal;
+      const opResult = verifyFn(localRepoPath, baseSha, requestedByFp);
+      if (!opResult.ok) {
+        process.stderr.write(
+          `note: skipping event for PR #${prNumber} — operator verification failed: ${opResult.reason}\n`,
+        );
+        continue;
+      }
     }
 
     // ─── AGT-430: Haiku triage call ──────────────────────────────
@@ -728,16 +780,19 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     }
 
     // ─── Claim seat ──────────────────────────────────────────────
+    // AGT-454: include pubkey in the payload so server can verify without repo access.
     const claimResult = await callClaimSeat({
       patch_id: patchId,
       claimant_fp: keypair.fingerprint,
       base_sha: baseSha,
       repo,
+      pubkey: keypair.publicKeyPem,
       signature: canonicalSign(keypair, {
         patch_id: patchId,
         claimant_fp: keypair.fingerprint,
         base_sha: baseSha,
         repo,
+        pubkey: keypair.publicKeyPem,
       }),
       serverConfig: serverCfg,
       _sshSpawnForTest: opts._sshSpawnForTest,

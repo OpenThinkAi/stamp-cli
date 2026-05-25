@@ -512,6 +512,50 @@ export function touchHeartbeat(
 }
 
 /**
+ * Sweep expired seats from `peer_review_patches` (AGT-454, G3).
+ *
+ * Clears `seat_N_holder` / `seat_N_claimed_at` for any seat whose last
+ * heartbeat timestamp is older than `ttlSeconds` seconds. This bounds
+ * seat-squat attacks where a member claims both seats and never releases
+ * them — the TTL ensures they are freed automatically.
+ *
+ * Safe to run at any cadence; skips seats that are already NULL.
+ * Returns the number of individual seat columns cleared (0–2× patches swept).
+ *
+ * `now` is injectable for deterministic tests.
+ */
+export function sweepExpiredSeats(
+  db: DatabaseSync,
+  ttlSeconds: number,
+  now: number = Date.now(),
+): number {
+  const cutoffSec = Math.floor(now / 1000) - ttlSeconds;
+  let cleared = 0;
+
+  // Clear seat_1_holder on rows where seat 1 is held but the heartbeat expired.
+  const r1 = db.prepare(
+    `UPDATE peer_review_patches
+     SET seat_1_holder = NULL, seat_1_claimed_at = NULL
+     WHERE seat_1_holder IS NOT NULL
+       AND seat_1_claimed_at IS NOT NULL
+       AND seat_1_claimed_at < ?`,
+  ).run(cutoffSec) as { changes: number };
+  cleared += r1.changes;
+
+  // Clear seat_2_holder on rows where seat 2 is held but the heartbeat expired.
+  const r2 = db.prepare(
+    `UPDATE peer_review_patches
+     SET seat_2_holder = NULL, seat_2_claimed_at = NULL
+     WHERE seat_2_holder IS NOT NULL
+       AND seat_2_claimed_at IS NOT NULL
+       AND seat_2_claimed_at < ?`,
+  ).run(cutoffSec) as { changes: number };
+  cleared += r2.changes;
+
+  return cleared;
+}
+
+/**
  * Token-bucket rate limit keyed on `(subjectId, action)` (AGT-420). Lazy
  * refill: tokens accrue at `capPerHour/3600` per second since the last
  * touch, capped at `capPerHour`. Consumes one token and returns true when

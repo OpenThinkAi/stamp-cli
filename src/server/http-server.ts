@@ -44,7 +44,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
-import { insertUser, openServerDb } from "../lib/serverDb.js";
+import { insertUser, openServerDb, sweepExpiredSeats } from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
 import { verifyBytes } from "../lib/signing.js";
 import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
@@ -61,9 +61,9 @@ import {
 } from "./prompts-cache.js";
 import {
   resolvePeerReviewsEnabled,
-  bareRepoPath,
-  verifyOperatorAtBase,
-  verifyPeerPayloadSignature,
+  resolvePeerReviewLimit,
+  verifyPeerPayloadSignatureFromPubkey,
+  SEAT_TTL_SECONDS_DEFAULT,
 } from "./peerReviews.js";
 import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 
@@ -1078,6 +1078,55 @@ export function __getTrashSweepTickCountForTests(): number {
   return trashSweepState.tickCount;
 }
 
+// ─── Seat-TTL sweep worker (AGT-454, G3) ─────────────────────────────
+//
+// Periodically clear expired peer-review seats (those whose heartbeat is
+// older than SEAT_TTL_SECONDS). Mirrors the trash-sweep worker shape.
+// Cadence: every 5 minutes (well under the 10-min default TTL).
+// Disabled when STAMP_PEER_REVIEWS_ENABLED is not exactly "1".
+
+const DEFAULT_SEAT_SWEEP_INTERVAL_SEC = 300; // 5 min
+
+interface SeatSweepState {
+  handle: ReturnType<typeof setInterval> | null;
+}
+
+const seatSweepState: SeatSweepState = { handle: null };
+
+/** Arm the periodic seat-TTL sweep. Idempotent; only runs when peer reviews
+ *  are enabled. unref'd so an idle daemon still exits. */
+export function startSeatSweepWorker(): void {
+  if (seatSweepState.handle !== null) return; // already running
+  if (!resolvePeerReviewsEnabled()) return;    // feature dark — no-op
+
+  const intervalSec = DEFAULT_SEAT_SWEEP_INTERVAL_SEC;
+  const handle = setInterval(() => {
+    const ttlSec = resolvePeerReviewLimit("SEAT_TTL_SECONDS", SEAT_TTL_SECONDS_DEFAULT);
+    try {
+      const db = openServerDb({ skipChmod: true });
+      try {
+        const cleared = sweepExpiredSeats(db, ttlSec);
+        if (cleared > 0) {
+          logLine("info", `seat-sweep: cleared ${cleared} expired seat(s) (ttl=${ttlSec}s)`);
+        }
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      logLine("error", `seat-sweep: tick failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, intervalSec * 1000);
+  handle.unref();
+  seatSweepState.handle = handle;
+  logLine("info", `seat-sweep: started (interval=${intervalSec}s)`);
+}
+
+export function stopSeatSweepWorker(): void {
+  if (seatSweepState.handle === null) return;
+  clearInterval(seatSweepState.handle);
+  seatSweepState.handle = null;
+}
+
 /**
  * Test-only direct fire of one poll tick. Fake timers + an async
  * `setInterval` callback is a known-finicky combination — driving the
@@ -1260,15 +1309,20 @@ export function pushEventToWsClient(
 /**
  * Handle an inbound WS message (post-auth).
  * Expected shapes:
- *   {type:"pr-opened", ...payload, signature}
- *   {type:"claim-seat", ...payload, signature}
- *   {type:"re-review-request", ...payload, signature}
+ *   {type:"pr-opened", ...payload, pubkey, signature}
+ *   {type:"claim-seat", ...payload, pubkey, signature}
+ *   {type:"re-review-request", ...payload, pubkey, signature}
  *
- * Verifies the Ed25519 signature against the repo's trusted-keys at base_sha
- * (via `verifyPeerPayloadSignature` from peerReviews.ts), then verifies the
- * sender has operator capability via `verifyOperatorAtBase`. Returns a JSON
- * response string; a verified message returns `{ok:true}` (full peer-review
- * fanout is a stub pending AGT-435). Returns a JSON error string on failure.
+ * AGT-454 pure-crypto verify (GitHub-blind broker, zero repo access):
+ *   1. Recompute fingerprintFromPem(msg.pubkey); reject if ≠ state.fingerprint
+ *      (fp-recompute bind — prevents pubkey/fp swap).
+ *   2. verifyBytes(pubkey, canonicalSerializePeerPayload(payloadWithoutSig), signature).
+ *
+ * Operator-ness @ base_sha is NOT checked here — that is the listener's job
+ * (client-side, against its own local clone).
+ *
+ * Returns a JSON response string; a verified message returns `{ok:true}`.
+ * Returns a JSON error string on failure.
  */
 function handleWsMessage(
   state: WsSocketState,
@@ -1294,33 +1348,21 @@ function handleWsMessage(
       return JSON.stringify({ ok: false, error: "signature_required" });
     }
 
-    // Get the repo and base_sha for the key lookup.
-    const repo = typeof msg["repo"] === "string" ? msg["repo"] : null;
-    const base_sha = typeof msg["base_sha"] === "string" ? msg["base_sha"] : null;
-
-    if (!repo || !base_sha) {
-      return JSON.stringify({ ok: false, error: "repo_and_base_sha_required" });
-    }
-
-    // Validate repo format (prevent path traversal).
-    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) {
-      return JSON.stringify({ ok: false, error: "repo_format_invalid" });
-    }
-
-    if (!/^[0-9a-f]{40}$/.test(base_sha)) {
-      return JSON.stringify({ ok: false, error: "base_sha_format_invalid" });
+    // AGT-454: pubkey is carried inline in the message.
+    const pubkey = typeof msg["pubkey"] === "string" ? msg["pubkey"] : null;
+    if (!pubkey) {
+      return JSON.stringify({ ok: false, error: "pubkey_required" });
     }
 
     // Build the payload-without-signature for canonical serialization.
-    // `verifyPeerPayloadSignature` takes pre-serialized canonical bytes, so
-    // we produce them here (same serializer the client used in canonicalSign).
+    // The client signed over the full payload minus the `signature` field
+    // (and minus `type` on the WS path, per canonicalSign convention).
     const { signature: _sig, type: _type, ...payloadWithoutSig } = msg;
     const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
 
-    const gitDir = bareRepoPath(repo);
-    const verifyResult = verifyPeerPayloadSignature(
-      gitDir,
-      base_sha,
+    // AGT-454 pure-crypto bind: recompute fp from carried pubkey, verify sig.
+    const verifyResult = verifyPeerPayloadSignatureFromPubkey(
+      pubkey,
       state.fingerprint,
       canonicalBytes,
       signature,
@@ -1334,19 +1376,9 @@ function handleWsMessage(
       return JSON.stringify({ ok: false, error: "signature_verification_failed" });
     }
 
-    // Also verify operator capability via manifest.
-    const authResult = verifyOperatorAtBase(gitDir, base_sha, state.fingerprint);
-    if (!authResult.ok) {
-      logLine(
-        "warn",
-        `WS ${msgType}: operator auth failed for fp=${state.fingerprint}: ${authResult.reason}`,
-      );
-      return JSON.stringify({ ok: false, error: "operator_auth_failed" });
-    }
-
     logLine(
       "info",
-      `WS ${msgType}: signature + operator-auth verified for fp=${state.fingerprint} repo=${repo}`,
+      `WS ${msgType}: pubkey-bind + signature verified for fp=${state.fingerprint}`,
     );
     return JSON.stringify({ ok: true, type: msgType, message: "verified" });
   }
@@ -1517,6 +1549,8 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     if (resolvePeerReviewsEnabled()) {
       attachWsServer(server);
     }
+    // AGT-454 G3: arm the seat-TTL sweeper when peer reviews are enabled.
+    startSeatSweepWorker();
   });
   // Symmetric shutdown: when the server closes (operator-driven or test
   // cleanup), stop the poll worker so the interval doesn't leak into
@@ -1526,6 +1560,7 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
   server.once("close", () => {
     stopPromptsPollWorker();
     stopTrashSweepWorker();
+    stopSeatSweepWorker();
     // Close the WS server if it was attached.
     if (_wssInstance) {
       _wssInstance.close();

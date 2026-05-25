@@ -290,6 +290,7 @@ export async function runPrOpen(opts: PrOpenOptions): Promise<void> {
   }
 
   // Build the payload body (all fields excluding `signature`).
+  // AGT-454: include pubkey (SPKI PEM) so the server can verify without repo access.
   const payloadBody: PrOpenedPayloadBody = {
     repo: repoField,
     patch_id: patchInfo.patch_id,
@@ -300,6 +301,7 @@ export async function runPrOpen(opts: PrOpenOptions): Promise<void> {
     title: prTitle,
     body: prBody,
     pr_url: prUrl,
+    pubkey: keypair.publicKeyPem,
   };
 
   // Sign the canonical bytes (all fields excluding `signature`).

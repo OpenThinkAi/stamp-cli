@@ -219,6 +219,8 @@ export interface ClaimSeatInput {
   claimant_fp: string;
   base_sha: string;
   repo: string;
+  /** SPKI PEM of the stamp signing key (AGT-454). Included in canonical signed bytes. */
+  pubkey: string;
   signature: string;
   serverConfig: ServerConfig;
   _sshSpawnForTest?: SshSpawnFn;
@@ -239,6 +241,7 @@ export async function callClaimSeat(input: ClaimSeatInput): Promise<ClaimSeatRes
     claimant_fp: input.claimant_fp,
     base_sha: input.base_sha,
     repo: input.repo,
+    pubkey: input.pubkey,
     signature: input.signature,
   });
 
@@ -541,6 +544,8 @@ export interface ReReviewRequestInput {
   requester_fp: string;
   /** Raw reviewer short_names forwarded verbatim; resolved server-side. */
   reviewer_filter: string[];
+  /** SPKI PEM of the stamp signing key (AGT-454). Included in canonical signed bytes. */
+  pubkey: string;
   signature: string;
   serverConfig: ServerConfig;
   _sshSpawnForTest?: SshSpawnFn;
@@ -554,6 +559,7 @@ export async function callReReviewRequest(
     patch_id: input.patch_id,
     requester_fp: input.requester_fp,
     reviewer_filter: input.reviewer_filter,
+    pubkey: input.pubkey,
     signature: input.signature,
   });
 

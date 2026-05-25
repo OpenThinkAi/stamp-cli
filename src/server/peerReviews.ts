@@ -1,11 +1,10 @@
 /**
- * Shared module for peer-agentic review SSH-verb endpoints (AGT-427).
+ * Shared module for peer-agentic review SSH-verb endpoints (AGT-427/AGT-454).
  *
  * Provides:
  *   - Feature-gate check (`resolvePeerReviewsEnabled`)
  *   - Safety-limit parsers (`resolvePeerReviewLimit`)
- *   - Bare-repo path resolution (`bareRepoPath`)
- *   - Operator-at-base-sha manifest verification (`verifyOperatorAtBase`)
+ *   - Pure-crypto peer-payload signature verification (`verifyPeerPayloadSignatureFromPubkey`)
  *   - In-memory listener registry + synchronous fanout
  *     NOTE: The in-memory registry is scoped to a SINGLE PROCESS. Each
  *     SSH-verb invocation is its own short-lived process (the AGT-420
@@ -16,20 +15,14 @@
  *     real cross-process delivery. Until then, fanout over SSH is a no-op
  *     in production against real separate-process subscribers.
  *
- * IMPORTANT: `verifyOperatorAtBase` re-introduces a server-side manifest
- * read that the live `stamp-review` verb deliberately dropped (AGT-370 moved
- * that read operator-side). Keep this function SCOPED HERE — do NOT refactor
- * it into a shared place that `reviewPipeline.ts` could accidentally pick up.
+ * AGT-454: server is a GitHub-blind broker. All repo-access functions
+ * (`bareRepoPath`, `verifyOperatorAtBase`, `verifyPeerPayloadSignature`,
+ * `readTrustedKeysAtRepo`, `STAMP_BARE_REPOS_DIR`) have been removed.
+ * Operator-ness @ base_sha is now verified client-side (in prListen.ts)
+ * against the listener's own local clone.
  */
 
-import path from "node:path";
-
-import { showAtRef, listFilesAtRef } from "../lib/git.js";
-import {
-  parseManifest,
-  resolveCapability,
-  MANIFEST_RELATIVE_PATH,
-} from "../lib/trustedKeysManifest.js";
+import { fingerprintFromPem } from "../lib/keys.js";
 import { verifyBytes } from "../lib/signing.js";
 export type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 
@@ -74,78 +67,65 @@ export const SEAT_TTL_SECONDS_DEFAULT = 600;
 /** Rate-limit cap for `pr-opened` per author (60/hr per design doc). */
 export const PR_OPENED_RATE_CAP_DEFAULT = 60;
 
-// ─── Bare-repo path resolution ──────────────────────────────────────
-
-/** Server-side bare-repo layout: `<base>/<org>/<repo>.git`.
- *
- *  The base directory defaults to `/srv/git` (the production convention used
- *  by `new-stamp-repo` / `delete-stamp-repo`), but can be overridden via the
- *  `STAMP_BARE_REPOS_DIR` environment variable. This allows a hermetic test
- *  harness to point the seat verbs at a throwaway bare repo without needing
- *  `/srv/git` to exist on the machine running the test.
- *
- *  When `STAMP_BARE_REPOS_DIR` is unset the behaviour is identical to the
- *  previous hard-coded `/srv/git` path — no production behaviour changes.
- */
-export function bareRepoPath(repo: string): string {
-  // `repo` is expected to be `<org>/<name>` (e.g. "acme/widget-co").
-  // Callers must validate the shape before calling — we don't sanitise here.
-  const base = process.env["STAMP_BARE_REPOS_DIR"] ?? "/srv/git";
-  return path.join(base, `${repo}.git`);
-}
-
-// ─── Operator-at-base-sha manifest verification ─────────────────────
+// ─── Pure-crypto peer-payload signature verification (AGT-454) ──────
+//
+// Replaces the old repo-access-based `verifyPeerPayloadSignature` and
+// `readTrustedKeysAtRepo`. The caller carries their stamp signing pubkey
+// (SPKI PEM) in the payload; the server:
+//   1. Recomputes the fingerprint from the carried pubkey (fingerprintFromPem).
+//   2. Rejects unless it equals the claimed fp (fp-recompute bind).
+//   3. Verifies the Ed25519 signature over the canonical bytes.
+//
+// This triple is the entire server crypto check — zero repo access required.
 
 /**
- * Verify that `fingerprint` appears in the repo's `.stamp/trusted-keys/manifest.yml`
- * at `base_sha` with the `operator` capability.
+ * Verify a peer-payload Ed25519 signature using the pubkey carried inline in
+ * the payload (AGT-454 pure-crypto path, no repo access).
  *
- * Returns `{ ok: true }` on success, or `{ ok: false, reason }` on any
- * failure (manifest missing/unparseable, fingerprint absent, capability not
- * operator).
+ * Steps:
+ *   1. Recompute `fingerprintFromPem(pubkeyPem)` and reject if it ≠ `claimedFp`
+ *      (prevents a pubkey/fp swap attack).
+ *   2. `verifyBytes(pubkeyPem, canonicalBytes, signatureBase64)`.
  *
- * SCOPING NOTE: This is the only caller of `showAtRef` for the manifest on
- * the server side. The live `stamp-review` verb is deliberately manifest-
- * blind (AGT-370). Keep this wrapper in peerReviews.ts ONLY.
+ * Returns `{ ok: true }` on success, `{ ok: false, reason }` on any failure.
+ * Callers treat any non-OK as an auth failure and reject the request.
  */
-export function verifyOperatorAtBase(
-  repoGitDir: string,
-  base_sha: string,
-  fingerprint: string,
+export function verifyPeerPayloadSignatureFromPubkey(
+  pubkeyPem: string,
+  claimedFp: string,
+  canonicalBytes: Buffer,
+  signatureBase64: string,
 ): { ok: true } | { ok: false; reason: string } {
-  let manifestYaml: string;
+  // Step 1: recompute fingerprint from the carried pubkey.
+  let recomputedFp: string;
   try {
-    manifestYaml = showAtRef(base_sha, MANIFEST_RELATIVE_PATH, repoGitDir);
+    recomputedFp = fingerprintFromPem(pubkeyPem);
   } catch (err) {
     return {
       ok: false,
-      reason: `manifest not found at ${base_sha}:${MANIFEST_RELATIVE_PATH}: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `carried pubkey is not a valid SPKI PEM: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-
-  const manifest = parseManifest(manifestYaml);
-  if (!manifest) {
+  if (recomputedFp !== claimedFp) {
     return {
       ok: false,
-      reason: `manifest at ${base_sha} failed to parse`,
+      reason: `fp mismatch: recomputed ${recomputedFp} from carried pubkey but payload claims ${claimedFp}`,
     };
   }
 
-  const caps = resolveCapability(manifest, fingerprint);
-  if (!caps) {
+  // Step 2: verify the Ed25519 signature.
+  let valid: boolean;
+  try {
+    valid = verifyBytes(pubkeyPem, canonicalBytes, signatureBase64);
+  } catch (err) {
     return {
       ok: false,
-      reason: `fingerprint ${fingerprint} is not in manifest at ${base_sha}`,
+      reason: `signature verification threw: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-
-  if (!caps.includes("operator")) {
-    return {
-      ok: false,
-      reason: `fingerprint ${fingerprint} has capabilities [${caps.join(", ")}] at ${base_sha} — 'operator' required`,
-    };
+  if (!valid) {
+    return { ok: false, reason: "signature verification failed" };
   }
-
   return { ok: true };
 }
 
@@ -289,83 +269,3 @@ export function notConfiguredResponse(): string {
   return JSON.stringify({ ok: false, error: "peer_reviews_not_configured" });
 }
 
-// ─── WS-path Ed25519 verification helpers (AGT-434) ─────────────────
-//
-// These helpers are used by the WS handler in http-server.ts to perform
-// load-bearing per-message signature verification. The SSH-verb handlers
-// keep their existing parse-and-discard (SSH identity is the auth boundary).
-
-/**
- * Load the fingerprint → PEM map from `.stamp/trusted-keys/*.pub` at `sha`
- * in the given bare-repo `repoGitDir`. Mirrors the `readTrustedKeysAt(sha)`
- * pattern from `src/hooks/pre-receive.ts:876`.
- *
- * Returns an empty map when the tree entry is absent or any file is
- * unreadable — callers treat an empty map as "key not found".
- */
-export function readTrustedKeysAtRepo(
-  repoGitDir: string,
-  sha: string,
-): Map<string, string> {
-  const map = new Map<string, string>();
-  let files: string[];
-  try {
-    // listFilesAtRef returns bare filenames (e.g. "SHA256:abc.pub") relative
-    // to the directory. Returns [] when the tree entry is absent.
-    files = listFilesAtRef(sha, ".stamp/trusted-keys", repoGitDir);
-  } catch {
-    return map;
-  }
-  for (const file of files) {
-    if (!file.endsWith(".pub")) continue;
-    try {
-      const pem = showAtRef(sha, `.stamp/trusted-keys/${file}`, repoGitDir);
-      // Derive fingerprint from the filename stem — the convention is
-      // `<fingerprint>.pub` (set by `stamp keys generate` and `stamp trust`).
-      const stem = path.basename(file, ".pub");
-      if (stem) map.set(stem, pem);
-    } catch {
-      // Skip unreadable / invalid entries — same discipline as pre-receive.ts.
-    }
-  }
-  return map;
-}
-
-/**
- * Verify the Ed25519 `signature` (base64) over `canonicalBytes` for a peer
- * payload, loading the operator's PEM from `.stamp/trusted-keys/<fp>.pub` at
- * `base_sha` in `repoGitDir`.
- *
- * Returns `{ ok: true }` on success, `{ ok: false, reason }` on any failure
- * (key not found, invalid signature, crypto error). Callers should treat any
- * non-OK result as an auth failure and reject the request.
- */
-export function verifyPeerPayloadSignature(
-  repoGitDir: string,
-  base_sha: string,
-  fingerprint: string,
-  canonicalBytes: Buffer,
-  signatureBase64: string,
-): { ok: true } | { ok: false; reason: string } {
-  const keyMap = readTrustedKeysAtRepo(repoGitDir, base_sha);
-  const pem = keyMap.get(fingerprint);
-  if (!pem) {
-    return {
-      ok: false,
-      reason: `pubkey for fingerprint ${fingerprint} not found in .stamp/trusted-keys at ${base_sha}`,
-    };
-  }
-  let valid: boolean;
-  try {
-    valid = verifyBytes(pem, canonicalBytes, signatureBase64);
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `signature verification threw: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  if (!valid) {
-    return { ok: false, reason: "signature verification failed" };
-  }
-  return { ok: true };
-}
