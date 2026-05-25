@@ -102,8 +102,12 @@ describe("peerSshVerbs: client↔server verb agreement", () => {
     }
   });
 
-  it("PEER_SSH_VERBS has exactly six entries", () => {
+  it("PEER_SSH_VERBS has exactly as many entries as the peer verb witness set", () => {
     const count = Object.keys(PEER_SSH_VERBS).length;
-    assert.equal(count, 6, `Expected 6 PEER_SSH_VERBS entries, got ${count}`);
+    assert.equal(
+      count,
+      PEER_VERB_PREFIXES.size,
+      `Expected ${PEER_VERB_PREFIXES.size} PEER_SSH_VERBS entries, got ${count}`,
+    );
   });
 });

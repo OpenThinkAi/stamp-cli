@@ -304,8 +304,8 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
     if (intervalFnRef) intervalFnRef();
 
     // AC #2: SSH calls include subscribe + claim-seat.
-    assert.ok(sshCalls.includes("stamp-subscribe"), `expected subscribe in: ${sshCalls}`);
-    assert.ok(sshCalls.includes("stamp-claim-seat"), `expected claim-seat in: ${sshCalls}`);
+    assert.ok(sshCalls.includes("stamp-subscribe"), `expected stamp-subscribe in: ${sshCalls}`);
+    assert.ok(sshCalls.includes("stamp-claim-seat"), `expected stamp-claim-seat in: ${sshCalls}`);
   });
 
   it("AC #13: stdout is empty on a normal run", async () => {
@@ -528,7 +528,7 @@ describe("AC #7: gh pr review failure → release-seat called", () => {
     // release-seat should have been called.
     assert.ok(
       sshCalls.includes("stamp-release-seat"),
-      `expected release-seat in calls: ${sshCalls.join(",")}`,
+      `expected stamp-release-seat in calls: ${sshCalls.join(",")}`,
     );
   });
 });
