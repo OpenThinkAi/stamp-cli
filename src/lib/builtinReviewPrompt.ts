@@ -50,6 +50,8 @@ export interface RunBuiltinReviewInput {
 export interface RunBuiltinReviewResult {
   ok: true;
   body: string;
+  /** Cost of the review SDK call in USD, from `total_cost_usd` on the result message. 0 when using a test seam or when the field is absent. */
+  costUsd: number;
 }
 
 export interface RunBuiltinReviewFailure {
@@ -82,7 +84,7 @@ export async function runBuiltinReview(
   if (input._sdkRunnerForTest) {
     try {
       const body = await input._sdkRunnerForTest(input.diff);
-      return { ok: true, body };
+      return { ok: true, body, costUsd: 0 };
     } catch (err) {
       return {
         ok: false,
@@ -106,9 +108,15 @@ export async function runBuiltinReview(
     });
 
     let finalText: string | null = null;
+    let costUsd = 0;
     for await (const msg of q) {
       if (msg.type === "result" && msg.subtype === "success") {
         finalText = msg.result;
+        // Capture total_cost_usd from the SDK result message (AGT-432 AC #2).
+        const msgAny = msg as Record<string, unknown>;
+        if (typeof msgAny["total_cost_usd"] === "number") {
+          costUsd = msgAny["total_cost_usd"] as number;
+        }
         break;
       }
       if (msg.type === "result") {
@@ -126,7 +134,7 @@ export async function runBuiltinReview(
       };
     }
 
-    return { ok: true, body: finalText };
+    return { ok: true, body: finalText, costUsd };
   } catch (err) {
     return {
       ok: false,

@@ -98,6 +98,17 @@ export interface TriageInput {
   _haikuRunnerForTest?: (system: string, user: string) => Promise<string>;
 }
 
+/**
+ * Result from `runTriage`: the structured decision plus the cost of the
+ * Haiku call (from `total_cost_usd` on the SDK result message).
+ * `costUsd` is 0 when a test seam is used or when the field is absent from
+ * the SDK result (both are safe — no fallback price table needed).
+ */
+export interface TriageResult {
+  decision: TriageDecision;
+  costUsd: number;
+}
+
 export interface LoadRulesResult {
   rules: string;
   /** SHA-256 hex digest of the peer-watch.md bytes (for AC #6 triplet log). */
@@ -206,18 +217,22 @@ function extractJsonBlock(text: string): string | null {
 /**
  * Make the Haiku triage call against the operator's rules and the event.
  *
- * Never rejects (AC #2). Every failure path returns `SKIP_DECISION` and logs
- * a `✗`-prefixed message to stderr.
+ * Never rejects (AC #2). Every failure path returns `{ decision: SKIP_DECISION, costUsd: 0 }`
+ * and logs a `✗`-prefixed message to stderr.
  *
- * Honors `STAMP_NO_LLM=1` (returns `SKIP_DECISION` with a notice, consistent
+ * Honors `STAMP_NO_LLM=1` (returns SKIP_DECISION with a notice, consistent
  * with `builtinReviewPrompt.ts:61`).
+ *
+ * Returns a `TriageResult` containing both the decision and `costUsd` extracted
+ * from the SDK result message's `total_cost_usd` field (AGT-432 cost-cap support).
+ * When a test seam is used or the field is absent, `costUsd` is 0.
  */
-export async function runTriage(input: TriageInput): Promise<TriageDecision> {
+export async function runTriage(input: TriageInput): Promise<TriageResult> {
   if (process.env["STAMP_NO_LLM"] === "1") {
     process.stderr.write(
       `⟳ STAMP_NO_LLM=1 is set; skipping Haiku triage call (returning skip)\n`,
     );
-    return { ...SKIP_DECISION };
+    return { decision: { ...SKIP_DECISION }, costUsd: 0 };
   }
 
   const { system, user } = assembleTriagePrompt(input.rules, input.event);
@@ -231,9 +246,9 @@ export async function runTriage(input: TriageInput): Promise<TriageDecision> {
       process.stderr.write(
         `✗ Haiku triage runner threw: ${err instanceof Error ? err.message : String(err)}\n`,
       );
-      return { ...SKIP_DECISION };
+      return { decision: { ...SKIP_DECISION }, costUsd: 0 };
     }
-    return parseTriageResponse(rawText);
+    return { decision: parseTriageResponse(rawText), costUsd: 0 };
   }
 
   // ─── Production: real SDK call ────────────────────────────────────
@@ -250,16 +265,22 @@ export async function runTriage(input: TriageInput): Promise<TriageDecision> {
     });
 
     let finalText: string | null = null;
+    let costUsd = 0;
     for await (const msg of q) {
       if (msg.type === "result" && msg.subtype === "success") {
         finalText = msg.result;
+        // Capture total_cost_usd from the SDK result message (AGT-432 AC #2).
+        const msgAny = msg as Record<string, unknown>;
+        if (typeof msgAny["total_cost_usd"] === "number") {
+          costUsd = msgAny["total_cost_usd"] as number;
+        }
         break;
       }
       if (msg.type === "result") {
         process.stderr.write(
           `✗ Haiku triage SDK returned non-success result: ${msg.subtype}; treating as skip\n`,
         );
-        return { ...SKIP_DECISION };
+        return { decision: { ...SKIP_DECISION }, costUsd: 0 };
       }
     }
 
@@ -267,15 +288,15 @@ export async function runTriage(input: TriageInput): Promise<TriageDecision> {
       process.stderr.write(
         `✗ Haiku triage SDK returned no result message; treating as skip\n`,
       );
-      return { ...SKIP_DECISION };
+      return { decision: { ...SKIP_DECISION }, costUsd: 0 };
     }
 
-    return parseTriageResponse(finalText);
+    return { decision: parseTriageResponse(finalText), costUsd };
   } catch (err) {
     process.stderr.write(
       `✗ Haiku triage call failed: ${err instanceof Error ? err.message : String(err)}; treating as skip\n`,
     );
-    return { ...SKIP_DECISION };
+    return { decision: { ...SKIP_DECISION }, costUsd: 0 };
   }
 }
 

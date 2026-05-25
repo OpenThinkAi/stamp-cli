@@ -104,6 +104,11 @@ export function peersDir(): string {
   return join(homedir(), ".stamp", "personal", "peers");
 }
 
+/** Directory for saved peer-review drafts (`~/.stamp/drafts/`). */
+export function draftsDir(): string {
+  return join(homedir(), ".stamp", "drafts");
+}
+
 /**
  * Per-user stamp-server config. Holds {host, port, user, repo_root_prefix}
  * so commands like `stamp provision` can reach the operator's stamp server
