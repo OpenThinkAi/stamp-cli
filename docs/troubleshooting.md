@@ -411,6 +411,60 @@ The advisory is silenced by `STAMP_SUPPRESS_LLM_NOTICE=1`; auto-prune is not (it
 
 ---
 
+## Local reviewer: no verdict / "produced no verdict"
+
+```
+error: local reviewer "security" (model qwen3-coder-30b) produced no verdict:
+  unknown error. The local model may not support tool-calling …
+```
+
+The local reviewer runs in one-shot mode: if the model doesn't emit a `VERDICT:` line as
+the last non-empty line of its response, stamp has no verdict to record and fails the
+reviewer (keeping the gate closed). Common causes and fixes:
+
+1. **Model didn't follow the prompt.** The one-shot reviewer prompt always appends a
+   `VERDICT: <choice>` instruction. If the model is too small or too instruction-confused
+   to follow it reliably, try a larger or more instruction-tuned model.
+
+2. **Chat-template sentinels in the response.** Some server builds (e.g. `mlx_lm.server`
+   with certain models) leak `<|im_end|>` or similar tokens after the last line. The
+   adapter scrubs known sentinels, but the model may use a different variant. Check the
+   raw response with a `curl` test against your endpoint and report unrecognised tokens as
+   a bug.
+
+3. **Tools crash caused the server to return an error.** If `STAMP_LOCAL_TOOLS=1` is set
+   (or `local_tools: true` in `~/.stamp/config.yml`), the adapter sends the OpenAI `tools`
+   field. Several backends — notably `mlx_lm.server` — crash or return HTTP errors when
+   `tools` are present. Either unset `STAMP_LOCAL_TOOLS`, remove `local_tools` from
+   `~/.stamp/config.yml`, or switch to a server that handles OpenAI tool-calling correctly.
+
+---
+
+## Local reviewer: when to use local vs Anthropic
+
+The local backend is the right choice for the **small/iterative inner loop**: delta
+reviews between rounds, focused one-file changes, or any diff you want to stay fully
+on-host without consuming a metered Anthropic review.
+
+**Use `STAMP_REVIEWER_BACKEND=anthropic` (or omit `local:` from config) for:**
+- Large or cross-cutting diffs (many files, large context window) where a small model
+  is likely to hallucinate or miss findings.
+- Cold reviews of a new branch where no delta is available.
+- When you need the prior-review ratchet prose (Anthropic-path-only for now).
+
+On ~32GB Apple Silicon, unified memory is shared between the model weights, KV cache,
+and OS. A single large-context review sits near the rail; three concurrent reviewers
+on a ~28K-token diff have been observed to OOM. If you see Metal GPU OOM errors:
+- Switch that review to `STAMP_REVIEWER_BACKEND=anthropic`, or
+- Reduce the diff size (commit smaller; use delta reviews after round 1).
+
+The `STAMP_LOCAL_REVIEW_MAX_BYTES` env var (used by the pipeline skill's
+auto-routing logic) lets you set a byte threshold above which reviews automatically
+route to the Anthropic backend. The concrete threshold depends on your hardware and
+model — TBD pending a full benchmark.
+
+---
+
 ## When all else fails
 
 - `stamp log --limit 5` — see what recently landed (or didn't)

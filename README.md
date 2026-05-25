@@ -550,17 +550,41 @@ regulated / air-gapped repos.)
 
 Then `curl <endpoint>/models` for the exact model id, put it after `local:`, and set `local_endpoint` to match.
 
+**Supported envelope.** The local backend is the right tool for the **small/iterative
+inner loop** — a delta review between rounds, a focused one-file change, or any diff
+you want to stay fully on-host without consuming a metered Anthropic review. Large or
+cross-cutting diffs (many files, large context) are better served by the Anthropic
+backend (`STAMP_REVIEWER_BACKEND=anthropic`) where a hosted model runs without
+unified-memory pressure. The concrete size threshold and latency numbers depend on your
+hardware and model choice; measure on your machine and set `STAMP_LOCAL_REVIEW_MAX_BYTES`
+in your env to automate the routing (the `5·0` review-backend selection in the pipeline
+skill respects it). Numbers are TBD pending a full benchmark on 32GB Apple Silicon.
+
+**Tool-calling (opt-in).** By default, the local reviewer suppresses the OpenAI `tools`
+field and relies on the one-shot core's last-line `VERDICT:` fallback — reliable across
+every backend, including `mlx_lm.server` which crashes server-side when `tools` are
+present. If your local server correctly implements OpenAI function-calling (verify with
+a test request first), you can opt into the structured `submit_verdict` path:
+
+```sh
+# Per-run opt-in (highest precedence):
+STAMP_LOCAL_TOOLS=1 stamp review --diff main..feature
+
+# Or persist it in ~/.stamp/config.yml:
+local_tools: true
+```
+
+With tools enabled the reviewer receives the `submit_verdict` schema and the structured
+verdict path is preferred; the `VERDICT:` line parser stays as a fallback.
+
 **v1 limitations.** The local reviewer is one-shot (a single model turn, no
 agentic file-reading tools): it sees the diff, not the surrounding tree. For
 a reviewer with `enforce_reads_on_dotstamp` (the `security` default), stamp
 auto-includes the full content of changed `.stamp/*` files in the prompt so
-trust-anchor changes are still inspected. It does **not** use tool-calling —
-several local servers (notably `mlx_lm.server`) mishandle or crash on the
-`tools` parameter — so the verdict comes through a `VERDICT:` line that
-stamp's prompt appends automatically and parses leniently (markdown/case
-tolerant); just write your reviewer prompt normally. The prior-review
-"ratchet" prose is Anthropic-path-only for now — the local path still gets
-the narrowed delta diff across rounds.
+trust-anchor changes are still inspected. By default it does **not** use
+tool-calling (see above for the opt-in). The prior-review "ratchet" prose is
+Anthropic-path-only for now — the local path still gets the narrowed delta
+diff across rounds.
 
 ### Reviewer execution budgets
 

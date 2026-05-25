@@ -37,6 +37,17 @@ export interface InvokeLocalReviewerParams {
   /** Local endpoint base URL, or undefined to let the adapter default to
    *  LM Studio (http://localhost:1234/v1). */
   endpoint: string | undefined;
+  /**
+   * Enable the OpenAI `tools` field and the `submit_verdict` structured-
+   * verdict path. Off by default — `mlx_lm.server` (the most common Apple-
+   * Silicon backend) crashes when `tools` are present. Flip on only for a
+   * server you have verified handles OpenAI function-calling correctly.
+   * When false the one-shot core's last-line `VERDICT:` fallback is used
+   * instead, which is reliable across every backend. Sourced from the
+   * `local_tools` config field / `STAMP_LOCAL_TOOLS` env var via the
+   * `ReviewerBackend.enableTools` property.
+   */
+  enableTools: boolean;
   repoRoot: string;
   /** When true (the `security` reviewer's default), the full head content of
    *  changed `.stamp/*` files is appended to the diff the model sees —
@@ -75,9 +86,11 @@ export async function invokeLocalReviewer(
   const client =
     params.client ??
     createLocalReviewClient({
-      // Local servers' tool-calling is unreliable (mlx_lm.server crashes on
-      // it); rely on the one-shot core's VERDICT: fallback instead.
-      disableTools: true,
+      // Tool-calling is off by default: mlx_lm.server (the most common
+      // Apple-Silicon backend) crashes server-side when `tools` are present.
+      // The operator can opt in via STAMP_LOCAL_TOOLS=1 or `local_tools: true`
+      // in ~/.stamp/config.yml for a server known to handle it correctly.
+      disableTools: !params.enableTools,
       ...(params.endpoint !== undefined ? { baseURL: params.endpoint } : {}),
     });
 
