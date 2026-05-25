@@ -339,6 +339,8 @@ export interface PrOpenedPayloadBody {
   title: string;
   body: string;
   pr_url: string;
+  /** SPKI PEM of the stamp signing key (AGT-454). Included in canonical signed bytes. */
+  pubkey: string;
 }
 
 /**

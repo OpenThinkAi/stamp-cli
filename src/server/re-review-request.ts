@@ -35,10 +35,12 @@ import {
 import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 
+import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import {
   fanoutToSeatHoldersFiltered,
   notConfiguredResponse,
   resolvePeerReviewsEnabled,
+  verifyPeerPayloadSignatureFromPubkey,
 } from "./peerReviews.js";
 
 function fail(message: string, exitCode: number): never {
@@ -59,6 +61,8 @@ interface ReReviewPayload {
   requester_fp: string;
   /** Optional list of reviewer short_names (resolved server-side to fps). */
   reviewer_filter?: string[];
+  /** SPKI PEM of the stamp signing key (AGT-454). Included in canonical signed bytes. */
+  pubkey: string;
   signature: string;
 }
 
@@ -75,7 +79,7 @@ function parsePayload(raw: Buffer): ReReviewPayload {
   }
 
   const p = parsed as Record<string, unknown>;
-  for (const k of ["patch_id", "requester_fp", "signature"]) {
+  for (const k of ["patch_id", "requester_fp", "pubkey", "signature"]) {
     if (typeof p[k] !== "string") fail(`re-review-request payload missing or invalid field: ${k}`, 4);
   }
 
@@ -121,13 +125,20 @@ async function main(): Promise<void> {
     const raw = await readStdin();
     const payload = parsePayload(raw);
 
-    // Security: bind the payload fingerprint to the SSH-authenticated caller.
-    if (payload.requester_fp !== caller.fingerprint) {
-      fail(
-        `requester_fp in payload (${payload.requester_fp}) does not match ` +
-          `the SSH-authenticated caller's fingerprint (${caller.fingerprint})`,
-        4,
-      );
+    // AGT-454 Auth (GitHub-blind broker, pure-crypto):
+    //   1. Recompute fingerprintFromPem(payload.pubkey); reject if ≠ requester_fp.
+    //   2. Verify Ed25519 sig over canonicalSerializePeerPayload(payloadWithoutSig).
+    // Author-identity check (requester_fp === original requested_by_fp) remains DB-based below.
+    const { signature: _sig, ...payloadWithoutSig } = payload;
+    const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
+    const authResult = verifyPeerPayloadSignatureFromPubkey(
+      payload.pubkey,
+      payload.requester_fp,
+      canonicalBytes,
+      payload.signature,
+    );
+    if (!authResult.ok) {
+      fail(`auth failure: ${authResult.reason}`, 4);
     }
 
     const patch = findPatch(db, payload.patch_id);

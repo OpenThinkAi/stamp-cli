@@ -63,6 +63,8 @@ const FIXTURE_BODY: PrOpenedPayloadBody = {
   title: "feat: add widget",
   body: "This PR adds the widget feature.",
   pr_url: "https://github.com/acme/widget/pull/42",
+  // AGT-454: pubkey is now part of the canonical signed payload.
+  pubkey: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA" + "A".repeat(43) + "\n-----END PUBLIC KEY-----\n",
 };
 
 /** A minimal server config fixture. */
@@ -89,6 +91,7 @@ describe("canonicalSerializePrOpened (AC #7)", () => {
       head_sha: FIXTURE_BODY.head_sha,
       requested_by_fp: FIXTURE_BODY.requested_by_fp,
       paths_changed: FIXTURE_BODY.paths_changed,
+      pubkey: FIXTURE_BODY.pubkey,
     };
     const bytes1 = canonicalSerializePrOpened(body1);
     const bytes2 = canonicalSerializePrOpened(body2);

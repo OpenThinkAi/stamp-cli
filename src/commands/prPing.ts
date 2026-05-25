@@ -222,10 +222,12 @@ export async function runPrPing(opts: PrPingOptions): Promise<void> {
   // ─── Sign the payload ─────────────────────────────────────────────
   // Canonical form: canonicalSerializePeerPayload (sortKeysDeep + JSON.stringify),
   // pinned across all peer-review signing/verifying call sites (AGT-434 AC 4).
+  // AGT-454: include pubkey in the signed payload body.
   const payloadBody = {
     patch_id: patchId,
     requester_fp: keypair.fingerprint,
     reviewer_filter: opts.reviewer,
+    pubkey: keypair.publicKeyPem,
   };
   const canonicalBytes = canonicalSerializePeerPayload(payloadBody);
   const signature = signBytes(keypair.privateKeyPem, canonicalBytes);
@@ -235,6 +237,7 @@ export async function runPrPing(opts: PrPingOptions): Promise<void> {
     patch_id: patchId,
     requester_fp: keypair.fingerprint,
     reviewer_filter: opts.reviewer,
+    pubkey: keypair.publicKeyPem,
     signature,
     serverConfig: serverCfg,
     _sshSpawnForTest: opts._sshSpawnForTest,

@@ -1,10 +1,8 @@
 /**
- * AGT-433 — Single-machine multi-key peer-review simulation.
+ * AGT-454 — Peer-agentic review simulation (rewritten for real topology).
  *
  * Drives the complete seat protocol and event-fanout path on one machine
- * using multiple Ed25519 keypairs against a temporary bare git repo and
- * in-process DB. This is the AC5/AC6 deliverable: a committed node:test
- * file that runs under `npm test` with zero outbound network.
+ * using multiple Ed25519 keypairs against an in-process DB.
  *
  * Architecture: the loop is a hybrid transport.
  *   - Seat protocol (claim semantics) → `claimSeatTx` called directly on
@@ -12,29 +10,31 @@
  *     delivery mechanism, but its seat enforcement is entirely in
  *     `claimSeatTx` (see src/lib/serverDb.ts). Driving that function
  *     directly covers the AC5 assertions without the subprocess/SSH-auth
- *     complexity (fingerprint system mismatch between SPKI and OpenSSH
- *     wire format makes end-to-end subprocess tests require real sshd).
+ *     complexity.
  *   - Event fanout → `fanoutToSeatHolders` / `registerListener` in-process.
  *   - Cost-cap + prListen loop → `prListen.ts` in-process via the
  *     `_eventQueueForTest` + `_sshSpawnForTest` seams.
  *
- * BINDING PLAN-GATE DECISIONS:
- *   - "extras" (claim_seat: always on seats_full) is NOT asserted here —
- *     the code for it is descoped to AGT-451.
- *   - post_mode: "dry-run" is NOT tested here — descoped to AGT-452.
- *     Use `draft` mode to suppress gh posts in tests.
- *   - Seat-claim over WS is NOT exercised — descoped to AGT-453.
- *     The SSH-verb path is the load-bearing seat-claim path in V1.
- *
- * Note: `STAMP_BARE_REPOS_DIR` (added in this ticket) is tested by the
- * `bareRepoPath` unit test below, verifying the env-override path.
+ * AGT-454 CHANGES FROM AGT-433:
+ *   - DELETED: STAMP_BARE_REPOS_DIR / bareRepoPath describe block — function removed.
+ *   - KEPT: AC5 claimSeatTx enforcement block.
+ *   - KEPT: fanoutToSeatHolders block.
+ *   - KEPT: cost-cap enforcement block.
+ *   - ADDED: server-crypto describe block (accept-valid / reject-fp-mismatch /
+ *            reject-tamper / reject-pubkey-swap) exercising the new
+ *            `verifyPeerPayloadSignatureFromPubkey`.
+ *   - ADDED: client-operator describe block using a real tmp git repo fixture
+ *            with a committed manifest.yml at a real base_sha, exercising
+ *            `verifyOperatorAtBaseLocal`.
  */
 
 import { strict as assert } from "node:assert";
 import { describe, it, before, after } from "node:test";
 import {
   mkdtempSync,
+  mkdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
@@ -43,6 +43,7 @@ import {
   createHash,
   createPublicKey,
 } from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 import {
   insertPatch,
@@ -54,9 +55,12 @@ import {
   registerListener,
   unregisterListener,
   clearListenerRegistry,
-  bareRepoPath,
   type PeerReviewEvent,
 } from "../src/server/peerReviews.ts";
+import { verifyPeerPayloadSignatureFromPubkey } from "../src/server/peerReviews.ts";
+import { verifyOperatorAtBaseLocal } from "../src/lib/peerOperatorVerify.ts";
+import { canonicalSerializePeerPayload } from "../src/lib/attestationV4.ts";
+import { signBytes } from "../src/lib/signing.ts";
 import { runPrListen, type PrListenOptions } from "../src/commands/prListen.ts";
 import type { TripletRecord } from "../src/lib/peerWatchLog.ts";
 import type { SshSpawnFn } from "../src/lib/seatClient.ts";
@@ -153,37 +157,6 @@ before(() => {
 after(() => {
   clearListenerRegistry();
   harness?.cleanup();
-});
-
-// ─── STAMP_BARE_REPOS_DIR override ───────────────────────────────────
-
-describe("STAMP_BARE_REPOS_DIR env override (new in AGT-433)", () => {
-  it("bareRepoPath uses STAMP_BARE_REPOS_DIR when set", () => {
-    const saved = process.env["STAMP_BARE_REPOS_DIR"];
-    try {
-      process.env["STAMP_BARE_REPOS_DIR"] = "/tmp/test-repos";
-      assert.equal(
-        bareRepoPath("acme/widget"),
-        "/tmp/test-repos/acme/widget.git",
-      );
-    } finally {
-      if (saved !== undefined) process.env["STAMP_BARE_REPOS_DIR"] = saved;
-      else delete process.env["STAMP_BARE_REPOS_DIR"];
-    }
-  });
-
-  it("bareRepoPath defaults to /srv/git when STAMP_BARE_REPOS_DIR is unset", () => {
-    const saved = process.env["STAMP_BARE_REPOS_DIR"];
-    try {
-      delete process.env["STAMP_BARE_REPOS_DIR"];
-      assert.equal(
-        bareRepoPath("acme/widget"),
-        "/srv/git/acme/widget.git",
-      );
-    } finally {
-      if (saved !== undefined) process.env["STAMP_BARE_REPOS_DIR"] = saved;
-    }
-  });
 });
 
 // ─── AC5: seat protocol via claimSeatTx ──────────────────────────────
@@ -406,6 +379,9 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
       _writeDraftForTest: (_filePath, _content) => { /* suppress disk write */ },
       _resolveNamedPromptForTest: (_input) => ({ ok: true, body: "sim prompt" }),
       _sdkRunnerForTest: async (_diff) => "sim review body",
+      // AGT-454: bypass operator gate — repo is not mapped in peer-repos.yml.
+      _peerReposMapForTest: new Map([[repo, "/tmp/fake-repo"]]),
+      _operatorVerifyForTest: () => ({ ok: true as const }),
     };
 
     // Suppress stderr during the run.
@@ -457,5 +433,176 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
     assert.equal(seatClaimCount, 0, "seat claim should not be called when cap is hit");
 
     assert.equal(exitCode, 0, "prListen should exit 0 after queue drains");
+  });
+});
+
+// ─── Server crypto: verifyPeerPayloadSignatureFromPubkey ─────────────
+//
+// Tests for the new pure-crypto server verification function (AGT-454).
+// These replace the never-real server-bare-repo auth path.
+
+describe("AGT-454: server crypto — verifyPeerPayloadSignatureFromPubkey", () => {
+  it("accepts a correctly-signed payload with matching fp", () => {
+    const kp = genSimKeypair("actor");
+    const payloadBody = {
+      patch_id: "a".repeat(40),
+      requested_by_fp: kp.fp,
+      repo: "acme/widget",
+      base_sha: "b".repeat(40),
+      pubkey: kp.publicKeyPem,
+    };
+    const canonical = canonicalSerializePeerPayload(payloadBody);
+    const signature = signBytes(kp.privateKeyPem, canonical);
+
+    const result = verifyPeerPayloadSignatureFromPubkey(kp.publicKeyPem, kp.fp, canonical, signature);
+    assert.ok(result.ok, `should accept valid payload; got: ${JSON.stringify(result)}`);
+  });
+
+  it("rejects when claimed fp does not match sha256(SPKI-DER) of pubkey", () => {
+    const kp = genSimKeypair("actor");
+    const impostor = genSimKeypair("impostor");
+    // Provide kp.publicKeyPem but claim impostor.fp — fp mismatch.
+    const payloadBody = {
+      patch_id: "a".repeat(40),
+      requested_by_fp: impostor.fp,
+      pubkey: kp.publicKeyPem,
+    };
+    const canonical = canonicalSerializePeerPayload(payloadBody);
+    const signature = signBytes(kp.privateKeyPem, canonical);
+
+    const result = verifyPeerPayloadSignatureFromPubkey(kp.publicKeyPem, impostor.fp, canonical, signature);
+    assert.ok(!result.ok, "should reject fp mismatch");
+    if (!result.ok) {
+      assert.ok(result.reason.includes("fp mismatch"), `reason should mention fp mismatch; got: ${result.reason}`);
+    }
+  });
+
+  it("rejects a tampered payload (signature no longer valid over modified bytes)", () => {
+    const kp = genSimKeypair("actor");
+    const payloadBody = {
+      patch_id: "a".repeat(40),
+      requested_by_fp: kp.fp,
+      pubkey: kp.publicKeyPem,
+    };
+    const canonical = canonicalSerializePeerPayload(payloadBody);
+    const signature = signBytes(kp.privateKeyPem, canonical);
+
+    // Tamper: change the canonical bytes slightly before verifying.
+    const tampered = Buffer.from(canonical);
+    tampered[0] = tampered[0]! ^ 0x01;
+
+    const result = verifyPeerPayloadSignatureFromPubkey(kp.publicKeyPem, kp.fp, tampered, signature);
+    assert.ok(!result.ok, "should reject tampered payload");
+    if (!result.ok) {
+      assert.ok(
+        result.reason.includes("signature verification failed"),
+        `reason should mention sig failure; got: ${result.reason}`,
+      );
+    }
+  });
+
+  it("rejects a pubkey/fp swap (both pubkey and fp from a different keypair)", () => {
+    // Attacker scenario: sign with actor's key but provide impostor's pubkey+fp.
+    const actor = genSimKeypair("actor");
+    const impostor = genSimKeypair("impostor");
+
+    // Sign with actor's private key.
+    const payloadBody = {
+      patch_id: "a".repeat(40),
+      requested_by_fp: actor.fp,
+      pubkey: actor.publicKeyPem,
+    };
+    const canonical = canonicalSerializePeerPayload(payloadBody);
+    const signature = signBytes(actor.privateKeyPem, canonical);
+
+    // Try to present impostor's pubkey+fp while reusing actor's sig.
+    // fp-recompute will catch this: fingerprintFromPem(impostor.publicKeyPem) ≠ actor.fp.
+    const result = verifyPeerPayloadSignatureFromPubkey(
+      impostor.publicKeyPem,
+      actor.fp,          // claimed fp = actor's fp, but pubkey = impostor's pubkey
+      canonical,
+      signature,
+    );
+    assert.ok(!result.ok, "should reject pubkey/fp swap");
+  });
+});
+
+// ─── Client operator check: verifyOperatorAtBaseLocal ────────────────
+//
+// Creates a real tmp git repo with a committed manifest at a known base_sha.
+// Mirrors the mkdtemp+git-init+commit pattern from tests/attest.test.ts.
+
+describe("AGT-454: client-side operator verification — verifyOperatorAtBaseLocal", () => {
+  let fixtureDir: string;
+  let baseSha: string;
+  let operatorKp: SimKeypair;
+  let outsiderKp: SimKeypair;
+
+  before(() => {
+    fixtureDir = mkdtempSync(join(os.tmpdir(), "peer-operator-verify-"));
+    operatorKp = genSimKeypair("operator");
+    outsiderKp = genSimKeypair("outsider");
+
+    // Init a minimal git repo.
+    const git = (args: string[]) =>
+      spawnSync("git", args, { cwd: fixtureDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+    git(["init", "-b", "main"]);
+    git(["config", "user.email", "test@test.com"]);
+    git(["config", "user.name", "Test"]);
+
+    // Create a minimal manifest with operator entry for operatorKp.
+    // Format matches serializeManifestYaml: keys is a map keyed by short_name.
+    const manifestDir = join(fixtureDir, ".stamp", "trusted-keys");
+    mkdirSync(manifestDir, { recursive: true });
+    const manifestYaml = [
+      "keys:",
+      "  operator:",
+      `    fingerprint: ${operatorKp.fp}`,
+      "    capabilities: [operator]",
+    ].join("\n") + "\n";
+    writeFileSync(join(manifestDir, "manifest.yml"), manifestYaml, "utf8");
+
+    // Also write a dummy pubkey file so the dir is non-empty.
+    writeFileSync(join(manifestDir, "operator.pub"), operatorKp.publicKeyPem, "utf8");
+
+    git(["add", "."]);
+    git(["commit", "-m", "init manifest"]);
+
+    const result = git(["rev-parse", "HEAD"]);
+    baseSha = result.stdout.trim();
+  });
+
+  after(() => {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  it("accepts operator fingerprint present in manifest at base_sha", () => {
+    const result = verifyOperatorAtBaseLocal(fixtureDir, baseSha, operatorKp.fp);
+    assert.ok(result.ok, `should accept operator; got: ${JSON.stringify(result)}`);
+  });
+
+  it("rejects fingerprint not in manifest at base_sha", () => {
+    const result = verifyOperatorAtBaseLocal(fixtureDir, baseSha, outsiderKp.fp);
+    assert.ok(!result.ok, "should reject outsider fp");
+    if (!result.ok) {
+      assert.ok(
+        result.reason.includes("not in manifest"),
+        `reason should mention 'not in manifest'; got: ${result.reason}`,
+      );
+    }
+  });
+
+  it("rejects when base_sha is not present in local clone (absent sha)", () => {
+    // Use an all-zeros sha that doesn't exist in the fixture repo.
+    const absentSha = "0".repeat(40);
+    const result = verifyOperatorAtBaseLocal(fixtureDir, absentSha, operatorKp.fp);
+    assert.ok(!result.ok, "should reject unknown sha");
+    if (!result.ok) {
+      assert.ok(
+        result.reason.includes("base_sha_not_found") || result.reason.includes("manifest not found"),
+        `reason should mention sha not found; got: ${result.reason}`,
+      );
+    }
   });
 });

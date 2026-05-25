@@ -5,15 +5,16 @@
  *
  * Payload fields (JSON, max MAX_PR_OPENED_BODY_BYTES):
  *   repo, patch_id, base_sha, head_sha, requested_by_fp,
- *   paths_changed (string[]), title, body, pr_url, signature
+ *   paths_changed (string[]), title, body, pr_url, pubkey, signature
  *
- * Auth: binds the payload to the SSH-authenticated caller
- * (`requested_by_fp === caller.fingerprint`) and verifies that fingerprint
- * has `operator` capability in `.stamp/trusted-keys/manifest.yml` at
- * `base_sha` via `verifyOperatorAtBase`. The in-payload `signature` is
- * currently parsed but NOT cryptographically verified on the SSH path (SSH
- * identity is the auth boundary). On the WS path (AGT-434) the signature
- * is verified against the operator's pubkey at base_sha and is load-bearing.
+ * Auth (AGT-454 GitHub-blind broker):
+ *   - `pubkey` (SPKI PEM) is carried in the payload; server recomputes
+ *     `fingerprintFromPem(pubkey)` and rejects unless it equals
+ *     `requested_by_fp` (fp-recompute bind).
+ *   - Ed25519 signature over `canonicalSerializePeerPayload(payloadWithoutSig)`
+ *     is verified against the carried `pubkey`.
+ *   - No server-side repo or manifest access; operator-ness is verified
+ *     client-side by each listener against its own local clone.
  *
  * Rate limit: 60/hr per author (`pr-opened` rate bucket) via AGT-420
  * `checkAndConsumeToken`.
@@ -47,13 +48,13 @@ import {
 import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 
+import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import {
-  bareRepoPath,
   fanoutEvent,
   notConfiguredResponse,
   resolvePeerReviewLimit,
   resolvePeerReviewsEnabled,
-  verifyOperatorAtBase,
+  verifyPeerPayloadSignatureFromPubkey,
   PR_OPENED_RATE_CAP_DEFAULT,
   MAX_PR_OPENED_BODY_BYTES_DEFAULT,
   MAX_PATHS_CHANGED_DEFAULT,
@@ -92,6 +93,8 @@ interface PrOpenedPayload {
   title: string;
   body: string;
   pr_url: string;
+  /** SPKI PEM of the stamp signing key (AGT-454). Included in canonical signed bytes. */
+  pubkey: string;
   signature: string;
 }
 
@@ -110,7 +113,7 @@ function parsePayload(raw: Buffer): PrOpenedPayload {
   const p = parsed as Record<string, unknown>;
   const required = [
     "repo", "patch_id", "base_sha", "head_sha", "requested_by_fp",
-    "paths_changed", "title", "body", "pr_url", "signature",
+    "paths_changed", "title", "body", "pr_url", "pubkey", "signature",
   ];
   for (const k of required) {
     if (!(k in p)) fail(`pr-opened payload missing required field: ${k}`, 4);
@@ -128,6 +131,7 @@ function parsePayload(raw: Buffer): PrOpenedPayload {
   if (typeof p["title"] !== "string") fail("title must be a string", 4);
   if (typeof p["body"] !== "string") fail("body must be a string", 4);
   if (typeof p["pr_url"] !== "string") fail("pr_url must be a string", 4);
+  if (typeof p["pubkey"] !== "string") fail("pubkey must be a string", 4);
   if (typeof p["signature"] !== "string") fail("signature must be a string", 4);
 
   return p as unknown as PrOpenedPayload;
@@ -190,17 +194,6 @@ async function main(): Promise<void> {
     const raw = await readBoundedStdin(maxBodyBytes);
     const payload = parsePayload(raw);
 
-    // Security: bind the payload fingerprint to the SSH-authenticated caller.
-    // Without this check any legitimate operator can impersonate another by
-    // supplying a different `requested_by_fp` in the JSON payload.
-    if (payload.requested_by_fp !== caller.fingerprint) {
-      fail(
-        `requested_by_fp in payload (${payload.requested_by_fp}) does not match ` +
-          `the SSH-authenticated caller's fingerprint (${caller.fingerprint})`,
-        4,
-      );
-    }
-
     if (payload.paths_changed.length > maxPaths) {
       fail(
         `paths_changed has ${payload.paths_changed.length} entries — exceeds MAX_PATHS_CHANGED (${maxPaths})`,
@@ -208,7 +201,7 @@ async function main(): Promise<void> {
       );
     }
 
-    // Validate repo format before path resolution to prevent path traversal.
+    // Validate repo format to prevent path traversal / injection.
     if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(payload.repo)) {
       fail(
         `repo must be <org>/<name> with alphanumeric/dash/dot/underscore only (got ${JSON.stringify(payload.repo)})`,
@@ -216,12 +209,18 @@ async function main(): Promise<void> {
       );
     }
 
-    // Auth: verify operator capability at base_sha via manifest.
-    const gitDir = bareRepoPath(payload.repo);
-    const authResult = verifyOperatorAtBase(
-      gitDir,
-      payload.base_sha,
+    // AGT-454 Auth (GitHub-blind broker, pure-crypto):
+    //   1. Recompute fingerprintFromPem(payload.pubkey); reject if ≠ requested_by_fp.
+    //   2. Verify Ed25519 sig over canonicalSerializePeerPayload(payloadWithoutSig).
+    // Operator-ness @ base_sha is NOT checked here — that is the listener's job
+    // (client-side, against its own local clone via verifyOperatorAtBaseLocal).
+    const { signature: _sig, ...payloadWithoutSigForVerify } = payload;
+    const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSigForVerify);
+    const authResult = verifyPeerPayloadSignatureFromPubkey(
+      payload.pubkey,
       payload.requested_by_fp,
+      canonicalBytes,
+      payload.signature,
     );
     if (!authResult.ok) {
       fail(`auth failure: ${authResult.reason}`, 4);
@@ -238,8 +237,8 @@ async function main(): Promise<void> {
       pr_url: payload.pr_url,
     }, now);
 
-    const { signature: _sig, ...payloadWithoutSig } = payload;
-    appendEvent(db, payload.patch_id, "pr-opened", payload.requested_by_fp, payloadWithoutSig, now);
+    // payloadWithoutSigForVerify is the canonical payload (no signature) — reuse it for events.
+    appendEvent(db, payload.patch_id, "pr-opened", payload.requested_by_fp, payloadWithoutSigForVerify, now);
 
     // Fan out to subscribed listeners for this org (in-process stub only).
     const org = payload.repo.split("/")[0] ?? payload.repo;
@@ -247,7 +246,7 @@ async function main(): Promise<void> {
       event_type: "pr-opened",
       patch_id: payload.patch_id,
       actor_fp: payload.requested_by_fp,
-      payload: payloadWithoutSig,
+      payload: payloadWithoutSigForVerify,
     });
 
     process.stdout.write(

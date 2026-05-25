@@ -184,6 +184,26 @@ function makeSuccessSshSpawn(seatNum = 1): SshSpawnFn {
   };
 }
 
+/**
+ * AGT-454: Default seams to bypass the client-side operator verification gate.
+ *
+ * Tests that pre-date AGT-454 use `makeEvent()` which produces a `pr-opened`
+ * event for `acme/widget`. The new gate skips any event whose repo is not
+ * mapped in `~/.stamp/peer-repos.yml`. These seams inject a fake map with the
+ * test repo present, and short-circuit `verifyOperatorAtBaseLocal` to always
+ * accept. Tests that explicitly exercise the operator-verification gate should
+ * override these seams.
+ */
+function bypassOperatorGate(): Pick<
+  import("../src/commands/prListen.ts").PrListenOptions,
+  "_peerReposMapForTest" | "_operatorVerifyForTest"
+> {
+  return {
+    _peerReposMapForTest: new Map([["acme/widget", "/tmp/fake-acme-widget"]]),
+    _operatorVerifyForTest: () => ({ ok: true as const }),
+  };
+}
+
 // ─── Test cleanup ─────────────────────────────────────────────────────
 
 beforeEach(() => clearListenerRegistry());
@@ -249,6 +269,7 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
         _setIntervalForTest: setIntervalFake,
         _cwdForTest: "/tmp",
         _eventQueueForTest: [event],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -301,6 +322,7 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [event],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -338,6 +360,7 @@ describe("AC #8: loop re-enters — two events, both processed", () => {
         _ghReviewForTest: ghReview,
         _cwdForTest: "/tmp",
         _eventQueueForTest: [event1, event2],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -418,6 +441,7 @@ describe("AC #4: seat-claim rejections", () => {
         _sdkRunnerForTest: async (_diff) => { sdkCalled = true; return "body"; },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -436,6 +460,7 @@ describe("AC #4: seat-claim rejections", () => {
         _sshSpawnForTest: makeSeatRejectionSshSpawn("error: claim rejected: author_cannot_claim_own_pr"),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -456,6 +481,7 @@ describe("AC #4: seat-claim rejections", () => {
         _sshSpawnForTest: makeSeatRejectionSshSpawn("error: claim rejected: already_holds_other_seat"),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -491,6 +517,7 @@ describe("AC #7: gh pr review failure → release-seat called", () => {
         _ghReviewForTest: ghReview,
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -588,6 +615,7 @@ describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
     claimant_fp: "sha256:" + "a".repeat(64),
     base_sha: "b".repeat(40),
     repo: "acme/widget",
+    pubkey: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfakepubkeyforthisunittest=\n-----END PUBLIC KEY-----\n",
     signature: "sig",
     serverConfig: { host: "stamp.example.com", port: 2222, user: "git", repoRootPrefix: "/srv/git" },
   } as const;
@@ -722,6 +750,7 @@ describe("AGT-430 AC #1+4: triage → named prompt used as systemPrompt for revi
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [event],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -766,6 +795,7 @@ describe("AGT-430 AC #3: missing named prompt → ✗ log + skip (no claim, no S
         _ghReviewForTest: (_url, _body) => { ghCalled = true; return { status: 0, stderr: "" }; },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -801,6 +831,7 @@ describe("AGT-430 AC #6: triplet logged regardless of skip vs. claim", () => {
         _appendTripletForTest: (rec) => triplets.push(rec),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -841,6 +872,7 @@ describe("AGT-430 AC #6: triplet logged regardless of skip vs. claim", () => {
         _appendTripletForTest: (rec) => triplets.push(rec),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -872,6 +904,7 @@ describe("AGT-430 AC #8: peer-watch.md missing → ⟳ notice + fallback decisio
         _ghReviewForTest: (_url, _body) => { ghCalled = true; return { status: 0, stderr: "" }; },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -919,6 +952,7 @@ describe("AGT-430 AC triage skip: triage returns skip → no claim, no SDK, no g
         _appendTripletForTest: () => {},
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1119,6 +1153,7 @@ describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'",
         _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()], // pr-opened event
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1165,6 +1200,7 @@ describe("AGT-432 AC #3: cost-cap — cap NOT hit when dailySpend < cost_cap_usd
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1207,6 +1243,7 @@ describe("AGT-432 AC #3: cost-cap — cap HIT when _initialDailySpendForTest >= 
         _cwdForTest: "/tmp",
         _initialDailySpendForTest: 0.002,
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1244,6 +1281,7 @@ describe("AGT-432 AC #4: cost-cap log — normal skip does NOT get reason field"
         _notifyForTest: (title, body) => { notifyCalls.push({ title, body }); },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1291,6 +1329,7 @@ describe("AGT-432 AC #2: day rollover — daily spend resets at local midnight",
         _cwdForTest: "/tmp",
         // Two events on different days
         _eventQueueForTest: [makeEvent({ patch_id: "1".repeat(40) }), makeEvent({ patch_id: "2".repeat(40) })],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1324,6 +1363,7 @@ describe("AGT-432: draft save — listener saves draft when post_mode='draft'", 
         _writeDraftForTest: (filePath, content) => { drafts.push({ filePath, content }); },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1361,6 +1401,7 @@ describe("AGT-432: draft save — listener saves draft when post_mode='draft'", 
         _writeDraftForTest: (filePath, content) => { drafts.push({ filePath, content }); },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent({ patch_id: patchId })],
+        ...bypassOperatorGate(),
       }),
     );
 
