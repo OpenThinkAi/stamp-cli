@@ -772,6 +772,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           head_sha: resolved.head_sha,
           model: backend.model,
           endpoint: backend.endpoint,
+          enableTools: backend.enableTools,
           repoRoot,
           enforceReadsOnDotstamp:
             config.reviewers[name]?.enforce_reads_on_dotstamp ?? false,

@@ -49,6 +49,17 @@ export interface UserConfig {
    * `.stamp/config.yml`.
    */
   local_endpoint?: string;
+  /**
+   * Enable OpenAI `tools` / `submit_verdict` structured-verdict path for
+   * local reviewers. Off by default because `mlx_lm.server` (the most
+   * common Apple-Silicon backend) crashes server-side when `tools` are
+   * present. Flip on only for a local server you have verified accepts
+   * OpenAI function-calling correctly (e.g. oMLX with a tools-capable
+   * model). When off, the verdict falls through to the one-shot core's
+   * last-line `VERDICT:` parser, which is reliable across every backend.
+   * Overridable per-run via `STAMP_LOCAL_TOOLS=1` (opt-in).
+   */
+  local_tools?: boolean;
 }
 
 /**
@@ -67,10 +78,16 @@ export const LOCAL_MODEL_PREFIX = "local:";
  * branches on `kind`: `anthropic` runs the existing agent-SDK reviewer (or
  * SDK default when `model` is null); `local` runs the one-shot core against
  * a local OpenAI-compatible endpoint (unmetered).
+ *
+ * `enableTools` (local only): when true, the local client sends the
+ * `tools` field and prefers the `submit_verdict` structured-verdict path;
+ * when false (the default), tools are suppressed and the one-shot core's
+ * `VERDICT:` text fallback is used instead — safe for backends (like
+ * `mlx_lm.server`) that crash on the OpenAI tools param.
  */
 export type ReviewerBackend =
   | { kind: "anthropic"; model: string | null }
-  | { kind: "local"; model: string; endpoint: string | undefined };
+  | { kind: "local"; model: string; endpoint: string | undefined; enableTools: boolean };
 
 /**
  * Default reviewer-model assignments shipped to first-time operators.
@@ -223,9 +240,26 @@ export function parseUserConfig(
     local_endpoint = url;
   }
 
-  return local_endpoint !== undefined
-    ? { reviewers, local_endpoint }
-    : { reviewers };
+  // Optional top-level local_tools. Controls whether the local reviewer
+  // sends the OpenAI `tools` field (enabling the structured submit_verdict
+  // path). Defaults to false (tools off) — safe for mlx_lm.server which
+  // crashes on the tools param. Flip on only for a verified tool-capable
+  // server. Validated as boolean; non-boolean values are a config error.
+  let local_tools: boolean | undefined;
+  const localToolsRaw = obj.local_tools;
+  if (localToolsRaw !== undefined && localToolsRaw !== null) {
+    if (typeof localToolsRaw !== "boolean") {
+      throw new Error(
+        `${contextPath}: local_tools must be a boolean (true or false)`,
+      );
+    }
+    local_tools = localToolsRaw;
+  }
+
+  const result: UserConfig = { reviewers };
+  if (local_endpoint !== undefined) result.local_endpoint = local_endpoint;
+  if (local_tools !== undefined) result.local_tools = local_tools;
+  return result;
 }
 
 /**
@@ -235,11 +269,10 @@ export function parseUserConfig(
  * `yaml` package's defaults (insertion order).
  */
 export function stringifyUserConfig(cfg: UserConfig): string {
-  return stringifyYaml(
-    cfg.local_endpoint !== undefined
-      ? { reviewers: cfg.reviewers, local_endpoint: cfg.local_endpoint }
-      : { reviewers: cfg.reviewers },
-  );
+  const out: Record<string, unknown> = { reviewers: cfg.reviewers };
+  if (cfg.local_endpoint !== undefined) out.local_endpoint = cfg.local_endpoint;
+  if (cfg.local_tools !== undefined) out.local_tools = cfg.local_tools;
+  return stringifyYaml(out);
 }
 
 /**
@@ -360,7 +393,8 @@ export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
     if (!model) return { kind: "anthropic", model: null };
     const endpoint =
       process.env.STAMP_LOCAL_ENDPOINT?.trim() || cfg?.local_endpoint;
-    return { kind: "local", model, endpoint };
+    const enableTools = resolveLocalTools(cfg);
+    return { kind: "local", model, endpoint, enableTools };
   }
 
   if (typeof raw !== "string" || raw.length === 0) {
@@ -371,9 +405,24 @@ export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
     // A bare `local:` with no model id is a misconfiguration; fall back to
     // anthropic-default rather than handing the local server an empty model.
     if (model.length === 0) return { kind: "anthropic", model: null };
-    return { kind: "local", model, endpoint: cfg?.local_endpoint };
+    const enableTools = resolveLocalTools(cfg);
+    return { kind: "local", model, endpoint: cfg?.local_endpoint, enableTools };
   }
   return { kind: "anthropic", model: raw };
+}
+
+/**
+ * Resolve whether tools should be enabled for the local reviewer. The
+ * default is `false` (tools off — safe for mlx_lm.server which crashes on
+ * the OpenAI tools param). Opt in via:
+ *   - `STAMP_LOCAL_TOOLS=1` env var (per-run, highest precedence), or
+ *   - `local_tools: true` in `~/.stamp/config.yml` (per-machine persistent).
+ * Any truthy-looking value for the env var counts: "1", "true", "yes".
+ */
+function resolveLocalTools(cfg: UserConfig | null): boolean {
+  const envVal = process.env.STAMP_LOCAL_TOOLS?.trim().toLowerCase();
+  if (envVal === "1" || envVal === "true" || envVal === "yes") return true;
+  return cfg?.local_tools === true;
 }
 
 /**

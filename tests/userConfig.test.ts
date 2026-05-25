@@ -268,6 +268,7 @@ describe("resolveReviewerBackend + local: scheme", () => {
       kind: "local",
       model: "qwen2.5-coder-32b",
       endpoint: "http://localhost:1234/v1",
+      enableTools: false,
     });
   });
 
@@ -277,6 +278,7 @@ describe("resolveReviewerBackend + local: scheme", () => {
       kind: "local",
       model: "qwen",
       endpoint: undefined,
+      enableTools: false,
     });
   });
 
@@ -385,6 +387,7 @@ describe("STAMP_REVIEWER_BACKEND=local override", () => {
           kind: "local",
           model: "qwen3-coder-30b",
           endpoint: "http://127.0.0.1:8000/v1",
+          enableTools: false,
         });
       },
     );
@@ -400,6 +403,7 @@ describe("STAMP_REVIEWER_BACKEND=local override", () => {
         kind: "local",
         model: "cfg-model",
         endpoint: "http://localhost:1234/v1",
+        enableTools: false,
       });
     });
   });
@@ -430,6 +434,7 @@ describe("STAMP_REVIEWER_BACKEND=local override", () => {
         kind: "local",
         model: "m",
         endpoint: undefined,
+        enableTools: false,
       });
     });
   });
@@ -442,6 +447,154 @@ describe("STAMP_REVIEWER_BACKEND=local override", () => {
         model: null,
       });
     });
+  });
+});
+
+describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", () => {
+  function withEnvTools(
+    env: Record<string, string | undefined>,
+    fn: () => void,
+  ) {
+    const keys = [
+      "STAMP_REVIEWER_BACKEND",
+      "STAMP_LOCAL_MODEL",
+      "STAMP_LOCAL_ENDPOINT",
+      "STAMP_LOCAL_TOOLS",
+    ];
+    const saved: Record<string, string | undefined> = {};
+    for (const k of keys) saved[k] = process.env[k];
+    try {
+      for (const k of keys) {
+        if (env[k] === undefined) delete process.env[k];
+        else process.env[k] = env[k];
+      }
+      fn();
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  }
+
+  it("default is enableTools:false — tools off unless operator explicitly opts in", () => {
+    writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
+    withEnvTools({}, () => {
+      const b = resolveReviewerBackend("security");
+      assert.equal(b.kind, "local");
+      assert.equal((b as { enableTools: boolean }).enableTools, false);
+    });
+  });
+
+  it("local_tools:true in config enables tools", () => {
+    writeUserConfig({
+      reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` },
+      local_tools: true,
+    });
+    withEnvTools({}, () => {
+      const b = resolveReviewerBackend("security");
+      assert.equal(b.kind, "local");
+      assert.equal((b as { enableTools: boolean }).enableTools, true);
+    });
+  });
+
+  it("local_tools:false in config keeps tools off (explicit off)", () => {
+    writeUserConfig({
+      reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` },
+      local_tools: false,
+    });
+    withEnvTools({}, () => {
+      const b = resolveReviewerBackend("security");
+      assert.equal(b.kind, "local");
+      assert.equal((b as { enableTools: boolean }).enableTools, false);
+    });
+  });
+
+  it("STAMP_LOCAL_TOOLS=1 enables tools (highest precedence, per-run opt-in)", () => {
+    // Config says off; env says on — env wins.
+    writeUserConfig({
+      reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` },
+      local_tools: false,
+    });
+    withEnvTools({ STAMP_LOCAL_TOOLS: "1" }, () => {
+      const b = resolveReviewerBackend("security");
+      assert.equal(b.kind, "local");
+      assert.equal((b as { enableTools: boolean }).enableTools, true);
+    });
+  });
+
+  it("STAMP_LOCAL_TOOLS=true and STAMP_LOCAL_TOOLS=yes are also accepted", () => {
+    writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
+    for (const val of ["true", "yes"]) {
+      withEnvTools({ STAMP_LOCAL_TOOLS: val }, () => {
+        const b = resolveReviewerBackend("security");
+        assert.equal(b.kind, "local");
+        assert.equal(
+          (b as { enableTools: boolean }).enableTools,
+          true,
+          `expected enableTools=true for STAMP_LOCAL_TOOLS=${val}`,
+        );
+      });
+    }
+  });
+
+  it("STAMP_LOCAL_TOOLS=0 does not enable tools", () => {
+    // Config says on; env says '0' — only 1/true/yes enable; '0' doesn't.
+    writeUserConfig({
+      reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` },
+      local_tools: true,
+    });
+    withEnvTools({ STAMP_LOCAL_TOOLS: "0" }, () => {
+      // local_tools: true in config still wins when env doesn't actively enable
+      const b = resolveReviewerBackend("security");
+      assert.equal(b.kind, "local");
+      assert.equal((b as { enableTools: boolean }).enableTools, true);
+    });
+  });
+
+  it("STAMP_REVIEWER_BACKEND=local override also threads enableTools", () => {
+    writeUserConfig({
+      reviewers: { security: "claude-opus-4-7" },
+      local_tools: true,
+    });
+    withEnvTools(
+      {
+        STAMP_REVIEWER_BACKEND: "local",
+        STAMP_LOCAL_MODEL: "qwen",
+        STAMP_LOCAL_ENDPOINT: "http://localhost:8000/v1",
+      },
+      () => {
+        const b = resolveReviewerBackend("security");
+        assert.equal(b.kind, "local");
+        assert.equal((b as { enableTools: boolean }).enableTools, true);
+      },
+    );
+  });
+
+  it("parseUserConfig rejects a non-boolean local_tools value", () => {
+    assert.throws(
+      () => parseUserConfig("local_tools: yes\nreviewers: {}\n"),
+      /local_tools must be a boolean/,
+    );
+    assert.throws(
+      () => parseUserConfig("local_tools: 1\nreviewers: {}\n"),
+      /local_tools must be a boolean/,
+    );
+  });
+
+  it("parseUserConfig accepts local_tools:true and persists it through stringify round-trip", () => {
+    const cfg = parseUserConfig("local_tools: true\nreviewers: {}\n");
+    assert.equal(cfg.local_tools, true);
+    const round = parseUserConfig(stringifyUserConfig(cfg));
+    assert.equal(round.local_tools, true);
+  });
+
+  it("parseUserConfig accepts local_tools:false and omits it when not set (no spurious key)", () => {
+    const withFalse = parseUserConfig("local_tools: false\nreviewers: {}\n");
+    assert.equal(withFalse.local_tools, false);
+    // Absent key → undefined, not false
+    const absent = parseUserConfig("reviewers: {}\n");
+    assert.equal(absent.local_tools, undefined);
   });
 });
 
