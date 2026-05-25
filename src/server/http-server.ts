@@ -63,7 +63,7 @@ import {
   resolvePeerReviewsEnabled,
   bareRepoPath,
   verifyOperatorAtBase,
-  readTrustedKeysAtRepo,
+  verifyPeerPayloadSignature,
 } from "./peerReviews.js";
 import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 
@@ -1137,6 +1137,9 @@ export function __getPollStateForTests(): {
 
 const NONCE_TTL_MS = 30_000;
 const WS_HANDSHAKE_TIMEOUT_MS = 30_000;
+// Ed25519 fingerprints are `SHA256:<43-44 base64 chars>`.
+// Validated before any filesystem path construction to prevent path traversal.
+const WS_FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/=]{43,44}$/;
 // WS path that `stamp pr listen --ws` connects to.
 export const WS_PEER_LISTEN_PATH = "/peer/listen";
 // Server-managed trusted-key directory for the WS handshake. On the WS path
@@ -1191,6 +1194,13 @@ function verifyWsHandshake(
   nonce: string,
   signatureBase64: string,
 ): { ok: true } | { ok: false; reason: string } {
+  // Validate fingerprint format before any filesystem path construction.
+  // Ed25519 fingerprints are `SHA256:<43-44 base64 chars>`. Rejecting here
+  // prevents path traversal via a crafted fingerprint (e.g. `../../tmp/evil`).
+  if (!WS_FINGERPRINT_RE.test(fingerprint)) {
+    return { ok: false, reason: `fingerprint format invalid: ${fingerprint}` };
+  }
+
   // Look up and consume the nonce.
   sweepNonces();
   const entry = pendingNonces.get(nonce);
@@ -1207,6 +1217,7 @@ function verifyWsHandshake(
   try {
     // readFileSync from node:fs — the server-global dir is a real fs path,
     // not a git-tree path (no base_sha needed for the handshake).
+    // The fingerprint is already validated above; path.basename is not needed.
     pem = readFileSync(
       `${SERVER_TRUSTED_KEYS_DIR}/${fingerprint}.pub`,
       "utf8",
@@ -1218,39 +1229,6 @@ function verifyWsHandshake(
   let valid: boolean;
   try {
     valid = verifyBytes(pem, Buffer.from(nonce, "utf8"), signatureBase64);
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `signature verify threw: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  return valid ? { ok: true } : { ok: false, reason: "signature invalid" };
-}
-
-/**
- * Verify a per-message peer payload signature on the WS path (AC 3).
- * Loads the operator's pubkey from the repo's `.stamp/trusted-keys/<fp>.pub`
- * at `base_sha` via `readTrustedKeysAtRepo`, then calls `verifyBytes`.
- */
-function verifyWsPayloadSignature(
-  repoGitDir: string,
-  base_sha: string,
-  fingerprint: string,
-  payloadWithoutSig: object,
-  signatureBase64: string,
-): { ok: true } | { ok: false; reason: string } {
-  const keyMap = readTrustedKeysAtRepo(repoGitDir, base_sha);
-  const pem = keyMap.get(fingerprint);
-  if (!pem) {
-    return {
-      ok: false,
-      reason: `pubkey for ${fingerprint} not found at ${base_sha}`,
-    };
-  }
-  const canonical = canonicalSerializePeerPayload(payloadWithoutSig);
-  let valid: boolean;
-  try {
-    valid = verifyBytes(pem, canonical, signatureBase64);
   } catch (err) {
     return {
       ok: false,
@@ -1286,9 +1264,11 @@ export function pushEventToWsClient(
  *   {type:"claim-seat", ...payload, signature}
  *   {type:"re-review-request", ...payload, signature}
  *
- * Verifies the Ed25519 signature against the repo's trusted-keys at base_sha,
- * then delegates to the shared peerReviews module. Returns a JSON response
- * string to send back, or null to silently drop.
+ * Verifies the Ed25519 signature against the repo's trusted-keys at base_sha
+ * (via `verifyPeerPayloadSignature` from peerReviews.ts), then verifies the
+ * sender has operator capability via `verifyOperatorAtBase`. Returns a JSON
+ * response string; a verified message returns `{ok:true}` (full peer-review
+ * fanout is a stub pending AGT-435). Returns a JSON error string on failure.
  */
 function handleWsMessage(
   state: WsSocketState,
@@ -1332,14 +1312,17 @@ function handleWsMessage(
     }
 
     // Build the payload-without-signature for canonical serialization.
+    // `verifyPeerPayloadSignature` takes pre-serialized canonical bytes, so
+    // we produce them here (same serializer the client used in canonicalSign).
     const { signature: _sig, type: _type, ...payloadWithoutSig } = msg;
+    const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
 
     const gitDir = bareRepoPath(repo);
-    const verifyResult = verifyWsPayloadSignature(
+    const verifyResult = verifyPeerPayloadSignature(
       gitDir,
       base_sha,
       state.fingerprint,
-      payloadWithoutSig,
+      canonicalBytes,
       signature,
     );
 

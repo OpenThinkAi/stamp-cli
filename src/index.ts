@@ -834,15 +834,15 @@ pr
   )
   .option(
     "--ws",
-    "use the WebSocket transport (AGT-434) instead of the SSH-verb long-poll fallback",
+    "use the WebSocket transport instead of the default polling transport",
   )
   .addHelpText(
     "after",
     `
 Subscribes the operator's stamp identity to PR-opened events for the given orgs,
 then loops indefinitely:
-  - Receives pr-opened events via the WebSocket transport (--ws flag; AGT-434)
-    or the SSH-verb long-poll fallback (default, retained through AGT-433)
+  - Receives pr-opened events via the WebSocket transport (--ws) or the default
+    polling transport
   - Applies author-exclusion (skips own PRs)
   - Claims a reviewer seat; runs the builtin-default review via the Claude Agent SDK
   - Posts the result via 'gh pr review --comment'

@@ -34,7 +34,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadUserKeypair, type Keypair } from "../lib/keys.js";
 import { signBytes } from "../lib/signing.js";
-import { sortKeysDeep } from "../lib/attestationV4.js";
+import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
 import type { ServerConfig } from "../lib/serverConfig.js";
 import { WebSocket } from "ws";
@@ -155,11 +155,7 @@ export interface PrListenOptions {
  * the object does NOT include a `signature` field (omit it before signing).
  */
 function canonicalSign(keypair: Keypair, payloadBody: object): string {
-  const canonical = Buffer.from(
-    JSON.stringify(sortKeysDeep(payloadBody)),
-    "utf8",
-  );
-  return signBytes(keypair.privateKeyPem, canonical);
+  return signBytes(keypair.privateKeyPem, canonicalSerializePeerPayload(payloadBody));
 }
 
 /**
@@ -188,10 +184,8 @@ async function connectWsTransport(
   | { ok: false; reason: string }
 > {
   // In-test: use the injected WS socket (skip the real connect).
-  const ws: WebSocket = wsSocketOverride ?? (() => {
-    const url = `ws://${serverCfg.host}:${serverCfg.port}/peer/listen`;
-    return new WebSocket(url);
-  })();
+  const url = `ws://${serverCfg.host}:${serverCfg.port}/peer/listen`;
+  const ws: WebSocket = wsSocketOverride ?? new WebSocket(url);
 
   return new Promise((resolve) => {
     let authenticated = false;
@@ -497,10 +491,8 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     });
   }
   // Wire the SSH-path listener's onEvent to the promise resolver.
-  // (Only relevant when SSH path is active — registerListener already happened.)
+  // Only relevant when SSH transport is active (not WS, not queue-mode test).
   if (!opts.useWsTransport && !useQueueMode) {
-    // Re-register with the pending-resolve approach. The SSH branch above
-    // registered a stub listener; we need to update it to resolve sshPendingResolve.
     registerListener(keypair.fingerprint, {
       orgs,
       onEvent: (event: PeerReviewEvent) => {
