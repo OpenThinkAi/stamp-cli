@@ -926,8 +926,8 @@ export async function invokeReviewer(params: {
       // Emit warnings for optional failures and proceed.
       for (const entry of optionalFailures) {
         process.stderr.write(
-          `stamp: reviewer "${params.reviewer}" mcp server "${entry.name}" ` +
-            `is optional and failed to connect ` +
+          `warning: reviewer "${params.reviewer}" mcp server "${entry.name}" ` +
+            `failed to connect ` +
             `(status: ${entry.status}${entry.error ? `; error: ${entry.error}` : ""}); ` +
             `proceeding with degraded tool surface\n`,
         );
