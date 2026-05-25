@@ -430,6 +430,17 @@ write_env_var MAX_INVITES_PER_HOUR
 # crash-loop the self-deploying server).
 write_env_var STAMP_TRASH_TTL_DAYS
 
+# AGT-454 — peer-agentic reviews master toggle. Consumed by the peer-review
+# SSH verbs (stamp-pr-opened / stamp-claim-seat / stamp-subscribe / etc.) via
+# resolvePeerReviewsEnabled(), which reads process.env after the verb's
+# loadServerEnvFile() merge. sshd strips env from the session, so without
+# persisting it here every peer verb sees the flag as unset and reports
+# "peer reviews disabled" — even when the container has STAMP_PEER_REVIEWS_ENABLED=1.
+# (The long-running stamp-http-server / WS path inherits the container env
+# directly, so only the SSH verbs need this.) A bad value is harmless: the
+# resolver only enables on an exact "1", anything else stays disabled.
+write_env_var STAMP_PEER_REVIEWS_ENABLED
+
 # AGT-411: production refusal guard for STAMP_PROMPTS_DIR override.
 # Must run before write_env_var STAMP_PROMPTS_DIR so a misconfigured prod
 # deployment is rejected before the var is persisted to /etc/stamp/env.
