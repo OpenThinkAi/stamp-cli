@@ -1423,4 +1423,68 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
     // Verify triplet is tagged as re-review
     assert.equal(triplets[0]!["kind"], "re-review", "re-review triplet should have kind='re-review'");
   });
+
+  it("AC-3: downgrades re-review-requested to skip with reason 'daily cap hit' when cap is hit", async () => {
+    // Mirrors the fresh pr-opened cap-HIT test but for a re-review-requested event.
+    // Proves cap enforcement applies at the shared triage-finalize point for re-review events too.
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+    const notifyCalls: Array<{ title: string; body: string }> = [];
+    let sdkCalled = false;
+    let sshClaimCalled = false;
+
+    // cap=0.001; _initialDailySpendForTest=0.002 → dailySpend(0.002) >= cap(0.001) → IS triggered
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
+
+    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
+      if (verb === "claim-seat") sshClaimCalled = true;
+      return makeSuccessSshSpawn(1)(cfg, verb);
+    };
+
+    const reReviewEvent: PeerReviewEvent = {
+      event_type: "re-review-requested",
+      patch_id: "d".repeat(40),
+      actor_fp: "sha256:" + "e".repeat(64),
+      payload: {
+        patch_id: "d".repeat(40),
+        requested_by_fp: "sha256:" + "f".repeat(64),
+        pr_url: "https://github.com/acme/widget/pull/99",
+        repo: "acme/widget",
+        seat: 1,
+      },
+    };
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: sshSpawn,
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "re-review body"; },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "claim if available", hash: "abc" },
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _notifyForTest: (title, body) => { notifyCalls.push({ title, body }); },
+        _cwdForTest: "/tmp",
+        _initialDailySpendForTest: 0.002,
+        _eventQueueForTest: [reReviewEvent],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Cap is HIT → seat should NOT be claimed, SDK should NOT run
+    assert.equal(sshClaimCalled, false, "seat should NOT be claimed for re-review when cap is hit");
+    assert.equal(sdkCalled, false, "SDK should NOT run for re-review when cap is hit");
+    // Notification should fire once
+    assert.equal(notifyCalls.length, 1, "notification should fire when cap is hit on re-review");
+    // Triplet should be logged with reason='daily cap hit' (AC-3 + AC-4)
+    assert.equal(triplets.length, 1, "expected 1 triplet for cap-downgraded re-review");
+    assert.equal(
+      triplets[0]!["reason"],
+      "daily cap hit",
+      "re-review triplet reason should be 'daily cap hit' when cap is hit",
+    );
+  });
 });

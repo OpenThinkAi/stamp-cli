@@ -36,8 +36,19 @@ function colorForClaimSeat(claimSeat: string): { pre: string; post: string } {
 // ─── Input types ─────────────────────────────────────────────────────
 
 export interface PeerLogOptions {
-  /** Show last N triplets only (0 = all). */
+  /**
+   * Show last N triplets only (0 = all).
+   * Primary/canonical flag name (reviewer renamed from --last during stamp review).
+   */
   limit?: number;
+  /**
+   * Alias for `limit` — intentional AC-7 contract alias.
+   * AC-7 specifies `--last <n>`; the product reviewer renamed it to `--limit` during stamp review.
+   * Both are supported so the AC contract and the review decision hold simultaneously.
+   * When both are supplied to the CLI, Commander last-one-wins applies; the resolved value
+   * is passed to whichever field was set by the last option parsed.
+   */
+  last?: number;
   /** Output uncolorized raw JSON. */
   raw?: boolean;
   /**
@@ -114,8 +125,10 @@ export function runPeerLog(opts: PeerLogOptions): void {
     return;
   }
 
-  // ─── Apply --limit filter ─────────────────────────────────────────
-  const limitN = opts.limit ?? 0;
+  // ─── Apply --limit / --last filter ───────────────────────────────
+  // --last is an alias for --limit (AC-7 contract; see PeerLogOptions comment).
+  // If both are supplied, last-one-wins as Commander parses them; we pick whichever is set.
+  const limitN = opts.last ?? opts.limit ?? 0;
   const toShow = limitN > 0 ? records.slice(-limitN) : records;
 
   // ─── Output ───────────────────────────────────────────────────────

@@ -200,7 +200,68 @@ describe("peerLog: --raw → raw NDJSON output", () => {
   });
 });
 
-// ─── AC #7: --last N → limited output ────────────────────────────────
+// ─── AC #7: --last N → limited output (alias for --limit) ───────────
+
+describe("peerLog: --last N is an alias for --limit N (AC-7 contract)", () => {
+  it("shows only the last 2 triplets when --last 2 (identical behavior to --limit 2)", () => {
+    const lines = [
+      makeTriplet({ ts: "2026-05-01T00:00:00.000Z" }),
+      makeTriplet({ ts: "2026-05-02T00:00:00.000Z" }),
+      makeTriplet({ ts: "2026-05-03T00:00:00.000Z" }),
+    ];
+    const logPath = writeTempLog(lines.join("\n") + "\n");
+    const { exitFn, capturedCode } = makeExitCapture();
+    const stdoutLines: string[] = [];
+
+    try {
+      // Pass `last: 2` (the AC-7 alias) — should behave identically to `limit: 2`.
+      runPeerLog({
+        last: 2,
+        _logPathForTest: logPath,
+        _exitForTest: exitFn,
+        _stdoutWriteForTest: (s) => { stdoutLines.push(s); },
+        _stderrWriteForTest: () => {},
+        raw: true,
+      });
+    } catch { /* exitFn throws */ } finally {
+      try { unlinkSync(logPath); } catch { /* ignore */ }
+    }
+
+    assert.equal(capturedCode(), 0, `expected exit 0, got ${capturedCode()}`);
+    const out = stdoutLines.join("");
+    // --last 2 should show the last 2 triplets (same as --limit 2).
+    assert.ok(out.includes("2026-05-02"), `expected 2026-05-02 in output: ${out}`);
+    assert.ok(out.includes("2026-05-03"), `expected 2026-05-03 in output: ${out}`);
+    assert.ok(!out.includes("2026-05-01"), `should NOT include 2026-05-01 with --last 2: ${out}`);
+  });
+
+  it("--last and --limit produce the same output when given the same value", () => {
+    const lines = [
+      makeTriplet({ ts: "2026-05-10T00:00:00.000Z" }),
+      makeTriplet({ ts: "2026-05-11T00:00:00.000Z" }),
+      makeTriplet({ ts: "2026-05-12T00:00:00.000Z" }),
+    ];
+    const logPath = writeTempLog(lines.join("\n") + "\n");
+
+    const collectOutput = (opts: Parameters<typeof runPeerLog>[0]): string => {
+      const { exitFn } = makeExitCapture();
+      const captured: string[] = [];
+      try {
+        runPeerLog({ ...opts, _logPathForTest: logPath, _exitForTest: exitFn,
+          _stdoutWriteForTest: (s) => { captured.push(s); }, _stderrWriteForTest: () => {}, raw: true });
+      } catch { /* exitFn throws */ }
+      return captured.join("");
+    };
+
+    try {
+      const viaLimit = collectOutput({ limit: 2 });
+      const viaLast = collectOutput({ last: 2 });
+      assert.equal(viaLimit, viaLast, `--limit 2 and --last 2 should produce identical output`);
+    } finally {
+      try { unlinkSync(logPath); } catch { /* ignore */ }
+    }
+  });
+});
 
 describe("peerLog: --limit N limits output to last N triplets", () => {
   it("shows only the last 2 triplets when --limit 2", () => {
