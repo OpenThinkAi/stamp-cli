@@ -134,7 +134,7 @@ function setupHarness(opts?: {
   // it with the redirected HOME so no real ~/.stamp is touched.
   const { keypair } = ensureUserKeypair();
   const pubFileName =
-    keypair.fingerprint.replace(":", "_") + ".pub";
+    keypair.fingerprint.replace(/:/g, "_") + ".pub";
   writeFileSync(
     path.join(repo, ".stamp", "trusted-keys", pubFileName),
     keypair.publicKeyPem,
