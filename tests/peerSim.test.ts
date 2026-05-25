@@ -317,10 +317,10 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
     // be called when the cap is pre-hit.
     let seatClaimCount = 0;
     const fakeSshSpawn: SshSpawnFn = async (_cfg, verb, _payload) => {
-      if (verb === "subscribe") {
+      if (verb === "stamp-subscribe") {
         return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
       }
-      if (verb === "claim-seat") {
+      if (verb === "stamp-claim-seat") {
         seatClaimCount++;
         return {
           stdout: JSON.stringify({ ok: true, seat: 1, patch_id: patchId }) + "\n",
@@ -329,7 +329,7 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
           signal: null,
         };
       }
-      if (verb === "release-seat") {
+      if (verb === "stamp-release-seat") {
         return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
       }
       return { stdout: "", stderr: `unknown verb: ${verb}`, exitCode: 1, signal: null };

@@ -120,7 +120,7 @@ const PATCH_ID = "a".repeat(40);
 /** SSH spawn seam that simulates a successful re-review-request. */
 function makeSuccessSshSpawn(seatHoldersNotified = 2): SshSpawnFn {
   return async (_cfg, verb) => {
-    if (verb === "re-review-request") {
+    if (verb === "stamp-re-review-request") {
       return {
         stdout: JSON.stringify({
           ok: true,
@@ -256,7 +256,7 @@ describe("AC #1: happy path — sends re-review-request and exits 0", () => {
     const capturedPayloads: string[] = [];
 
     const spawnFn: SshSpawnFn = async (_cfg, verb, payload) => {
-      if (verb === "re-review-request") {
+      if (verb === "stamp-re-review-request") {
         capturedPayloads.push(payload);
         return {
           stdout: JSON.stringify({ ok: true, patch_id: PATCH_ID, seat_holders_notified: 1 }),
