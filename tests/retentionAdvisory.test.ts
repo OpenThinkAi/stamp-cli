@@ -34,7 +34,7 @@ import type { RetentionConfig } from "../src/lib/config.ts";
 import {
   formatRetentionAdvisory,
   printRetentionAdvisory,
-} from "../src/lib/retentionAdvisory.ts";
+} from "../src/commands/retentionAdvisory.ts";
 import { openDb, peekPrunable, recentReviewsByReviewer } from "../src/lib/db.ts";
 import { stampStateDbPath } from "../src/lib/paths.ts";
 
@@ -393,9 +393,9 @@ describe("printRetentionAdvisory (integration)", () => {
     }
   });
 
-  it("advisory is NOT suppressed by STAMP_SUPPRESS_LLM_NOTICE when db is null", () => {
-    // When db is null, the reviews advisory skip is structural (null check),
-    // not suppress-dependent. Spools advisory is still subject to suppress.
+  it("reviews advisory skips structurally when db is null; spools advisory still fires", () => {
+    // When db is null, the reviews advisory skip is a structural null check,
+    // not a suppress-based skip. The spools advisory still runs independently.
     const spoolDir = join(repo, ".git", "stamp", "failed-parses");
     mkdirSync(spoolDir, { recursive: true });
     const spoolFile = join(spoolDir, "old-spool.txt");
@@ -448,6 +448,43 @@ describe("printRetentionAdvisory (integration)", () => {
     } finally {
       dbAfter.close();
     }
+  });
+
+  it("auto_prune: dual thresholds — both reviews and spools honored independently", () => {
+    // When reviews and spools differ, auto_prune must honour both. Stage an
+    // old review row (> 7d) and an old spool file (> 3d) — then configure
+    // reviews: 7d, spools: 3d, auto_prune: true. Both should be deleted.
+    insertAt(dbPath, "security", "2024-01-01 00:00:00");
+    const spoolDir = join(repo, ".git", "stamp", "failed-parses");
+    mkdirSync(spoolDir, { recursive: true });
+    const spoolFile = join(spoolDir, "old-spool.txt");
+    writeFileSync(spoolFile, "fake raw output");
+    // 5 days old — older than 3d threshold but younger than 7d threshold
+    const mtimeSec = (Date.now() - 5 * 86_400_000) / 1000;
+    utimesSync(spoolFile, mtimeSec, mtimeSec);
+
+    const db = openDb(dbPath);
+    try {
+      captureStderr(() =>
+        printRetentionAdvisory(db, repo, {
+          reviews: "7d",
+          spools: "3d",
+          auto_prune: true,
+        }),
+      );
+    } finally {
+      db.close();
+    }
+
+    // Review row deleted by the reviews threshold (7d pass)
+    const dbAfter = openDb(dbPath);
+    try {
+      assert.equal(recentReviewsByReviewer(dbAfter, "security", 10).length, 0);
+    } finally {
+      dbAfter.close();
+    }
+    // Spool file deleted by the spools threshold (3d pass)
+    assert.ok(!existsSync(spoolFile));
   });
 
   it("auto_prune: false (explicit) uses advisory-only path", () => {

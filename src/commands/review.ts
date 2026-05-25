@@ -64,7 +64,7 @@ import {
 } from "../lib/paths.js";
 import { formatRetroBlock } from "../lib/retro.js";
 import { serializeToolCalls } from "../lib/toolCalls.js";
-import { printRetentionAdvisory } from "../lib/retentionAdvisory.js";
+import { printRetentionAdvisory } from "./retentionAdvisory.js";
 
 export interface ReviewOptions {
   diff: string;

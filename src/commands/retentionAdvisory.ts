@@ -23,11 +23,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
-import { peekSpools, runPrune } from "../commands/prune.js";
-import type { RetentionConfig } from "./config.js";
-import { parseRetentionDuration } from "./duration.js";
-import { gitCommonDir } from "./paths.js";
-import { peekPrunable } from "./db.js";
+import { peekSpools, runPrune } from "./prune.js";
+import type { RetentionConfig } from "../lib/config.js";
+import { parseRetentionDuration } from "../lib/duration.js";
+import { gitCommonDir } from "../lib/paths.js";
+import { peekPrunable } from "../lib/db.js";
 
 const SUPPRESS_ENV = "STAMP_SUPPRESS_LLM_NOTICE";
 
@@ -86,28 +86,37 @@ export function printRetentionAdvisory(
   const auto = retention.auto_prune === true;
 
   if (auto) {
-    // Auto-prune: call runPrune for whichever thresholds are configured.
-    // runPrune internally re-finds the repo root, so we only need to chdir
-    // or pass the relevant opts. Since runPrune calls findRepoRoot() itself,
-    // and review.ts already has the repo root resolved, we call it with the
-    // first configured threshold — reviews takes precedence when both are set
-    // (they share the same underlying prune command and duration). In practice
-    // an operator sets both to the same value; if they differ, the reviews
-    // threshold drives the prune (spools are also pruned at that duration).
-    //
-    // NOTE: auto_prune always uses the reviews duration when set, falling back
-    // to spools duration. Both thresholds are enforced by a single runPrune
-    // call since runPrune sweeps both the DB rows and the spool dirs.
-    const olderThan = retention.reviews ?? retention.spools!;
-    try {
-      runPrune({ olderThan });
-    } catch (err) {
-      // Surface the error as a stderr warning rather than aborting — the
-      // review itself succeeded; a prune failure is advisory, not fatal.
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(
-        `warning: retention.auto_prune failed (${message}); run \`stamp prune --older-than ${olderThan}\` manually\n`,
-      );
+    // Auto-prune: call runPrune for each configured threshold independently.
+    // `runPrune` accepts a single `olderThan` and sweeps BOTH DB rows and
+    // spool dirs under that one duration — there's no per-category threshold
+    // in its interface. When `reviews` and `spools` are set to different
+    // values we therefore call `runPrune` twice so both thresholds are
+    // honoured independently (idempotent: each sweep deletes what the other
+    // already deleted — harmless). When only one is set, or when they're
+    // equal, a single call is sufficient.
+    const runPruneWithWarning = (olderThan: string): void => {
+      try {
+        runPrune({ olderThan });
+      } catch (err) {
+        // Surface the error as a stderr warning rather than aborting — the
+        // review itself succeeded; a prune failure is advisory, not fatal.
+        const message = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `warning: retention.auto_prune failed (${message}); run \`stamp prune --older-than ${olderThan}\` manually\n`,
+        );
+      }
+    };
+
+    if (retention.reviews) {
+      runPruneWithWarning(retention.reviews);
+    }
+    // Run a second pass for spools only when the spools threshold differs
+    // from reviews — when they're equal or only one is set, the first pass
+    // (or the spools-only single pass below) already covered everything.
+    if (retention.spools && retention.spools !== retention.reviews) {
+      runPruneWithWarning(retention.spools);
+    } else if (!retention.reviews && retention.spools) {
+      runPruneWithWarning(retention.spools);
     }
     return;
   }
