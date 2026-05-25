@@ -53,6 +53,8 @@ import { runPrOpen } from "./commands/prOpen.js";
 import { runPrListen } from "./commands/prListen.js";
 import { runPrPing } from "./commands/prPing.js";
 import { runPeerTest } from "./commands/peerTest.js";
+import { runPeerLog } from "./commands/peerLog.js";
+import { runDraftsList, runDraftsShow, runDraftsDelete } from "./commands/peerDrafts.js";
 import { runPrune } from "./commands/prune.js";
 import { runPush } from "./commands/push.js";
 import { runReview } from "./commands/review.js";
@@ -937,6 +939,116 @@ Exit codes:
   )
   .action(async (opts: { event: string }) => {
     await runPeerTest({ eventPath: opts.event });
+  });
+
+peer
+  .command("log")
+  .description("stream ~/.stamp/peer-watch.log with colorized triage decisions")
+  .option("--raw", "output uncolorized raw NDJSON")
+  .option(
+    "--limit <n>",
+    "show last N triplets (tail semantics: most recent N)",
+    (v: string) => {
+      const n = parseInt(v, 10);
+      return Number.isNaN(n) ? 0 : n;
+    },
+  )
+  // --last is an intentional alias for --limit (AC-7 contract specifies --last; the product
+  // reviewer renamed it to --limit during stamp review; both are kept so both contracts hold).
+  .option(
+    "--last <n>",
+    "alias for --limit",
+    (v: string) => {
+      const n = parseInt(v, 10);
+      return Number.isNaN(n) ? 0 : n;
+    },
+  )
+  .addHelpText(
+    "after",
+    `
+Reads ~/.stamp/peer-watch.log and outputs triage triplets.
+
+Colorization (without --raw):
+  skip          = dim
+  if_available  = cyan
+  always        = yellow
+  daily cap hit = red bold marker
+
+Exit codes:
+  0   — success
+  1   — log file missing or empty
+  2   — reserved for arg-parse (Commander only)
+  3   — I/O error
+`,
+  )
+  .action((opts: { raw?: boolean; limit?: number; last?: number }) => {
+    runPeerLog({ raw: opts.raw, limit: opts.limit, last: opts.last });
+  });
+
+const drafts = peer
+  .command("drafts")
+  .description("manage saved peer-review drafts in ~/.stamp/drafts/");
+
+drafts
+  .command("list")
+  .description("list all saved drafts in reverse-chronological order")
+  .addHelpText(
+    "after",
+    `
+Lists all .md files in ~/.stamp/drafts/ sorted by modification time (newest first).
+Format: <patch-id>  <age>  <PR title or —>
+
+Exit codes:
+  0   — success
+  1   — drafts directory missing or empty
+  2   — reserved for arg-parse (Commander only)
+  3   — I/O error
+`,
+  )
+  .action(() => {
+    runDraftsList({});
+  });
+
+drafts
+  .command("show <patch-id>")
+  .description("render the full draft body for a given patch-id to stdout")
+  .addHelpText(
+    "after",
+    `
+Renders the draft markdown to stdout. Accepts an unambiguous prefix of the patch-id
+(first match wins; ambiguous prefix exits 1 and lists matches).
+
+Exit codes:
+  0   — success
+  1   — draft not found (or ambiguous prefix)
+  2   — reserved for arg-parse (Commander only)
+  3   — I/O error
+`,
+  )
+  .action((patchId: string) => {
+    runDraftsShow({ patchId });
+  });
+
+drafts
+  .command("delete [patch-id]")
+  .description("delete a draft by patch-id; --all --yes to delete all")
+  .option("--all", "delete all drafts")
+  .option("--yes", "required with --all to confirm bulk deletion")
+  .addHelpText(
+    "after",
+    `
+Delete a single draft by patch-id (or unambiguous prefix), or delete all drafts
+with --all --yes. Without --yes, --all lists files that would be deleted and exits 1.
+
+Exit codes:
+  0   — success
+  1   — draft not found / directory empty (or --all without --yes)
+  2   — reserved for arg-parse (Commander only)
+  3   — I/O error
+`,
+  )
+  .action((patchId: string | undefined, opts: { all?: boolean; yes?: boolean }) => {
+    runDraftsDelete({ patchId, all: opts.all, yes: opts.yes });
   });
 
 program

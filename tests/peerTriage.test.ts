@@ -25,6 +25,7 @@ import {
   FALLBACK_DECISION,
   TRIAGE_MODEL,
   type TriageDecision,
+  type TriageResult,
 } from "../src/lib/peerTriage.ts";
 
 import { resolveNamedPrompt } from "../src/lib/namedPrompt.ts";
@@ -72,7 +73,7 @@ describe("AC #9a: valid Haiku JSON → correct TriageDecision", () => {
     const runner = async (_sys: string, _user: string): Promise<string> =>
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default"}';
 
-    const decision = await runTriage({
+    const { decision } = await runTriage({
       rules: "Claim all PRs",
       event: BASE_EVENT,
       cwd: "/tmp",
@@ -88,7 +89,7 @@ describe("AC #9a: valid Haiku JSON → correct TriageDecision", () => {
     const runner = async (): Promise<string> =>
       "```json\n{\"claim_seat\":\"always\",\"post_mode\":\"draft\",\"prompt\":\"security\"}\n```";
 
-    const decision = await runTriage({
+    const { decision } = await runTriage({
       rules: "Always claim",
       event: BASE_EVENT,
       cwd: "/tmp",
@@ -104,7 +105,7 @@ describe("AC #9a: valid Haiku JSON → correct TriageDecision", () => {
     const runner = async (): Promise<string> =>
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.5}';
 
-    const decision = await runTriage({
+    const { decision } = await runTriage({
       rules: "Claim if cheap",
       event: BASE_EVENT,
       cwd: "/tmp",
@@ -119,7 +120,7 @@ describe("AC #9a: valid Haiku JSON → correct TriageDecision", () => {
     // Only claim_seat is required; others have defaults.
     const runner = async (): Promise<string> => '{"claim_seat":"skip"}';
 
-    const decision = await runTriage({
+    const { decision } = await runTriage({
       rules: "Skip everything",
       event: BASE_EVENT,
       cwd: "/tmp",
@@ -130,6 +131,20 @@ describe("AC #9a: valid Haiku JSON → correct TriageDecision", () => {
     assert.equal(decision.post_mode, "auto-post");
     assert.equal(decision.prompt, "default");
   });
+
+  it("returns costUsd: 0 when using test seam (no real SDK)", async () => {
+    const runner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default"}';
+
+    const result: TriageResult = await runTriage({
+      rules: "Claim all PRs",
+      event: BASE_EVENT,
+      cwd: "/tmp",
+      _haikuRunnerForTest: runner,
+    });
+
+    assert.equal(result.costUsd, 0, "costUsd should be 0 when using test seam");
+  });
 });
 
 // ─── AC #9b: invalid output → skip + ✗ log ──────────────────────────
@@ -139,11 +154,11 @@ describe("AC #9b: invalid Haiku output → skip decision + ✗ log; runTriage ne
     const runner = async (): Promise<string> =>
       '{"claim_seat":"unknown_value","post_mode":"auto-post","prompt":"default"}';
 
-    const { result: decision, stderr } = await captureStderr(() =>
+    const { result: triageResult, stderr } = await captureStderr(() =>
       runTriage({ rules: "test", event: BASE_EVENT, cwd: "/tmp", _haikuRunnerForTest: runner }),
     );
 
-    assert.equal(decision.claim_seat, "skip");
+    assert.equal(triageResult.decision.claim_seat, "skip");
     assert.ok(stderr.includes("✗"), `expected ✗ in stderr, got: ${stderr}`);
   });
 
@@ -151,33 +166,33 @@ describe("AC #9b: invalid Haiku output → skip decision + ✗ log; runTriage ne
     const runner = async (): Promise<string> =>
       '{"post_mode":"auto-post","prompt":"default"}';
 
-    const { result: decision, stderr } = await captureStderr(() =>
+    const { result: triageResult, stderr } = await captureStderr(() =>
       runTriage({ rules: "test", event: BASE_EVENT, cwd: "/tmp", _haikuRunnerForTest: runner }),
     );
 
-    assert.equal(decision.claim_seat, "skip");
+    assert.equal(triageResult.decision.claim_seat, "skip");
     assert.ok(stderr.includes("✗"), `expected ✗ in stderr: ${stderr}`);
   });
 
   it("returns SKIP when response is not valid JSON", async () => {
     const runner = async (): Promise<string> => "This is not JSON at all.";
 
-    const { result: decision, stderr } = await captureStderr(() =>
+    const { result: triageResult, stderr } = await captureStderr(() =>
       runTriage({ rules: "test", event: BASE_EVENT, cwd: "/tmp", _haikuRunnerForTest: runner }),
     );
 
-    assert.equal(decision.claim_seat, "skip");
+    assert.equal(triageResult.decision.claim_seat, "skip");
     assert.ok(stderr.includes("✗"), `expected ✗ in stderr: ${stderr}`);
   });
 
   it("returns SKIP when response is empty string", async () => {
     const runner = async (): Promise<string> => "";
 
-    const { result: decision, stderr } = await captureStderr(() =>
+    const { result: triageResult, stderr } = await captureStderr(() =>
       runTriage({ rules: "test", event: BASE_EVENT, cwd: "/tmp", _haikuRunnerForTest: runner }),
     );
 
-    assert.equal(decision.claim_seat, "skip");
+    assert.equal(triageResult.decision.claim_seat, "skip");
     assert.ok(stderr.includes("✗"), `expected ✗ in stderr: ${stderr}`);
   });
 
@@ -186,11 +201,11 @@ describe("AC #9b: invalid Haiku output → skip decision + ✗ log; runTriage ne
       throw new Error("network error");
     };
 
-    const { result: decision, stderr } = await captureStderr(() =>
+    const { result: triageResult, stderr } = await captureStderr(() =>
       runTriage({ rules: "test", event: BASE_EVENT, cwd: "/tmp", _haikuRunnerForTest: runner }),
     );
 
-    assert.equal(decision.claim_seat, "skip");
+    assert.equal(triageResult.decision.claim_seat, "skip");
     assert.ok(stderr.includes("✗"), `expected ✗ in stderr: ${stderr}`);
   });
 
@@ -198,11 +213,11 @@ describe("AC #9b: invalid Haiku output → skip decision + ✗ log; runTriage ne
     const runner = async (): Promise<string> =>
       '{"claim_seat":"always","post_mode":"bad-mode","prompt":"default"}';
 
-    const { result: decision, stderr } = await captureStderr(() =>
+    const { result: triageResult, stderr } = await captureStderr(() =>
       runTriage({ rules: "test", event: BASE_EVENT, cwd: "/tmp", _haikuRunnerForTest: runner }),
     );
 
-    assert.equal(decision.claim_seat, "skip");
+    assert.equal(triageResult.decision.claim_seat, "skip");
     assert.ok(stderr.includes("✗"), `expected ✗ in stderr: ${stderr}`);
   });
 });
@@ -276,14 +291,14 @@ describe("AC #5/9d: prompt-injection structural resistance", () => {
       return '{"claim_seat":"skip","post_mode":"auto-post","prompt":"default"}';
     };
 
-    const decisionWithHostile = await runTriage({
+    const { decision: decisionWithHostile } = await runTriage({
       rules: "Skip all PRs",
       event: { ...BASE_EVENT, body: HOSTILE_BODY },
       cwd: "/tmp",
       _haikuRunnerForTest: honestRunner,
     });
 
-    const decisionWithBenign = await runTriage({
+    const { decision: decisionWithBenign } = await runTriage({
       rules: "Skip all PRs",
       event: { ...BASE_EVENT, body: BENIGN_BODY },
       cwd: "/tmp",
@@ -333,7 +348,7 @@ describe("STAMP_NO_LLM=1: runTriage returns skip without invoking runner", () =>
     };
 
     try {
-      const { result: decision, stderr } = await captureStderr(() =>
+      const { result: triageResult, stderr } = await captureStderr(() =>
         runTriage({
           rules: "test",
           event: BASE_EVENT,
@@ -342,7 +357,7 @@ describe("STAMP_NO_LLM=1: runTriage returns skip without invoking runner", () =>
         }),
       );
 
-      assert.equal(decision.claim_seat, "skip");
+      assert.equal(triageResult.decision.claim_seat, "skip");
       assert.equal(runnerCalled, false, "runner must NOT be called when STAMP_NO_LLM=1");
       assert.ok(
         stderr.includes("STAMP_NO_LLM"),

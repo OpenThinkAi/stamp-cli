@@ -19,6 +19,7 @@ import {
   loadPeerWatchRules,
   SKIP_DECISION,
   type TriageDecision,
+  type TriageResult,
 } from "../lib/peerTriage.js";
 
 // ─── Input types ─────────────────────────────────────────────────────
@@ -129,12 +130,13 @@ export async function runPeerTest(opts: PeerTestOptions): Promise<void> {
     : [];
 
   // ─── Run triage ───────────────────────────────────────────────────
-  const decision = await runTriage({
+  const triageResult: TriageResult = await runTriage({
     rules: rulesResult.rules,
     event: { repo, title, body, paths },
     cwd: opts.cwd ?? process.cwd(),
     _haikuRunnerForTest: opts._haikuRunnerForTest,
   });
+  const decision: TriageDecision = triageResult.decision;
 
   // ─── Detect triage failure (AC #7 exit 3) ────────────────────────
   // Design-doc intent: exit 3 = "Haiku call fails (network/auth/schema)".

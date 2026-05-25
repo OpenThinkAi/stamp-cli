@@ -30,6 +30,8 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { loadUserKeypair, type Keypair } from "../lib/keys.js";
 import { signBytes } from "../lib/signing.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
@@ -64,6 +66,8 @@ import {
   type ResolveNamedPromptInput,
 } from "../lib/namedPrompt.js";
 import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
+import { firePeerNotification } from "../lib/peerNotify.js";
+import { draftsDir } from "../lib/paths.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -101,6 +105,28 @@ export interface PrListenOptions {
   /** Test-only: inject a fake triplet-append function.
    *  Called with the full triplet record instead of writing to disk. */
   _appendTripletForTest?: (record: TripletRecord) => void;
+  /**
+   * Test-only: override `new Date()` so day-rollover logic is deterministic.
+   * Returns a Date used for local-TZ day-key computation.
+   */
+  _nowForTest?: () => Date;
+  /**
+   * Test-only: replace `firePeerNotification` so tests can assert notifications
+   * without spawning osascript.
+   */
+  _notifyForTest?: (title: string, body: string) => void;
+  /**
+   * Test-only: replace the draft file write so tests can assert draft content
+   * without touching the real filesystem.
+   * Receives (filePath, content) — the full draft markdown string.
+   */
+  _writeDraftForTest?: (filePath: string, content: string) => void;
+  /**
+   * Test-only: pre-seed the daily spend accumulator to a specific value.
+   * Allows tests to simulate cost-cap triggering without a real SDK call
+   * (which would otherwise return costUsd: 0 via the test seam).
+   */
+  _initialDailySpendForTest?: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -111,6 +137,17 @@ export interface PrListenOptions {
 function stubSignature(keypair: Keypair, ...parts: string[]): string {
   const data = Buffer.from(parts.join("|"), "utf8");
   return signBytes(keypair.privateKeyPem, data);
+}
+
+/**
+ * Return a YYYY-MM-DD string in local time, used to detect day rollovers for
+ * the in-memory daily spend accumulator.
+ */
+function localDayKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 /**
@@ -223,6 +260,24 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   });
 
   process.stderr.write(`⟳ subscribed; listening for PR events\n`);
+
+  // ─── Daily spend accumulator (AGT-432 AC #2) ──────────────────────
+  // In-memory accumulator scoped to this listener process lifetime.
+  // Resets at local-TZ midnight. Not persisted across restarts.
+  const nowFn = opts._nowForTest ?? (() => new Date());
+  let dailySpend = opts._initialDailySpendForTest ?? 0;
+  let spendDayKey = localDayKey(nowFn());
+
+  /** Advance the daily spend counter, resetting at local midnight. */
+  function addDailySpend(amount: number): void {
+    const today = localDayKey(nowFn());
+    if (today !== spendDayKey) {
+      // Day rolled over — reset accumulator.
+      dailySpend = 0;
+      spendDayKey = today;
+    }
+    dailySpend += amount;
+  }
 
   // ─── SIGINT handler ──────────────────────────────────────────────
   let currentSeatPatchId: string | null = null;
@@ -372,6 +427,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     let triageDecision: TriageDecision;
     let rulesHash: string;
+    let triageCostUsd = 0;
 
     if (rulesResult === null) {
       // AC #8: peer-watch.md missing → log ⟳ notice + use fallback decision.
@@ -393,21 +449,53 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         cwd: opts._cwdForTest ?? process.cwd(),
         _haikuRunnerForTest: opts._haikuRunnerForTest,
       };
-      triageDecision = await runTriage(triageInput);
+      const triageResult = await runTriage(triageInput);
+      triageDecision = triageResult.decision;
+      triageCostUsd = triageResult.costUsd;
     }
 
-    // ─── Log triplet (AC #6 / AGT-431 AC #12) ───────────────────
+    // ─── AGT-432 AC #2/#3: Cost-cap enforcement ───────────────────
+    // At the single triage-finalize point, after triage resolves (covering
+    // BOTH pr-opened and re-review-requested events), add the triage cost and
+    // check whether the daily cap has been reached. This intentionally runs
+    // before the triplet log so the logged decision reflects the downgrade.
+    addDailySpend(triageCostUsd);
+
+    let wasCapDowngraded = false;
+    if (
+      typeof triageDecision.cost_cap_usd === "number" &&
+      triageDecision.cost_cap_usd > 0 &&
+      dailySpend >= triageDecision.cost_cap_usd &&
+      (triageDecision.claim_seat === "if_available" || triageDecision.claim_seat === "always")
+    ) {
+      // Downgrade to skip: daily cap hit.
+      const capUsd = triageDecision.cost_cap_usd;
+      triageDecision = { ...triageDecision, claim_seat: "skip" };
+      wasCapDowngraded = true;
+      const notifyTitle = "stamp peer";
+      const notifyBody = `Daily review cap ($${capUsd.toFixed(2)}) reached — skipping PR #${prNumber}`;
+      // Fire desktop notification (fire-and-forget, must never crash/stall).
+      firePeerNotification({
+        title: notifyTitle,
+        body: notifyBody,
+        _notifyForTest: opts._notifyForTest,
+      });
+    }
+
+    // ─── Log triplet (AC #6 / AGT-431 AC #12 / AGT-432 AC #4) ──
     // Append regardless of whether we skip or claim.
     // For re-review-requested events, tag with kind: "re-review" (AC #12).
+    // For cap-triggered skips, include reason: "daily cap hit" (AGT-432 AC #4).
     {
-      const tripletRecord = {
-        ts: new Date().toISOString(),
+      const tripletRecord: TripletRecord = {
+        ts: nowFn().toISOString(),
         repo,
         pr_url: prUrl,
         rules_hash: rulesHash,
         event_payload: payload as Record<string, unknown>,
         decision: triageDecision,
         ...(event.event_type === "re-review-requested" ? { kind: "re-review" } : {}),
+        ...(wasCapDowngraded ? { reason: "daily cap hit" } : {}),
       };
       if (opts._appendTripletForTest) {
         opts._appendTripletForTest(tripletRecord);
@@ -534,8 +622,57 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         continue;
       }
       reviewBody = reviewResult.body;
+      // AGT-432 AC #2: add review cost to daily spend accumulator.
+      addDailySpend(reviewResult.costUsd);
     } finally {
       clearHeartbeat();
+    }
+
+    // ─── AGT-432 AC (draft saving): save draft if post_mode === "draft" ───
+    if (triageDecision.post_mode === "draft") {
+      // Security: validate patchId is a safe hex token before constructing
+      // the file path. A crafted patchId containing `../` sequences would
+      // otherwise escape the drafts directory.
+      if (!/^[0-9a-f]{40}$/i.test(patchId)) {
+        process.stderr.write(
+          `✗ refusing to save draft for PR #${prNumber}: invalid patchId format ${JSON.stringify(patchId)}\n`,
+        );
+        currentSeatPatchId = null;
+        await callReleaseSeat({
+          patch_id: patchId,
+          claimant_fp: keypair.fingerprint,
+          signature: stubSignature(keypair, patchId, keypair.fingerprint),
+          serverConfig: serverCfg,
+          _sshSpawnForTest: opts._sshSpawnForTest,
+        });
+        continue;
+      }
+      const draftContent =
+        `---\npatch_id: ${patchId}\npr_url: ${prUrl}\nts: ${nowFn().toISOString()}\n---\n\n${reviewBody}`;
+      const draftPath = join(draftsDir(), `${patchId}.md`);
+      try {
+        if (opts._writeDraftForTest) {
+          opts._writeDraftForTest(draftPath, draftContent);
+        } else {
+          mkdirSync(dirname(draftPath), { recursive: true });
+          writeFileSync(draftPath, draftContent, "utf8");
+        }
+        process.stderr.write(`⟳ saved draft for PR #${prNumber} to ${draftPath}\n`);
+      } catch (err) {
+        process.stderr.write(
+          `✗ draft save failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+      currentSeatPatchId = null;
+      // Release seat after draft save (no gh post).
+      await callReleaseSeat({
+        patch_id: patchId,
+        claimant_fp: keypair.fingerprint,
+        signature: stubSignature(keypair, patchId, keypair.fingerprint),
+        serverConfig: serverCfg,
+        _sshSpawnForTest: opts._sshSpawnForTest,
+      });
+      continue;
     }
 
     // ─── AC #7: post review via gh ───────────────────────────────

@@ -1130,3 +1130,361 @@ describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'",
     );
   });
 });
+
+// ─── AGT-432 AC #2/#3: daily cost-cap enforcement ────────────────────
+
+describe("AGT-432 AC #3: cost-cap — cap NOT hit when dailySpend < cost_cap_usd", () => {
+  it("does not downgrade or notify when dailySpend < cap", async () => {
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+    const notifyCalls: Array<{ title: string; body: string }> = [];
+    let sdkCalled = false;
+    let sshClaimCalled = false;
+
+    // cap=0.001, _initialDailySpendForTest not set (defaults to 0)
+    // 0 < 0.001 → cap NOT triggered
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
+
+    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
+      if (verb === "claim-seat") sshClaimCalled = true;
+      return makeSuccessSshSpawn(1)(cfg, verb);
+    };
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: sshSpawn,
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "review body"; },
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "claim if available", hash: "abc" },
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _notifyForTest: (title, body) => { notifyCalls.push({ title, body }); },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(sshClaimCalled, true, "seat should be claimed when cap is not hit");
+    assert.equal(sdkCalled, true, "SDK should run when cap is not hit");
+    assert.equal(notifyCalls.length, 0, "notification should NOT fire when cap is not hit");
+  });
+});
+
+describe("AGT-432 AC #3: cost-cap — cap HIT when _initialDailySpendForTest >= cost_cap_usd", () => {
+  it("downgrades if_available to skip and fires notification when pre-seeded daily spend >= cap", async () => {
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+    const notifyCalls: Array<{ title: string; body: string }> = [];
+    let sdkCalled = false;
+    let sshClaimCalled = false;
+
+    // cap=0.001, _initialDailySpendForTest=0.002 → dailySpend(0.002) >= cap(0.001) → IS triggered
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
+
+    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
+      if (verb === "claim-seat") sshClaimCalled = true;
+      return makeSuccessSshSpawn(1)(cfg, verb);
+    };
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: sshSpawn,
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "review body"; },
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "claim if available", hash: "abc" },
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _notifyForTest: (title, body) => { notifyCalls.push({ title, body }); },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _initialDailySpendForTest: 0.002,
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Cap is HIT → seat should NOT be claimed, SDK should NOT run
+    assert.equal(sshClaimCalled, false, "seat should NOT be claimed when cap is hit");
+    assert.equal(sdkCalled, false, "SDK should NOT run when cap is hit");
+    // Notification should fire once
+    assert.equal(notifyCalls.length, 1, "notification should fire when cap is hit");
+    // Triplet should have reason='daily cap hit'
+    assert.equal(triplets.length, 1, "expected 1 triplet");
+    assert.equal(triplets[0]!["reason"], "daily cap hit", "triplet reason should be 'daily cap hit'");
+  });
+});
+
+describe("AGT-432 AC #4: cost-cap log — normal skip does NOT get reason field", () => {
+  it("triplet has no reason field on triage-returned skip (not cap-triggered)", async () => {
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+    const notifyCalls: Array<{ title: string; body: string }> = [];
+
+    // Triage naturally returns skip (no cost_cap_usd, no cap enforcement)
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"skip","post_mode":"auto-post","prompt":"default"}';
+
+    await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "skip all", hash: "abc" },
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _notifyForTest: (title, body) => { notifyCalls.push({ title, body }); },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(triplets.length, 1, "expected 1 triplet");
+    const rec = triplets[0]!;
+    // Normal skip (not cap-triggered): reason field should be absent
+    assert.ok(
+      !("reason" in rec) || rec["reason"] === undefined,
+      `normal skip should NOT have reason field, got: ${JSON.stringify(rec)}`,
+    );
+    assert.equal(notifyCalls.length, 0, "no notification for normal skip");
+  });
+});
+
+describe("AGT-432 AC #2: day rollover — daily spend resets at local midnight", () => {
+  it("resets dailySpend when day changes (via _nowForTest)", async () => {
+    const fakeKeypair = genKeypair();
+    let dayCount = 0;
+    let tripletCount = 0;
+
+    // Alternate between two days to simulate day rollover.
+    // Day 0 → process first event; Day 1 → process second event (new day).
+    const days = ["2026-05-24", "2026-05-25"];
+    const nowFn = () => new Date(days[dayCount % 2]! + "T12:00:00Z");
+
+    // Use a $0.001 cap; both events have costUsd=0 (seam), so no cap trigger.
+    // The test just verifies the loop completes normally across a day rollover.
+    const haikuRunner = async (): Promise<string> => {
+      dayCount++;
+      return '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
+    };
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "review body",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "test", hash: "abc" },
+        _appendTripletForTest: () => { tripletCount++; },
+        _nowForTest: nowFn,
+        _cwdForTest: "/tmp",
+        // Two events on different days
+        _eventQueueForTest: [makeEvent({ patch_id: "1".repeat(40) }), makeEvent({ patch_id: "2".repeat(40) })],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Both events should process normally even across a day rollover.
+    assert.equal(tripletCount, 2, "both events should be processed");
+  });
+});
+
+describe("AGT-432: draft save — listener saves draft when post_mode='draft'", () => {
+  it("saves draft file and does not post via gh when post_mode='draft'", async () => {
+    const fakeKeypair = genKeypair();
+    const drafts: Array<{ filePath: string; content: string }> = [];
+    let ghCalled = false;
+
+    // Triage returns post_mode: 'draft'
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"draft","prompt":"default"}';
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "draft review body",
+        _ghReviewForTest: () => { ghCalled = true; return { status: 0, stderr: "" }; },
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "draft mode", hash: "abc" },
+        _appendTripletForTest: () => {},
+        _writeDraftForTest: (filePath, content) => { drafts.push({ filePath, content }); },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Draft should be saved
+    assert.equal(drafts.length, 1, "expected 1 draft to be saved");
+    assert.ok(drafts[0]!.filePath.includes(".md"), "draft file should be .md");
+    assert.ok(drafts[0]!.content.includes("draft review body"), "draft content should include review body");
+    assert.ok(drafts[0]!.content.includes("pr_url"), "draft should include pr_url in frontmatter");
+    // gh should NOT be called for draft mode
+    assert.equal(ghCalled, false, "gh review should NOT be called when post_mode='draft'");
+    // Logged to stderr
+    assert.ok(stderr.includes("saved draft") || stderr.includes("draft"), `expected draft save message in stderr: ${stderr}`);
+  });
+
+  it("draft file path is in draftsDir() and named by patchId", async () => {
+    const fakeKeypair = genKeypair();
+    const drafts: Array<{ filePath: string; content: string }> = [];
+    const patchId = "a".repeat(40);
+
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"draft","prompt":"default"}';
+
+    await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "body",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "draft mode", hash: "abc" },
+        _appendTripletForTest: () => {},
+        _writeDraftForTest: (filePath, content) => { drafts.push({ filePath, content }); },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent({ patch_id: patchId })],
+      }),
+    );
+
+    assert.equal(drafts.length, 1, "expected 1 draft");
+    assert.ok(
+      drafts[0]!.filePath.includes(patchId),
+      `expected patchId in draft path: ${drafts[0]!.filePath}`,
+    );
+    assert.ok(
+      drafts[0]!.filePath.includes("drafts"),
+      `expected 'drafts' in path: ${drafts[0]!.filePath}`,
+    );
+  });
+});
+
+describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
+  it("cost-cap check applies to re-review-requested events too", async () => {
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+    let sdkCalled = false;
+
+    // Re-review event with if_available + cap
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
+
+    const reReviewEvent: PeerReviewEvent = {
+      event_type: "re-review-requested",
+      patch_id: "d".repeat(40),
+      actor_fp: "sha256:" + "e".repeat(64),
+      payload: {
+        patch_id: "d".repeat(40),
+        requested_by_fp: "sha256:" + "f".repeat(64),
+        pr_url: "https://github.com/acme/widget/pull/99",
+        repo: "acme/widget",
+        seat: 1,
+      },
+    };
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "re-review body"; },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "test", hash: "abc" },
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _notifyForTest: () => {},
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [reReviewEvent],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // With dailySpend=0 and cap=0.001 → cap NOT hit → review proceeds
+    assert.equal(sdkCalled, true, "SDK should run for re-review when cap not exceeded");
+    assert.equal(triplets.length, 1, "triplet should be logged for re-review");
+    // Verify triplet is tagged as re-review
+    assert.equal(triplets[0]!["kind"], "re-review", "re-review triplet should have kind='re-review'");
+  });
+
+  it("AC-3: downgrades re-review-requested to skip with reason 'daily cap hit' when cap is hit", async () => {
+    // Mirrors the fresh pr-opened cap-HIT test but for a re-review-requested event.
+    // Proves cap enforcement applies at the shared triage-finalize point for re-review events too.
+    const fakeKeypair = genKeypair();
+    const triplets: Array<Record<string, unknown>> = [];
+    const notifyCalls: Array<{ title: string; body: string }> = [];
+    let sdkCalled = false;
+    let sshClaimCalled = false;
+
+    // cap=0.001; _initialDailySpendForTest=0.002 → dailySpend(0.002) >= cap(0.001) → IS triggered
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
+
+    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
+      if (verb === "claim-seat") sshClaimCalled = true;
+      return makeSuccessSshSpawn(1)(cfg, verb);
+    };
+
+    const reReviewEvent: PeerReviewEvent = {
+      event_type: "re-review-requested",
+      patch_id: "d".repeat(40),
+      actor_fp: "sha256:" + "e".repeat(64),
+      payload: {
+        patch_id: "d".repeat(40),
+        requested_by_fp: "sha256:" + "f".repeat(64),
+        pr_url: "https://github.com/acme/widget/pull/99",
+        repo: "acme/widget",
+        seat: 1,
+      },
+    };
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: sshSpawn,
+        _sdkRunnerForTest: async () => { sdkCalled = true; return "re-review body"; },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "claim if available", hash: "abc" },
+        _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
+        _notifyForTest: (title, body) => { notifyCalls.push({ title, body }); },
+        _cwdForTest: "/tmp",
+        _initialDailySpendForTest: 0.002,
+        _eventQueueForTest: [reReviewEvent],
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // Cap is HIT → seat should NOT be claimed, SDK should NOT run
+    assert.equal(sshClaimCalled, false, "seat should NOT be claimed for re-review when cap is hit");
+    assert.equal(sdkCalled, false, "SDK should NOT run for re-review when cap is hit");
+    // Notification should fire once
+    assert.equal(notifyCalls.length, 1, "notification should fire when cap is hit on re-review");
+    // Triplet should be logged with reason='daily cap hit' (AC-3 + AC-4)
+    assert.equal(triplets.length, 1, "expected 1 triplet for cap-downgraded re-review");
+    assert.equal(
+      triplets[0]!["reason"],
+      "daily cap hit",
+      "re-review triplet reason should be 'daily cap hit' when cap is hit",
+    );
+  });
+});

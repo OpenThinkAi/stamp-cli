@@ -37,6 +37,11 @@ export interface TripletRecord {
    * triplet log. Absent for pr-opened events (for backwards compatibility).
    */
   kind?: string;
+  /**
+   * Optional override reason (AGT-432). Present when the listener overrides
+   * the triage decision — e.g. "daily cap hit" when the cost cap is reached.
+   */
+  reason?: string;
 }
 
 export interface AppendTripletInput extends TripletRecord {
@@ -65,6 +70,7 @@ export function appendTriplet(input: AppendTripletInput): void {
     event_payload: input.event_payload,
     decision: input.decision,
     ...(input.kind !== undefined ? { kind: input.kind } : {}),
+    ...(input.reason !== undefined ? { reason: input.reason } : {}),
   };
 
   const line = JSON.stringify(record) + "\n";
