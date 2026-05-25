@@ -946,8 +946,8 @@ peer
   .description("stream ~/.stamp/peer-watch.log with colorized triage decisions")
   .option("--raw", "output uncolorized raw NDJSON")
   .option(
-    "--last <n>",
-    "show last N triplets",
+    "--limit <n>",
+    "show last N triplets (tail semantics: most recent N)",
     (v: string) => {
       const n = parseInt(v, 10);
       return Number.isNaN(n) ? 0 : n;
@@ -971,8 +971,8 @@ Exit codes:
   3   — I/O error
 `,
   )
-  .action((opts: { raw?: boolean; last?: number }) => {
-    runPeerLog({ raw: opts.raw, last: opts.last });
+  .action((opts: { raw?: boolean; limit?: number }) => {
+    runPeerLog({ raw: opts.raw, limit: opts.limit });
   });
 
 const drafts = peer

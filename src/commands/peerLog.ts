@@ -37,7 +37,7 @@ function colorForClaimSeat(claimSeat: string): { pre: string; post: string } {
 
 export interface PeerLogOptions {
   /** Show last N triplets only (0 = all). */
-  last?: number;
+  limit?: number;
   /** Output uncolorized raw JSON. */
   raw?: boolean;
   /**
@@ -78,12 +78,12 @@ export function runPeerLog(opts: PeerLogOptions): void {
     const isNotFound =
       err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
     if (isNotFound) {
-      stderrWrite(`no peer-watch.log found at ${logPath}\n`);
+      stderrWrite(`error: no peer-watch.log found at ${logPath}\n`);
       exitFn(1);
       return;
     }
     stderrWrite(
-      `error reading peer-watch.log: ${err instanceof Error ? err.message : String(err)}\n`,
+      `error: failed to read peer-watch.log: ${err instanceof Error ? err.message : String(err)}\n`,
     );
     exitFn(3);
     return;
@@ -92,7 +92,7 @@ export function runPeerLog(opts: PeerLogOptions): void {
   // ─── Parse NDJSON lines ───────────────────────────────────────────
   const lines = rawContent.split("\n").filter((l) => l.trim().length > 0);
   if (lines.length === 0) {
-    stderrWrite(`no peer-watch.log found at ${logPath}\n`);
+    stderrWrite(`error: no peer-watch.log found at ${logPath}\n`);
     exitFn(1);
     return;
   }
@@ -109,14 +109,14 @@ export function runPeerLog(opts: PeerLogOptions): void {
   }
 
   if (records.length === 0) {
-    stderrWrite(`no peer-watch.log found at ${logPath}\n`);
+    stderrWrite(`error: no peer-watch.log found at ${logPath}\n`);
     exitFn(1);
     return;
   }
 
-  // ─── Apply --last filter ──────────────────────────────────────────
-  const lastN = opts.last ?? 0;
-  const toShow = lastN > 0 ? records.slice(-lastN) : records;
+  // ─── Apply --limit filter ─────────────────────────────────────────
+  const limitN = opts.limit ?? 0;
+  const toShow = limitN > 0 ? records.slice(-limitN) : records;
 
   // ─── Output ───────────────────────────────────────────────────────
   const raw = opts.raw ?? false;
@@ -134,8 +134,6 @@ export function runPeerLog(opts: PeerLogOptions): void {
       const line =
         `${pre}${rec.ts}  ${rec.repo}  ${rec.pr_url}  ${claimSeat}${post}${capHitMark}\n`;
       stdoutWrite(line);
-      // Also print the raw JSON underneath (dimmed for non-colorized terminals).
-      stdoutWrite(`${ANSI_DIM}${JSON.stringify(rec)}${ANSI_RESET}\n`);
     }
   }
 

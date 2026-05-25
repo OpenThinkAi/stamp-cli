@@ -42,9 +42,11 @@ export function firePeerNotification(input: PeerNotifyInput): void {
   }
 
   // Production: fire-and-forget osascript invocation.
-  // Escape single-quotes in title and body so they don't break the AppleScript string.
-  const safeTitle = input.title.replace(/'/g, "\\'");
-  const safeBody = input.body.replace(/'/g, "\\'");
+  // Escape double-quotes: title and body are embedded inside double-quoted
+  // AppleScript string literals, so `"` must be escaped as `\"`.
+  // Single-quotes are safe inside double-quoted AppleScript strings.
+  const safeTitle = input.title.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const safeBody = input.body.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const script = `display notification "${safeBody}" with title "${safeTitle}"`;
 
   try {

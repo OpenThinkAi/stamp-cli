@@ -113,12 +113,7 @@ function resolvePatchId(
   dir: string,
   prefix: string,
 ): { found: DraftsMeta } | { ambiguous: DraftsMeta[] } | { notFound: true } {
-  let metas: DraftsMeta[] | null;
-  try {
-    metas = listDraftFiles(dir);
-  } catch (err) {
-    throw err;
-  }
+  const metas = listDraftFiles(dir);
   if (!metas) return { notFound: true };
 
   // Exact match first.
@@ -187,13 +182,13 @@ export function runDraftsList(opts: DraftsListOptions): void {
   try {
     metas = listDraftFiles(dir);
   } catch (err) {
-    stderrWrite(`error listing drafts: ${err instanceof Error ? err.message : String(err)}\n`);
+    stderrWrite(`error: failed to list drafts: ${err instanceof Error ? err.message : String(err)}\n`);
     exitFn(3);
     return;
   }
 
   if (!metas) {
-    stderrWrite(`no drafts found\n`);
+    stderrWrite(`error: no drafts found\n`);
     exitFn(1);
     return;
   }
@@ -217,18 +212,18 @@ export function runDraftsShow(opts: DraftsShowOptions): void {
   try {
     resolved = resolvePatchId(dir, opts.patchId);
   } catch (err) {
-    stderrWrite(`error accessing drafts: ${err instanceof Error ? err.message : String(err)}\n`);
+    stderrWrite(`error: failed to access drafts: ${err instanceof Error ? err.message : String(err)}\n`);
     exitFn(3);
     return;
   }
 
   if ("notFound" in resolved) {
-    stderrWrite(`draft not found: ${opts.patchId}\n`);
+    stderrWrite(`error: draft not found: ${opts.patchId} — run 'stamp peer drafts list' to see available drafts\n`);
     exitFn(1);
     return;
   }
   if ("ambiguous" in resolved) {
-    stderrWrite(`ambiguous patch-id prefix "${opts.patchId}" — matches:\n`);
+    stderrWrite(`error: ambiguous patch-id prefix "${opts.patchId}" — matches:\n`);
     for (const m of resolved.ambiguous) {
       stderrWrite(`  ${m.patchId}\n`);
     }
@@ -242,7 +237,7 @@ export function runDraftsShow(opts: DraftsShowOptions): void {
     content = readFileSync(found.filePath, "utf8");
   } catch (err) {
     stderrWrite(
-      `error reading draft ${found.patchId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      `error: failed to read draft ${found.patchId}: ${err instanceof Error ? err.message : String(err)}\n`,
     );
     exitFn(3);
     return;
@@ -266,13 +261,13 @@ export function runDraftsDelete(opts: DraftsDeleteOptions): void {
     try {
       metas = listDraftFiles(dir);
     } catch (err) {
-      stderrWrite(`error listing drafts: ${err instanceof Error ? err.message : String(err)}\n`);
+      stderrWrite(`error: failed to list drafts: ${err instanceof Error ? err.message : String(err)}\n`);
       exitFn(3);
       return;
     }
 
     if (!metas) {
-      stderrWrite(`no drafts found\n`);
+      stderrWrite(`error: no drafts found\n`);
       exitFn(1);
       return;
     }
@@ -283,7 +278,7 @@ export function runDraftsDelete(opts: DraftsDeleteOptions): void {
       for (const m of metas) {
         stderrWrite(`  ${m.patchId}\n`);
       }
-      stderrWrite(`re-run with --all --yes to confirm\n`);
+      stderrWrite(`note: re-run with --all --yes to confirm\n`);
       exitFn(1);
       return;
     }
@@ -296,7 +291,7 @@ export function runDraftsDelete(opts: DraftsDeleteOptions): void {
         stdoutWrite(`deleted ${meta.patchId}\n`);
       } catch (err) {
         stderrWrite(
-          `error deleting ${meta.patchId}: ${err instanceof Error ? err.message : String(err)}\n`,
+          `error: failed to delete ${meta.patchId}: ${err instanceof Error ? err.message : String(err)}\n`,
         );
         ioError = true;
       }
@@ -316,18 +311,18 @@ export function runDraftsDelete(opts: DraftsDeleteOptions): void {
   try {
     resolved = resolvePatchId(dir, opts.patchId);
   } catch (err) {
-    stderrWrite(`error accessing drafts: ${err instanceof Error ? err.message : String(err)}\n`);
+    stderrWrite(`error: failed to access drafts: ${err instanceof Error ? err.message : String(err)}\n`);
     exitFn(3);
     return;
   }
 
   if ("notFound" in resolved) {
-    stderrWrite(`draft not found: ${opts.patchId}\n`);
+    stderrWrite(`error: draft not found: ${opts.patchId} — run 'stamp peer drafts list' to see available drafts\n`);
     exitFn(1);
     return;
   }
   if ("ambiguous" in resolved) {
-    stderrWrite(`ambiguous patch-id prefix "${opts.patchId}" — matches:\n`);
+    stderrWrite(`error: ambiguous patch-id prefix "${opts.patchId}" — matches:\n`);
     for (const m of resolved.ambiguous) {
       stderrWrite(`  ${m.patchId}\n`);
     }
@@ -340,7 +335,7 @@ export function runDraftsDelete(opts: DraftsDeleteOptions): void {
     unlinkSync(found.filePath);
   } catch (err) {
     stderrWrite(
-      `error deleting draft ${found.patchId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      `error: failed to delete draft ${found.patchId}: ${err instanceof Error ? err.message : String(err)}\n`,
     );
     exitFn(3);
     return;

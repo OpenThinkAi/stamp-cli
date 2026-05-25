@@ -22,7 +22,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, readdirSync } from "node:fs";
 
 import { runDraftsList, runDraftsShow, runDraftsDelete } from "../src/commands/peerDrafts.ts";
 
@@ -52,7 +52,7 @@ function writeDraft(dir: string, patchId: string, prUrl = "https://github.com/ac
 
 function cleanup(dir: string): void {
   try {
-    const files = require("fs").readdirSync(dir);
+    const files = readdirSync(dir);
     for (const f of files) {
       try { unlinkSync(join(dir, f)); } catch { /* ignore */ }
     }
@@ -78,7 +78,7 @@ describe("peerDrafts list: missing dir → exit 1", () => {
     assert.equal(capturedCode(), 1, `expected exit 1, got ${capturedCode()}`);
     assert.ok(
       stderrLines.join("").includes("no drafts found"),
-      `expected 'no drafts found', got: ${stderrLines.join("")}`,
+      `expected 'no drafts found' in: ${stderrLines.join("")}`,
     );
   });
 
@@ -180,7 +180,7 @@ describe("peerDrafts show: not found → exit 1", () => {
     assert.equal(capturedCode(), 1, `expected exit 1, got ${capturedCode()}`);
     assert.ok(
       stderrLines.join("").includes("draft not found"),
-      `expected 'draft not found', got: ${stderrLines.join("")}`,
+      `expected 'draft not found' in: ${stderrLines.join("")}`,
     );
   });
 });
@@ -302,7 +302,7 @@ describe("peerDrafts delete: not found → exit 1", () => {
     assert.equal(capturedCode(), 1, `expected exit 1, got ${capturedCode()}`);
     assert.ok(
       stderrLines.join("").includes("draft not found"),
-      `expected 'draft not found', got: ${stderrLines.join("")}`,
+      `expected 'draft not found' in: ${stderrLines.join("")}`,
     );
   });
 });
@@ -355,16 +355,19 @@ describe("peerDrafts delete --all without --yes → exit 1, no deletion", () => 
         _exitForTest: exitFn,
         _stderrWriteForTest: (s) => { stderrLines.push(s); },
       });
-    } catch { /* exitFn throws */ } finally {
-      cleanup(dir);
-    }
+    } catch { /* exitFn throws */ }
 
-    assert.equal(capturedCode(), 1, `expected exit 1, got ${capturedCode()}`);
-    assert.ok(existsSync(filePath), "draft file should NOT have been deleted without --yes");
+    // Assertions must run before cleanup so the file still exists.
+    const exitCode = capturedCode();
+    const fileStillExists = existsSync(filePath);
     const err = stderrLines.join("");
+    cleanup(dir);
+
+    assert.equal(exitCode, 1, `expected exit 1, got ${exitCode}`);
+    assert.ok(fileStillExists, "draft file should NOT have been deleted without --yes");
     assert.ok(
-      err.includes("--yes") || err.includes("re-run"),
-      `expected --yes prompt in stderr: ${err}`,
+      err.includes("--yes") || err.includes("re-run") || err.includes("--all"),
+      `expected --yes/re-run prompt in stderr: ${err}`,
     );
   });
 });

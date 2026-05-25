@@ -31,7 +31,7 @@
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { loadUserKeypair, type Keypair } from "../lib/keys.js";
 import { signBytes } from "../lib/signing.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
@@ -121,6 +121,12 @@ export interface PrListenOptions {
    * Receives (filePath, content) — the full draft markdown string.
    */
   _writeDraftForTest?: (filePath: string, content: string) => void;
+  /**
+   * Test-only: pre-seed the daily spend accumulator to a specific value.
+   * Allows tests to simulate cost-cap triggering without a real SDK call
+   * (which would otherwise return costUsd: 0 via the test seam).
+   */
+  _initialDailySpendForTest?: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -259,7 +265,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   // In-memory accumulator scoped to this listener process lifetime.
   // Resets at local-TZ midnight. Not persisted across restarts.
   const nowFn = opts._nowForTest ?? (() => new Date());
-  let dailySpend = 0;
+  let dailySpend = opts._initialDailySpendForTest ?? 0;
   let spendDayKey = localDayKey(nowFn());
 
   /** Advance the daily spend counter, resetting at local midnight. */
@@ -455,6 +461,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // before the triplet log so the logged decision reflects the downgrade.
     addDailySpend(triageCostUsd);
 
+    let wasCapDowngraded = false;
     if (
       typeof triageDecision.cost_cap_usd === "number" &&
       triageDecision.cost_cap_usd > 0 &&
@@ -462,8 +469,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       (triageDecision.claim_seat === "if_available" || triageDecision.claim_seat === "always")
     ) {
       // Downgrade to skip: daily cap hit.
-      triageDecision = { ...triageDecision, claim_seat: "skip" };
       const capUsd = triageDecision.cost_cap_usd;
+      triageDecision = { ...triageDecision, claim_seat: "skip" };
+      wasCapDowngraded = true;
       const notifyTitle = "stamp peer";
       const notifyBody = `Daily review cap ($${capUsd.toFixed(2)}) reached — skipping PR #${prNumber}`;
       // Fire desktop notification (fire-and-forget, must never crash/stall).
@@ -479,12 +487,6 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // For re-review-requested events, tag with kind: "re-review" (AC #12).
     // For cap-triggered skips, include reason: "daily cap hit" (AGT-432 AC #4).
     {
-      const isCapSkip =
-        triageDecision.claim_seat === "skip" &&
-        typeof triageDecision.cost_cap_usd === "number" &&
-        triageDecision.cost_cap_usd > 0 &&
-        dailySpend >= triageDecision.cost_cap_usd;
-
       const tripletRecord: TripletRecord = {
         ts: nowFn().toISOString(),
         repo,
@@ -493,7 +495,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         event_payload: payload as Record<string, unknown>,
         decision: triageDecision,
         ...(event.event_type === "re-review-requested" ? { kind: "re-review" } : {}),
-        ...(isCapSkip ? { reason: "daily cap hit" } : {}),
+        ...(wasCapDowngraded ? { reason: "daily cap hit" } : {}),
       };
       if (opts._appendTripletForTest) {
         opts._appendTripletForTest(tripletRecord);
@@ -628,9 +630,26 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     // ─── AGT-432 AC (draft saving): save draft if post_mode === "draft" ───
     if (triageDecision.post_mode === "draft") {
+      // Security: validate patchId is a safe hex token before constructing
+      // the file path. A crafted patchId containing `../` sequences would
+      // otherwise escape the drafts directory.
+      if (!/^[0-9a-f]{40}$/i.test(patchId)) {
+        process.stderr.write(
+          `✗ refusing to save draft for PR #${prNumber}: invalid patchId format ${JSON.stringify(patchId)}\n`,
+        );
+        currentSeatPatchId = null;
+        await callReleaseSeat({
+          patch_id: patchId,
+          claimant_fp: keypair.fingerprint,
+          signature: stubSignature(keypair, patchId, keypair.fingerprint),
+          serverConfig: serverCfg,
+          _sshSpawnForTest: opts._sshSpawnForTest,
+        });
+        continue;
+      }
       const draftContent =
         `---\npatch_id: ${patchId}\npr_url: ${prUrl}\nts: ${nowFn().toISOString()}\n---\n\n${reviewBody}`;
-      const draftPath = `${draftsDir()}/${patchId}.md`;
+      const draftPath = join(draftsDir(), `${patchId}.md`);
       try {
         if (opts._writeDraftForTest) {
           opts._writeDraftForTest(draftPath, draftContent);

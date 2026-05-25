@@ -69,7 +69,7 @@ describe("peerLog: missing log file → exit 1", () => {
     const stderrJoined = stderrLines.join("");
     assert.ok(
       stderrJoined.includes("no peer-watch.log found"),
-      `expected 'no peer-watch.log found' in stderr: ${stderrJoined}`,
+      `expected 'no peer-watch.log found' in: ${stderrJoined}`,
     );
   });
 });
@@ -96,7 +96,7 @@ describe("peerLog: empty log file → exit 1", () => {
     const stderrJoined = stderrLines.join("");
     assert.ok(
       stderrJoined.includes("no peer-watch.log found"),
-      `expected 'no peer-watch.log found' in stderr: ${stderrJoined}`,
+      `expected 'no peer-watch.log found' in: ${stderrJoined}`,
     );
   });
 
@@ -202,8 +202,8 @@ describe("peerLog: --raw → raw NDJSON output", () => {
 
 // ─── AC #7: --last N → limited output ────────────────────────────────
 
-describe("peerLog: --last N limits output to last N triplets", () => {
-  it("shows only the last 2 triplets when --last 2", () => {
+describe("peerLog: --limit N limits output to last N triplets", () => {
+  it("shows only the last 2 triplets when --limit 2", () => {
     const lines = [
       makeTriplet({ ts: "2026-05-01T00:00:00.000Z" }),
       makeTriplet({ ts: "2026-05-02T00:00:00.000Z" }),
@@ -215,7 +215,7 @@ describe("peerLog: --last N limits output to last N triplets", () => {
 
     try {
       runPeerLog({
-        last: 2,
+        limit: 2,
         _logPathForTest: logPath,
         _exitForTest: exitFn,
         _stdoutWriteForTest: (s) => { stdoutLines.push(s); },

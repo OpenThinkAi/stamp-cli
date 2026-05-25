@@ -1133,18 +1133,16 @@ describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'",
 
 // ─── AGT-432 AC #2/#3: daily cost-cap enforcement ────────────────────
 
-describe("AGT-432 AC #3: cost-cap — decision downgraded to skip when daily cap hit", () => {
-  it("downgrades if_available to skip and fires notification when cap exceeded", async () => {
+describe("AGT-432 AC #3: cost-cap — cap NOT hit when dailySpend < cost_cap_usd", () => {
+  it("does not downgrade or notify when dailySpend < cap", async () => {
     const fakeKeypair = genKeypair();
     const triplets: Array<Record<string, unknown>> = [];
     const notifyCalls: Array<{ title: string; body: string }> = [];
     let sdkCalled = false;
     let sshClaimCalled = false;
 
-    // Triage runner returns if_available with a $0.01 cap; we'll simulate
-    // dailySpend already at cap by having the cap = 0 (any positive spend ≥ 0).
-    // Use a cap that gets hit: set cost_cap_usd to a tiny amount and inject
-    // a _nowForTest that keeps the same day.
+    // cap=0.001, _initialDailySpendForTest not set (defaults to 0)
+    // 0 < 0.001 → cap NOT triggered
     const haikuRunner = async (): Promise<string> =>
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
@@ -1153,79 +1151,6 @@ describe("AGT-432 AC #3: cost-cap — decision downgraded to skip when daily cap
       return makeSuccessSshSpawn(1)(cfg, verb);
     };
 
-    // We need the daily spend to exceed 0.001. Since the triage call returns
-    // costUsd=0 (test seam), we can set cost_cap_usd=0 to trigger the cap
-    // immediately (cap > 0 is required by the guard, so use a very small value
-    // and rely on the fact that dailySpend >= cap even at 0 if cap=0 is excluded).
-    //
-    // Actually: the check is `dailySpend >= cost_cap_usd && cost_cap_usd > 0`.
-    // With test seam, costUsd=0, so dailySpend stays 0. With cap=0.001,
-    // dailySpend (0) < cap (0.001) → no trigger.
-    //
-    // To force the cap to trigger, we need dailySpend > 0. We do this by
-    // processing two events: the first event succeeds (and presumably the
-    // review adds cost — but with test seam costUsd=0, we can't add cost
-    // this way). Instead, let's use cap=0 which means cap <= 0 → no trigger.
-    //
-    // The real test is: can we verify the cap fires when dailySpend >= cap?
-    // With test seams all returning costUsd=0, we need a different approach.
-    //
-    // Solution: Set cost_cap_usd to 0 but make the guard check >=0 on the
-    // first check... Actually the guard requires cost_cap_usd > 0. Let's just
-    // test that cap=0 does NOT trigger (normal case with zero cost), and add
-    // a separate test that confirms the triggering logic by setting a very
-    // small positive cap and observing the SECOND event (after the first sets
-    // dailySpend to something positive via a review).
-
-    // Simpler: test with haikuRunner that injects costUsd via the fact that
-    // the test seam returns costUsd=0 and dailySpend accumulates from
-    // review costs too. Since both return 0, to test the cap we need a
-    // different test seam approach.
-    //
-    // Correct approach per the operator decision: cost comes from the SDK result
-    // message's total_cost_usd. With test seams, costUsd=0. The cost-cap test
-    // should simulate a non-zero costUsd by testing the accumulator directly,
-    // or by verifying behavior when cap=0 (always >= if cap>0 check fails).
-    //
-    // We'll test the "notification fires when cap is hit at dailySpend=0,
-    // cost_cap_usd=0" — but that doesn't trigger (cap must be > 0).
-    //
-    // Real test: verify that cost_cap_usd <= 0 does NOT trigger (guard).
-    // And verify cap DOES trigger: Process event1 (no cap), then check that
-    // event2 with cost_cap_usd = a small epsilon and dailySpend = 0 does NOT
-    // trigger (since 0 < epsilon) — but if we could inject a non-zero daily
-    // spend, it would.
-    //
-    // SIMPLEST correct approach: test cost cap by injecting a costUsd seam.
-    // But prListen doesn't have a costUsd injection seam — costs come from
-    // runTriage/runBuiltinReview return values. The _haikuRunnerForTest and
-    // _sdkRunnerForTest don't return costUsd; the TriageResult.costUsd is
-    // always 0 from the test path.
-    //
-    // THE RIGHT TEST: Verify cap fires when we mock a scenario where
-    // dailySpend accumulated BEFORE this event. Use _nowForTest to keep the
-    // same day, and process two events so the second sees the first's cost.
-    // But since all costs are 0 in test seams... we can't easily add cost.
-    //
-    // WORKAROUND: Test the cap at cost_cap_usd = 0 + dailySpend = 0 scenario:
-    // cost_cap_usd must be > 0 for the cap to fire. With cost_cap_usd=0.001
-    // and all test-seam costs=0, dailySpend=0 < 0.001 → no trigger.
-    //
-    // To properly test triggering: we need cost_cap_usd = 0.001 and at
-    // least one prior event that added >= 0.001 to dailySpend. Since test
-    // seams return 0, this can't happen in the current architecture without
-    // a direct cost-injection seam.
-    //
-    // CONCLUSION: Add a _dailySpendForTest seam to allow tests to pre-seed
-    // the daily spend. This is the right approach; let's re-examine the code.
-    //
-    // Actually - re-reading the ticket instructions: "Test seams: `_nowForTest`
-    // (day-rollover determinism), `_addedCostForTest` / cost-injection seam,
-    // `_notifyForTest`". The spike explicitly asks for `_addedCostForTest`.
-    // I need to add this seam to prListen.ts and use it here.
-
-    // For now, this test verifies the notification is NOT fired when cap is
-    // not exceeded (cost_cap_usd > 0 but dailySpend < cap).
     const { result: exitCode } = await captureStderrAsync(() =>
       runWithExitCapture({
         orgs: ["acme"],
@@ -1244,47 +1169,30 @@ describe("AGT-432 AC #3: cost-cap — decision downgraded to skip when daily cap
     );
 
     assert.equal(exitCode, 0);
-    // With dailySpend=0 and cap=0.001, cap is NOT hit → claim proceeds normally
     assert.equal(sshClaimCalled, true, "seat should be claimed when cap is not hit");
     assert.equal(sdkCalled, true, "SDK should run when cap is not hit");
     assert.equal(notifyCalls.length, 0, "notification should NOT fire when cap is not hit");
   });
 });
 
-describe("AGT-432 AC #3: cost-cap — notification fires when cap IS exceeded (via pre-seeded spend)", () => {
-  it("downgrades to skip and fires notification when cost_cap_usd is exceeded", async () => {
+describe("AGT-432 AC #3: cost-cap — cap HIT when _initialDailySpendForTest >= cost_cap_usd", () => {
+  it("downgrades if_available to skip and fires notification when pre-seeded daily spend >= cap", async () => {
     const fakeKeypair = genKeypair();
     const triplets: Array<Record<string, unknown>> = [];
     const notifyCalls: Array<{ title: string; body: string }> = [];
     let sdkCalled = false;
     let sshClaimCalled = false;
 
-    // Triage returns if_available + cost_cap_usd=0.001
+    // cap=0.001, _initialDailySpendForTest=0.002 → dailySpend(0.002) >= cap(0.001) → IS triggered
     const haikuRunner = async (): Promise<string> =>
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
-    // To trigger the cap, we process TWO events from two different days and
-    // reset the day between them... but that doesn't add cost.
-    // The simplest real test: use cost_cap_usd = 0 is not valid (cap must > 0).
-    // TRUE approach: we need to pre-seed dailySpend. Since addDailySpend is
-    // internal to runPrListen, the only way to trigger it is via the actual
-    // cost returned from runTriage/runBuiltinReview. With test seams those
-    // return 0. So we MUST add a _initialDailySpendForTest seam.
-    //
-    // For now, mark this as a pending test that will be fixed when the seam
-    // is added. The important thing is that the struct compiles and the
-    // basic plumbing is tested.
-
-    // We verify the cap check fires by using cost_cap_usd = 0 and checking
-    // that the guard `cost_cap_usd > 0` prevents spurious triggering.
-    // The actual triggering is verified manually via the notification path below.
     const sshSpawn: SshSpawnFn = async (cfg, verb) => {
       if (verb === "claim-seat") sshClaimCalled = true;
       return makeSuccessSshSpawn(1)(cfg, verb);
     };
 
-    // Process 1 event (cap=0.001, dailySpend starts at 0; 0 < 0.001 → NOT hit)
-    await captureStderrAsync(() =>
+    const { result: exitCode } = await captureStderrAsync(() =>
       runWithExitCapture({
         orgs: ["acme"],
         server: FIXTURE_SERVER,
@@ -1292,31 +1200,35 @@ describe("AGT-432 AC #3: cost-cap — notification fires when cap IS exceeded (v
         _sshSpawnForTest: sshSpawn,
         _sdkRunnerForTest: async () => { sdkCalled = true; return "review body"; },
         _haikuRunnerForTest: haikuRunner,
-        _peerWatchRulesForTest: { rules: "test", hash: "abc" },
+        _peerWatchRulesForTest: { rules: "claim if available", hash: "abc" },
         _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
         _notifyForTest: (title, body) => { notifyCalls.push({ title, body }); },
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
+        _initialDailySpendForTest: 0.002,
         _eventQueueForTest: [makeEvent()],
       }),
     );
 
-    // Verify: even with cap set, with dailySpend=0 and cap=0.001, no trigger.
-    assert.equal(notifyCalls.length, 0, "should not notify when dailySpend < cap");
-    assert.equal(sshClaimCalled, true, "seat should be claimed normally");
-    assert.equal(sdkCalled, true, "review should run normally");
+    assert.equal(exitCode, 0);
+    // Cap is HIT → seat should NOT be claimed, SDK should NOT run
+    assert.equal(sshClaimCalled, false, "seat should NOT be claimed when cap is hit");
+    assert.equal(sdkCalled, false, "SDK should NOT run when cap is hit");
+    // Notification should fire once
+    assert.equal(notifyCalls.length, 1, "notification should fire when cap is hit");
+    // Triplet should have reason='daily cap hit'
+    assert.equal(triplets.length, 1, "expected 1 triplet");
+    assert.equal(triplets[0]!["reason"], "daily cap hit", "triplet reason should be 'daily cap hit'");
   });
 });
 
-describe("AGT-432 AC #4: cost-cap log — triplet has reason='daily cap hit' on cap skip", () => {
-  it("logs reason='daily cap hit' when cost cap is triggered on re-review event", async () => {
+describe("AGT-432 AC #4: cost-cap log — normal skip does NOT get reason field", () => {
+  it("triplet has no reason field on triage-returned skip (not cap-triggered)", async () => {
     const fakeKeypair = genKeypair();
     const triplets: Array<Record<string, unknown>> = [];
     const notifyCalls: Array<{ title: string; body: string }> = [];
 
-    // Use a zero cost_cap_usd (won't trigger) to test the absence of the reason field.
-    // For the presence test with a triggered cap, we'd need a cost seam.
-    // This test verifies the reason field is NOT present on normal skips.
+    // Triage naturally returns skip (no cost_cap_usd, no cap enforcement)
     const haikuRunner = async (): Promise<string> =>
       '{"claim_seat":"skip","post_mode":"auto-post","prompt":"default"}';
 
