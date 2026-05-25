@@ -42,11 +42,12 @@ export interface PeerLogOptions {
    */
   limit?: number;
   /**
-   * Alias for `limit` — intentional AC-7 contract alias.
+   * Alias for `limit` — intentional alias preserving AC-7 contract.
    * AC-7 specifies `--last <n>`; the product reviewer renamed it to `--limit` during stamp review.
    * Both are supported so the AC contract and the review decision hold simultaneously.
-   * When both are supplied to the CLI, Commander last-one-wins applies; the resolved value
-   * is passed to whichever field was set by the last option parsed.
+   * Note: these are two separate Commander options writing separate fields; if both are supplied
+   * (unusual), `last` always takes precedence via `opts.last ?? opts.limit ?? 0` regardless
+   * of parse order — it is NOT parse-order-sensitive.
    */
   last?: number;
   /** Output uncolorized raw JSON. */
@@ -126,8 +127,8 @@ export function runPeerLog(opts: PeerLogOptions): void {
   }
 
   // ─── Apply --limit / --last filter ───────────────────────────────
-  // --last is an alias for --limit (AC-7 contract; see PeerLogOptions comment).
-  // If both are supplied, last-one-wins as Commander parses them; we pick whichever is set.
+  // --last is an alias for --limit (see PeerLogOptions comment).
+  // Both write separate fields; `opts.last` has fixed precedence (not parse-order-sensitive).
   const limitN = opts.last ?? opts.limit ?? 0;
   const toShow = limitN > 0 ? records.slice(-limitN) : records;
 

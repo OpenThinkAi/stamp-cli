@@ -947,7 +947,7 @@ peer
   .option("--raw", "output uncolorized raw NDJSON")
   .option(
     "--limit <n>",
-    "show last N triplets (tail semantics: most recent N; canonical flag name)",
+    "show last N triplets (tail semantics: most recent N)",
     (v: string) => {
       const n = parseInt(v, 10);
       return Number.isNaN(n) ? 0 : n;
@@ -957,7 +957,7 @@ peer
   // reviewer renamed it to --limit during stamp review; both are kept so both contracts hold).
   .option(
     "--last <n>",
-    "alias for --limit (AC-7 contract alias; see --limit)",
+    "alias for --limit",
     (v: string) => {
       const n = parseInt(v, 10);
       return Number.isNaN(n) ? 0 : n;
