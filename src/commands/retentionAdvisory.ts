@@ -110,12 +110,11 @@ export function printRetentionAdvisory(
     if (retention.reviews) {
       runPruneWithWarning(retention.reviews);
     }
-    // Run a second pass for spools only when the spools threshold differs
-    // from reviews — when they're equal or only one is set, the first pass
-    // (or the spools-only single pass below) already covered everything.
+    // Second pass for spools when the threshold differs from reviews (or
+    // when only spools is set — `"3d" !== undefined` is true, so this
+    // covers both cases). When reviews === spools the first pass already
+    // swept both DB rows and spool dirs at that duration.
     if (retention.spools && retention.spools !== retention.reviews) {
-      runPruneWithWarning(retention.spools);
-    } else if (!retention.reviews && retention.spools) {
       runPruneWithWarning(retention.spools);
     }
     return;
