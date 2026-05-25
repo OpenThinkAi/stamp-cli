@@ -234,7 +234,7 @@ async function connectWsTransport(
   | { ok: true; ws: WebSocket; nextEvent: () => Promise<PeerReviewEvent | null> }
   | { ok: false; reason: string }
 > {
-  // In-test: use the injected WS socket (skip URL resolution entirely.
+  // In-test: use the injected WS socket (skip URL resolution entirely).
   // For real connections, resolve the URL via buildWsPeerListenUrl; it fails
   // fast with an actionable error when wsUrl is missing (the SSH host:port
   // cannot be used for WS — it speaks sshd, not HTTP).

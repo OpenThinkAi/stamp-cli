@@ -38,15 +38,14 @@ ws_url: ws://localhost:8080
     assert.equal(cfg.wsUrl, "ws://localhost:8080");
   });
 
-  it("strips trailing slash from ws_url before storing", () => {
+  it("stores wsUrl as-is including trailing slash (stripping happens at URL-build time)", () => {
     const raw = `
 host: stamp.example.com
 port: 2222
 ws_url: wss://stamp-cli-production.up.railway.app/
 `;
-    // parseServerConfig stores the raw (non-trailing-stripped) value;
+    // parseServerConfig stores the raw value with the trailing slash intact;
     // buildWsPeerListenUrl strips it when appending /peer/listen.
-    // This test verifies the raw value is stored as-is.
     const cfg = parseServerConfig(raw, "<test>");
     assert.equal(cfg.wsUrl, "wss://stamp-cli-production.up.railway.app/");
   });
