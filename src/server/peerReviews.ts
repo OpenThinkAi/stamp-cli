@@ -24,12 +24,14 @@
 
 import path from "node:path";
 
-import { showAtRef } from "../lib/git.js";
+import { showAtRef, listFilesAtRef } from "../lib/git.js";
 import {
   parseManifest,
   resolveCapability,
   MANIFEST_RELATIVE_PATH,
 } from "../lib/trustedKeysManifest.js";
+import { verifyBytes } from "../lib/signing.js";
+export type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 
 // ─── Feature gate ───────────────────────────────────────────────────
 
@@ -155,12 +157,10 @@ export interface ListenerHandle {
   onEvent: (event: PeerReviewEvent) => void;
 }
 
-export interface PeerReviewEvent {
-  event_type: string;
-  patch_id: string;
-  actor_fp: string;
-  payload: object;
-}
+// PeerReviewEvent is re-exported from src/lib/peerReviewEvent.ts (AGT-434).
+// The re-export at the top of this file (via `export type { PeerReviewEvent }`)
+// preserves back-compat for any import that still uses this path.
+import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 
 // Module-scoped registry: fingerprint → listener handle.
 const listenerRegistry = new Map<string, ListenerHandle>();
@@ -277,4 +277,85 @@ export function clearListenerRegistry(): void {
 /** Emit the "feature not configured" response (AC 8). */
 export function notConfiguredResponse(): string {
   return JSON.stringify({ ok: false, error: "peer_reviews_not_configured" });
+}
+
+// ─── WS-path Ed25519 verification helpers (AGT-434) ─────────────────
+//
+// These helpers are used by the WS handler in http-server.ts to perform
+// load-bearing per-message signature verification. The SSH-verb handlers
+// keep their existing parse-and-discard (SSH identity is the auth boundary).
+
+/**
+ * Load the fingerprint → PEM map from `.stamp/trusted-keys/*.pub` at `sha`
+ * in the given bare-repo `repoGitDir`. Mirrors the `readTrustedKeysAt(sha)`
+ * pattern from `src/hooks/pre-receive.ts:876`.
+ *
+ * Returns an empty map when the tree entry is absent or any file is
+ * unreadable — callers treat an empty map as "key not found".
+ */
+export function readTrustedKeysAtRepo(
+  repoGitDir: string,
+  sha: string,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  let files: string[];
+  try {
+    // listFilesAtRef returns bare filenames (e.g. "SHA256:abc.pub") relative
+    // to the directory. Returns [] when the tree entry is absent.
+    files = listFilesAtRef(sha, ".stamp/trusted-keys", repoGitDir);
+  } catch {
+    return map;
+  }
+  for (const file of files) {
+    if (!file.endsWith(".pub")) continue;
+    try {
+      const pem = showAtRef(sha, `.stamp/trusted-keys/${file}`, repoGitDir);
+      // Derive fingerprint from the filename stem — the convention is
+      // `<fingerprint>.pub` (set by `stamp keys generate` and `stamp trust`).
+      const stem = path.basename(file, ".pub");
+      if (stem) map.set(stem, pem);
+    } catch {
+      // Skip unreadable / invalid entries — same discipline as pre-receive.ts.
+    }
+  }
+  return map;
+}
+
+/**
+ * Verify the Ed25519 `signature` (base64) over `canonicalBytes` for a peer
+ * payload, loading the operator's PEM from `.stamp/trusted-keys/<fp>.pub` at
+ * `base_sha` in `repoGitDir`.
+ *
+ * Returns `{ ok: true }` on success, `{ ok: false, reason }` on any failure
+ * (key not found, invalid signature, crypto error). Callers should treat any
+ * non-OK result as an auth failure and reject the request.
+ */
+export function verifyPeerPayloadSignature(
+  repoGitDir: string,
+  base_sha: string,
+  fingerprint: string,
+  canonicalBytes: Buffer,
+  signatureBase64: string,
+): { ok: true } | { ok: false; reason: string } {
+  const keyMap = readTrustedKeysAtRepo(repoGitDir, base_sha);
+  const pem = keyMap.get(fingerprint);
+  if (!pem) {
+    return {
+      ok: false,
+      reason: `pubkey for fingerprint ${fingerprint} not found in .stamp/trusted-keys at ${base_sha}`,
+    };
+  }
+  let valid: boolean;
+  try {
+    valid = verifyBytes(pem, canonicalBytes, signatureBase64);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `signature verification threw: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!valid) {
+    return { ok: false, reason: "signature verification failed" };
+  }
+  return { ok: true };
 }

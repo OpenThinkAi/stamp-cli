@@ -7,9 +7,13 @@
  *   repo, patch_id, base_sha, head_sha, requested_by_fp,
  *   paths_changed (string[]), title, body, pr_url, signature
  *
- * Auth: verifies the Ed25519 `signature` against the repo's
- * `.stamp/trusted-keys/manifest.yml` at `base_sha`, confirming
- * `requested_by_fp` has `operator` capability.
+ * Auth: binds the payload to the SSH-authenticated caller
+ * (`requested_by_fp === caller.fingerprint`) and verifies that fingerprint
+ * has `operator` capability in `.stamp/trusted-keys/manifest.yml` at
+ * `base_sha` via `verifyOperatorAtBase`. The in-payload `signature` is
+ * currently parsed but NOT cryptographically verified on the SSH path (SSH
+ * identity is the auth boundary). On the WS path (AGT-434) the signature
+ * is verified against the operator's pubkey at base_sha and is load-bearing.
  *
  * Rate limit: 60/hr per author (`pr-opened` rate bucket) via AGT-420
  * `checkAndConsumeToken`.

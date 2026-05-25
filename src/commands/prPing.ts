@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { findRepoRoot } from "../lib/paths.js";
 import { loadUserKeypair, type Keypair } from "../lib/keys.js";
 import { signBytes } from "../lib/signing.js";
+import { sortKeysDeep } from "../lib/attestationV4.js";
 import { patchIdForRevspec } from "../lib/patchId.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
 import type { ServerConfig } from "../lib/serverConfig.js";
@@ -219,14 +220,17 @@ export async function runPrPing(opts: PrPingOptions): Promise<void> {
   }
 
   // ─── Sign the payload ─────────────────────────────────────────────
-  // Canonical form: JSON.stringify of the fields (same signing discipline
-  // as other verbs — payload body without `signature`).
+  // Canonical form: sortKeysDeep + JSON.stringify (pinned across all
+  // peer-review signing/verifying call sites per AGT-434 AC 4).
   const payloadBody = {
     patch_id: patchId,
     requester_fp: keypair.fingerprint,
     reviewer_filter: opts.reviewer,
   };
-  const canonicalBytes = Buffer.from(JSON.stringify(payloadBody), "utf8");
+  const canonicalBytes = Buffer.from(
+    JSON.stringify(sortKeysDeep(payloadBody)),
+    "utf8",
+  );
   const signature = signBytes(keypair.privateKeyPem, canonicalBytes);
 
   // ─── Call server ──────────────────────────────────────────────────

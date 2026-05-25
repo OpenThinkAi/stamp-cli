@@ -34,13 +34,15 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadUserKeypair, type Keypair } from "../lib/keys.js";
 import { signBytes } from "../lib/signing.js";
+import { sortKeysDeep } from "../lib/attestationV4.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
 import type { ServerConfig } from "../lib/serverConfig.js";
+import { WebSocket } from "ws";
 import {
   registerListener,
   unregisterListener,
-  type PeerReviewEvent,
 } from "../server/peerReviews.js";
+import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 import {
   callSubscribe,
   callClaimSeat,
@@ -127,16 +129,156 @@ export interface PrListenOptions {
    * (which would otherwise return costUsd: 0 via the test seam).
    */
   _initialDailySpendForTest?: number;
+  /**
+   * Select the WebSocket transport (AGT-434) instead of the SSH-verb long-poll
+   * fallback. When true, `stamp pr listen` connects via WS to the stamp-server's
+   * `/peer/listen` endpoint for event delivery instead of the SSH-verb
+   * `subscribe` long-poll. The SSH-verb path is retained as a flag-selected
+   * fallback through AGT-433 validation.
+   */
+  useWsTransport?: boolean;
+  /**
+   * Test-only: inject a pre-constructed WebSocket for the WS transport path.
+   * When set, the WS connect step is skipped and this socket is used directly.
+   */
+  _wsSocketForTest?: WebSocket;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
-/** Build a minimal base64-encoded stub signature for the wire-frame.
- *  The server relies on SSH identity binding, not payload-signature
- *  verification, for this ticket's scope. */
-function stubSignature(keypair: Keypair, ...parts: string[]): string {
-  const data = Buffer.from(parts.join("|"), "utf8");
-  return signBytes(keypair.privateKeyPem, data);
+/**
+ * Canonical payload signing: `sortKeysDeep` (excluding the `signature` field)
+ * then `JSON.stringify` then Ed25519 sign. This is the single canonicalizer
+ * pinned across all peer-review signing/verifying call sites (AGT-434, AC 4).
+ *
+ * The function accepts any object as the payload body; callers must ensure
+ * the object does NOT include a `signature` field (omit it before signing).
+ */
+function canonicalSign(keypair: Keypair, payloadBody: object): string {
+  const canonical = Buffer.from(
+    JSON.stringify(sortKeysDeep(payloadBody)),
+    "utf8",
+  );
+  return signBytes(keypair.privateKeyPem, canonical);
+}
+
+/**
+ * Connect to the stamp-server's WS `/peer/listen` endpoint, complete the
+ * signed-challenge handshake, and return a Promise that resolves to a
+ * readable event source: an async generator that yields `PeerReviewEvent`
+ * objects as the server pushes them.
+ *
+ * Handshake:
+ *   1. Server sends `{type:"challenge",nonce}`.
+ *   2. Client signs the nonce with Ed25519 and responds with
+ *      `{type:"auth", fingerprint, nonce, signature, orgs}`.
+ *   3. Server responds `{type:"authenticated",fingerprint}` on success, or
+ *      closes with a 44xx code on failure.
+ *
+ * Returns `{ ok: false, reason }` when auth fails; `{ ok: true, ws, eventGen }`
+ * when connected.
+ */
+async function connectWsTransport(
+  keypair: Keypair,
+  orgs: string[],
+  serverCfg: ServerConfig,
+  wsSocketOverride?: WebSocket,
+): Promise<
+  | { ok: true; ws: WebSocket; nextEvent: () => Promise<PeerReviewEvent | null> }
+  | { ok: false; reason: string }
+> {
+  // In-test: use the injected WS socket (skip the real connect).
+  const ws: WebSocket = wsSocketOverride ?? (() => {
+    const url = `ws://${serverCfg.host}:${serverCfg.port}/peer/listen`;
+    return new WebSocket(url);
+  })();
+
+  return new Promise((resolve) => {
+    let authenticated = false;
+    let pendingResolve: ((event: PeerReviewEvent | null) => void) | null = null;
+
+    ws.on("error", (err) => {
+      if (!authenticated) {
+        resolve({ ok: false, reason: `WS connection error: ${err.message}` });
+      }
+    });
+
+    ws.on("close", (code, reason) => {
+      if (!authenticated) {
+        resolve({ ok: false, reason: `WS closed before auth: code=${code} ${reason.toString("utf8")}` });
+        return;
+      }
+      // Signal end-of-stream to any pending nextEvent() caller.
+      if (pendingResolve) {
+        const r = pendingResolve;
+        pendingResolve = null;
+        r(null);
+      }
+    });
+
+    ws.on("message", (data: Buffer | string) => {
+      const raw = typeof data === "string" ? data : data.toString("utf8");
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      if (!authenticated) {
+        // Phase 1: handle challenge → send auth.
+        if (msg["type"] === "challenge") {
+          const nonce = typeof msg["nonce"] === "string" ? msg["nonce"] : null;
+          if (!nonce) {
+            resolve({ ok: false, reason: "WS challenge missing nonce" });
+            ws.close();
+            return;
+          }
+          // Sign the nonce bytes directly (not the JSON) to bind our identity.
+          const sig = signBytes(keypair.privateKeyPem, Buffer.from(nonce, "utf8"));
+          ws.send(JSON.stringify({
+            type: "auth",
+            fingerprint: keypair.fingerprint,
+            nonce,
+            signature: sig,
+            orgs,
+          }));
+          return;
+        }
+        if (msg["type"] === "authenticated") {
+          authenticated = true;
+          resolve({
+            ok: true,
+            ws,
+            nextEvent: () =>
+              new Promise<PeerReviewEvent | null>((r) => {
+                pendingResolve = r;
+              }),
+          });
+          return;
+        }
+        // Any other message before auth is a protocol error.
+        resolve({ ok: false, reason: `unexpected WS message before auth: ${JSON.stringify(msg["type"])}` });
+        ws.close();
+        return;
+      }
+
+      // Phase 2: authenticated — deliver event messages.
+      if (msg["type"] === "event" && pendingResolve) {
+        const event: PeerReviewEvent = {
+          event_type: typeof msg["event_type"] === "string" ? msg["event_type"] : "unknown",
+          patch_id: typeof msg["patch_id"] === "string" ? msg["patch_id"] : "",
+          actor_fp: typeof msg["actor_fp"] === "string" ? msg["actor_fp"] : "",
+          payload: typeof msg["payload"] === "object" && msg["payload"] !== null
+            ? msg["payload"] as object
+            : {},
+        };
+        const r = pendingResolve;
+        pendingResolve = null;
+        r(event);
+      }
+    });
+  });
 }
 
 /**
@@ -212,54 +354,69 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   }
   const serverCfg: ServerConfig = serverResult.cfg;
 
-  // ─── Subscribe: register in-process listener ──────────────────────
-  // The subscription call goes to the server's `subscribe` verb. For the
-  // in-process spike (AGT-429) this registers in the module-scoped registry
-  // AND goes over SSH so the server knows the fingerprint. In tests, the
-  // SSH call is injected.
-  const subscribeResult = await callSubscribe({
-    orgs,
-    fingerprint: keypair.fingerprint,
-    signature: stubSignature(keypair, keypair.fingerprint, ...orgs),
-    serverConfig: serverCfg,
-    _sshSpawnForTest: opts._sshSpawnForTest,
-  });
+  // ─── Transport selection: WS vs SSH long-poll ────────────────────
+  // useWsTransport=true (--ws flag) → connect via WebSocket (AGT-434).
+  // useWsTransport=false (default) → SSH-verb long-poll fallback.
 
-  if (!subscribeResult.ok && subscribeResult.reason !== "peer_reviews_not_configured") {
-    process.stderr.write(
-      `error: subscribe failed — ${subscribeResult.message}\n`,
+  // wsCleanup: called on shutdown to close the WS socket gracefully.
+  let wsCleanup: (() => void) | null = null;
+  // wsNextEvent: when using WS transport, this is the per-event resolver.
+  let wsNextEvent: (() => Promise<PeerReviewEvent | null>) | null = null;
+
+  if (opts.useWsTransport) {
+    // ─── WS transport ─────────────────────────────────────────────
+    const wsResult = await connectWsTransport(
+      keypair,
+      orgs,
+      serverCfg,
+      opts._wsSocketForTest,
     );
-    process.exit(1);
-  }
-
-  if (!subscribeResult.ok && subscribeResult.reason === "peer_reviews_not_configured") {
-    process.stderr.write(
-      `note: stamp-server has peer reviews disabled; operating in local-only mode\n`,
-    );
-  }
-
-  // Register the local in-process listener. This is the seam that lets
-  // tests drive the loop via `fanoutEvent`.
-  let pendingResolve: ((event: PeerReviewEvent) => void) | null = null;
-
-  function waitForNextEvent(): Promise<PeerReviewEvent> {
-    return new Promise<PeerReviewEvent>((resolve) => {
-      pendingResolve = resolve;
+    if (!wsResult.ok) {
+      process.stderr.write(
+        `error: WS connect failed — ${wsResult.reason}\n`,
+      );
+      process.exit(1);
+    }
+    wsNextEvent = wsResult.nextEvent;
+    wsCleanup = () => wsResult.ws.close();
+    process.stderr.write(`⟳ subscribed (WS); listening for PR events\n`);
+  } else {
+    // ─── SSH long-poll (fallback) ──────────────────────────────────
+    // The subscription call goes to the server's `subscribe` verb. For the
+    // in-process spike (AGT-429) this registers in the module-scoped registry
+    // AND goes over SSH so the server knows the fingerprint. In tests, the
+    // SSH call is injected.
+    const subscribeResult = await callSubscribe({
+      orgs,
+      fingerprint: keypair.fingerprint,
+      signature: canonicalSign(keypair, {
+        fingerprint: keypair.fingerprint,
+        orgs,
+      }),
+      serverConfig: serverCfg,
+      _sshSpawnForTest: opts._sshSpawnForTest,
     });
+
+    if (!subscribeResult.ok && subscribeResult.reason !== "peer_reviews_not_configured") {
+      process.stderr.write(
+        `error: subscribe failed — ${subscribeResult.message}\n`,
+      );
+      process.exit(1);
+    }
+
+    if (!subscribeResult.ok && subscribeResult.reason === "peer_reviews_not_configured") {
+      process.stderr.write(
+        `note: stamp-server has peer reviews disabled; operating in local-only mode\n`,
+      );
+    }
+
+    process.stderr.write(`⟳ subscribed; listening for PR events\n`);
+
+    // wsNextEvent stays null — the loop uses the in-process fan-out path.
+    // wsCleanup stays null — unregisterListener handles teardown.
+    // Note: the in-process listener is registered below (after sshPendingResolve
+    // is in scope) so the onEvent callback can resolve the per-event Promise.
   }
-
-  registerListener(keypair.fingerprint, {
-    orgs,
-    onEvent: (event: PeerReviewEvent) => {
-      if (pendingResolve) {
-        const r = pendingResolve;
-        pendingResolve = null;
-        r(event);
-      }
-    },
-  });
-
-  process.stderr.write(`⟳ subscribed; listening for PR events\n`);
 
   // ─── Daily spend accumulator (AGT-432 AC #2) ──────────────────────
   // In-memory accumulator scoped to this listener process lifetime.
@@ -293,13 +450,21 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   async function shutdown(): Promise<void> {
     process.stderr.write(`note: shutting down\n`);
     clearHeartbeat();
-    unregisterListener(keypair!.fingerprint);
+    // Clean up based on which transport is active.
+    if (opts.useWsTransport) {
+      if (wsCleanup) wsCleanup();
+    } else {
+      unregisterListener(keypair!.fingerprint);
+    }
 
     if (currentSeatPatchId !== null) {
       await callReleaseSeat({
         patch_id: currentSeatPatchId,
         claimant_fp: keypair!.fingerprint,
-        signature: stubSignature(keypair!, currentSeatPatchId, keypair!.fingerprint),
+        signature: canonicalSign(keypair!, {
+          patch_id: currentSeatPatchId,
+          claimant_fp: keypair!.fingerprint,
+        }),
         serverConfig: serverCfg!,
         _sshSpawnForTest: opts._sshSpawnForTest,
       });
@@ -313,10 +478,40 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
   // ─── Event loop ───────────────────────────────────────────────────
   //
+  // Three event sources in priority order:
+  //   1. _eventQueueForTest (test seam): drains a pre-queued array.
+  //   2. wsNextEvent (WS transport): awaits the next pushed frame.
+  //   3. In-process in-process fanout (SSH long-poll fallback): awaits the
+  //      next `registerListener` callback.
+  //
   // When `_eventQueueForTest` is provided (test seam), drain that array
   // deterministically instead of blocking on the in-process fanout Promise.
   // This avoids timer/goroutine races in `node --test` environments.
   const useQueueMode = Array.isArray(opts._eventQueueForTest);
+
+  // In-process event wait for the SSH-path fallback.
+  let sshPendingResolve: ((event: PeerReviewEvent) => void) | null = null;
+  function waitForNextSshEvent(): Promise<PeerReviewEvent> {
+    return new Promise<PeerReviewEvent>((resolve) => {
+      sshPendingResolve = resolve;
+    });
+  }
+  // Wire the SSH-path listener's onEvent to the promise resolver.
+  // (Only relevant when SSH path is active — registerListener already happened.)
+  if (!opts.useWsTransport && !useQueueMode) {
+    // Re-register with the pending-resolve approach. The SSH branch above
+    // registered a stub listener; we need to update it to resolve sshPendingResolve.
+    registerListener(keypair.fingerprint, {
+      orgs,
+      onEvent: (event: PeerReviewEvent) => {
+        if (sshPendingResolve) {
+          const r = sshPendingResolve;
+          sshPendingResolve = null;
+          r(event);
+        }
+      },
+    });
+  }
 
   async function nextEvent(): Promise<PeerReviewEvent | null> {
     if (useQueueMode) {
@@ -325,7 +520,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       if (q.length === 0) return null;
       return q.shift()!;
     }
-    return waitForNextEvent();
+    if (opts.useWsTransport && wsNextEvent) {
+      return wsNextEvent();
+    }
+    return waitForNextSshEvent();
   }
 
   for (;;) {
@@ -543,7 +741,12 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       claimant_fp: keypair.fingerprint,
       base_sha: baseSha,
       repo,
-      signature: stubSignature(keypair, patchId, keypair.fingerprint, baseSha, repo),
+      signature: canonicalSign(keypair, {
+        patch_id: patchId,
+        claimant_fp: keypair.fingerprint,
+        base_sha: baseSha,
+        repo,
+      }),
       serverConfig: serverCfg,
       _sshSpawnForTest: opts._sshSpawnForTest,
     });
@@ -587,7 +790,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       void callHeartbeat({
         patch_id: patchId,
         claimant_fp: keypair.fingerprint,
-        signature: stubSignature(keypair, patchId, keypair.fingerprint),
+        signature: canonicalSign(keypair, {
+          patch_id: patchId,
+          claimant_fp: keypair.fingerprint,
+        }),
         serverConfig: serverCfg,
         _sshSpawnForTest: opts._sshSpawnForTest,
       });
@@ -615,7 +821,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         await callReleaseSeat({
           patch_id: patchId,
           claimant_fp: keypair.fingerprint,
-          signature: stubSignature(keypair, patchId, keypair.fingerprint),
+          signature: canonicalSign(keypair, {
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+          }),
           serverConfig: serverCfg,
           _sshSpawnForTest: opts._sshSpawnForTest,
         });
@@ -641,7 +850,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         await callReleaseSeat({
           patch_id: patchId,
           claimant_fp: keypair.fingerprint,
-          signature: stubSignature(keypair, patchId, keypair.fingerprint),
+          signature: canonicalSign(keypair, {
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+          }),
           serverConfig: serverCfg,
           _sshSpawnForTest: opts._sshSpawnForTest,
         });
@@ -668,7 +880,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       await callReleaseSeat({
         patch_id: patchId,
         claimant_fp: keypair.fingerprint,
-        signature: stubSignature(keypair, patchId, keypair.fingerprint),
+        signature: canonicalSign(keypair, {
+          patch_id: patchId,
+          claimant_fp: keypair.fingerprint,
+        }),
         serverConfig: serverCfg,
         _sshSpawnForTest: opts._sshSpawnForTest,
       });
@@ -705,7 +920,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       await callReleaseSeat({
         patch_id: patchId,
         claimant_fp: keypair.fingerprint,
-        signature: stubSignature(keypair, patchId, keypair.fingerprint),
+        signature: canonicalSign(keypair, {
+          patch_id: patchId,
+          claimant_fp: keypair.fingerprint,
+        }),
         serverConfig: serverCfg,
         _sshSpawnForTest: opts._sshSpawnForTest,
       });
