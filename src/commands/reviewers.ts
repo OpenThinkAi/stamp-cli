@@ -787,6 +787,16 @@ function validateMcpServersFromSource(
         `config.yaml from ${source}@${ref}: mcp_servers.${name}.allowed_env`,
       );
     }
+    // Omit-on-unset: mirror parseMcpServers' pattern so persona-fetched
+    // configs round-trip identically and produce the same mcp_sha256.
+    if (e.optional !== undefined) {
+      if (typeof e.optional !== "boolean") {
+        throw new Error(
+          `config.yaml from ${source}@${ref}: mcp_servers.${name}.optional must be a boolean (got ${JSON.stringify(e.optional)})`,
+        );
+      }
+      def.optional = e.optional;
+    }
     out[name] = def;
   }
   return out;

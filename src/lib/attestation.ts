@@ -46,6 +46,22 @@ export interface Approval {
    *  Omitted or empty for reviewers that ran with no tools or where the SDK
    *  version didn't surface tool-use blocks. */
   tool_calls?: ToolCall[];
+  /**
+   * AGT-246: per-server MCP runtime status captured at SDK init time.
+   * Optional/additive — existing v3 attestations remain valid without a
+   * schema bump. Each entry records whether the server was declared in config,
+   * its connection status at review time, and any SDK-provided error string.
+   * The `declared` bit lets verifiers distinguish stamp-internal servers
+   * (e.g. `stamp-verdict`) from operator-configured servers without a
+   * separate channel.
+   */
+  mcp_servers_at_init?: Array<{
+    name: string;
+    status: string;
+    optional: boolean;
+    declared: boolean;
+    error?: string;
+  }>;
 }
 
 export interface CheckAttestation {
