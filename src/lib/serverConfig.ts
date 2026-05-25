@@ -10,6 +10,12 @@
  *   port: 12345
  *   user: git              # optional, default "git"
  *   repo_root_prefix: /srv/git  # optional, default "/srv/git"
+ *   ws_url: wss://stamp-cli-production.up.railway.app  # optional; HTTP-server
+ *                          # origin for `stamp pr listen --ws`. This is the
+ *                          # WebSocket endpoint, which is distinct from the
+ *                          # SSH host:port above (SSH speaks a different
+ *                          # protocol on a different port/host). Required for
+ *                          # `stamp pr listen --ws`.
  *
  * The `--server <host:port>` flag on `stamp provision` overrides the file.
  */
@@ -23,6 +29,8 @@ export interface ServerConfig {
   port: number;
   user: string;
   repoRootPrefix: string;
+  /** HTTP-server origin for `stamp pr listen --ws` (e.g. `wss://stamp-cli-production.up.railway.app`). */
+  wsUrl?: string;
 }
 
 const DEFAULT_USER = "git";
@@ -124,11 +132,34 @@ export function parseServerConfig(
       ? obj.repo_root_prefix.trim()
       : DEFAULT_REPO_ROOT;
   validateField("repo_root_prefix", repoRootPrefix, contextPath);
+  let wsUrl: string | undefined;
+  if (obj.ws_url !== undefined) {
+    if (typeof obj.ws_url !== "string" || !obj.ws_url.trim()) {
+      throw new Error(
+        `${contextPath}: 'ws_url' must be a non-empty string (got ${JSON.stringify(obj.ws_url)})`,
+      );
+    }
+    const rawWsUrl = obj.ws_url.trim();
+    if (!rawWsUrl.startsWith("ws://") && !rawWsUrl.startsWith("wss://")) {
+      throw new Error(
+        `${contextPath}: 'ws_url' must start with 'ws://' or 'wss://' (got ${JSON.stringify(rawWsUrl)})`,
+      );
+    }
+    try {
+      new URL(rawWsUrl);
+    } catch {
+      throw new Error(
+        `${contextPath}: 'ws_url' is not a valid URL (got ${JSON.stringify(rawWsUrl)})`,
+      );
+    }
+    wsUrl = rawWsUrl;
+  }
   return {
     host,
     port: obj.port,
     user,
     repoRootPrefix,
+    wsUrl,
   };
 }
 
