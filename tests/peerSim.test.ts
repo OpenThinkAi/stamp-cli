@@ -599,9 +599,12 @@ describe("AGT-454: client-side operator verification — verifyOperatorAtBaseLoc
     const result = verifyOperatorAtBaseLocal(fixtureDir, absentSha, operatorKp.fp);
     assert.ok(!result.ok, "should reject unknown sha");
     if (!result.ok) {
+      // No auto-fetch: the function returns base_sha_not_found immediately
+      // (DoS amplification fix — any registered user can supply an arbitrary
+      // base_sha, so fetching on attacker-controlled input is not safe).
       assert.ok(
-        result.reason.includes("base_sha_not_found") || result.reason.includes("manifest not found"),
-        `reason should mention sha not found; got: ${result.reason}`,
+        result.reason.includes("base_sha_not_found"),
+        `reason should mention base_sha_not_found (no auto-fetch); got: ${result.reason}`,
       );
     }
   });

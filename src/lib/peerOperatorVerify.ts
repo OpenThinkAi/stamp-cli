@@ -13,7 +13,6 @@
  * explicit at every call site.
  */
 
-import { spawnSync } from "node:child_process";
 import { showAtRef } from "./git.js";
 import {
   parseManifest,
@@ -25,9 +24,12 @@ import {
  * Verify that `fingerprint` has `operator` capability in the manifest at
  * `base_sha` in the local git repo at `localRepoPath`.
  *
- * If `base_sha` is not present in the local clone, performs one `git fetch`
- * on the configured remote and retries. If still absent after the fetch,
- * returns `{ ok: false, reason: "base_sha_not_found" }`.
+ * If `base_sha` is not present in the local clone, returns
+ * `{ ok: false, reason: "base_sha_not_found: ..." }` immediately. No
+ * automatic `git fetch` is performed: post-AGT-454 the server is a GitHub-
+ * blind broker and any SSH-registered user can submit events, so an auto-
+ * fetch on attacker-controlled `base_sha` would create a DoS amplification
+ * path. Listeners are expected to keep their local clones up to date.
  *
  * Returns `{ ok: true }` on success, or `{ ok: false, reason }` on any
  * failure (sha absent, manifest missing/unparseable, fp absent, not operator).
@@ -44,38 +46,15 @@ export function verifyOperatorAtBaseLocal(
     return checkOperator(attempt.yaml, base_sha, fingerprint);
   }
 
-  // If the sha is not found locally, try one git fetch and retry.
-  if (attempt.reason === "sha_not_found") {
-    process.stderr.write(
-      `note: base_sha ${base_sha} not in local clone at ${localRepoPath}; fetching remote...\n`,
-    );
-    try {
-      const fetchResult = spawnSync("git", ["fetch", "--quiet"], {
-        cwd: localRepoPath,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-        timeout: 30_000,
-      });
-      if (fetchResult.status !== 0) {
-        process.stderr.write(
-          `note: git fetch failed in ${localRepoPath}: ${fetchResult.stderr?.trim() ?? "(no output)"}\n`,
-        );
-      }
-    } catch (err) {
-      process.stderr.write(
-        `note: git fetch threw in ${localRepoPath}: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    }
-
-    // Retry once after fetch.
-    const retryAttempt = readManifestAtSha(localRepoPath, base_sha);
-    if (retryAttempt.ok) {
-      return checkOperator(retryAttempt.yaml, base_sha, fingerprint);
-    }
-    return { ok: false, reason: `base_sha_not_found: ${base_sha} absent even after git fetch` };
-  }
-
-  return { ok: false, reason: attempt.reason };
+  // The sha is not accessible locally (absent sha, missing manifest, etc.).
+  // Fail closed — do NOT auto-fetch. Post-AGT-454 any SSH-registered user can
+  // submit events with an arbitrary base_sha, so triggering a network fetch on
+  // attacker-controlled input would create a DoS amplification. The listener
+  // must keep its local clone current.
+  return {
+    ok: false,
+    reason: `base_sha_not_found: ${base_sha} is not accessible in local clone at ${localRepoPath} (${attempt.reason}); run git fetch manually`,
+  };
 }
 
 /**
