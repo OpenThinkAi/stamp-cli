@@ -143,7 +143,7 @@ stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER" --ws
 - [ ] B's terminal shows `✓ posted review to <PR_URL>`
 - [ ] GitHub PR shows a review comment under B's GitHub identity
 - [ ] A's terminal (if running) shows `note: skipping event for PR #N — author matches own fingerprint`
-- [ ] Elapsed: < 5 minutes from `stamp pr open` to GitHub review appearing
+- [ ] Elapsed: < 5 minutes from `gh pr create` to GitHub review appearing
 
 ---
 
@@ -250,14 +250,14 @@ Ensure B and C listeners are still running.
 
 **Expected on Machine A** (pr ping output):
 ```
-re-review-requested: 2 seat-holder(s) notified
+✓ sent re-review-requested to 2 seat-holder(s)
 ```
 
 ### Pass criteria
 
 - [ ] B's and C's terminals show new `✓ posted review` entries
 - [ ] GitHub PR shows fresh review comments from both identities
-- [ ] `stamp pr ping` exits 0 with "2 seat-holder(s) notified" output
+- [ ] `stamp pr ping` exits 0 with "✓ sent re-review-requested to 2 seat-holder(s)" output
 - [ ] Elapsed: < 5 minutes from ping to both reviews appearing
 
 ---

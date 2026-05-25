@@ -35,7 +35,6 @@ import { describe, it, before, after } from "node:test";
 import {
   mkdtempSync,
   rmSync,
-  mkdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
@@ -329,7 +328,7 @@ describe("AC5: re-review-requested delivered to both seat-holders via in-process
 
 describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fired", () => {
   it("events with initial spend >= cap → triplets logged as 'daily cap hit' + notification fired", async () => {
-    const { reviewerB, author, patchId, baseSha: _baseSha, prUrl, repo } = harness as SimHarness & { baseSha?: string };
+    const { reviewerB, author, patchId, prUrl, repo } = harness;
 
     const triplets: TripletRecord[] = [];
     const notifications: Array<{ title: string; body: string }> = [];
@@ -410,13 +409,9 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
     };
 
     // Suppress stderr during the run.
-    const stderrLines: string[] = [];
     const origWrite = process.stderr.write.bind(process.stderr);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (process.stderr as any).write = (chunk: unknown) => {
-      if (typeof chunk === "string") stderrLines.push(chunk);
-      return true;
-    };
+    (process.stderr as any).write = () => true;
 
     const origExit = process.exit.bind(process);
     let exitCode = 0;
