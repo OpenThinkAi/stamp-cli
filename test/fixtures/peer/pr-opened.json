@@ -1,0 +1,17 @@
+{
+  "repo": "anglepoint-engineering/stamp-peer-review-validation",
+  "patch_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "base_sha": "0000000000000000000000000000000000000001",
+  "head_sha": "0000000000000000000000000000000000000002",
+  "requested_by_fp": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "paths_changed": [
+    "src/auth/login.ts",
+    "src/auth/logout.ts",
+    "src/security/audit.ts",
+    "tests/auth.test.ts"
+  ],
+  "title": "feat: add session invalidation on password change",
+  "body": "This PR adds automatic session invalidation when a user changes their password.\n\nAll active sessions for the user are revoked upon a successful password change,\npreventing session fixation attacks on compromised accounts.\n\nTested manually against staging with three concurrent sessions.",
+  "pr_url": "https://github.com/anglepoint-engineering/stamp-peer-review-validation/pull/7",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}
