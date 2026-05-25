@@ -383,6 +383,32 @@ stamp prune --older-than 30d           # actually delete + VACUUM + unlink
 
 `<duration>` accepts `<n>d` (days), `<n>h` (hours), or `<n>m` (minutes) — e.g. `30d`, `12h`, `90m`. Whitespace, leading `+`, and zero values are rejected. The non-dry-run path runs `VACUUM` after the DB delete so the file actually shrinks; the output is two blocks separated by a blank line — `<n> review rows pruned (...); db size <before> → <after> bytes` for the DB pass and `<n> failed-parse spool files pruned` for the spool pass. **Pruned data is unrecoverable** — neither `state.db` nor the spool directory has an upstream copy. If you want to keep an audit trail of older verdicts, copy `state.db` and the spool directory aside before pruning.
 
+**Config-driven retention advisory.** Instead of remembering to run `stamp prune` manually, you can commit a `retention:` block to `.stamp/config.yml`. After every `stamp review` run, stamp checks whether any rows or spool files exceed your configured thresholds and prints an advisory line to stderr:
+
+```yaml
+# .stamp/config.yml
+retention:
+  reviews: 90d    # advisory fires when any review row is older than 90 days
+  spools: 30d     # advisory fires when any spool file is older than 30 days
+```
+
+Sample advisory output after a review run:
+
+```
+note: state.db has 3 reviews older than 90d; run `stamp prune --older-than 90d` to clean up
+note: state.db has 1 spool file older than 30d; run `stamp prune --older-than 30d` to clean up
+```
+
+Both fields are optional — omitting a field suppresses its advisory entirely. The `retention:` block is advisory-only by default so prose history is never silently deleted. To auto-prune instead of advising, set `retention.auto_prune: true`:
+
+```yaml
+retention:
+  reviews: 90d
+  auto_prune: true   # calls `stamp prune` automatically after each review
+```
+
+The advisory is silenced by `STAMP_SUPPRESS_LLM_NOTICE=1`; auto-prune is not (it's an explicit operator opt-in, not a notice). Duration syntax (`<n>d`, `<n>h`, `<n>m`) is validated at config-load time — a typo surfaces immediately as a `parseConfigFromYaml` error rather than silently at advisory time.
+
 ---
 
 ## When all else fails

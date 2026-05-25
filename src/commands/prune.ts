@@ -179,8 +179,12 @@ export function runPrune(opts: PruneOptions): void {
  * output spools) and `failed-runs/` (structured turn traces). Returns
  * absolute paths so the caller can print or unlink without re-joining.
  * No-ops cleanly if the dir doesn't exist.
+ *
+ * Exported for `src/lib/retentionAdvisory.ts` — the advisory counts overdue
+ * spools using the same walk so the advisory's N matches what `stamp prune`
+ * would actually delete. One-line export; no behavior change to runPrune.
  */
-function peekSpools(spoolDir: string, cutoffMs: number): string[] {
+export function peekSpools(spoolDir: string, cutoffMs: number): string[] {
   if (!existsSync(spoolDir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(spoolDir)) {

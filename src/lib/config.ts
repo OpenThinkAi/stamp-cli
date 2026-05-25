@@ -341,11 +341,46 @@ export interface DataFlowConfig {
   confirmed?: boolean;
 }
 
+/**
+ * Optional top-level `retention:` block (AGT-112). Drives post-review
+ * advisory output and opt-in auto-prune.
+ *
+ * IMPORTANT (security): this is a TOP-LEVEL field. It does NOT enter the
+ * v3/v4 reviewer attestation hash chain (which hashes only per-reviewer
+ * `prompt`/`tools`/`mcp_servers` — see `reviewerHash.ts`), so it is a
+ * purely additive config field: existing attestations and `stamp verify`
+ * are unaffected. Like every other policy field, `stamp review` reads it
+ * from the merge-base tree, NOT the working tree.
+ */
+export interface RetentionConfig {
+  /**
+   * Duration string (`<n>d`, `<n>h`, `<n>m`) for review rows in
+   * `state.db`. When set and rows older than this threshold exist after a
+   * `stamp review` run, an advisory is printed to stderr suggesting the
+   * operator run `stamp prune --older-than <duration>`.
+   */
+  reviews?: string;
+  /**
+   * Duration string (`<n>d`, `<n>h`, `<n>m`) for failed-parse and
+   * failed-run spool files. Same advisory mechanic as `reviews`.
+   */
+  spools?: string;
+  /**
+   * When true, `stamp review` auto-prunes at the configured thresholds
+   * (via `stamp prune`) instead of just advising. Default (unset/false)
+   * stays advisory-only so an operator's prose history is never silently
+   * deleted — matches stamp's "explicit opt-in" pattern.
+   */
+  auto_prune?: boolean;
+}
+
 export interface StampConfig {
   branches: Record<string, BranchRule>;
   reviewers: Record<string, ReviewerDef>;
   /** Optional sub-processor disclosure + confirmation gate (AGT-415). */
   data_flow?: DataFlowConfig;
+  /** Optional retention advisory / auto-prune config (AGT-112). */
+  retention?: RetentionConfig;
 }
 
 export function loadConfig(path: string): StampConfig {
@@ -500,8 +535,14 @@ function validateConfig(input: unknown): StampConfig {
   }
 
   const data_flow = parseDataFlow(obj.data_flow);
+  const retention = parseRetention(obj.retention);
 
-  return { branches, reviewers, ...(data_flow ? { data_flow } : {}) };
+  return {
+    branches,
+    reviewers,
+    ...(data_flow ? { data_flow } : {}),
+    ...(retention ? { retention } : {}),
+  };
 }
 
 function parseDataFlow(input: unknown): DataFlowConfig | undefined {
@@ -544,6 +585,77 @@ function parseDataFlow(input: unknown): DataFlowConfig | undefined {
     ...(require_confirmation !== undefined ? { require_confirmation } : {}),
     ...(confirmed !== undefined ? { confirmed } : {}),
   };
+}
+
+function parseRetention(input: unknown): RetentionConfig | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("config.retention must be an object");
+  }
+  const d = input as Record<string, unknown>;
+
+  let reviews: string | undefined;
+  if (d.reviews !== undefined) {
+    if (typeof d.reviews !== "string") {
+      throw new Error("config.retention.reviews must be a string (e.g. \"90d\")");
+    }
+    // Validate the duration shape up-front so a typo surfaces at config-load
+    // time rather than at the advisory call site — same pattern as the CLI's
+    // `stamp prune --older-than` validation.
+    try {
+      parseRetentionDurationInternal(d.reviews);
+    } catch (err) {
+      throw new Error(
+        `config.retention.reviews: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    reviews = d.reviews;
+  }
+
+  let spools: string | undefined;
+  if (d.spools !== undefined) {
+    if (typeof d.spools !== "string") {
+      throw new Error("config.retention.spools must be a string (e.g. \"30d\")");
+    }
+    try {
+      parseRetentionDurationInternal(d.spools);
+    } catch (err) {
+      throw new Error(
+        `config.retention.spools: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    spools = d.spools;
+  }
+
+  let auto_prune: boolean | undefined;
+  if (d.auto_prune !== undefined) {
+    if (typeof d.auto_prune !== "boolean") {
+      throw new Error(
+        `config.retention.auto_prune must be a boolean (got ${JSON.stringify(d.auto_prune)})`,
+      );
+    }
+    auto_prune = d.auto_prune;
+  }
+
+  return {
+    ...(reviews !== undefined ? { reviews } : {}),
+    ...(spools !== undefined ? { spools } : {}),
+    ...(auto_prune !== undefined ? { auto_prune } : {}),
+  };
+}
+
+/**
+ * Internal minimal duration validator. Mirrors parseRetentionDuration's regex
+ * check without importing it — avoids a circular dependency between config.ts
+ * and duration.ts. The real parser in lib/duration.ts is used at advisory
+ * runtime; this is config-load-time preflight only.
+ */
+function parseRetentionDurationInternal(input: string): void {
+  if (!/^[1-9][0-9]{0,6}(d|h|m)$/.test(input)) {
+    throw new Error(
+      `invalid duration "${input}". Accepted shapes: <n>d (days), <n>h (hours), <n>m (minutes), where <n> is a positive integer (no whitespace, no leading +, no zero). Examples: 30d, 12h, 90m.`,
+    );
+  }
 }
 
 function parsePositiveInt(input: unknown, path: string): number | undefined {
