@@ -64,7 +64,7 @@ export async function runPrPing(opts: PrPingOptions): Promise<void> {
   // ─── Load keypair ──────────────────────────────────────────────────
   const keypair: Keypair | null =
     opts._keypairForTest !== undefined
-      ? (opts._keypairForTest as Keypair | null)
+      ? opts._keypairForTest
       : loadUserKeypair();
 
   if (!keypair) {
@@ -122,13 +122,14 @@ export async function runPrPing(opts: PrPingOptions): Promise<void> {
     patchId = fakePatch.patch_id;
   } else if (opts.prUrl) {
     // Explicit PR URL: extract headRef + baseRef via `gh pr view`.
+    const repoRootForUrl = findRepoRoot();
     const ghView = spawnSync(
       "gh",
       ["pr", "view", opts.prUrl, "--json", "headRefName,baseRefName"],
       {
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf8",
-        cwd: findRepoRoot(),
+        cwd: repoRootForUrl,
       },
     );
     if (ghView.status !== 0) {
@@ -157,7 +158,7 @@ export async function runPrPing(opts: PrPingOptions): Promise<void> {
     try {
       const info = patchIdForRevspec(
         `origin/${baseRefName}..origin/${headRefName}`,
-        findRepoRoot(),
+        repoRootForUrl,
       );
       patchId = info.patch_id;
     } catch (err) {

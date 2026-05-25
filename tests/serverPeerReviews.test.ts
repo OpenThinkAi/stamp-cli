@@ -560,7 +560,6 @@ import {
 import {
   mkdtempSync,
   rmSync,
-  writeFileSync as _writeFileSync,
 } from "node:fs";
 import os from "node:os";
 

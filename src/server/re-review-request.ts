@@ -157,8 +157,26 @@ async function main(): Promise<void> {
           process.stderr.write(`note: reviewer_filter name "${name}" not found in membership DB; skipping\n`);
         }
       }
+      // Fail-safe: if a non-empty filter was requested but ALL names failed to
+      // resolve, delivering to everyone would violate least-privilege — the
+      // caller intended a restricted ping but got a broadcast. Treat this as
+      // "notify nobody" rather than silently expanding to all seat-holders.
+      if (resolvedFilter.length === 0) {
+        process.stderr.write(
+          `note: none of the supplied reviewer_filter names resolved to a known user; no seat-holders notified\n`,
+        );
+        process.stdout.write(
+          JSON.stringify({
+            ok: true,
+            patch_id: payload.patch_id,
+            seat_holders_notified: 0,
+            note: "no reviewer_filter names resolved; no seat-holders notified",
+          }) + "\n",
+        );
+        process.exit(0);
+      }
     }
-    // Empty resolvedFilter → no filter applied (all seat-holders notified).
+    // Empty resolvedFilter (rawFilter was empty) → no filter applied (all seat-holders notified).
 
     // Build the seat map for the two seats with per-seat metadata.
     const seatMap: Array<{ fp: string; seat: 1 | 2 }> = [];

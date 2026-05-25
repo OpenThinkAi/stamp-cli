@@ -407,7 +407,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         rules_hash: rulesHash,
         event_payload: payload as Record<string, unknown>,
         decision: triageDecision,
-        ...(event.event_type === "re-review-requested" ? { kind: "re-review" as const } : {}),
+        ...(event.event_type === "re-review-requested" ? { kind: "re-review" } : {}),
       };
       if (opts._appendTripletForTest) {
         opts._appendTripletForTest(tripletRecord);
