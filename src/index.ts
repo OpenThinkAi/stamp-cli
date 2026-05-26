@@ -74,6 +74,10 @@ import {
   reviewersTest,
   reviewersVerify,
 } from "./commands/reviewers.js";
+import {
+  runManifestSign,
+  runManifestVerify,
+} from "./commands/manifest.js";
 import { runStatus } from "./commands/status.js";
 import { runUpdate } from "./commands/update.js";
 import { runVerify } from "./commands/verify.js";
@@ -1564,7 +1568,10 @@ reviewers
 reviewers
   .command("fetch <name>")
   .description(
-    "install a reviewer from a remote canonical source (writes prompt + lock file)",
+    "install a reviewer from a remote canonical source (writes prompt + lock file). " +
+      "When the source publishes a signed manifest (personas/manifest.json + .sig) and " +
+      "a .stamp/verifying-keys/ allowlist is present, the manifest signature is verified " +
+      "before the lock file is written. Falls back to TOFU when neither side opts in.",
   )
   .requiredOption(
     "--from <source@ref>",
@@ -1582,6 +1589,11 @@ reviewers
     "--expect-mcp-sha <sha256>",
     "trust anchor for the canonicalized mcp_servers-map hash (only meaningful when config.yaml is present)",
   )
+  .option(
+    "--no-verify-manifest",
+    "skip signed-manifest verification even if the source publishes one. " +
+      "Use --expect-prompt-sha as a manual trust anchor instead.",
+  )
   .action(
     async (
       name: string,
@@ -1590,6 +1602,7 @@ reviewers
         expectPromptSha?: string;
         expectToolsSha?: string;
         expectMcpSha?: string;
+        verifyManifest?: boolean;
       },
     ) => {
       try {
@@ -1598,6 +1611,8 @@ reviewers
           expectPromptSha: opts.expectPromptSha,
           expectToolsSha: opts.expectToolsSha,
           expectMcpSha: opts.expectMcpSha,
+          // commander --no-verify-manifest sets opts.verifyManifest = false
+          noVerifyManifest: opts.verifyManifest === false,
         });
       } catch (err) {
         handleCliError(err);
@@ -1611,6 +1626,106 @@ reviewers
   )
   .action((name: string | undefined) =>
     wrap(() => reviewersVerify({ only: name })),
+  );
+
+// --------------------------------------------------------------------------
+// stamp manifest — publisher tooling for signed reviewer manifests (AGT-113)
+// --------------------------------------------------------------------------
+
+const manifest = program
+  .command("manifest")
+  .description(
+    "sign and verify reviewer manifests for the signed-persona-fetch feature (AGT-113). " +
+      "Sources publish personas/manifest.json + personas/manifest.json.sig alongside " +
+      "persona files; consumers verify before writing the lock file.",
+  );
+
+manifest
+  .command("sign <manifest-json>")
+  .description(
+    "sign a reviewer manifest with the operator's local key (~/.stamp/keys/ed25519). " +
+      "Writes <manifest-json>.sig (a base64-encoded detached Ed25519 signature over " +
+      "the manifest's canonical JSON bytes). The manifest's `signed_by` field must " +
+      "match the signing key's fingerprint.",
+  )
+  .option(
+    "--key <path>",
+    "use a specific private key PEM file instead of ~/.stamp/keys/ed25519",
+  )
+  .option(
+    "--output <path>",
+    "write the signature to <path> instead of <manifest-json>.sig",
+  )
+  .addHelpText(
+    "after",
+    `
+Produces a detached Ed25519 signature over the manifest's canonical bytes.
+The canonical form is the same sort-keys-recursively JSON used elsewhere
+in stamp (reviewerHash.ts / trustedKeysManifest.ts) — not a new form.
+
+Prerequisites:
+  - A signing key at ~/.stamp/keys/ed25519 ('stamp keys generate' to create)
+  - The manifest.json must have 'signed_by' set to your key's fingerprint
+    ('stamp keys export' to print your public key fingerprint)
+
+Example:
+  stamp manifest sign personas/manifest.json
+  # → writes personas/manifest.json.sig
+`,
+  )
+  .action(
+    (manifestJson: string, opts: { key?: string; output?: string }) => {
+      try {
+        runManifestSign({
+          manifestPath: manifestJson,
+          keyPath: opts.key,
+          outputPath: opts.output,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
+
+manifest
+  .command("verify <manifest-json>")
+  .description(
+    "verify a reviewer manifest's detached signature. " +
+      "Reads <manifest-json>.sig by default; pass --sig to override. " +
+      "Verifies against --key (a public key PEM file) or your local key if the " +
+      "manifest's signed_by matches.",
+  )
+  .option(
+    "--sig <path>",
+    "signature file to verify (default: <manifest-json>.sig)",
+  )
+  .option(
+    "--key <path>",
+    "public key PEM file to verify against (default: your local ~/.stamp/keys/ed25519.pub if fingerprint matches)",
+  )
+  .addHelpText(
+    "after",
+    `
+Verifies the manifest's detached Ed25519 signature (produced by 'stamp manifest sign').
+Exits 0 on success, 1 on failure.
+
+Example:
+  stamp manifest verify personas/manifest.json --key publisher.pub
+  stamp manifest verify personas/manifest.json  # uses your local key if fingerprint matches
+`,
+  )
+  .action(
+    (manifestJson: string, opts: { sig?: string; key?: string }) => {
+      try {
+        runManifestVerify({
+          manifestPath: manifestJson,
+          sigPath: opts.sig,
+          keyPath: opts.key,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
   );
 
 // Tombstone the removed Shape 2 `--pr-mode` flags with an actionable notice
