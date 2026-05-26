@@ -5,6 +5,52 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.1.0 — 2026-05-26
+
+This release packages two previously-merged main-branch changes into a
+publishable version. The implementations were reviewed and approved at
+their respective merges (see `git log` history). This release commit
+itself contains only the version bump, CHANGELOG entries, and design-doc
+updates — no implementation code is introduced here.
+
+### Changed
+
+- **`stamp pr listen` now requires a hosting Claude Code session by default.**
+  The published design intended the listener as a session-hosted long-running
+  command — hosted by an active interactive session, not a daemon running in a
+  detached terminal. 3.0.0 allowed unattended operation, which the design
+  ruled out (silent quota burn, no observability, posts under your GitHub
+  identity with no presence). 3.1.0 enforces the intended model: without a
+  hosting Claude Code session the listener refuses to start with exit 2 and
+  tells the operator to invoke it from within Claude Code. The unattended use
+  case remains available via the new opt-in `--headless` flag.
+
+### Added
+
+- **`stamp pr listen --headless`.** Opt-in flag for running the listener
+  without a hosting Claude session. Prints a non-suppressible warning on
+  every startup covering the operational trust shift (silent quota usage,
+  no presence, no session-end teardown, identity-of-record). Use only with
+  intent.
+
+- **Peer-review now picks a verdict — `--approve`, `--request-changes`, or
+  `--comment`.** The 3.0.0 listener's built-in review prompt explicitly told
+  the model not to approve or request changes, and the gh-review post was
+  hard-coded to `--comment`, so every peer review posted as COMMENTED
+  regardless of content. 3.1.0 lets the reviewing model emit a verdict on
+  the final line of the review body; the listener maps the verdict to the
+  matching `gh pr review` flag. Defaults to `--comment` on missing/malformed
+  output (safe fallback). Operators see the verdict in the listener stderr:
+  `✓ posted review (verdict=approve) for PR #N`.
+
+### Documentation
+
+- `peer-agentic-reviews.md` design doc updated to reflect the
+  session-hosted-default listener model and remove the (now-realized)
+  "Claude Code as a skill or sidebar" V2-deferred item.
+
+---
+
 ## 3.0.0 — 2026-05-25
 
 ### Fixed
