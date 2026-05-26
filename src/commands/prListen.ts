@@ -75,6 +75,7 @@ import { firePeerNotification } from "../lib/peerNotify.js";
 import { draftsDir } from "../lib/paths.js";
 import { loadPeerReposConfig, resolveLocalRepoPath } from "../lib/peerReposConfig.js";
 import { verifyOperatorAtBaseLocal } from "../lib/peerOperatorVerify.js";
+import { detectClaudeSession } from "../lib/claudeSession.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -82,6 +83,19 @@ export interface PrListenOptions {
   orgs: string[];
   /** `--server <host:port>` override. */
   server?: string;
+  /**
+   * Pass `--headless` to opt into daemon-mode operation without a hosting
+   * Claude Code session. Loud warnings are printed on every startup; then
+   * the listener proceeds unchanged. Without `--headless` (the default),
+   * `stamp pr listen` requires an active Claude Code session (detected via
+   * `CLAUDECODE=1` + `CLAUDE_CODE_SESSION_ID`) and exits 2 if one is absent.
+   */
+  headless?: boolean;
+  /**
+   * Test-only: inject a fake `process.env`-like object for `detectClaudeSession`.
+   * When set, the session detection uses this env instead of `process.env`.
+   */
+  _envForTest?: NodeJS.ProcessEnv;
   /** Test-only: inject a fake SSH spawn function to avoid real network calls. */
   _sshSpawnForTest?: SshSpawnFn;
   /** Test-only: inject a fake `gh pr review` spawn result. */
@@ -436,6 +450,47 @@ function resolveServerConfig(
  */
 export async function runPrListen(opts: PrListenOptions): Promise<void> {
   const { orgs } = opts;
+
+  // ─── Session-hosted guard ─────────────────────────────────────────
+  // Default mode: stamp pr listen requires a hosting Claude Code session.
+  // Without one the listener becomes a daemon by behavior (no presence,
+  // no observability, holds keys without active consent) — explicitly
+  // out of scope for this feature. --headless opts into daemon-mode with
+  // loud, non-suppressible warnings.
+  if (opts.headless) {
+    process.stderr.write(
+      `warning: --headless: listener will run without a hosting Claude session.\n` +
+        `  - no presence: events will be triaged and posted to GitHub on your behalf\n` +
+        `    with no interactive operator. close this terminal and you have a daemon.\n` +
+        `  - quota: Claude Code subscription / ANTHROPIC_API_KEY usage is silent.\n` +
+        `    set cost_cap_usd in peer-watch.md or you can blow through limits.\n` +
+        `  - identity: every review posts under your gh identity. you are the\n` +
+        `    operator of record for whatever this thing approves or comments.\n` +
+        `  - shutdown: exits on ctrl-C only. no automatic session-end teardown.\n` +
+        `  this mode is explicitly opt-in; the supported default is session-hosted.\n`,
+    );
+    // Proceed with the rest of the listener startup.
+  } else {
+    const envToProbe = opts._envForTest ?? process.env;
+    const sessionResult = detectClaudeSession(envToProbe);
+    if (!sessionResult.ok) {
+      process.stderr.write(
+        `error: stamp pr listen requires an active Claude Code session as its host.\n` +
+          `  open Claude Code and run this command from within the session (so it can\n` +
+          `  spawn the listener as a managed background process). without a hosting\n` +
+          `  session there is no presence: the listener becomes a de-facto daemon,\n` +
+          `  which is explicitly out of scope for this feature.\n` +
+          `\n` +
+          `  to run anyway, pass --headless. read the warnings carefully — running\n` +
+          `  unattended changes the trust model (silent quota burn, no observability,\n` +
+          `  no ctrl-C-driven exit when you walk away).\n`,
+      );
+      process.exit(2);
+    }
+    // Bound to a Claude session — log the binding line.
+    const sessionPrefix = sessionResult.session.sessionId.slice(0, 8);
+    process.stderr.write(`note: bound to Claude session ${sessionPrefix}\n`);
+  }
 
   // ─── Auth preflight ───────────────────────────────────────────────
   // Prefer the injected seam; only fall through to loadUserKeypair when the

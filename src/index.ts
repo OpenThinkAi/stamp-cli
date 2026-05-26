@@ -820,7 +820,8 @@ pr
   .command("listen")
   .description(
     "subscribe to peer-review PR events for the given org(s) and run the builtin-default review " +
-      "for each incoming PR-opened event. Runs as a foreground loop until ctrl-C.",
+      "for each incoming PR-opened event. Runs session-hosted by default (requires an active " +
+      "Claude Code session); use --headless to opt into unattended/daemon-style operation.",
   )
   .requiredOption(
     "--org <org>",
@@ -831,6 +832,12 @@ pr
   .option(
     "--server <host:port>",
     "override ~/.stamp/server.yml with an inline endpoint",
+  )
+  .option(
+    "--headless",
+    "run without a hosting Claude Code session (daemon-mode opt-in; loud warnings printed on every startup). " +
+      "The default requires an active Claude Code session as the host so the listener is a managed " +
+      "background process bound to the session lifetime.",
   )
   .addHelpText(
     "after",
@@ -845,6 +852,19 @@ indefinitely:
   - Posts the result via 'gh pr review --comment'
   - Sends a heartbeat every 60 s to keep the seat alive
 
+Default mode (session-hosted): stamp pr listen requires an active Claude Code
+session as its host. The session is the presence; the listener is a managed
+background process bound to the session lifetime. When the Claude session ends,
+the child process receives SIGHUP and exits cleanly — no extra wiring needed.
+Detection is via CLAUDECODE=1 + CLAUDE_CODE_SESSION_ID set by Claude Code in
+spawned-process env.
+
+Standalone / headless mode (--headless): the listener runs without a hosting
+session. Warnings are printed on every startup and cannot be suppressed. The
+listener becomes a daemon by behavior (no presence, silent quota use, no
+automatic teardown on session exit). This mode is explicitly opt-in; the
+supported default is session-hosted.
+
 Requires 'http_url' in ~/.stamp/server.yml (the HTTP origin of the stamp-server,
 e.g. https://stamp-cli-production.up.railway.app) — distinct from the SSH
 host:port. The legacy 'ws_url' key is still accepted (rewritten to http(s)).
@@ -852,7 +872,7 @@ host:port. The legacy 'ws_url' key is still accepted (rewritten to http(s)).
 Exit codes:
   0   — clean shutdown (ctrl-C / SIGINT)
   1   — auth failure (no signing key, SSE connect failed)
-  2   — arg-parse error (--org is required)
+  2   — arg-parse error (--org is required; or no Claude Code session without --headless)
 
 Prerequisites:
   - 'gh' must be installed: https://cli.github.com
@@ -865,13 +885,13 @@ Prerequisites:
       acme/api: /home/you/dev/api
 `,
   )
-  .action(async (opts: { org: string[]; server?: string }) => {
+  .action(async (opts: { org: string[]; server?: string; headless?: boolean }) => {
     const orgs: string[] = Array.isArray(opts.org) ? opts.org : [opts.org];
     if (orgs.length === 0) {
       process.stderr.write(`error: --org is required (repeat for multiple orgs)\n`);
       process.exit(2);
     }
-    await runPrListen({ orgs, server: opts.server });
+    await runPrListen({ orgs, server: opts.server, headless: opts.headless });
   });
 
 pr

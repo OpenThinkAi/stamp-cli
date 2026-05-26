@@ -82,12 +82,21 @@ async function runWithExitCapture(opts: PrListenOptions): Promise<number> {
   // seat. Default that seam to a successful unified diff so review-path tests
   // (which don't care about the fetch) keep working; tests that exercise the
   // gh-diff failure path override _ghDiffForTest explicitly.
+  //
+  // Session-hosted guard: inject a valid Claude Code session env so existing
+  // tests (which don't care about the session check) pass through the guard
+  // without needing to set --headless. Tests that exercise the session-guard
+  // paths override _envForTest explicitly.
   const optsWithDiff: PrListenOptions = {
     _ghDiffForTest: () => ({
       status: 0,
       stdout: "diff --git a/src/foo.ts b/src/foo.ts\n+const x = 1;\n",
       stderr: "",
     }),
+    _envForTest: {
+      CLAUDECODE: "1",
+      CLAUDE_CODE_SESSION_ID: "deadbeef-cafe-babe-abcd-000000000000",
+    },
     ...opts,
   };
 
@@ -1825,5 +1834,133 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
     assert.equal(sdkCalled, false, "review must NOT run on an empty diff");
     assert.ok(stderr.includes("could not fetch diff (gh)"), `expected gh-diff failure note: ${stderr}`);
     assert.ok(sshCalls.includes("stamp-release-seat"), "seat should be released on empty diff");
+  });
+});
+
+// ─── Session-hosted guard: new integration tests ──────────────────────
+
+describe("session-hosted guard: no env + no --headless → exits 2 with refusal text", () => {
+  it("exits 2 and prints the refusal message when CLAUDECODE is absent and --headless is not set", async () => {
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: genKeypair(),
+        _eventQueueForTest: [],
+        // Inject an env with NO Claude session vars (overrides the default in runWithExitCapture).
+        _envForTest: {},
+        // headless is NOT set (default).
+      }),
+    );
+
+    assert.equal(exitCode, 2, `expected exit 2 for missing session, got ${exitCode}`);
+    assert.ok(
+      stderr.includes("stamp pr listen requires an active Claude Code session"),
+      `expected refusal message in stderr, got: ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("--headless"),
+      `expected --headless opt-in hint in refusal message, got: ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("de-facto daemon"),
+      `expected 'de-facto daemon' in refusal message, got: ${stderr}`,
+    );
+  });
+});
+
+describe("session-hosted guard: no env + --headless → warnings + proceeds", () => {
+  it("prints the headless warnings and continues to the event loop when --headless is passed", async () => {
+    const fakeKeypair = genKeypair();
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "review body",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [], // empty queue → exits 0 after loop drains
+        headless: true,
+        // Inject an env with NO Claude session vars to prove --headless bypasses the guard.
+        _envForTest: {},
+      }),
+    );
+
+    // Should proceed (queue-mode exits 0).
+    assert.equal(exitCode, 0, `expected exit 0 with --headless and empty queue, got ${exitCode}`);
+
+    // All headless warnings must be present.
+    assert.ok(
+      stderr.includes("--headless: listener will run without a hosting Claude session"),
+      `expected headless warning header, got: ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("no presence"),
+      `expected 'no presence' warning, got: ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("quota"),
+      `expected 'quota' warning, got: ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("identity"),
+      `expected 'identity' warning, got: ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("shutdown"),
+      `expected 'shutdown' warning, got: ${stderr}`,
+    );
+    assert.ok(
+      stderr.includes("explicitly opt-in"),
+      `expected 'explicitly opt-in' footer, got: ${stderr}`,
+    );
+  });
+});
+
+describe("session-hosted guard: valid env + no --headless → 'bound to Claude session' + proceeds", () => {
+  it("logs the session binding line and continues when CLAUDECODE env is present", async () => {
+    const fakeKeypair = genKeypair();
+    const SESSION_ID = "abcdef01-1234-5678-abcd-ef0123456789";
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "review body",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [], // empty queue → exits 0 after loop drains
+        // Valid Claude session env.
+        _envForTest: {
+          CLAUDECODE: "1",
+          CLAUDE_CODE_SESSION_ID: SESSION_ID,
+        },
+        // headless NOT set — this is the default session-hosted path.
+      }),
+    );
+
+    assert.equal(exitCode, 0, `expected exit 0 with valid session env, got ${exitCode}`);
+
+    // "bound to Claude session" log line should appear.
+    assert.ok(
+      stderr.includes("bound to Claude session"),
+      `expected 'bound to Claude session' line, got: ${stderr}`,
+    );
+    // The first 8 chars of the session ID should be in the log line.
+    const expectedPrefix = SESSION_ID.slice(0, 8);
+    assert.ok(
+      stderr.includes(expectedPrefix),
+      `expected session id prefix '${expectedPrefix}' in stderr, got: ${stderr}`,
+    );
+    // No headless warnings should appear.
+    assert.ok(
+      !stderr.includes("--headless: listener will run without"),
+      `headless warnings must NOT appear when session is detected, got: ${stderr}`,
+    );
   });
 });
