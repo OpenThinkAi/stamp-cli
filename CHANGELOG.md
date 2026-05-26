@@ -5,6 +5,20 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.1.1 — 2026-05-26
+
+### Developer experience
+
+- **`npm test` now uses the `spec` reporter by default** (was `tap`). The
+  prior `tap` output interleaved 4 concurrent test files' worth of per-test
+  TAP lines onto stdout, which read as a flood of unrelated tests during
+  interactive runs. The `spec` reporter prints one line per test with file
+  context, far less noisy and easier to scan. Override via
+  `TEST_REPORTER=tap npm test` for machine-parseable output (CI / scripts).
+  The existing `TEST_CONCURRENCY` env override (default 4) is unchanged.
+
+---
+
 ## 3.1.0 — 2026-05-26
 
 This release packages two previously-merged main-branch changes into a
