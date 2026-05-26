@@ -325,6 +325,67 @@ export function findPatch(
     : null;
 }
 
+// ─── Peer-review event query helpers (peer-events poll worker) ───────
+
+/**
+ * Shape of a raw row returned by `findPeerReviewEventsAfter`.
+ * `payload` is the raw JSON string; callers parse it.
+ */
+export interface PeerReviewEventRow {
+  id: number;
+  patch_id: string;
+  event_type: string;
+  actor_fp: string;
+  occurred_at: number;
+  payload: string;
+  /** `repo` field extracted from the peer_review_patches join. */
+  repo: string;
+}
+
+/**
+ * Fetch up to `limit` peer_review_events rows with `id > afterId`, ordered
+ * by id ascending. The `repo` field is joined from peer_review_patches so the
+ * poll worker can filter by org without re-querying. Returns an empty array
+ * when there are no new events. Safe to call from a read-only DB connection.
+ */
+export function findPeerReviewEventsAfter(
+  db: DatabaseSync,
+  afterId: number,
+  limit: number = 500,
+): PeerReviewEventRow[] {
+  const rows = db.prepare(`
+    SELECT e.id, e.patch_id, e.event_type, e.actor_fp, e.occurred_at, e.payload,
+           p.repo
+    FROM peer_review_events e
+    JOIN peer_review_patches p ON p.patch_id = e.patch_id
+    WHERE e.id > ?
+    ORDER BY e.id ASC
+    LIMIT ?
+  `).all(afterId, limit) as unknown as PeerReviewEventRow[];
+  // node:sqlite returns null-prototype rows; rebuild as plain objects.
+  return rows.map((r) => ({
+    id: r.id,
+    patch_id: r.patch_id,
+    event_type: r.event_type,
+    actor_fp: r.actor_fp,
+    occurred_at: r.occurred_at,
+    payload: r.payload,
+    repo: r.repo,
+  }));
+}
+
+/**
+ * Return the current MAX(id) from peer_review_events, or 0 when the table
+ * is empty. Used by the poll worker to initialize its cursor so it does not
+ * replay history that existed before the worker started.
+ */
+export function maxPeerReviewEventId(db: DatabaseSync): number {
+  const row = db.prepare(
+    `SELECT COALESCE(MAX(id), 0) AS max_id FROM peer_review_events`,
+  ).get() as { max_id: number };
+  return row.max_id;
+}
+
 /** Append a row to the peer_review_events table. */
 export function appendEvent(
   db: DatabaseSync,

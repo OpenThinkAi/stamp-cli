@@ -42,8 +42,10 @@ import {
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
 import {
+  findPeerReviewEventsAfter,
   findUserByStampPubkey,
   insertUser,
+  maxPeerReviewEventId,
   openServerDb,
   sweepExpiredSeats,
 } from "../lib/serverDb.js";
@@ -1165,6 +1167,204 @@ export function __getPollStateForTests(): {
   };
 }
 
+// ─── Peer-events poll worker (peer-events-delivery) ──────────────────
+//
+// Bridges the cross-process delivery gap: `pr-opened` and `re-review-request`
+// verbs write rows to `peer_review_events` AND call `fanoutEvent()` in their
+// own short-lived process, but `fanoutEvent` only reaches in-process listeners
+// — which are always ZERO in a verb process. The SSE listeners are connected
+// to this long-running http-server process.
+//
+// This worker polls the `peer_review_events` table every N seconds, picks up
+// rows written by verb processes since the previous tick, and pushes them to
+// connected SSE clients whose subscribed orgs match the event's org.
+//
+// Design invariants:
+//   - Cursor initialised to MAX(id) at startup → no history replay.
+//   - Each new event is pushed to each matching SSE client exactly once.
+//   - `fanoutEvent()` still fires for in-process tests (no double-delivery
+//     risk: an in-process `fanoutEvent` call writes the SSE frame via the
+//     `registerListener` onEvent callback; the poll worker only sees rows
+//     persisted to DB, which never happens in-process tests).
+//   - Gate: worker only starts when `resolvePeerReviewsEnabled()` is true.
+
+/** Default poll interval: 2 seconds — fast enough for interactive feel. */
+export const DEFAULT_PEER_EVENTS_POLL_INTERVAL_SEC = 2;
+const MIN_PEER_EVENTS_POLL_INTERVAL_SEC = 1;
+
+interface PeerEventsPollState {
+  handle: ReturnType<typeof setInterval> | null;
+  /** Inclusive lower bound: only rows with id > cursor are delivered. */
+  cursor: number;
+  inflight: boolean;
+  /** Test-only: bumped per tick. */
+  tickCount: number;
+}
+
+const peerEventsPollState: PeerEventsPollState = {
+  handle: null,
+  cursor: 0,
+  inflight: false,
+  tickCount: 0,
+};
+
+/**
+ * Resolve the peer-events poll interval from
+ * `STAMP_PEER_EVENTS_POLL_INTERVAL_SEC`. Literal `"0"` disables; non-integer
+ * or non-positive values fall back to the default (never silently disable on
+ * a typo — same discipline as the other poll intervals).
+ */
+export function resolvePeerEventsPollIntervalSec(): number {
+  const raw = process.env["STAMP_PEER_EVENTS_POLL_INTERVAL_SEC"];
+  if (raw === undefined || raw === "") return DEFAULT_PEER_EVENTS_POLL_INTERVAL_SEC;
+  if (raw === "0") return 0;
+  if (!/^-?\d+$/.test(raw)) {
+    logLine(
+      "warn",
+      `STAMP_PEER_EVENTS_POLL_INTERVAL_SEC=${JSON.stringify(raw)} is not an integer; falling back to default ${DEFAULT_PEER_EVENTS_POLL_INTERVAL_SEC}s`,
+    );
+    return DEFAULT_PEER_EVENTS_POLL_INTERVAL_SEC;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    logLine(
+      "warn",
+      `STAMP_PEER_EVENTS_POLL_INTERVAL_SEC=${JSON.stringify(raw)} is not a positive integer (and not the literal '0' opt-out); falling back to default ${DEFAULT_PEER_EVENTS_POLL_INTERVAL_SEC}s`,
+    );
+    return DEFAULT_PEER_EVENTS_POLL_INTERVAL_SEC;
+  }
+  if (n < MIN_PEER_EVENTS_POLL_INTERVAL_SEC) return MIN_PEER_EVENTS_POLL_INTERVAL_SEC;
+  return n;
+}
+
+/**
+ * One poll tick: fetch new peer_review_events rows since the last cursor,
+ * derive the org from the `repo` field, and push each event to SSE clients
+ * subscribed to that org. Advances the cursor to the max id seen.
+ *
+ * Exported as `__runPeerEventsPollTickForTests` so tests can fire a tick
+ * synchronously without driving `setInterval`.
+ */
+function runPeerEventsPollTick(): void {
+  if (peerEventsPollState.inflight) return;
+  peerEventsPollState.inflight = true;
+  peerEventsPollState.tickCount += 1;
+  try {
+    const db = openServerDb({ readOnly: true });
+    try {
+      const rows = findPeerReviewEventsAfter(db, peerEventsPollState.cursor);
+      for (const row of rows) {
+        // Derive org from repo ("org/repo" → "org").
+        const org = row.repo.split("/")[0] ?? "";
+        // Parse the stored payload JSON; fall back to empty object on corrupt data.
+        let payload: object;
+        try {
+          payload = JSON.parse(row.payload) as object;
+        } catch {
+          payload = {};
+        }
+        const event = {
+          event_type: row.event_type,
+          patch_id: row.patch_id,
+          actor_fp: row.actor_fp,
+          payload,
+        };
+        // Deliver to every SSE client subscribed to this org.
+        for (const [fp, client] of sseConnections) {
+          if (client.orgs.includes(org)) {
+            pushEventToSseClient(fp, event);
+          }
+        }
+        // Advance cursor past this row.
+        if (row.id > peerEventsPollState.cursor) {
+          peerEventsPollState.cursor = row.id;
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    logLine(
+      "error",
+      `peer-events-poll: tick failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  } finally {
+    peerEventsPollState.inflight = false;
+  }
+}
+
+export const __runPeerEventsPollTickForTests = runPeerEventsPollTick;
+
+/**
+ * Arm the peer-events poll worker. Idempotent; gated on
+ * `resolvePeerReviewsEnabled()`. Initializes the cursor to MAX(id) so the
+ * worker only delivers events created after it starts — no history replay.
+ */
+export function startPeerEventsPollWorker(): void {
+  if (peerEventsPollState.handle !== null) {
+    logLine("warn", "peer-events-poll: already started — ignoring duplicate start");
+    return;
+  }
+  if (!resolvePeerReviewsEnabled()) return; // feature dark — no-op
+
+  const intervalSec = resolvePeerEventsPollIntervalSec();
+  if (intervalSec === 0) {
+    logLine("info", "peer-events-poll: disabled (STAMP_PEER_EVENTS_POLL_INTERVAL_SEC=0)");
+    return;
+  }
+
+  // Initialize cursor: don't replay history.
+  try {
+    const db = openServerDb({ readOnly: true });
+    try {
+      peerEventsPollState.cursor = maxPeerReviewEventId(db);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    // If we can't read the max id, start from 0 (safer than not starting).
+    logLine(
+      "warn",
+      `peer-events-poll: could not read max event id (starting cursor at 0): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    peerEventsPollState.cursor = 0;
+  }
+
+  const handle = setInterval(() => runPeerEventsPollTick(), intervalSec * 1000);
+  handle.unref();
+  peerEventsPollState.handle = handle;
+  logLine("info", `peer-events-poll: started (interval=${intervalSec}s, cursor=${peerEventsPollState.cursor})`);
+}
+
+export function stopPeerEventsPollWorker(): void {
+  if (peerEventsPollState.handle === null) return;
+  clearInterval(peerEventsPollState.handle);
+  peerEventsPollState.handle = null;
+  peerEventsPollState.inflight = false;
+}
+
+export function __resetPeerEventsPollStateForTests(): void {
+  if (peerEventsPollState.handle !== null) clearInterval(peerEventsPollState.handle);
+  peerEventsPollState.handle = null;
+  peerEventsPollState.cursor = 0;
+  peerEventsPollState.inflight = false;
+  peerEventsPollState.tickCount = 0;
+}
+
+export function __getPeerEventsPollStateForTests(): {
+  armed: boolean;
+  cursor: number;
+  inflight: boolean;
+  tickCount: number;
+} {
+  return {
+    armed: peerEventsPollState.handle !== null,
+    cursor: peerEventsPollState.cursor,
+    inflight: peerEventsPollState.inflight,
+    tickCount: peerEventsPollState.tickCount,
+  };
+}
+
 // ─── SSE peer-review event transport (AGT-454; SSE replaces WS) ───────
 //
 // Mounted on the same HTTP server as the invite-accept and webhook endpoints.
@@ -1425,6 +1625,25 @@ export function __getSseConnectionsForTests(): string[] {
   return [...sseConnections.keys()];
 }
 
+/**
+ * Test-only: inject a fake SSE connection into the sseConnections map so
+ * that the peer-events poll worker can deliver events to it without requiring
+ * a real HTTP server + auth round-trip. The injected client must supply a
+ * `res.write` that captures frames and an `orgs` list for org filtering.
+ * Call `__clearSseConnectionsForTests` in afterEach to clean up.
+ */
+export function __injectSseConnectionForTests(
+  fingerprint: string,
+  client: { res: ServerResponse; orgs: string[] },
+): void {
+  // Create a minimal heartbeat interval that does nothing (unref'd so it
+  // doesn't keep the test process alive). The real cleanup path calls
+  // clearInterval, so we must provide a handle.
+  const heartbeat = setInterval(() => { /* noop heartbeat for test */ }, 1_000_000);
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
+  sseConnections.set(fingerprint, { res: client.res, orgs: client.orgs, heartbeat });
+}
+
 /** Test-only: clear all SSE connections (for teardown). */
 export function __clearSseConnectionsForTests(): void {
   for (const [fp, client] of sseConnections) {
@@ -1483,6 +1702,9 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     // No separate attach step is needed (it replaced the WS upgrade handler).
     // AGT-454 G3: arm the seat-TTL sweeper when peer reviews are enabled.
     startSeatSweepWorker();
+    // peer-events-delivery: arm the cross-process event poll worker so SSE
+    // clients receive events written by verb processes (pr-opened, re-review).
+    startPeerEventsPollWorker();
   });
   // Symmetric shutdown: when the server closes (operator-driven or test
   // cleanup), stop the poll worker so the interval doesn't leak into
@@ -1493,6 +1715,7 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     stopPromptsPollWorker();
     stopTrashSweepWorker();
     stopSeatSweepWorker();
+    stopPeerEventsPollWorker();
     // Tear down any live SSE streams so their heartbeat timers + registry
     // entries don't leak into the next listener instance (test reuse).
     __clearSseConnectionsForTests();
