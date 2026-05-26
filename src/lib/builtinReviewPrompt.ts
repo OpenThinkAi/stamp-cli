@@ -15,9 +15,17 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 export const BUILTIN_DEFAULT_PROMPT =
-  "You are a code reviewer. Summarize the key changes in the diff below and rate the overall quality. " +
-  "Be concise: 2–4 sentences max. Focus on correctness, clarity, and any obvious risks. " +
-  "Do not request changes or approvals — this is a peer summary only.";
+  "You are a peer code reviewer. Briefly summarise the diff (2-6 sentences) focused on correctness, clarity, and obvious risks. Be substantive but concise.\n\n" +
+  "At the end of your response, on its own final line, output exactly one of:\n\n" +
+  "  verdict: approve\n" +
+  "  verdict: request-changes\n" +
+  "  verdict: comment\n\n" +
+  "Choose `approve` for clean, low-risk changes you would sign off on.\n" +
+  "Choose `request-changes` only when there is a clear issue the author\n" +
+  "should address before merge — name it in the body.\n" +
+  "Choose `comment` for informational reviews, when the diff is small or\n" +
+  "ambiguous, or when you're unsure. `comment` is the safe default.\n\n" +
+  "Do not write anything after the verdict line.";
 
 export const BUILTIN_PROMPT_NAME = "builtin-default";
 
@@ -47,9 +55,12 @@ export interface RunBuiltinReviewInput {
   _sdkRunnerForTest?: (diff: string) => Promise<string>;
 }
 
+export type ReviewVerdict = "approve" | "request-changes" | "comment";
+
 export interface RunBuiltinReviewResult {
   ok: true;
-  body: string;
+  body: string;          // body WITH the verdict line stripped
+  verdict: ReviewVerdict;
   /** Cost of the review SDK call in USD, from `total_cost_usd` on the result message. 0 when using a test seam or when the field is absent. */
   costUsd: number;
 }
@@ -60,6 +71,62 @@ export interface RunBuiltinReviewFailure {
 }
 
 export type RunBuiltinReviewOutcome = RunBuiltinReviewResult | RunBuiltinReviewFailure;
+
+/**
+ * Parse the raw SDK output for a verdict line and strip it from the body.
+ *
+ * Scans for the LAST line matching `^\s*verdict\s*:\s*(approve|request-changes|comment)\s*$`
+ * (case-insensitive). If found, strips that line and any blank trailing lines
+ * before it from the body and returns the parsed verdict. If not found (or
+ * the value is not a recognised verdict), returns the raw text as body and
+ * `verdict: "comment"` (the safe fallback).
+ */
+export function parseReviewVerdict(raw: string): { body: string; verdict: ReviewVerdict } {
+  const lines = raw.split("\n");
+  const verdictRegex = /^\s*verdict\s*:\s*(approve|request-changes|comment)\s*$/i;
+  const validVerdicts = new Set(["approve", "request-changes", "comment"]);
+
+  // Find the LAST matching verdict line (used to determine the verdict value).
+  let lastVerdictIdx = -1;
+  let parsedVerdict: ReviewVerdict = "comment";
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = verdictRegex.exec(lines[i]!);
+    if (m) {
+      const v = m[1]!.toLowerCase();
+      if (validVerdicts.has(v)) {
+        lastVerdictIdx = i;
+        parsedVerdict = v as ReviewVerdict;
+        break;
+      }
+    }
+  }
+
+  if (lastVerdictIdx === -1) {
+    // No valid verdict line found — return raw body, safe fallback.
+    return { body: raw, verdict: "comment" };
+  }
+
+  // Strip the last verdict line and any blank trailing lines before it, then
+  // remove any remaining verdict lines in the body (defensive against the
+  // model repeating a verdict in the middle of its output).
+  let endIdx = lastVerdictIdx - 1;
+  while (endIdx >= 0 && lines[endIdx]!.trim() === "") {
+    endIdx--;
+  }
+
+  const bodyLines = lines
+    .slice(0, endIdx + 1)
+    .filter((line) => !verdictRegex.test(line));
+
+  // Trim any trailing blank lines introduced by filtering.
+  let trimEnd = bodyLines.length - 1;
+  while (trimEnd >= 0 && bodyLines[trimEnd]!.trim() === "") {
+    trimEnd--;
+  }
+
+  const body = bodyLines.slice(0, trimEnd + 1).join("\n");
+  return { body, verdict: parsedVerdict };
+}
 
 /**
  * Run a single hard-coded peer-review query against the diff using the
@@ -83,8 +150,9 @@ export async function runBuiltinReview(
   // Test injection: bypass real SDK.
   if (input._sdkRunnerForTest) {
     try {
-      const body = await input._sdkRunnerForTest(input.diff);
-      return { ok: true, body, costUsd: 0 };
+      const raw = await input._sdkRunnerForTest(input.diff);
+      const { body, verdict } = parseReviewVerdict(raw);
+      return { ok: true, body, verdict, costUsd: 0 };
     } catch (err) {
       return {
         ok: false,
@@ -134,7 +202,8 @@ export async function runBuiltinReview(
       };
     }
 
-    return { ok: true, body: finalText, costUsd };
+    const { body: parsedBody, verdict } = parseReviewVerdict(finalText);
+    return { ok: true, body: parsedBody, verdict, costUsd };
   } catch (err) {
     return {
       ok: false,

@@ -1964,3 +1964,158 @@ describe("session-hosted guard: valid env + no --headless → 'bound to Claude s
     );
   });
 });
+
+// ─── Verdict flag mapping: gh receives the right flag per verdict ─────
+
+describe("verdict flag: gh receives --approve when model returns approve", () => {
+  it("passes --approve to _ghReviewForTest when SDK returns verdict: approve", async () => {
+    const fakeKeypair = genKeypair();
+    let capturedVerdictFlag: string | undefined;
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () =>
+          "Clean change, no issues found.\n\nverdict: approve",
+        _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
+          capturedVerdictFlag = verdictFlag;
+          return { status: 0, stderr: "" };
+        },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(
+      capturedVerdictFlag,
+      "--approve",
+      `expected --approve flag, got: ${capturedVerdictFlag}`,
+    );
+  });
+});
+
+describe("verdict flag: gh receives --request-changes when model returns request-changes", () => {
+  it("passes --request-changes to _ghReviewForTest when SDK returns verdict: request-changes", async () => {
+    const fakeKeypair = genKeypair();
+    let capturedVerdictFlag: string | undefined;
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () =>
+          "Missing null check on the new endpoint.\n\nverdict: request-changes",
+        _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
+          capturedVerdictFlag = verdictFlag;
+          return { status: 0, stderr: "" };
+        },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(
+      capturedVerdictFlag,
+      "--request-changes",
+      `expected --request-changes flag, got: ${capturedVerdictFlag}`,
+    );
+  });
+});
+
+describe("verdict flag: gh receives --comment when model returns comment (or no verdict)", () => {
+  it("passes --comment to _ghReviewForTest when SDK returns verdict: comment", async () => {
+    const fakeKeypair = genKeypair();
+    let capturedVerdictFlag: string | undefined;
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () =>
+          "Informational note on the diff format.\n\nverdict: comment",
+        _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
+          capturedVerdictFlag = verdictFlag;
+          return { status: 0, stderr: "" };
+        },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(
+      capturedVerdictFlag,
+      "--comment",
+      `expected --comment flag, got: ${capturedVerdictFlag}`,
+    );
+  });
+
+  it("passes --comment to _ghReviewForTest when SDK returns no verdict (fallback)", async () => {
+    const fakeKeypair = genKeypair();
+    let capturedVerdictFlag: string | undefined;
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () =>
+          "The diff looks fine but no verdict line is emitted.",
+        _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
+          capturedVerdictFlag = verdictFlag;
+          return { status: 0, stderr: "" };
+        },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(
+      capturedVerdictFlag,
+      "--comment",
+      `expected --comment fallback flag, got: ${capturedVerdictFlag}`,
+    );
+  });
+});
+
+describe("verdict log line: '✓ posted review (verdict=X) for PR #N'", () => {
+  it("includes the verdict in the success log line", async () => {
+    const fakeKeypair = genKeypair();
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () =>
+          "Clean change.\n\nverdict: approve",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    assert.ok(
+      stderr.includes("verdict=approve"),
+      `expected 'verdict=approve' in success log line, got: ${stderr}`,
+    );
+  });
+});

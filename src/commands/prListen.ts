@@ -20,7 +20,9 @@
  *   8. Starts a 60-second heartbeat interval while the review runs.
  *   9. Runs the peer review via `runBuiltinReview` over the fetched diff using
  *      the resolved named prompt as the system prompt (AC #4).
- *  10. Posts the result via `gh pr review <pr_url> --comment -b "<body>"`.
+ *  10. Posts the result via `gh pr review <pr_url> <flag> -b "<body>"` where
+ *      `<flag>` is `--approve`, `--request-changes`, or `--comment` depending
+ *      on the verdict returned by the model.
  *  11. Releases the seat on `gh` failure; loops back to step 1.
  *  12. On SIGINT: emits "note: shutting down", releases any held seat, exits 0.
  *
@@ -99,7 +101,7 @@ export interface PrListenOptions {
   /** Test-only: inject a fake SSH spawn function to avoid real network calls. */
   _sshSpawnForTest?: SshSpawnFn;
   /** Test-only: inject a fake `gh pr review` spawn result. */
-  _ghReviewForTest?: (prUrl: string, body: string) => { status: number; stderr: string };
+  _ghReviewForTest?: (prUrl: string, body: string, verdictFlag: string) => { status: number; stderr: string };
   /** Test-only: inject a fake `gh pr diff` spawn result. */
   _ghDiffForTest?: (prUrl: string) => { status: number; stdout: string; stderr: string };
   /** Test-only: inject a fake SDK runner for the Sonnet review call. */
@@ -987,6 +989,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     };
 
     let reviewBody: string;
+    let reviewVerdict: "approve" | "request-changes" | "comment";
     try {
       process.stderr.write(`⟳ running review with prompt "${promptName}"\n`);
       const reviewResult = await runBuiltinReview(reviewInput);
@@ -1009,6 +1012,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         continue;
       }
       reviewBody = reviewResult.body;
+      reviewVerdict = reviewResult.verdict;
       // AGT-432 AC #2: add review cost to daily spend accumulator.
       addDailySpend(reviewResult.costUsd);
     } finally {
@@ -1069,17 +1073,23 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     }
 
     // ─── AC #7: post review via gh ───────────────────────────────
+    const ghVerdictFlag = ({
+      "approve": "--approve",
+      "request-changes": "--request-changes",
+      "comment": "--comment",
+    } as const)[reviewVerdict];
+
     let ghStatus: number;
     let ghStderr = "";
 
     if (opts._ghReviewForTest) {
-      const fakeResult = opts._ghReviewForTest(prUrl, reviewBody);
+      const fakeResult = opts._ghReviewForTest(prUrl, reviewBody, ghVerdictFlag);
       ghStatus = fakeResult.status;
       ghStderr = fakeResult.stderr;
     } else {
       const ghResult = spawnSync(
         "gh",
-        ["pr", "review", prUrl, "--comment", "-b", reviewBody],
+        ["pr", "review", prUrl, ghVerdictFlag, "-b", reviewBody],
         {
           stdio: ["ignore", "pipe", "pipe"],
           encoding: "utf8",
@@ -1110,6 +1120,6 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     // Success.
     currentSeatPatchId = null;
-    process.stderr.write(`✓ posted review for PR #${prNumber}\n`);
+    process.stderr.write(`✓ posted review (verdict=${reviewVerdict}) for PR #${prNumber}\n`);
   }
 }
