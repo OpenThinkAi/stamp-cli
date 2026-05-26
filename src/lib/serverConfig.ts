@@ -10,12 +10,14 @@
  *   port: 12345
  *   user: git              # optional, default "git"
  *   repo_root_prefix: /srv/git  # optional, default "/srv/git"
- *   ws_url: wss://stamp-cli-production.up.railway.app  # optional; HTTP-server
- *                          # origin for `stamp pr listen --ws`. This is the
- *                          # WebSocket endpoint, which is distinct from the
- *                          # SSH host:port above (SSH speaks a different
- *                          # protocol on a different port/host). Required for
- *                          # `stamp pr listen --ws`.
+ *   http_url: https://stamp-cli-production.up.railway.app  # optional; HTTP-server
+ *                          # origin for `stamp pr listen` (the SSE `/peer/events`
+ *                          # stream). This is the HTTP(S) endpoint, which is
+ *                          # distinct from the SSH host:port above (SSH speaks a
+ *                          # different protocol on a different port/host).
+ *                          # Required for `stamp pr listen`. The legacy `ws_url`
+ *                          # key is still accepted for back-compat (a ws:// or
+ *                          # wss:// value is rewritten to http:///https://).
  *
  * The `--server <host:port>` flag on `stamp provision` overrides the file.
  */
@@ -29,8 +31,8 @@ export interface ServerConfig {
   port: number;
   user: string;
   repoRootPrefix: string;
-  /** HTTP-server origin for `stamp pr listen --ws` (e.g. `wss://stamp-cli-production.up.railway.app`). */
-  wsUrl?: string;
+  /** HTTP-server origin for `stamp pr listen` SSE `/peer/events` (e.g. `https://stamp-cli-production.up.railway.app`). */
+  httpUrl?: string;
 }
 
 const DEFAULT_USER = "git";
@@ -132,7 +134,51 @@ export function parseServerConfig(
       ? obj.repo_root_prefix.trim()
       : DEFAULT_REPO_ROOT;
   validateField("repo_root_prefix", repoRootPrefix, contextPath);
-  let wsUrl: string | undefined;
+  // `http_url` is the canonical key; `ws_url` is accepted for back-compat and
+  // a ws://|wss:// value is rewritten to its http://|https:// equivalent (the
+  // SSE transport speaks HTTP, not WebSocket). `http_url` wins if both are set.
+  const httpUrl = parseHttpUrlField(obj, contextPath);
+  return {
+    host,
+    port: obj.port,
+    user,
+    repoRootPrefix,
+    httpUrl,
+  };
+}
+
+/**
+ * Parse the HTTP-server origin used for the SSE `/peer/events` stream.
+ * Canonical key: `http_url` (must be http:// or https://). Legacy key:
+ * `ws_url` (ws:// → http://, wss:// → https://). Returns undefined when
+ * neither key is present.
+ */
+function parseHttpUrlField(
+  obj: Record<string, unknown>,
+  contextPath: string,
+): string | undefined {
+  if (obj.http_url !== undefined) {
+    if (typeof obj.http_url !== "string" || !obj.http_url.trim()) {
+      throw new Error(
+        `${contextPath}: 'http_url' must be a non-empty string (got ${JSON.stringify(obj.http_url)})`,
+      );
+    }
+    const raw = obj.http_url.trim();
+    if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
+      throw new Error(
+        `${contextPath}: 'http_url' must start with 'http://' or 'https://' (got ${JSON.stringify(raw)})`,
+      );
+    }
+    try {
+      new URL(raw);
+    } catch {
+      throw new Error(
+        `${contextPath}: 'http_url' is not a valid URL (got ${JSON.stringify(raw)})`,
+      );
+    }
+    return raw;
+  }
+  // Back-compat: accept a legacy ws_url and rewrite the scheme to http(s).
   if (obj.ws_url !== undefined) {
     if (typeof obj.ws_url !== "string" || !obj.ws_url.trim()) {
       throw new Error(
@@ -145,22 +191,17 @@ export function parseServerConfig(
         `${contextPath}: 'ws_url' must start with 'ws://' or 'wss://' (got ${JSON.stringify(rawWsUrl)})`,
       );
     }
+    const rewritten = rawWsUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
     try {
-      new URL(rawWsUrl);
+      new URL(rewritten);
     } catch {
       throw new Error(
         `${contextPath}: 'ws_url' is not a valid URL (got ${JSON.stringify(rawWsUrl)})`,
       );
     }
-    wsUrl = rawWsUrl;
+    return rewritten;
   }
-  return {
-    host,
-    port: obj.port,
-    user,
-    repoRootPrefix,
-    wsUrl,
-  };
+  return undefined;
 }
 
 /**

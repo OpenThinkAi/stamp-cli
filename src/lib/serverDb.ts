@@ -757,6 +757,46 @@ export function findUserBySshFingerprint(
   return row ?? null;
 }
 
+/**
+ * Look up an enrolled user by their stamp (Ed25519) public key in SPKI PEM
+ * form. Used by the SSE `/peer/events` authorization step: a key that signed a
+ * valid challenge is only authorized if it belongs to an enrolled user.
+ *
+ * PEM whitespace is normalized on both sides of the compare so that a key sent
+ * with CRLF line endings, a trailing newline, or no trailing newline still
+ * matches the canonical form stored at enrollment time. The base64 body is
+ * what carries the identity; surrounding whitespace is not significant.
+ */
+export function findUserByStampPubkey(
+  db: DatabaseSync,
+  stamp_pubkey_pem: string,
+): UserRow | null {
+  const target = normalizePemWhitespace(stamp_pubkey_pem);
+  if (!target) return null;
+  const stmt = db.prepare(
+    `SELECT id, short_name, ssh_pubkey, ssh_fp, stamp_pubkey, role, source,
+            invited_by, created_at, last_seen_at
+     FROM users WHERE stamp_pubkey IS NOT NULL`,
+  );
+  const rows = stmt.all() as unknown as UserRow[];
+  for (const row of rows) {
+    if (row.stamp_pubkey && normalizePemWhitespace(row.stamp_pubkey) === target) {
+      return row;
+    }
+  }
+  return null;
+}
+
+/** Collapse PEM whitespace (CRLF→LF, strip blank lines, trim) for comparison. */
+function normalizePemWhitespace(pem: string): string {
+  return pem
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join("\n");
+}
+
 export function findUserByShortName(
   db: DatabaseSync,
   short_name: string,

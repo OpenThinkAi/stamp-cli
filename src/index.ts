@@ -832,21 +832,22 @@ pr
     "--server <host:port>",
     "override ~/.stamp/server.yml with an inline endpoint",
   )
-  .option(
-    "--ws",
-    "use the WebSocket transport instead of the default polling transport",
-  )
   .addHelpText(
     "after",
     `
-Subscribes the operator's stamp identity to PR-opened events for the given orgs,
-then loops indefinitely:
-  - Receives pr-opened events via the WebSocket transport (--ws) or the default
-    polling transport
+Subscribes the operator's stamp identity to PR-opened events for the given orgs
+via the stamp-server's SSE event stream (GET /peer/events), then loops
+indefinitely:
+  - Receives pr-opened events over the SSE transport (the sole listen transport)
   - Applies author-exclusion (skips own PRs)
-  - Claims a reviewer seat; runs the builtin-default review via the Claude Agent SDK
+  - Claims a reviewer seat; fetches the diff via 'gh pr diff'; runs the
+    builtin-default review via the Claude Agent SDK
   - Posts the result via 'gh pr review --comment'
   - Sends a heartbeat every 60 s to keep the seat alive
+
+Requires 'http_url' in ~/.stamp/server.yml (the HTTP origin of the stamp-server,
+e.g. https://stamp-cli-production.up.railway.app) — distinct from the SSH
+host:port. The legacy 'ws_url' key is still accepted (rewritten to http(s)).
 
 Exit codes:
   0   — clean shutdown (ctrl-C / SIGINT)
@@ -864,13 +865,13 @@ Prerequisites:
       acme/api: /home/you/dev/api
 `,
   )
-  .action(async (opts: { org: string[]; server?: string; ws?: boolean }) => {
+  .action(async (opts: { org: string[]; server?: string }) => {
     const orgs: string[] = Array.isArray(opts.org) ? opts.org : [opts.org];
     if (orgs.length === 0) {
       process.stderr.write(`error: --org is required (repeat for multiple orgs)\n`);
       process.exit(2);
     }
-    await runPrListen({ orgs, server: opts.server, useWsTransport: opts.ws ?? false });
+    await runPrListen({ orgs, server: opts.server });
   });
 
 pr

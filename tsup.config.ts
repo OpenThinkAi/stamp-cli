@@ -82,7 +82,7 @@ export default defineConfig([
     //
     // CLI (ESM) build above intentionally leaves these external — the CLI
     // ships via npm install so node_modules is present alongside dist/.
-    noExternal: ["yaml", "@anthropic-ai/sdk", "ws"],
+    noExternal: ["yaml", "@anthropic-ai/sdk"],
     outExtension: () => ({ js: ".cjs" }),
   },
 ]);

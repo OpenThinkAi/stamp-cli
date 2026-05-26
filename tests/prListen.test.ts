@@ -29,7 +29,13 @@ import {
   createPublicKey,
 } from "node:crypto";
 
-import { runPrListen, buildWsPeerListenUrl, type PrListenOptions } from "../src/commands/prListen.ts";
+import {
+  runPrListen,
+  buildPeerEventsUrl,
+  parseSseStream,
+  type PrListenOptions,
+} from "../src/commands/prListen.ts";
+import { Readable } from "node:stream";
 import {
   clearListenerRegistry,
   type PeerReviewEvent,
@@ -72,8 +78,21 @@ async function runWithExitCapture(opts: PrListenOptions): Promise<number> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (process as any).exit = patchedExit;
 
+  // AGT-454: the listener fetches the diff via `gh pr diff` after claiming the
+  // seat. Default that seam to a successful unified diff so review-path tests
+  // (which don't care about the fetch) keep working; tests that exercise the
+  // gh-diff failure path override _ghDiffForTest explicitly.
+  const optsWithDiff: PrListenOptions = {
+    _ghDiffForTest: () => ({
+      status: 0,
+      stdout: "diff --git a/src/foo.ts b/src/foo.ts\n+const x = 1;\n",
+      stderr: "",
+    }),
+    ...opts,
+  };
+
   try {
-    await runPrListen(opts);
+    await runPrListen(optsWithDiff);
     return capturedCode ?? 0;
   } catch (err) {
     if (err instanceof ExitSignal) return err.code;
@@ -228,7 +247,7 @@ describe("AC #12: auth failure — no keypair → exit 1", () => {
 // ─── AC #10 + AC #2 + AC #6 + AC #7 + AC #13: full loop ─────────────
 
 describe("AC #10: full loop via _eventQueueForTest injection", () => {
-  it("subscribe → event → claim → review → post → exit 0", async () => {
+  it("event → claim → fetch diff (gh) → review → post → exit 0", async () => {
     const fakeKeypair = genKeypair();
     const sshCalls: string[] = [];
     const sshSpawn: SshSpawnFn = async (cfg, verb) => {
@@ -243,6 +262,11 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
       sdkReceivedDiff = diff;
       return "This diff adds a constant. Code quality: good. No obvious issues.";
     };
+
+    // AGT-454: the diff fed to the review comes from `gh pr diff`, not the
+    // event payload. Inject a recognizable diff so we can assert the SDK saw it.
+    const GH_DIFF = "diff --git a/src/gh.ts b/src/gh.ts\n+const fetched = true;\n";
+    const ghDiff = (_prUrl: string) => ({ status: 0, stdout: GH_DIFF, stderr: "" });
 
     let ghCallArgs: { prUrl: string; body: string } | null = null;
     const ghReview = (prUrl: string, body: string) => {
@@ -266,6 +290,7 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
         _sshSpawnForTest: sshSpawn,
         _sdkRunnerForTest: sdkRunner,
         _ghReviewForTest: ghReview,
+        _ghDiffForTest: ghDiff,
         _setIntervalForTest: setIntervalFake,
         _cwdForTest: "/tmp",
         _eventQueueForTest: [event],
@@ -276,8 +301,6 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
     // AC #2: exit 0 on clean queue drain.
     assert.equal(exitCode, 0, `expected exit 0, got ${exitCode}`);
 
-    // AC #2: subscribed line.
-    assert.ok(stderr.includes("⟳ subscribed"), `expected '⟳ subscribed' in: ${stderr}`);
     // AC #2: triage line.
     assert.ok(stderr.includes("⟳ triaging event"), `expected '⟳ triaging event' in: ${stderr}`);
     // AC #4+#2: seat claimed.
@@ -289,6 +312,13 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
 
     // AC #6: SDK called exactly once.
     assert.equal(sdkCallCount, 1, "SDK runner should have been called once");
+
+    // AGT-454: the SDK reviewed the diff fetched via gh, NOT the payload.
+    assert.equal(
+      sdkReceivedDiff,
+      GH_DIFF,
+      "SDK should have reviewed the gh-fetched diff, not the event payload",
+    );
 
     // AC #7: gh received the PR URL.
     assert.ok(ghCallArgs !== null, "gh review should have been called");
@@ -303,9 +333,10 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
     // Verify heartbeat tick doesn't throw.
     if (intervalFnRef) intervalFnRef();
 
-    // AC #2: SSH calls include subscribe + claim-seat.
-    assert.ok(sshCalls.includes("stamp-subscribe"), `expected stamp-subscribe in: ${sshCalls}`);
+    // SSH calls include claim-seat (the seat protocol stays on SSH; subscribe
+    // is gone — SSE replaced the listen subscription).
     assert.ok(sshCalls.includes("stamp-claim-seat"), `expected stamp-claim-seat in: ${sshCalls}`);
+    assert.ok(!sshCalls.includes("stamp-subscribe"), `stamp-subscribe should NOT be called: ${sshCalls}`);
   });
 
   it("AC #13: stdout is empty on a normal run", async () => {
@@ -1530,152 +1561,269 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
   });
 });
 
-// ─── ws_url config: buildWsPeerListenUrl unit tests ──────────────────
 
-describe("buildWsPeerListenUrl: URL construction from ServerConfig", () => {
-  it("returns ok:false with actionable message when wsUrl is absent", () => {
+// ─── SSE transport: buildPeerEventsUrl unit tests (AGT-454) ──────────
+
+describe("buildPeerEventsUrl: URL construction from ServerConfig", () => {
+  it("returns ok:false with actionable message when httpUrl is absent", () => {
     const cfg = { host: "ssh.example.com", port: 2222, user: "git", repoRootPrefix: "/srv/git" };
-    const result = buildWsPeerListenUrl(cfg);
+    const result = buildPeerEventsUrl(cfg, ["acme"]);
     assert.equal(result.ok, false);
     if (!result.ok) {
-      assert.ok(
-        result.reason.includes("ws_url"),
-        `reason should mention 'ws_url': ${result.reason}`,
-      );
+      assert.ok(result.reason.includes("http_url"), `reason should mention 'http_url': ${result.reason}`);
       assert.ok(
         result.reason.includes("~/.stamp/server.yml"),
         `reason should mention '~/.stamp/server.yml': ${result.reason}`,
       );
-      assert.ok(
-        result.reason.includes("SSH host:port"),
-        `reason should mention 'SSH host:port': ${result.reason}`,
+      assert.ok(result.reason.includes("SSH host:port"), `reason should mention 'SSH host:port': ${result.reason}`);
+    }
+  });
+
+  it("builds <httpUrl>/peer/events?org=... when httpUrl is set", () => {
+    const cfg = {
+      host: "ssh.example.com",
+      port: 2222,
+      user: "git",
+      repoRootPrefix: "/srv/git",
+      httpUrl: "https://stamp-cli-production.up.railway.app",
+    };
+    const result = buildPeerEventsUrl(cfg, ["acme", "beta"]);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(
+        result.url,
+        "https://stamp-cli-production.up.railway.app/peer/events?org=acme&org=beta",
       );
     }
   });
 
-  it("builds <wsUrl>/peer/listen when wsUrl is set (no trailing slash)", () => {
+  it("strips a trailing slash from httpUrl before appending /peer/events", () => {
     const cfg = {
       host: "ssh.example.com",
       port: 2222,
       user: "git",
       repoRootPrefix: "/srv/git",
-      wsUrl: "wss://stamp-cli-production.up.railway.app",
+      httpUrl: "https://stamp-cli-production.up.railway.app/",
     };
-    const result = buildWsPeerListenUrl(cfg);
+    const result = buildPeerEventsUrl(cfg, ["acme"]);
     assert.equal(result.ok, true);
     if (result.ok) {
-      assert.equal(result.url, "wss://stamp-cli-production.up.railway.app/peer/listen");
+      assert.equal(result.url, "https://stamp-cli-production.up.railway.app/peer/events?org=acme");
     }
   });
 
-  it("strips trailing slash from wsUrl before appending /peer/listen", () => {
+  it("omits the query string when no orgs are given", () => {
     const cfg = {
       host: "ssh.example.com",
       port: 2222,
       user: "git",
       repoRootPrefix: "/srv/git",
-      wsUrl: "wss://stamp-cli-production.up.railway.app/",
+      httpUrl: "http://localhost:3000",
     };
-    const result = buildWsPeerListenUrl(cfg);
+    const result = buildPeerEventsUrl(cfg, []);
     assert.equal(result.ok, true);
     if (result.ok) {
-      assert.equal(result.url, "wss://stamp-cli-production.up.railway.app/peer/listen");
-    }
-  });
-
-  it("works with ws:// origin as well", () => {
-    const cfg = {
-      host: "ssh.example.com",
-      port: 2222,
-      user: "git",
-      repoRootPrefix: "/srv/git",
-      wsUrl: "ws://localhost:3000",
-    };
-    const result = buildWsPeerListenUrl(cfg);
-    assert.equal(result.ok, true);
-    if (result.ok) {
-      assert.equal(result.url, "ws://localhost:3000/peer/listen");
+      assert.equal(result.url, "http://localhost:3000/peer/events");
     }
   });
 });
 
-// ─── ws_url config: --ws with no wsUrl → exit 1 + actionable error ───
+// ─── SSE transport: parseSseStream parses data: frames into events ───
 
-describe("--ws transport: no wsUrl configured → exit 1 with actionable error", () => {
-  it("exits 1 and emits actionable error when useWsTransport=true but wsUrl is absent", async () => {
-    const fakeKeypair = genKeypair();
+describe("parseSseStream: text/event-stream → PeerReviewEvent", () => {
+  it("parses a data:-framed stream into events, ignoring heartbeat comments", async () => {
+    const ev1 = {
+      event_type: "pr-opened",
+      patch_id: "a".repeat(40),
+      actor_fp: "sha256:fp1",
+      payload: { repo: "acme/widget", pr_url: "https://github.com/acme/widget/pull/1" },
+    };
+    const ev2 = {
+      event_type: "re-review-requested",
+      patch_id: "b".repeat(40),
+      actor_fp: "sha256:fp2",
+      payload: { repo: "acme/widget" },
+    };
+    const wire =
+      `: connected\n\n` +
+      `: heartbeat\n\n` +
+      `data: ${JSON.stringify(ev1)}\n\n` +
+      `data: ${JSON.stringify(ev2)}\n\n`;
 
-    // Server config without wsUrl — simulates a server.yml that only has
-    // host/port (the SSH endpoint), not the HTTP ws_url.
-    const { result: exitCode, stderr } = await captureStderrAsync(() =>
-      runWithExitCapture({
-        orgs: ["acme"],
-        server: FIXTURE_SERVER,
-        useWsTransport: true,
-        _keypairForTest: fakeKeypair,
-        // No _wsSocketForTest → the code will try to build a real URL.
-        // No wsUrl on the config → buildWsPeerListenUrl returns ok:false.
-        _eventQueueForTest: [],
-      }),
-    );
-
-    assert.equal(exitCode, 1, `expected exit 1 when wsUrl is absent, got ${exitCode}`);
-    assert.ok(
-      stderr.includes("ws_url"),
-      `stderr should mention 'ws_url': ${stderr}`,
-    );
-    assert.ok(
-      stderr.includes("~/.stamp/server.yml"),
-      `stderr should mention '~/.stamp/server.yml': ${stderr}`,
-    );
-  });
-
-  it("succeeds (exit 0) when useWsTransport=true and _wsSocketForTest is provided (seam bypasses URL check)", async () => {
-    // When _wsSocketForTest is injected, URL resolution is skipped entirely —
-    // this is the path all existing WS tests use. Verify it still works when
-    // wsUrl is absent (the seam takes precedence).
-    const fakeKeypair = genKeypair();
-
-    // A minimal fake WebSocket that immediately closes (simulating auth failure
-    // so the test terminates quickly without a real server).
-    const { WebSocket: WsClass } = await import("ws");
-    const fakeWs = Object.assign(Object.create(WsClass.prototype), {
-      _listeners: {} as Record<string, ((...args: unknown[]) => void)[]>,
-      on(event: string, fn: (...args: unknown[]) => void) {
-        if (!this._listeners[event]) this._listeners[event] = [];
-        this._listeners[event]!.push(fn);
-        return this;
-      },
-      send() {},
-      close() {},
-      _emit(event: string, ...args: unknown[]) {
-        for (const fn of this._listeners[event] ?? []) fn(...args);
-      },
+    const received: PeerReviewEvent[] = [];
+    const stream = Readable.from([wire]);
+    await new Promise<void>((resolve) => {
+      parseSseStream(stream, (e) => {
+        received.push(e);
+      });
+      stream.on("end", () => resolve());
     });
 
-    // Immediately emit a close before auth so connectWsTransport returns ok:false.
-    // This causes runPrListen to exit 1 (WS connect failed) — not 0 — but the
-    // key assertion is that it does NOT exit 1 with the "ws_url missing" error.
-    setTimeout(() => {
-      (fakeWs as { _emit: (e: string, ...a: unknown[]) => void })._emit("close", 4401, Buffer.from("test close"));
-    }, 0);
+    assert.equal(received.length, 2, "should parse exactly two events");
+    assert.equal(received[0]!.event_type, "pr-opened");
+    assert.equal(received[0]!.patch_id, "a".repeat(40));
+    assert.equal(received[1]!.event_type, "re-review-requested");
+    assert.equal(received[1]!.patch_id, "b".repeat(40));
+  });
 
+  it("reassembles events split across chunk boundaries", async () => {
+    const ev = {
+      event_type: "pr-opened",
+      patch_id: "c".repeat(40),
+      actor_fp: "sha256:fp3",
+      payload: { repo: "acme/widget" },
+    };
+    const full = `data: ${JSON.stringify(ev)}\n\n`;
+    const mid = Math.floor(full.length / 2);
+    const received: PeerReviewEvent[] = [];
+    const stream = Readable.from([full.slice(0, mid), full.slice(mid)]);
+    await new Promise<void>((resolve) => {
+      parseSseStream(stream, (e) => received.push(e));
+      stream.on("end", () => resolve());
+    });
+    assert.equal(received.length, 1);
+    assert.equal(received[0]!.patch_id, "c".repeat(40));
+  });
+
+  it("drops a malformed (non-JSON) data frame without aborting the stream", async () => {
+    const good = {
+      event_type: "pr-opened",
+      patch_id: "d".repeat(40),
+      actor_fp: "sha256:fp4",
+      payload: {},
+    };
+    const wire = `data: not-json{\n\n` + `data: ${JSON.stringify(good)}\n\n`;
+    const received: PeerReviewEvent[] = [];
+    const stream = Readable.from([wire]);
+    const { result: _r } = await captureStderrAsync(
+      () =>
+        new Promise<void>((resolve) => {
+          parseSseStream(stream, (e) => received.push(e));
+          stream.on("end", () => resolve());
+        }),
+    );
+    assert.equal(received.length, 1, "only the valid frame should be delivered");
+    assert.equal(received[0]!.patch_id, "d".repeat(40));
+  });
+});
+
+// ─── SSE transport: no http_url configured → exit 1 + actionable error ─
+
+describe("SSE transport: no http_url configured → exit 1 with actionable error", () => {
+  it("exits 1 and emits an actionable error when http_url is absent (live connect path)", async () => {
+    const fakeKeypair = genKeypair();
+    // Non-queue mode (no _eventQueueForTest) and no _sseStreamForTest forces
+    // the real connect path, which calls buildPeerEventsUrl → ok:false.
     const { result: exitCode, stderr } = await captureStderrAsync(() =>
       runWithExitCapture({
         orgs: ["acme"],
         server: FIXTURE_SERVER,
-        useWsTransport: true,
         _keypairForTest: fakeKeypair,
-        _wsSocketForTest: fakeWs as unknown as import("ws").WebSocket,
-        _eventQueueForTest: [],
+      }),
+    );
+    assert.equal(exitCode, 1, `expected exit 1 when http_url is absent, got ${exitCode}`);
+    assert.ok(stderr.includes("SSE connect failed"), `stderr should mention SSE connect failure: ${stderr}`);
+    assert.ok(stderr.includes("http_url"), `stderr should mention 'http_url': ${stderr}`);
+  });
+});
+
+// ─── Listener: gh pr diff fetch (AGT-454) ────────────────────────────
+
+describe("listener: fetches the diff via gh after claiming the seat", () => {
+  it("reviews the gh-fetched diff (no payload/body/placeholder fallback)", async () => {
+    const fakeKeypair = genKeypair();
+    const GH_DIFF = "diff --git a/src/real.ts b/src/real.ts\n+const real = 1;\n";
+    let ghDiffPrUrl = "";
+    let sdkDiff = "";
+
+    const { result: exitCode } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _ghDiffForTest: (prUrl) => {
+          ghDiffPrUrl = prUrl;
+          return { status: 0, stdout: GH_DIFF, stderr: "" };
+        },
+        _sdkRunnerForTest: async (diff) => {
+          sdkDiff = diff;
+          return "review body";
+        },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
       }),
     );
 
-    // Should exit 1 due to WS close-before-auth, NOT due to missing ws_url.
-    assert.equal(exitCode, 1);
-    assert.ok(
-      !stderr.includes("'ws_url'") || stderr.includes("WS connect failed"),
-      `should NOT emit ws_url-missing error when socket seam is used: ${stderr}`,
+    assert.equal(exitCode, 0);
+    assert.equal(ghDiffPrUrl, "https://github.com/acme/widget/pull/42", "gh pr diff should get the PR url");
+    assert.equal(sdkDiff, GH_DIFF, "the review must run on the gh-fetched diff");
+    // The event payload's diff (set by makeEvent) must NOT leak into the review.
+    assert.ok(!sdkDiff.includes("src/foo.ts"), "payload diff must not be used");
+  });
+
+  it("releases the seat and skips when gh pr diff fails (non-zero)", async () => {
+    const fakeKeypair = genKeypair();
+    const sshCalls: string[] = [];
+    let sdkCalled = false;
+
+    const { stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: async (cfg, verb) => {
+          sshCalls.push(verb);
+          return makeSuccessSshSpawn()(cfg, verb);
+        },
+        _ghDiffForTest: () => ({ status: 1, stdout: "", stderr: "gh: no access to acme/widget" }),
+        _sdkRunnerForTest: async () => {
+          sdkCalled = true;
+          return "body";
+        },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
     );
+
+    assert.equal(sdkCalled, false, "review must NOT run when the diff fetch fails");
+    assert.ok(stderr.includes("could not fetch diff (gh)"), `expected gh-diff failure note: ${stderr}`);
+    assert.ok(sshCalls.includes("stamp-claim-seat"), "seat should have been claimed first");
+    assert.ok(sshCalls.includes("stamp-release-seat"), "seat should be released after the diff fetch fails");
+  });
+
+  it("releases the seat and skips when gh pr diff returns an empty diff", async () => {
+    const fakeKeypair = genKeypair();
+    const sshCalls: string[] = [];
+    let sdkCalled = false;
+
+    const { stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: async (cfg, verb) => {
+          sshCalls.push(verb);
+          return makeSuccessSshSpawn()(cfg, verb);
+        },
+        _ghDiffForTest: () => ({ status: 0, stdout: "   \n", stderr: "" }),
+        _sdkRunnerForTest: async () => {
+          sdkCalled = true;
+          return "body";
+        },
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+
+    assert.equal(sdkCalled, false, "review must NOT run on an empty diff");
+    assert.ok(stderr.includes("could not fetch diff (gh)"), `expected gh-diff failure note: ${stderr}`);
+    assert.ok(sshCalls.includes("stamp-release-seat"), "seat should be released on empty diff");
   });
 });

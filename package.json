@@ -43,14 +43,12 @@
     "commander": "^13.1.0",
     "ink": "^7.0.1",
     "react": "^19.2.5",
-    "ws": "^8.21.0",
     "yaml": "^2.7.0",
     "zod": "^4.4.2"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
     "@types/react": "^19.2.14",
-    "@types/ws": "^8.18.1",
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3"
