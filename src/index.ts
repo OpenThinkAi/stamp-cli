@@ -851,7 +851,7 @@ host:port. The legacy 'ws_url' key is still accepted (rewritten to http(s)).
 
 Exit codes:
   0   — clean shutdown (ctrl-C / SIGINT)
-  1   — auth failure (no signing key, subscribe failed)
+  1   — auth failure (no signing key, SSE connect failed)
   2   — arg-parse error (--org is required)
 
 Prerequisites:
