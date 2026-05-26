@@ -5,9 +5,20 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
-## Unreleased
+## 3.0.0 — 2026-05-25
 
-> Contains a breaking removal — the next release should be a **major** version cut.
+### Fixed
+
+- **Peer-agentic review now works end-to-end.** A chain of latent
+  never-run-against-a-real-server defects was fixed and validated live on an
+  Attested-PR repo: the client peer SSH verbs now carry the `stamp-` prefix the
+  server's git-shell exposes; `STAMP_PEER_REVIEWS_ENABLED` is propagated to the
+  SSH verbs via `/etc/stamp/env`; the WS transport was replaced by SSE
+  (`GET /peer/events`) with sign-with-key auth against the enrolled-`users`
+  table; a server-side poll worker bridges the broadcast (SSH-verb process) to
+  the SSE-connected listeners (`peer_review_events` → fanout); and the listener
+  fetches the real diff via `gh pr diff` (GitHub is the per-repo authorization
+  boundary) instead of reviewing the PR body.
 
 ### Security
 
