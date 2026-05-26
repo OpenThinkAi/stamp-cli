@@ -1,6 +1,6 @@
 {
   "name": "@openthink/stamp",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "type": "module",
   "description": "Local, headless pull-request system for agent-to-agent code review workflows",
   "bin": {
@@ -14,8 +14,8 @@
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "check-conventions": "bash scripts/check-conventions.sh",
-    "test:unit": "node --test --import tsx --test-concurrency=${TEST_CONCURRENCY:-4} 'tests/*.test.ts'",
-    "test:integration": "node --test --import tsx --test-timeout=120000 --test-concurrency=${TEST_CONCURRENCY:-4} 'tests/integration/*.test.ts'",
+    "test:unit": "node --test --import tsx --test-concurrency=${TEST_CONCURRENCY:-4} --test-reporter=${TEST_REPORTER:-spec} 'tests/*.test.ts'",
+    "test:integration": "node --test --import tsx --test-timeout=120000 --test-concurrency=${TEST_CONCURRENCY:-4} --test-reporter=${TEST_REPORTER:-spec} 'tests/integration/*.test.ts'",
     "test": "npm run check-conventions && npm run test:unit",
     "prepublishOnly": "npm run build"
   },
