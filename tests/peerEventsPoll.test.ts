@@ -28,7 +28,6 @@ import {
   appendEvent,
   findPeerReviewEventsAfter,
   insertPatch,
-  insertUser,
   maxPeerReviewEventId,
   openServerDb,
 } from "../src/lib/serverDb.ts";
@@ -123,21 +122,6 @@ function seedPatchAndEvent(
 
 // ─── Fake SSE client ─────────────────────────────────────────────────
 //
-// We need to inject a fake SSE connection into the module-private
-// `sseConnections` Map. The only public write surface is
-// `handlePeerEventsRequest`, which requires a live HTTP connection.
-// Instead we use `pushEventToSseClient` to verify delivery, and we inject
-// fake clients by re-using the module's internal `__clearSseConnectionsForTests`
-// + directly monkey-patching via the `sseConnections` export.
-//
-// Since `sseConnections` is not exported, we rely on the test-seam exports:
-//   - `pushEventToSseClient` (already exported) verifies delivery.
-//   - We build a fake response object and use the worker's own loop
-//     (which iterates `sseConnections`) by forcing a fake client into it.
-//
-// The cleanest approach: use a WritableBuffer fake res, seed the sseConnections
-// map via a helper that accepts a ServerResponse mock.
-
 /** Minimal mock of ServerResponse for SSE frame capture. */
 function makeFakeRes(): { res: ServerResponse; frames: string[] } {
   const frames: string[] = [];
@@ -152,27 +136,8 @@ function makeFakeRes(): { res: ServerResponse; frames: string[] } {
   return { res, frames };
 }
 
-// We need to register fake SSE clients into the module. The only exported
-// surface that mutates sseConnections is `handlePeerEventsRequest` (which
-// requires auth + a real HTTP connection). However, `pushEventToSseClient`
-// is exported and reads from `sseConnections`.
-//
-// We use a test-internal approach: import the named export that sets up the
-// sseConnections map indirectly by calling the internal `startPeerEventsPollWorker`
-// worker tick which reads from `sseConnections`. We need to inject a fake
-// client. The cleanest way is to expose `__injectSseClientForTests` — but
-// that's a new export we'd add. Instead, let's use the existing
-// `pushEventToSseClient` to verify the fake client was hit, and inject via
-// a tiny helper that patches over the fake res using a workaround.
-//
-// Actually the CLEANEST approach: the poll worker's tick calls
-// `pushEventToSseClient(fp, event)` for each matching client in sseConnections.
-// We can verify delivery by capturing what `pushEventToSseClient` would write.
-// But since sseConnections is private, we need another way.
-//
-// Solution: export a `__injectSseConnectionForTests` from http-server.ts.
-// This is the minimal, non-invasive seam for testing cross-process delivery
-// without starting a real HTTP server.
+// `__injectSseConnectionForTests` injects a fake client into the module-private
+// `sseConnections` map without needing a real HTTP server + auth round-trip.
 import {
   __injectSseConnectionForTests,
 } from "../src/server/http-server.ts";
@@ -409,15 +374,12 @@ describe("peer-events poll worker — tick delivery", () => {
     // Seed event for "other-org".
     seedPatchAndEvent(dbPath, { patchId: "py-1", repo: "other-org/repo" });
 
-    const { frames } = makeFakeRes();
-    const { res } = makeFakeRes();
+    const { res, frames } = makeFakeRes();
     __injectSseConnectionForTests("fp-x-only", { res, orgs: ["acme"] });
 
-    // Suppress the void warning — frames won't be from injectSseConnectionForTests
-    const framesRef = frames;
     __runPeerEventsPollTickForTests();
 
-    assert.equal(framesRef.length, 0, "client subscribed to 'acme' must not receive 'other-org' events");
+    assert.equal(frames.length, 0, "client subscribed to 'acme' must not receive 'other-org' events");
   });
 
   it("does NOT replay history older than the start cursor", () => {
