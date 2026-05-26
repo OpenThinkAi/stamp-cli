@@ -358,6 +358,74 @@ describe("in-memory listener registry (AC 7)", () => {
     });
     assert.equal(count, 0);
   });
+
+  // ─── Org case-insensitivity tests (AGT org-case-norm) ────────────────
+
+  it("fanoutEvent delivers when org arg is mixed-case but listener subscribed lowercase", () => {
+    const received: object[] = [];
+    registerListener("SHA256:fp-lc", {
+      orgs: ["micromediasites"],
+      onEvent: (ev) => received.push(ev),
+    });
+
+    const event = {
+      event_type: "pr-opened",
+      patch_id: "case-fp-1",
+      actor_fp: "SHA256:author",
+      payload: {},
+    };
+
+    // Broadcast with mixed-case org (as derived from payload.repo).
+    const count = fanoutEvent("MicroMediaSites", event);
+    assert.equal(count, 1, "mixed-case broadcast must reach lowercase-subscribed listener");
+    assert.deepStrictEqual(received, [event]);
+  });
+
+  it("fanoutEvent delivers when org arg is lowercase but listener subscribed mixed-case", () => {
+    const received: object[] = [];
+    registerListener("SHA256:fp-mc", {
+      orgs: ["MicroMediaSites"],
+      onEvent: (ev) => received.push(ev),
+    });
+
+    const event = {
+      event_type: "pr-opened",
+      patch_id: "case-fp-2",
+      actor_fp: "SHA256:author",
+      payload: {},
+    };
+
+    // Broadcast with lowercase org.
+    const count = fanoutEvent("micromediasites", event);
+    assert.equal(count, 1, "lowercase broadcast must reach mixed-case-subscribed listener");
+    assert.deepStrictEqual(received, [event]);
+  });
+
+  it("fanoutEvent delivers for multi-org subscriber when only one org matches (different cases)", () => {
+    const received: object[] = [];
+    registerListener("SHA256:fp-multi", {
+      orgs: ["foo", "BAR"],
+      onEvent: (ev) => received.push(ev),
+    });
+
+    const eventFoo = {
+      event_type: "pr-opened",
+      patch_id: "case-fp-3a",
+      actor_fp: "SHA256:author",
+      payload: {},
+    };
+    const eventBar = {
+      event_type: "pr-opened",
+      patch_id: "case-fp-3b",
+      actor_fp: "SHA256:author",
+      payload: {},
+    };
+
+    // FOO should match "foo" (after lowercase); "bar" should match "BAR" (after lowercase).
+    assert.equal(fanoutEvent("FOO", eventFoo), 1, "FOO must match subscriber with 'foo'");
+    assert.equal(fanoutEvent("bar", eventBar), 1, "bar must match subscriber with 'BAR'");
+    assert.equal(received.length, 2, "both events should be received");
+  });
 });
 
 // ─── AC 6: re-review-request fanout helpers ──────────────────────────

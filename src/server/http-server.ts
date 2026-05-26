@@ -1254,8 +1254,10 @@ function runPeerEventsPollTick(): void {
     try {
       const rows = findPeerReviewEventsAfter(db, peerEventsPollState.cursor);
       for (const row of rows) {
-        // Derive org from repo ("org/repo" → "org").
-        const org = row.repo.split("/")[0] ?? "";
+        // Derive org from repo ("org/repo" → "org") and lowercase so the
+        // comparison against listener-stored orgs (also lowercased via
+        // parseOrgQuery) is case-insensitive by construction.
+        const org = (row.repo.split("/")[0] ?? "").toLowerCase();
         // Parse the stored payload JSON; fall back to empty object on corrupt data.
         let payload: object;
         try {
@@ -1507,12 +1509,24 @@ function headerValue(req: IncomingMessage, name: string): string | null {
   return typeof v === "string" ? v : null;
 }
 
-/** Parse `?org=a&org=b` (repeated) into a deduped org list. */
+/**
+ * Parse `?org=a&org=b` (repeated) into a deduped, lowercased org list.
+ * Orgs are stored in lowercase so that comparisons against the broadcast
+ * org (also lowercased at delivery time) are case-insensitive by
+ * construction. Empty/whitespace-only values are dropped.
+ */
 function parseOrgQuery(url: string): string[] {
   const q = url.indexOf("?");
   if (q < 0) return [];
   const params = new URLSearchParams(url.slice(q + 1));
-  return [...new Set(params.getAll("org").filter((o) => o.length > 0))];
+  return [
+    ...new Set(
+      params
+        .getAll("org")
+        .map((o) => o.trim().toLowerCase())
+        .filter((o) => o.length > 0),
+    ),
+  ];
 }
 
 /**
@@ -1641,7 +1655,10 @@ export function __injectSseConnectionForTests(
   // clearInterval, so we must provide a handle.
   const heartbeat = setInterval(() => { /* noop heartbeat for test */ }, 1_000_000);
   if (typeof heartbeat.unref === "function") heartbeat.unref();
-  sseConnections.set(fingerprint, { res: client.res, orgs: client.orgs, heartbeat });
+  // Normalize orgs to lowercase, mirroring what parseOrgQuery does on the real
+  // code path (so tests that pass mixed-case orgs behave consistently).
+  const orgs = client.orgs.map((o) => o.toLowerCase());
+  sseConnections.set(fingerprint, { res: client.res, orgs, heartbeat });
 }
 
 /** Test-only: clear all SSE connections (for teardown). */
