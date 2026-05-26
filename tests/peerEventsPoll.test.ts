@@ -527,10 +527,8 @@ describe("peer-events poll worker — tick delivery", () => {
   });
 
   it("does not store empty or whitespace-only org entries from query string", () => {
-    // parseOrgQuery is exercised indirectly via __injectSseConnectionForTests;
-    // we verify directly that the poll worker does not deliver to a client
-    // whose injected org list is [""] (simulating a bug where empty strings
-    // slipped through).
+    // Verify that a client injected with an empty-string org never receives
+    // events: an empty string cannot match any real org slug via .includes().
     const { dbPath } = dbFixture;
     seedPatchAndEvent(dbPath, { patchId: "empty-org-1", repo: "acme/r" });
 
