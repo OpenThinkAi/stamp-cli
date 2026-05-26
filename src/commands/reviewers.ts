@@ -589,7 +589,7 @@ export async function reviewersFetch(
           // Explicit --expect-*-sha flags take precedence (let operator override
           // if they have a more specific anchor).
           console.log(
-            `  manifest signature verified (signer: ${signerFp.slice(0, 18)}...)`,
+            `  ✓ manifest signature verified (signer: ${signerFp.slice(0, 18)}...)`,
           );
           if (effectiveExpectPromptSha === undefined) {
             effectiveExpectPromptSha = entry.prompt_sha256;

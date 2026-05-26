@@ -199,7 +199,7 @@ export function runManifestVerify(opts: ManifestVerifyOptions): void {
 
   if (valid) {
     console.log(bar);
-    console.log(`manifest signature: VALID`);
+    console.log(`✓ manifest signature`);
     console.log(bar);
     console.log(`  manifest:     ${manifestPath}`);
     console.log(`  signature:    ${sigPath}`);
@@ -212,7 +212,7 @@ export function runManifestVerify(opts: ManifestVerifyOptions): void {
     // (emitted by handleCliError from the thrown Error) belongs on stderr.
     // Label padding matches the VALID block above (14 chars) for consistency.
     console.log(bar);
-    console.log(`manifest signature: INVALID`);
+    console.log(`✗ manifest signature`);
     console.log(bar);
     console.log(`  manifest:     ${manifestPath}`);
     console.log(`  signature:    ${sigPath}`);
