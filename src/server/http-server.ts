@@ -36,18 +36,20 @@
 
 import {
   createHmac,
-  randomBytes,
   timingSafeEqual,
   type BinaryLike,
 } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { WebSocketServer, type WebSocket } from "ws";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
-import { insertUser, openServerDb, sweepExpiredSeats } from "../lib/serverDb.js";
+import {
+  findUserByStampPubkey,
+  insertUser,
+  openServerDb,
+  sweepExpiredSeats,
+} from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
 import { verifyBytes } from "../lib/signing.js";
-import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
+import { fingerprintFromPem } from "../lib/keys.js";
 import {
   DEFAULT_TRASH_DIR,
   purgeTrash,
@@ -62,7 +64,8 @@ import {
 import {
   resolvePeerReviewsEnabled,
   resolvePeerReviewLimit,
-  verifyPeerPayloadSignatureFromPubkey,
+  registerListener,
+  unregisterListener,
   SEAT_TTL_SECONDS_DEFAULT,
 } from "./peerReviews.js";
 import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
@@ -1162,144 +1165,169 @@ export function __getPollStateForTests(): {
   };
 }
 
-// ─── WebSocket peer-review transport (AGT-434) ───────────────────────
+// ─── SSE peer-review event transport (AGT-454; SSE replaces WS) ───────
 //
 // Mounted on the same HTTP server as the invite-accept and webhook endpoints.
-// The WS endpoint is dark unless STAMP_PEER_REVIEWS_ENABLED=1. When enabled,
-// the upgrade flow is:
+// The endpoint is dark unless STAMP_PEER_REVIEWS_ENABLED=1. When enabled:
 //
-//   1. Client sends WS upgrade request to `/peer/listen`.
-//   2. Server issues a random nonce challenge (`{type:"challenge",nonce:<hex>}`).
-//   3. Client signs the nonce with its Ed25519 operator key and responds
-//      with `{type:"auth",fingerprint:<fp>,signature:<base64>}`.
-//   4. Server verifies the signature against the operator's `.pub` key in the
-//      global trusted-key store (no per-repo base_sha at handshake time;
-//      per-repo verification is deferred to per-message verify).
-//   5. Socket is bound to the verified fingerprint; subsequent inbound messages
-//      carry per-payload Ed25519 signatures that the server verifies against
-//      the repo's pubkey at base_sha (load-bearing per AC 3).
-//   6. Outbound: the server pushes PeerReviewEvent objects to the socket as
-//      `{type:"event",...event}` frames.
+//   GET /peer/events?org=<a>&org=<b>
+//     headers:
+//       x-stamp-pubkey     SPKI PEM (raw, or base64 of the PEM)
+//       x-stamp-timestamp  ISO-8601 timestamp
+//       x-stamp-signature  base64 Ed25519 signature over the canonical string
+//                          `peer-events\n<x-stamp-timestamp>`
+//     200: text/event-stream — periodic `: heartbeat` comments + `data: <json>`
+//          event frames for the caller's subscribed orgs.
+//     401: {ok:false,error:<reason>} — bad signature, stale timestamp, or the
+//          key is not an enrolled user.
 //
-// Nonce TTL: NONCE_TTL_MS (default 30 s). The nonce is consumed on first use
-// (single-use) so a captured challenge cannot be replayed even within the TTL.
+// The WS signed-challenge handshake was retired: it authenticated against an
+// unpopulated `/srv/git/.stamp/trusted-keys/<fp>.pub` store that was never
+// written. The SSE auth is self-contained: a fresh-timestamp signature proves
+// key possession (no nonce store needed for a read-only stream), and the
+// `users` table lookup proves enrollment.
 
-const NONCE_TTL_MS = 30_000;
-const WS_HANDSHAKE_TIMEOUT_MS = 30_000;
-// Ed25519 fingerprints are `SHA256:<43-44 base64 chars>`.
-// Validated before any filesystem path construction to prevent path traversal.
-const WS_FINGERPRINT_RE = /^SHA256:[A-Za-z0-9+/=]{43,44}$/;
-// WS path that `stamp pr listen --ws` connects to.
-export const WS_PEER_LISTEN_PATH = "/peer/listen";
-// Server-managed trusted-key directory for the WS handshake. On the WS path
-// we load keys from the server-global location (not per-repo at base_sha —
-// that per-repo check happens on each inbound message).
-const SERVER_TRUSTED_KEYS_DIR = process.env["STAMP_TRUSTED_KEYS_DIR"] ?? "/srv/git/.stamp/trusted-keys";
+/** Heartbeat comment interval — keeps Railway's idle-proxy from closing the
+ *  stream. Comment lines (`:`-prefixed) are ignored by EventSource parsers. */
+const SSE_HEARTBEAT_MS = 25_000;
+/** Allowed clock skew for the signed timestamp (replay window). */
+const SSE_TIMESTAMP_WINDOW_MS = 300_000;
+/** The path `stamp pr listen` connects to for the SSE event stream. */
+export const SSE_PEER_EVENTS_PATH = "/peer/events";
 
-/** Pending nonce state (for single-use enforcement + TTL). */
-interface PendingNonce {
-  nonce: string;
-  expiresAt: number;
-}
-
-/** Per-socket state bound after successful handshake. */
-interface WsSocketState {
-  fingerprint: string;
+/** Per-connection SSE state bound after successful auth. */
+interface SseClientState {
+  res: ServerResponse;
   orgs: string[];
+  heartbeat: ReturnType<typeof setInterval>;
 }
 
-// Module-scoped WS state for test seams.
-let _wssInstance: WebSocketServer | null = null;
+/** Active SSE connections keyed by fingerprint (for event fanout). */
+const sseConnections = new Map<string, SseClientState>();
 
-/** Map from WS socket → bound fingerprint+orgs (set after auth). */
-const wsSocketState = new WeakMap<WebSocket, WsSocketState>();
-/** Active WS connections keyed by fingerprint (for event fanout). */
-const wsConnections = new Map<string, WebSocket>();
-/** Single-use nonce store: nonce hex → PendingNonce. */
-const pendingNonces = new Map<string, PendingNonce>();
-
-/** Generate a fresh 32-byte nonce as a hex string. */
-function generateNonce(): string {
-  return randomBytes(32).toString("hex");
-}
-
-/** Expire stale nonces (called lazily before nonce operations). */
-function sweepNonces(): void {
-  const now = Date.now();
-  for (const [n, entry] of pendingNonces) {
-    if (entry.expiresAt <= now) pendingNonces.delete(n);
-  }
+/**
+ * Canonical string the client signs (and the server reconstructs) to prove
+ * key possession for the SSE stream. Bound to a timestamp so a captured
+ * signature falls out of the replay window quickly.
+ */
+function sseCanonicalString(timestamp: string): Buffer {
+  return Buffer.from(`peer-events\n${timestamp}`, "utf8");
 }
 
 /**
- * Verify the WS handshake auth message. Loads the operator's PEM from
- * `SERVER_TRUSTED_KEYS_DIR/<fingerprint>.pub` (global store — same keys that
- * SSH `authorized_keys` uses for the stamp-server).
- *
- * Returns `{ ok: true }` or `{ ok: false, reason }`.
+ * Decode the `x-stamp-pubkey` header into an SPKI PEM string. The header may
+ * carry the PEM verbatim (multi-line, possibly with literal `\n`), or the
+ * base64 of the PEM. Returns null when neither form yields a PEM.
  */
-function verifyWsHandshake(
-  fingerprint: string,
-  nonce: string,
-  signatureBase64: string,
-): { ok: true } | { ok: false; reason: string } {
-  // Validate fingerprint format before any filesystem path construction.
-  // Ed25519 fingerprints are `SHA256:<43-44 base64 chars>`. Rejecting here
-  // prevents path traversal via a crafted fingerprint (e.g. `../../tmp/evil`).
-  if (!WS_FINGERPRINT_RE.test(fingerprint)) {
-    return { ok: false, reason: `fingerprint format invalid: ${fingerprint}` };
-  }
-
-  // Look up and consume the nonce.
-  sweepNonces();
-  const entry = pendingNonces.get(nonce);
-  if (!entry) return { ok: false, reason: "nonce not found or expired" };
-  if (entry.expiresAt <= Date.now()) {
-    pendingNonces.delete(nonce);
-    return { ok: false, reason: "nonce expired" };
-  }
-  // Consume: single-use enforcement.
-  pendingNonces.delete(nonce);
-
-  // Load PEM from global server trusted-keys dir.
-  let pem: string;
+function decodePubkeyHeader(raw: string): string | null {
+  const direct = raw.includes("BEGIN PUBLIC KEY") ? raw.replace(/\\n/g, "\n") : null;
+  if (direct) return direct;
   try {
-    // readFileSync from node:fs — the server-global dir is a real fs path,
-    // not a git-tree path (no base_sha needed for the handshake).
-    // The fingerprint is already validated above; path.basename is not needed.
-    pem = readFileSync(
-      `${SERVER_TRUSTED_KEYS_DIR}/${fingerprint}.pub`,
-      "utf8",
-    );
+    const decoded = Buffer.from(raw, "base64").toString("utf8");
+    if (decoded.includes("BEGIN PUBLIC KEY")) return decoded;
   } catch {
-    return { ok: false, reason: `pubkey for ${fingerprint} not found` };
+    // fall through
+  }
+  return null;
+}
+
+/**
+ * Authenticate + authorize an inbound `/peer/events` request.
+ *   1. verifyBytes(pubkey, `peer-events\n<ts>`, signature) — proof of key
+ *      possession (self-contained; no nonce store).
+ *   2. timestamp within ±SSE_TIMESTAMP_WINDOW_MS — replay defense.
+ *   3. the key belongs to an enrolled user (users.stamp_pubkey lookup).
+ *
+ * Returns `{ ok: true, fingerprint }` or `{ ok: false, status, reason }`.
+ */
+function authenticateSseRequest(
+  req: IncomingMessage,
+): { ok: true; pubkeyPem: string } | { ok: false; reason: string } {
+  const rawPubkey = headerValue(req, "x-stamp-pubkey");
+  const timestamp = headerValue(req, "x-stamp-timestamp");
+  const signature = headerValue(req, "x-stamp-signature");
+  if (!rawPubkey || !timestamp || !signature) {
+    return { ok: false, reason: "missing auth headers" };
   }
 
-  let valid: boolean;
+  const pubkeyPem = decodePubkeyHeader(rawPubkey);
+  if (!pubkeyPem) {
+    return { ok: false, reason: "x-stamp-pubkey is not an SPKI PEM" };
+  }
+
+  // (2) Timestamp window — reject stale/future signatures.
+  const ts = Date.parse(timestamp);
+  if (Number.isNaN(ts)) {
+    return { ok: false, reason: "x-stamp-timestamp is not a valid ISO-8601 timestamp" };
+  }
+  if (Math.abs(Date.now() - ts) > SSE_TIMESTAMP_WINDOW_MS) {
+    return { ok: false, reason: "x-stamp-timestamp outside the allowed window" };
+  }
+
+  // (1) Signature — proof of key possession.
+  let validSig: boolean;
   try {
-    valid = verifyBytes(pem, Buffer.from(nonce, "utf8"), signatureBase64);
+    validSig = verifyBytes(pubkeyPem, sseCanonicalString(timestamp), signature);
   } catch (err) {
     return {
       ok: false,
       reason: `signature verify threw: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  return valid ? { ok: true } : { ok: false, reason: "signature invalid" };
+  if (!validSig) {
+    return { ok: false, reason: "signature invalid" };
+  }
+
+  // (3) Enrollment — the key must belong to a known user.
+  let enrolled = false;
+  try {
+    const db = openServerDb({ readOnly: true });
+    try {
+      enrolled = findUserByStampPubkey(db, pubkeyPem) !== null;
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `user lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!enrolled) {
+    return { ok: false, reason: "key is not an enrolled user" };
+  }
+
+  return { ok: true, pubkeyPem };
+}
+
+/** Read a request header as a single string (first value if repeated). */
+function headerValue(req: IncomingMessage, name: string): string | null {
+  const v = req.headers[name];
+  if (Array.isArray(v)) return v[0] ?? null;
+  return typeof v === "string" ? v : null;
+}
+
+/** Parse `?org=a&org=b` (repeated) into a deduped org list. */
+function parseOrgQuery(url: string): string[] {
+  const q = url.indexOf("?");
+  if (q < 0) return [];
+  const params = new URLSearchParams(url.slice(q + 1));
+  return [...new Set(params.getAll("org").filter((o) => o.length > 0))];
 }
 
 /**
- * Push a PeerReviewEvent to the WS client identified by `fingerprint`.
- * Returns true when the socket was found and the message was queued;
- * false when no active WS connection exists for that fingerprint.
+ * Push a PeerReviewEvent to the SSE client identified by `fingerprint`.
+ * Returns true when the stream was found and the frame was written; false
+ * when no active SSE connection exists for that fingerprint.
  */
-export function pushEventToWsClient(
+export function pushEventToSseClient(
   fingerprint: string,
   event: PeerReviewEvent,
 ): boolean {
-  const ws = wsConnections.get(fingerprint);
-  if (!ws) return false;
+  const client = sseConnections.get(fingerprint);
+  if (!client) return false;
   try {
-    ws.send(JSON.stringify({ type: "event", ...event }));
+    client.res.write(`data: ${JSON.stringify(event)}\n\n`);
     return true;
   } catch {
     return false;
@@ -1307,208 +1335,104 @@ export function pushEventToWsClient(
 }
 
 /**
- * Handle an inbound WS message (post-auth).
- * Expected shapes:
- *   {type:"pr-opened", ...payload, pubkey, signature}
- *   {type:"claim-seat", ...payload, pubkey, signature}
- *   {type:"re-review-request", ...payload, pubkey, signature}
+ * Handle a `GET /peer/events` request: authenticate (sign-with-key against the
+ * users store), register the response stream keyed by fingerprint, and stream
+ * events for the caller's subscribed orgs. The whole endpoint is gated on
+ * `resolvePeerReviewsEnabled()` by the caller. Exported for test access.
  *
- * AGT-454 pure-crypto verify (GitHub-blind broker, zero repo access):
- *   1. Recompute fingerprintFromPem(msg.pubkey); reject if ≠ state.fingerprint
- *      (fp-recompute bind — prevents pubkey/fp swap).
- *   2. verifyBytes(pubkey, canonicalSerializePeerPayload(payloadWithoutSig), signature).
- *
- * Operator-ness @ base_sha is NOT checked here — that is the listener's job
- * (client-side, against its own local clone).
- *
- * Returns a JSON response string; a verified message returns `{ok:true}`.
- * Returns a JSON error string on failure.
+ * Delivery reuses the in-process listener registry (registerListener /
+ * fanoutEvent) — the registered `onEvent` callback writes a `data:` frame to
+ * this response, so `pr-opened` / re-review fanout reaches SSE clients without
+ * a separate fanout path.
  */
-function handleWsMessage(
-  state: WsSocketState,
-  raw: string,
-): string | null {
-  let msg: Record<string, unknown>;
-  try {
-    msg = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return JSON.stringify({ ok: false, error: "message_not_json" });
+export function handlePeerEventsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+): void {
+  const auth = authenticateSseRequest(req);
+  if (!auth.ok) {
+    logLine("warn", `SSE /peer/events: auth failed: ${auth.reason}`);
+    sendJson(res, 401, { ok: false, error: "unauthorized", reason: auth.reason });
+    return;
   }
 
-  const msgType = typeof msg["type"] === "string" ? msg["type"] : null;
-  if (!msgType) {
-    return JSON.stringify({ ok: false, error: "message_type_required" });
+  // Fingerprint binds the stream to the verified pubkey (same namespace the
+  // listener registry / seat verbs use).
+  const fingerprint = fingerprintFromPem(auth.pubkeyPem);
+  const orgs = parseOrgQuery(req.url ?? "");
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-store",
+    Connection: "keep-alive",
+  });
+  // Open the stream with a comment so proxies flush headers immediately.
+  res.write(`: connected ${fingerprint}\n\n`);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: heartbeat\n\n`);
+    } catch {
+      // The close handler will tear the registration down.
+    }
+  }, SSE_HEARTBEAT_MS);
+  // Don't let the heartbeat timer keep the event loop alive on its own.
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
+
+  const state: SseClientState = { res, orgs, heartbeat };
+  // Replace any prior stream for this fingerprint (a reconnect supersedes).
+  const prior = sseConnections.get(fingerprint);
+  if (prior) {
+    clearInterval(prior.heartbeat);
+    unregisterListener(fingerprint);
+    try { prior.res.end(); } catch { /* ignore */ }
   }
+  sseConnections.set(fingerprint, state);
 
-  // For pr-opened / claim-seat / re-review-request: verify the signature.
-  const verifiableTypes = ["pr-opened", "claim-seat", "re-review-request"];
-  if (verifiableTypes.includes(msgType)) {
-    const signature = typeof msg["signature"] === "string" ? msg["signature"] : null;
-    if (!signature) {
-      return JSON.stringify({ ok: false, error: "signature_required" });
-    }
-
-    // AGT-454: pubkey is carried inline in the message.
-    const pubkey = typeof msg["pubkey"] === "string" ? msg["pubkey"] : null;
-    if (!pubkey) {
-      return JSON.stringify({ ok: false, error: "pubkey_required" });
-    }
-
-    // Build the payload-without-signature for canonical serialization.
-    // The client signed over the full payload minus the `signature` field
-    // (and minus `type` on the WS path, per canonicalSign convention).
-    const { signature: _sig, type: _type, ...payloadWithoutSig } = msg;
-    const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
-
-    // AGT-454 pure-crypto bind: recompute fp from carried pubkey, verify sig.
-    const verifyResult = verifyPeerPayloadSignatureFromPubkey(
-      pubkey,
-      state.fingerprint,
-      canonicalBytes,
-      signature,
-    );
-
-    if (!verifyResult.ok) {
-      logLine(
-        "warn",
-        `WS ${msgType}: signature verification failed for fp=${state.fingerprint}: ${verifyResult.reason}`,
-      );
-      return JSON.stringify({ ok: false, error: "signature_verification_failed" });
-    }
-
-    logLine(
-      "info",
-      `WS ${msgType}: pubkey-bind + signature verified for fp=${state.fingerprint}`,
-    );
-    return JSON.stringify({ ok: true, type: msgType, message: "verified" });
-  }
-
-  // Unrecognised message type — silently acknowledge.
-  return JSON.stringify({ ok: false, error: `unknown_message_type: ${msgType}` });
-}
-
-/**
- * Attach a WebSocketServer to an existing HTTP server.
- * Called from `startServer` when `resolvePeerReviewsEnabled()` is true.
- * The WSS is also stored in `_wssInstance` for test access.
- *
- * The upgrade handler checks the request path is exactly WS_PEER_LISTEN_PATH
- * and rejects all other upgrade requests.
- */
-export function attachWsServer(
-  httpServer: ReturnType<typeof createServer>,
-): WebSocketServer {
-  const wss = new WebSocketServer({ noServer: true });
-  _wssInstance = wss;
-
-  httpServer.on("upgrade", (req, socket, head) => {
-    const url = req.url ?? "";
-    if (url !== WS_PEER_LISTEN_PATH) {
-      socket.destroy();
-      return;
-    }
-
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit("connection", ws, req);
-    });
+  // Wire delivery: fanoutEvent calls this onEvent, which writes the SSE frame.
+  registerListener(fingerprint, {
+    orgs,
+    onEvent: (event: PeerReviewEvent) => {
+      try {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        // Best-effort; cleanup happens on close.
+      }
+    },
   });
 
-  wss.on("connection", (ws: WebSocket) => {
-    logLine("info", "WS peer/listen: new connection, issuing challenge");
+  logLine(
+    "info",
+    `SSE /peer/events: connected fp=${fingerprint} orgs=[${orgs.join(",")}]`,
+  );
 
-    // Issue a nonce challenge.
-    sweepNonces();
-    const nonce = generateNonce();
-    pendingNonces.set(nonce, { nonce, expiresAt: Date.now() + NONCE_TTL_MS });
-    ws.send(JSON.stringify({ type: "challenge", nonce }));
-
-    // Set handshake timeout — drop the connection if auth doesn't arrive.
-    const handshakeTimer = setTimeout(() => {
-      if (!wsSocketState.has(ws)) {
-        logLine("warn", "WS peer/listen: handshake timeout — closing socket");
-        ws.close(4401, "handshake_timeout");
-      }
-    }, WS_HANDSHAKE_TIMEOUT_MS);
-
-    ws.on("message", (data: Buffer | string) => {
-      const raw = typeof data === "string" ? data : data.toString("utf8");
-
-      // Phase 1: handshake (socket not yet authenticated).
-      if (!wsSocketState.has(ws)) {
-        let msg: Record<string, unknown>;
-        try {
-          msg = JSON.parse(raw) as Record<string, unknown>;
-        } catch {
-          ws.close(4400, "auth_message_not_json");
-          return;
-        }
-        if (msg["type"] !== "auth") {
-          ws.close(4400, "expected_auth_message");
-          return;
-        }
-        const fingerprint = typeof msg["fingerprint"] === "string" ? msg["fingerprint"] : null;
-        const signature = typeof msg["signature"] === "string" ? msg["signature"] : null;
-        const nonce = typeof msg["nonce"] === "string" ? msg["nonce"] : null;
-        if (!fingerprint || !signature || !nonce) {
-          ws.close(4400, "auth_fields_missing");
-          return;
-        }
-
-        const result = verifyWsHandshake(fingerprint, nonce, signature);
-        if (!result.ok) {
-          logLine("warn", `WS peer/listen: auth failed for fp=${fingerprint}: ${result.reason}`);
-          ws.close(4401, "auth_failed");
-          return;
-        }
-
-        clearTimeout(handshakeTimer);
-        const orgs = Array.isArray(msg["orgs"])
-          ? (msg["orgs"] as unknown[]).filter((o): o is string => typeof o === "string")
-          : [];
-        const state: WsSocketState = { fingerprint, orgs };
-        wsSocketState.set(ws, state);
-        wsConnections.set(fingerprint, ws);
-        logLine("info", `WS peer/listen: authenticated fp=${fingerprint} orgs=[${orgs.join(",")}]`);
-        ws.send(JSON.stringify({ type: "authenticated", fingerprint }));
-        return;
-      }
-
-      // Phase 2: authenticated message handling.
-      const state = wsSocketState.get(ws)!;
-      const response = handleWsMessage(state, raw);
-      if (response !== null) {
-        ws.send(response);
-      }
-    });
-
-    ws.on("close", () => {
-      clearTimeout(handshakeTimer);
-      const state = wsSocketState.get(ws);
-      if (state) {
-        wsConnections.delete(state.fingerprint);
-        wsSocketState.delete(ws);
-        logLine("info", `WS peer/listen: disconnected fp=${state.fingerprint}`);
-      }
-    });
-
-    ws.on("error", (err) => {
-      logLine("warn", `WS peer/listen: socket error: ${err.message}`);
-    });
-  });
-
-  logLine("info", `WS peer/listen: server attached at ${WS_PEER_LISTEN_PATH}`);
-  return wss;
+  const cleanup = (): void => {
+    clearInterval(heartbeat);
+    // Only tear down the registry entry if it's still ours (a reconnect may
+    // have already replaced it).
+    if (sseConnections.get(fingerprint) === state) {
+      sseConnections.delete(fingerprint);
+      unregisterListener(fingerprint);
+      logLine("info", `SSE /peer/events: disconnected fp=${fingerprint}`);
+    }
+  };
+  req.on("close", cleanup);
+  res.on("close", cleanup);
 }
 
-/** Test-only: get the active WSS instance (null if not started). */
-export function __getWssForTests(): WebSocketServer | null {
-  return _wssInstance;
+/** Test-only: snapshot of active SSE fingerprints. */
+export function __getSseConnectionsForTests(): string[] {
+  return [...sseConnections.keys()];
 }
 
-/** Test-only: clear all WS connections (for teardown). */
-export function __clearWsConnectionsForTests(): void {
-  wsConnections.clear();
-  pendingNonces.clear();
+/** Test-only: clear all SSE connections (for teardown). */
+export function __clearSseConnectionsForTests(): void {
+  for (const [fp, client] of sseConnections) {
+    clearInterval(client.heartbeat);
+    unregisterListener(fp);
+    try { client.res.end(); } catch { /* ignore */ }
+  }
+  sseConnections.clear();
 }
 
 // ─── Server lifecycle ─────────────────────────────────────────────────
@@ -1530,6 +1454,17 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
       void handleWebhookPrompts(req, res);
       return;
     }
+    // AGT-454: SSE peer-review event stream. Gated on the feature flag — when
+    // disabled the endpoint is inert (404), so standard HTTP-only deploys see
+    // no behaviour change.
+    if (req.method === "GET" && (url === SSE_PEER_EVENTS_PATH || url.startsWith(`${SSE_PEER_EVENTS_PATH}?`))) {
+      if (!resolvePeerReviewsEnabled()) {
+        sendJson(res, 404, { ok: false, error: "not_found" });
+        return;
+      }
+      handlePeerEventsRequest(req, res);
+      return;
+    }
     sendJson(res, 404, { ok: false, error: "not_found" });
   });
   server.listen(port, () => {
@@ -1543,12 +1478,9 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     // AGT-423: arm the trash-retention sweep (independent of Phase B; runs
     // whenever STAMP_TRASH_SWEEP_INTERVAL_SEC != 0).
     startTrashSweepWorker();
-    // AGT-434: attach the WS peer-review transport only when the feature is
-    // enabled. The upgrade handler is inert when the flag is unset, so
-    // standard HTTP-only deploys see no behaviour change.
-    if (resolvePeerReviewsEnabled()) {
-      attachWsServer(server);
-    }
+    // AGT-454: the SSE peer-review event stream (GET /peer/events) is mounted
+    // inline in the request handler above, gated on resolvePeerReviewsEnabled().
+    // No separate attach step is needed (it replaced the WS upgrade handler).
     // AGT-454 G3: arm the seat-TTL sweeper when peer reviews are enabled.
     startSeatSweepWorker();
   });
@@ -1561,11 +1493,9 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     stopPromptsPollWorker();
     stopTrashSweepWorker();
     stopSeatSweepWorker();
-    // Close the WS server if it was attached.
-    if (_wssInstance) {
-      _wssInstance.close();
-      _wssInstance = null;
-    }
+    // Tear down any live SSE streams so their heartbeat timers + registry
+    // entries don't leak into the next listener instance (test reuse).
+    __clearSseConnectionsForTests();
   });
   return server;
 }

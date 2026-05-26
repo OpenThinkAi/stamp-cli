@@ -1,31 +1,36 @@
 /**
  * `stamp pr listen --org <org>...` — foreground peer-review listener (AGT-429/AGT-430).
  *
- * Subscribes the operator's fingerprint + org list against the in-process
- * listener registry (`registerListener` in peerReviews.ts) and enters an
- * event loop that:
+ * Connects to the stamp-server's SSE event stream (`GET /peer/events`) with
+ * sign-with-key auth (AGT-454) and enters an event loop that:
  *
- *   1. Waits for the next `pr-opened` event via a Promise resolved by the
- *      registered `onEvent` callback.
+ *   1. Waits for the next `pr-opened` event parsed from the SSE stream.
  *   2. Skips events where `requested_by_fp` matches the operator's own
  *      fingerprint (author-exclusion).
- *   3. Runs the Haiku triage call against `~/.stamp/peer-watch.md` (AGT-430).
- *      If `peer-watch.md` is missing, falls back to a default claim decision.
- *      If triage returns `claim_seat: "skip"`, skips the event.
+ *   3. Runs the Haiku triage call against `~/.stamp/peer-watch.md` (AGT-430)
+ *      using event metadata (title + paths_changed) only. If `peer-watch.md`
+ *      is missing, falls back to a default claim decision. If triage returns
+ *      `claim_seat: "skip"`, skips the event.
  *   4. Resolves the named prompt from `~/.stamp/personal/peers/<name>.md`.
  *      Missing prompt → logs `✗` and skips (AC #3).
  *   5. Logs the triage triplet to `~/.stamp/peer-watch.log` (AC #6).
  *   6. Claims a reviewer seat via `claim-seat` (seatClient.ts).
- *   7. Starts a 60-second heartbeat interval while the review runs.
- *   8. Runs the peer review via `runBuiltinReview` using the resolved named
- *      prompt as the system prompt (AC #4).
- *   9. Posts the result via `gh pr review <pr_url> --comment -b "<body>"`.
- *  10. Releases the seat on `gh` failure; loops back to step 1.
- *  11. On SIGINT: emits "note: shutting down", releases any held seat, exits 0.
+ *   7. Fetches the real unified diff via `gh pr diff <pr_url>` (the per-repo
+ *      GitHub authorization boundary). Failure → releases the seat and skips.
+ *   8. Starts a 60-second heartbeat interval while the review runs.
+ *   9. Runs the peer review via `runBuiltinReview` over the fetched diff using
+ *      the resolved named prompt as the system prompt (AC #4).
+ *  10. Posts the result via `gh pr review <pr_url> --comment -b "<body>"`.
+ *  11. Releases the seat on `gh` failure; loops back to step 1.
+ *  12. On SIGINT: emits "note: shutting down", releases any held seat, exits 0.
+ *
+ * Transport: SSE is the sole listen transport. It requires `http_url` in
+ * ~/.stamp/server.yml (the HTTP origin of the stamp-server). The WS transport
+ * and the SSH-verb long-poll fallback were retired (AGT-454).
  *
  * Exit codes:
  *   0   — clean shutdown (SIGINT / ctrl-C)
- *   1   — auth failure (keypair missing, subscribe failed)
+ *   1   — auth failure (keypair missing, SSE connect failed)
  *   2   — arg-parse error (no --org provided; enforced by Commander)
  */
 
@@ -37,14 +42,12 @@ import { signBytes } from "../lib/signing.js";
 import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
 import type { ServerConfig } from "../lib/serverConfig.js";
-import { WebSocket } from "ws";
-import {
-  registerListener,
-  unregisterListener,
-} from "../server/peerReviews.js";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import type { IncomingMessage } from "node:http";
+import type { Readable } from "node:stream";
 import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 import {
-  callSubscribe,
   callClaimSeat,
   callHeartbeat,
   callReleaseSeat,
@@ -83,6 +86,8 @@ export interface PrListenOptions {
   _sshSpawnForTest?: SshSpawnFn;
   /** Test-only: inject a fake `gh pr review` spawn result. */
   _ghReviewForTest?: (prUrl: string, body: string) => { status: number; stderr: string };
+  /** Test-only: inject a fake `gh pr diff` spawn result. */
+  _ghDiffForTest?: (prUrl: string) => { status: number; stdout: string; stderr: string };
   /** Test-only: inject a fake SDK runner for the Sonnet review call. */
   _sdkRunnerForTest?: (diff: string) => Promise<string>;
   /** Test-only: inject a fake Haiku runner for the triage call. */
@@ -97,7 +102,7 @@ export interface PrListenOptions {
   /**
    * Test-only: pre-queued events to process deterministically. When set, the
    * listener loop drains this array (one event per iteration) instead of
-   * blocking on a Promise resolved by `fanoutEvent`. After the queue is
+   * connecting to / blocking on the SSE stream. After the queue is
    * drained, the loop exits normally (exit 0). This lets tests drive the full
    * loop in-process with no timers or background goroutines.
    */
@@ -152,18 +157,12 @@ export interface PrListenOptions {
    */
   _peerReposMapForTest?: Map<string, string>;
   /**
-   * Select the WebSocket transport (AGT-434) instead of the SSH-verb long-poll
-   * fallback. When true, `stamp pr listen` connects via WS to the stamp-server's
-   * `/peer/listen` endpoint for event delivery instead of the SSH-verb
-   * `subscribe` long-poll. The SSH-verb path is retained as a flag-selected
-   * fallback through AGT-433 validation.
+   * Test-only: inject a readable stream of raw `text/event-stream` bytes in
+   * place of a real HTTPS GET to `/peer/events`. When set, the SSE connect
+   * step is skipped and this stream is parsed directly. Used to drive the SSE
+   * parser deterministically without a server.
    */
-  useWsTransport?: boolean;
-  /**
-   * Test-only: inject a pre-constructed WebSocket for the WS transport path.
-   * When set, the WS connect step is skipped and this socket is used directly.
-   */
-  _wsSocketForTest?: WebSocket;
+  _sseStreamForTest?: Readable;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -181,159 +180,217 @@ function canonicalSign(keypair: Keypair, payloadBody: object): string {
 }
 
 /**
- * Build the WebSocket URL for the `/peer/listen` endpoint from a `ServerConfig`.
+ * Build the SSE `/peer/events` URL from a `ServerConfig` + org list.
  *
- * Returns `{ ok: true, url }` when `wsUrl` is set (strips a trailing `/` from
- * the origin before appending `/peer/listen`).
+ * Returns `{ ok: true, url }` when `httpUrl` is set (strips a trailing `/`
+ * from the origin before appending `/peer/events?org=...`).
  * Returns `{ ok: false, reason }` with an actionable error message when
- * `wsUrl` is absent — the SSH host:port cannot be used for WS connections.
+ * `httpUrl` is absent — the SSH host:port cannot be used for the HTTP stream.
  *
  * Exported for unit testing.
  */
-export function buildWsPeerListenUrl(
+export function buildPeerEventsUrl(
   serverCfg: ServerConfig,
+  orgs: string[],
 ): { ok: true; url: string } | { ok: false; reason: string } {
-  if (!serverCfg.wsUrl) {
+  if (!serverCfg.httpUrl) {
     return {
       ok: false,
       reason:
-        "WS transport requires 'ws_url' in ~/.stamp/server.yml " +
-        "(e.g. ws_url: wss://stamp-cli-production.up.railway.app). " +
-        "The SSH host:port cannot be used for WebSocket connections — " +
+        "SSE transport requires 'http_url' in ~/.stamp/server.yml " +
+        "(e.g. http_url: https://stamp-cli-production.up.railway.app). " +
+        "The SSH host:port cannot be used for the HTTP event stream — " +
         "the HTTP server lives at a different URL.",
     };
   }
-  return {
-    ok: true,
-    url: `${serverCfg.wsUrl.replace(/\/$/, "")}/peer/listen`,
-  };
+  const base = `${serverCfg.httpUrl.replace(/\/$/, "")}/peer/events`;
+  const query = orgs.map((o) => `org=${encodeURIComponent(o)}`).join("&");
+  return { ok: true, url: query ? `${base}?${query}` : base };
 }
 
 /**
- * Connect to the stamp-server's WS `/peer/listen` endpoint, complete the
- * signed-challenge handshake, and return a Promise that resolves to a
- * readable event source: an async generator that yields `PeerReviewEvent`
- * objects as the server pushes them.
+ * Parse a `text/event-stream` body into PeerReviewEvent objects.
  *
- * Handshake:
- *   1. Server sends `{type:"challenge",nonce}`.
- *   2. Client signs the nonce with Ed25519 and responds with
- *      `{type:"auth", fingerprint, nonce, signature, orgs}`.
- *   3. Server responds `{type:"authenticated",fingerprint}` on success, or
- *      closes with a 44xx code on failure.
+ * SSE framing: events are separated by a blank line; `data:` lines within a
+ * frame are concatenated; comment lines (`:`-prefixed, e.g. heartbeats) are
+ * ignored. Each completed frame's accumulated `data` payload is JSON-parsed
+ * into a PeerReviewEvent and pushed via `onEvent`. Malformed frames are
+ * dropped (logged to stderr) rather than aborting the stream.
  *
- * Returns `{ ok: false, reason }` when auth fails; `{ ok: true, ws, eventGen }`
- * when connected.
+ * Exported for unit testing with an injected stream.
  */
-async function connectWsTransport(
+export function parseSseStream(
+  stream: Readable,
+  onEvent: (event: PeerReviewEvent) => void,
+): void {
+  let buffer = "";
+  let dataLines: string[] = [];
+
+  const flushFrame = (): void => {
+    if (dataLines.length === 0) return;
+    const raw = dataLines.join("\n");
+    dataLines = [];
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      process.stderr.write(`note: dropping malformed SSE frame\n`);
+      return;
+    }
+    const event: PeerReviewEvent = {
+      event_type: typeof parsed["event_type"] === "string" ? parsed["event_type"] : "unknown",
+      patch_id: typeof parsed["patch_id"] === "string" ? parsed["patch_id"] : "",
+      actor_fp: typeof parsed["actor_fp"] === "string" ? parsed["actor_fp"] : "",
+      payload:
+        typeof parsed["payload"] === "object" && parsed["payload"] !== null
+          ? (parsed["payload"] as object)
+          : {},
+    };
+    onEvent(event);
+  };
+
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    buffer += chunk;
+    let nlIdx: number;
+    while ((nlIdx = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nlIdx).replace(/\r$/, "");
+      buffer = buffer.slice(nlIdx + 1);
+      if (line === "") {
+        // Blank line → end of one event frame.
+        flushFrame();
+        continue;
+      }
+      if (line.startsWith(":")) {
+        // Comment / heartbeat — ignore.
+        continue;
+      }
+      if (line.startsWith("data:")) {
+        // Per the SSE spec, a single leading space after the colon is stripped.
+        dataLines.push(line.slice(5).replace(/^ /, ""));
+      }
+      // Other field lines (event:, id:, retry:) are ignored — the server only
+      // emits data: frames.
+    }
+  });
+}
+
+/**
+ * Connect to the stamp-server's SSE `/peer/events` endpoint with sign-with-key
+ * auth headers, and return an async event source (`nextEvent`) that yields the
+ * pushed PeerReviewEvent objects.
+ *
+ * Auth (AGT-454): the client signs a canonical string `peer-events\n<iso8601>`
+ * with its Ed25519 operator key and sends:
+ *   x-stamp-pubkey     SPKI PEM (base64-encoded)
+ *   x-stamp-timestamp  ISO-8601 timestamp
+ *   x-stamp-signature  base64 Ed25519 signature
+ * The server verifies the signature, checks the timestamp window, and confirms
+ * the key is an enrolled user. A non-200 response → `{ ok: false, reason }`.
+ *
+ * Reconnection is the caller's job; this connects once. When the underlying
+ * stream ends, `nextEvent()` resolves to `null` (end-of-stream).
+ */
+async function connectSseTransport(
   keypair: Keypair,
   orgs: string[],
   serverCfg: ServerConfig,
-  wsSocketOverride?: WebSocket,
+  streamOverride?: Readable,
 ): Promise<
-  | { ok: true; ws: WebSocket; nextEvent: () => Promise<PeerReviewEvent | null> }
+  | { ok: true; nextEvent: () => Promise<PeerReviewEvent | null>; close: () => void }
   | { ok: false; reason: string }
 > {
-  // In-test: use the injected WS socket (skip URL resolution entirely).
-  // For real connections, resolve the URL via buildWsPeerListenUrl; it fails
-  // fast with an actionable error when wsUrl is missing (the SSH host:port
-  // cannot be used for WS — it speaks sshd, not HTTP).
-  let ws: WebSocket;
-  if (wsSocketOverride) {
-    ws = wsSocketOverride;
-  } else {
-    const urlResult = buildWsPeerListenUrl(serverCfg);
-    if (!urlResult.ok) {
-      return { ok: false, reason: urlResult.reason };
+  // Per-event delivery plumbing shared by both the live and injected paths.
+  const queue: PeerReviewEvent[] = [];
+  let pendingResolve: ((event: PeerReviewEvent | null) => void) | null = null;
+  let ended = false;
+
+  const deliver = (event: PeerReviewEvent): void => {
+    if (pendingResolve) {
+      const r = pendingResolve;
+      pendingResolve = null;
+      r(event);
+    } else {
+      queue.push(event);
     }
-    ws = new WebSocket(urlResult.url);
+  };
+  const signalEnd = (): void => {
+    ended = true;
+    if (pendingResolve) {
+      const r = pendingResolve;
+      pendingResolve = null;
+      r(null);
+    }
+  };
+  const nextEvent = (): Promise<PeerReviewEvent | null> =>
+    new Promise<PeerReviewEvent | null>((resolve) => {
+      if (queue.length > 0) {
+        resolve(queue.shift()!);
+        return;
+      }
+      if (ended) {
+        resolve(null);
+        return;
+      }
+      pendingResolve = resolve;
+    });
+
+  // ─── Test seam: parse an injected stream directly ──────────────────
+  if (streamOverride) {
+    parseSseStream(streamOverride, deliver);
+    streamOverride.on("end", signalEnd);
+    streamOverride.on("close", signalEnd);
+    streamOverride.on("error", signalEnd);
+    return { ok: true, nextEvent, close: () => streamOverride.destroy() };
   }
 
+  // ─── Live connection ───────────────────────────────────────────────
+  const urlResult = buildPeerEventsUrl(serverCfg, orgs);
+  if (!urlResult.ok) return { ok: false, reason: urlResult.reason };
+
+  const timestamp = new Date().toISOString();
+  const signature = signBytes(
+    keypair.privateKeyPem,
+    Buffer.from(`peer-events\n${timestamp}`, "utf8"),
+  );
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream",
+    "x-stamp-pubkey": Buffer.from(keypair.publicKeyPem, "utf8").toString("base64"),
+    "x-stamp-timestamp": timestamp,
+    "x-stamp-signature": signature,
+  };
+
+  const parsed = new URL(urlResult.url);
+  const requestFn = parsed.protocol === "https:" ? httpsRequest : httpRequest;
+
   return new Promise((resolve) => {
-    let authenticated = false;
-    let pendingResolve: ((event: PeerReviewEvent | null) => void) | null = null;
-
-    ws.on("error", (err) => {
-      if (!authenticated) {
-        resolve({ ok: false, reason: `WS connection error: ${err.message}` });
-      }
-    });
-
-    ws.on("close", (code, reason) => {
-      if (!authenticated) {
-        resolve({ ok: false, reason: `WS closed before auth: code=${code} ${reason.toString("utf8")}` });
-        return;
-      }
-      // Signal end-of-stream to any pending nextEvent() caller.
-      if (pendingResolve) {
-        const r = pendingResolve;
-        pendingResolve = null;
-        r(null);
-      }
-    });
-
-    ws.on("message", (data: Buffer | string) => {
-      const raw = typeof data === "string" ? data : data.toString("utf8");
-      let msg: Record<string, unknown>;
-      try {
-        msg = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-
-      if (!authenticated) {
-        // Phase 1: handle challenge → send auth.
-        if (msg["type"] === "challenge") {
-          const nonce = typeof msg["nonce"] === "string" ? msg["nonce"] : null;
-          if (!nonce) {
-            resolve({ ok: false, reason: "WS challenge missing nonce" });
-            ws.close();
-            return;
-          }
-          // Sign the nonce bytes directly (not the JSON) to bind our identity.
-          const sig = signBytes(keypair.privateKeyPem, Buffer.from(nonce, "utf8"));
-          ws.send(JSON.stringify({
-            type: "auth",
-            fingerprint: keypair.fingerprint,
-            nonce,
-            signature: sig,
-            orgs,
-          }));
-          return;
-        }
-        if (msg["type"] === "authenticated") {
-          authenticated = true;
-          resolve({
-            ok: true,
-            ws,
-            nextEvent: () =>
-              new Promise<PeerReviewEvent | null>((r) => {
-                pendingResolve = r;
-              }),
+    const req = requestFn(
+      parsed,
+      { method: "GET", headers },
+      (res: IncomingMessage) => {
+        if (res.statusCode !== 200) {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (c: string) => { body += c; });
+          res.on("end", () => {
+            resolve({
+              ok: false,
+              reason: `server responded ${res.statusCode}${body ? `: ${body.trim()}` : ""}`,
+            });
           });
           return;
         }
-        // Any other message before auth is a protocol error.
-        resolve({ ok: false, reason: `unexpected WS message before auth: ${JSON.stringify(msg["type"])}` });
-        ws.close();
-        return;
-      }
-
-      // Phase 2: authenticated — deliver event messages.
-      if (msg["type"] === "event" && pendingResolve) {
-        const event: PeerReviewEvent = {
-          event_type: typeof msg["event_type"] === "string" ? msg["event_type"] : "unknown",
-          patch_id: typeof msg["patch_id"] === "string" ? msg["patch_id"] : "",
-          actor_fp: typeof msg["actor_fp"] === "string" ? msg["actor_fp"] : "",
-          payload: typeof msg["payload"] === "object" && msg["payload"] !== null
-            ? msg["payload"] as object
-            : {},
-        };
-        const r = pendingResolve;
-        pendingResolve = null;
-        r(event);
-      }
+        parseSseStream(res, deliver);
+        res.on("end", signalEnd);
+        res.on("close", signalEnd);
+        res.on("error", signalEnd);
+        resolve({ ok: true, nextEvent, close: () => req.destroy() });
+      },
+    );
+    req.on("error", (err: Error) => {
+      if (!ended) resolve({ ok: false, reason: `SSE connection error: ${err.message}` });
     });
+    req.end();
   });
 }
 
@@ -410,68 +467,35 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   }
   const serverCfg: ServerConfig = serverResult.cfg;
 
-  // ─── Transport selection: WS vs SSH long-poll ────────────────────
-  // useWsTransport=true (--ws flag) → connect via WebSocket (AGT-434).
-  // useWsTransport=false (default) → SSH-verb long-poll fallback.
+  // ─── Transport: SSE (sole listen transport, AGT-454) ─────────────
+  // Connect to the stamp-server's `GET /peer/events` SSE stream. The
+  // signed-key auth (x-stamp-pubkey/timestamp/signature) is built inside
+  // connectSseTransport. In tests, an in-memory stream is injected via
+  // _sseStreamForTest; in queue-mode tests the connect step is skipped
+  // entirely (the loop drains _eventQueueForTest).
+  const useQueueMode = Array.isArray(opts._eventQueueForTest);
 
-  // wsCleanup: called on shutdown to close the WS socket gracefully.
-  let wsCleanup: (() => void) | null = null;
-  // wsNextEvent: when using WS transport, this is the per-event resolver.
-  let wsNextEvent: (() => Promise<PeerReviewEvent | null>) | null = null;
+  // sseCleanup: called on shutdown to close the SSE stream gracefully.
+  let sseCleanup: (() => void) | null = null;
+  // sseNextEvent: the per-event resolver fed by the SSE parser.
+  let sseNextEvent: (() => Promise<PeerReviewEvent | null>) | null = null;
 
-  if (opts.useWsTransport) {
-    // ─── WS transport ─────────────────────────────────────────────
-    const wsResult = await connectWsTransport(
+  if (!useQueueMode) {
+    const sseResult = await connectSseTransport(
       keypair,
       orgs,
       serverCfg,
-      opts._wsSocketForTest,
+      opts._sseStreamForTest,
     );
-    if (!wsResult.ok) {
+    if (!sseResult.ok) {
       process.stderr.write(
-        `error: WS connect failed — ${wsResult.reason}\n`,
+        `error: SSE connect failed — ${sseResult.reason}\n`,
       );
       process.exit(1);
     }
-    wsNextEvent = wsResult.nextEvent;
-    wsCleanup = () => wsResult.ws.close();
-    process.stderr.write(`⟳ subscribed (WS); listening for PR events\n`);
-  } else {
-    // ─── SSH long-poll (fallback) ──────────────────────────────────
-    // The subscription call goes to the server's `subscribe` verb. For the
-    // in-process spike (AGT-429) this registers in the module-scoped registry
-    // AND goes over SSH so the server knows the fingerprint. In tests, the
-    // SSH call is injected.
-    const subscribeResult = await callSubscribe({
-      orgs,
-      fingerprint: keypair.fingerprint,
-      signature: canonicalSign(keypair, {
-        fingerprint: keypair.fingerprint,
-        orgs,
-      }),
-      serverConfig: serverCfg,
-      _sshSpawnForTest: opts._sshSpawnForTest,
-    });
-
-    if (!subscribeResult.ok && subscribeResult.reason !== "peer_reviews_not_configured") {
-      process.stderr.write(
-        `error: subscribe failed — ${subscribeResult.message}\n`,
-      );
-      process.exit(1);
-    }
-
-    if (!subscribeResult.ok && subscribeResult.reason === "peer_reviews_not_configured") {
-      process.stderr.write(
-        `note: stamp-server has peer reviews disabled; operating in local-only mode\n`,
-      );
-    }
-
-    process.stderr.write(`⟳ subscribed; listening for PR events\n`);
-
-    // wsNextEvent stays null — the loop uses the in-process fan-out path.
-    // wsCleanup stays null — unregisterListener handles teardown.
-    // Note: the in-process listener is registered below (after sshPendingResolve
-    // is in scope) so the onEvent callback can resolve the per-event Promise.
+    sseNextEvent = sseResult.nextEvent;
+    sseCleanup = sseResult.close;
+    process.stderr.write(`⟳ subscribed (SSE); listening for PR events\n`);
   }
 
   // ─── Daily spend accumulator (AGT-432 AC #2) ──────────────────────
@@ -506,12 +530,8 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   async function shutdown(): Promise<void> {
     process.stderr.write(`note: shutting down\n`);
     clearHeartbeat();
-    // Clean up based on which transport is active.
-    if (opts.useWsTransport) {
-      if (wsCleanup) wsCleanup();
-    } else {
-      unregisterListener(keypair!.fingerprint);
-    }
+    // Close the SSE stream (no-op in queue-mode tests).
+    if (sseCleanup) sseCleanup();
 
     if (currentSeatPatchId !== null) {
       await callReleaseSeat({
@@ -534,38 +554,13 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
   // ─── Event loop ───────────────────────────────────────────────────
   //
-  // Three event sources in priority order:
+  // Two event sources in priority order:
   //   1. _eventQueueForTest (test seam): drains a pre-queued array.
-  //   2. wsNextEvent (WS transport): awaits the next pushed frame.
-  //   3. In-process in-process fanout (SSH long-poll fallback): awaits the
-  //      next `registerListener` callback.
+  //   2. sseNextEvent (SSE transport): awaits the next pushed frame.
   //
   // When `_eventQueueForTest` is provided (test seam), drain that array
-  // deterministically instead of blocking on the in-process fanout Promise.
-  // This avoids timer/goroutine races in `node --test` environments.
-  const useQueueMode = Array.isArray(opts._eventQueueForTest);
-
-  // In-process event wait for the SSH-path fallback.
-  let sshPendingResolve: ((event: PeerReviewEvent) => void) | null = null;
-  function waitForNextSshEvent(): Promise<PeerReviewEvent> {
-    return new Promise<PeerReviewEvent>((resolve) => {
-      sshPendingResolve = resolve;
-    });
-  }
-  // Wire the SSH-path listener's onEvent to the promise resolver.
-  // Only relevant when SSH transport is active (not WS, not queue-mode test).
-  if (!opts.useWsTransport && !useQueueMode) {
-    registerListener(keypair.fingerprint, {
-      orgs,
-      onEvent: (event: PeerReviewEvent) => {
-        if (sshPendingResolve) {
-          const r = sshPendingResolve;
-          sshPendingResolve = null;
-          r(event);
-        }
-      },
-    });
-  }
+  // deterministically instead of blocking on the SSE stream. This avoids
+  // timer/goroutine races in `node --test` environments.
 
   async function nextEvent(): Promise<PeerReviewEvent | null> {
     if (useQueueMode) {
@@ -574,10 +569,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       if (q.length === 0) return null;
       return q.shift()!;
     }
-    if (opts.useWsTransport && wsNextEvent) {
-      return wsNextEvent();
+    if (sseNextEvent) {
+      return sseNextEvent();
     }
-    return waitForNextSshEvent();
+    return null;
   }
 
   // AGT-454: load peer-repos map once before the loop (fail-closed per-event).
@@ -589,10 +584,11 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
   for (;;) {
     const event = await nextEvent();
-    // In queue mode, null means the queue is empty — exit the loop cleanly.
+    // null means the queue is drained (queue-mode test) or the SSE stream
+    // ended — exit the loop cleanly.
     if (event === null) {
       clearHeartbeat();
-      unregisterListener(keypair.fingerprint);
+      if (sseCleanup) sseCleanup();
       process.exit(0);
     }
 
@@ -640,12 +636,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       continue;
     }
     const prUrl = prUrlRaw;
-    const diff =
-      typeof payload["diff"] === "string"
-        ? payload["diff"]
-        : typeof payload["body"] === "string"
-          ? payload["body"]
-          : `PR diff for patch_id=${patchId}`;
+    // AGT-454: the notification payload is metadata-only — the real unified
+    // diff is fetched via `gh pr diff` AFTER a successful seat claim (the
+    // per-repo GitHub authorization boundary). No diff/body fallback here.
     const requestedByFp =
       typeof payload["requested_by_fp"] === "string"
         ? payload["requested_by_fp"]
@@ -689,12 +682,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // If missing, fall back to the default decision (AC #8).
     const prTitle =
       typeof payload["title"] === "string" ? payload["title"] : "";
-    const prBody =
-      typeof payload["body"] === "string"
-        ? payload["body"]
-        : typeof payload["diff"] === "string"
-          ? payload["diff"]
-          : "";
+    // Triage runs on metadata only (title + paths_changed). The payload no
+    // longer carries a diff/body, so prBody is intentionally empty here.
+    const prBody = "";
     const prPaths: string[] =
       Array.isArray(payload["paths_changed"])
         ? (payload["paths_changed"] as unknown[]).filter((p): p is string => typeof p === "string")
@@ -870,6 +860,52 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     const seatNumber = claimResult.seat;
     currentSeatPatchId = patchId;
     process.stderr.write(`⟳ claimed seat ${seatNumber}; running review\n`);
+
+    // ─── AGT-454: fetch the real diff via gh (per-repo auth boundary) ──
+    // The notification payload is metadata-only; the unified diff is fetched
+    // from GitHub here, AFTER claiming the seat. GitHub gates this — a listener
+    // that lacks repo access cannot fetch the diff and releases the seat.
+    let diff: string;
+    {
+      let ghDiffStatus: number;
+      let ghDiffStdout = "";
+      let ghDiffStderr = "";
+      if (opts._ghDiffForTest) {
+        const r = opts._ghDiffForTest(prUrl);
+        ghDiffStatus = r.status;
+        ghDiffStdout = r.stdout;
+        ghDiffStderr = r.stderr;
+      } else {
+        const r = spawnSync("gh", ["pr", "diff", prUrl], {
+          stdio: ["ignore", "pipe", "pipe"],
+          encoding: "utf8",
+          maxBuffer: 32 * 1024 * 1024,
+        });
+        ghDiffStatus = r.status ?? 1;
+        ghDiffStdout = r.stdout ?? "";
+        ghDiffStderr = r.stderr?.trim() ?? "";
+      }
+
+      if (ghDiffStatus !== 0 || ghDiffStdout.trim() === "") {
+        const reason = ghDiffStderr || (ghDiffStdout.trim() === "" ? "empty diff" : `exit ${ghDiffStatus}`);
+        process.stderr.write(
+          `✗ could not fetch diff (gh): ${reason}; releasing seat\n`,
+        );
+        currentSeatPatchId = null;
+        await callReleaseSeat({
+          patch_id: patchId,
+          claimant_fp: keypair.fingerprint,
+          signature: canonicalSign(keypair, {
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+          }),
+          serverConfig: serverCfg,
+          _sshSpawnForTest: opts._sshSpawnForTest,
+        });
+        continue;
+      }
+      diff = ghDiffStdout;
+    }
 
     // ─── AC #5: heartbeat timer ──────────────────────────────────
     const setIntervalFn = opts._setIntervalForTest ?? setInterval;

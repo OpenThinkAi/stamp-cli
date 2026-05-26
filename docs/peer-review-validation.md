@@ -114,7 +114,7 @@ PR_URL=$(gh pr create --title "Peer-review validation run" --body "Validation PR
 echo "PR URL: $PR_URL"
 
 # 1b. Open Machine A's listener (optional — validates author-exclusion):
-stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER" --ws
+stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER"
 ```
 
 **Expected on Machine A listener** (if running):
@@ -126,12 +126,12 @@ note: skipping event for PR #N — author matches own fingerprint
 
 ```sh
 # Start listener before Machine A opens the PR:
-stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER" --ws
+stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER"
 ```
 
 **Expected on Machine B listener**:
 ```
-⟳ subscribed (WS); listening for PR events
+⟳ subscribed (SSE); listening for PR events
 ⟳ triaging event for PR #N
 ⟳ claimed seat 1; running review
 ⟳ running review with prompt "default"
@@ -206,7 +206,7 @@ stamp pr open --pr <PR_URL> --server "$STAMP_SERVER"
 
 On Machines B, C, D (listeners started before Machine A broadcasts):
 ```sh
-stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER" --ws
+stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER"
 ```
 
 **Expected**:
@@ -322,7 +322,7 @@ self-collision attempt shows `409 already-holds-other-seat`.
 
 ```sh
 # Machine A: run the listener while also being the PR author
-stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER" --ws &
+stamp pr listen --org anglepoint-engineering --server "$STAMP_SERVER" &
 LISTENER_PID=$!
 
 # Open a PR from Machine A
@@ -374,15 +374,20 @@ Total elapsed time: _______ minutes (target: < 30)
 
 The peer-review loop is a **hybrid transport**:
 
-- **Event delivery** (server → listeners) rides the WebSocket endpoint `/peer/listen`
-  via `connectWsTransport` in `prListen.ts`. Use `--ws` on all `stamp pr listen`
-  invocations during these tests.
+- **Event delivery** (server → listeners) rides the SSE endpoint `GET /peer/events`
+  (AGT-454, replaced the WebSocket `/peer/listen`) via `connectSseTransport` in
+  `prListen.ts`. SSE is the sole listen transport — no flag is needed (the old
+  `--ws` flag was removed). The listener authenticates with a sign-with-key
+  header set (`x-stamp-pubkey` / `x-stamp-timestamp` / `x-stamp-signature`)
+  verified against the server's `users` table. Requires `http_url` in
+  `~/.stamp/server.yml` (the HTTP origin of the stamp-server).
+- **Diff fetch**: the SSE notification payload is metadata-only. After claiming a
+  seat the listener fetches the real unified diff via `gh pr diff <pr_url>` — the
+  per-repo GitHub authorization boundary. A diff-fetch failure releases the seat
+  and skips the event.
 - **Seat protocol** (claim/heartbeat/release/re-review) rides SSH subprocess verbs
   (`src/server/claim-seat.ts`, `src/server/re-review-request.ts`, etc.). These are
   short-lived processes; the seat assignments persist in the server's SQLite DB.
-- **WS `handleWsMessage`** verifies signatures and operator capability for incoming
-  messages but does NOT call `claimSeatTx` directly — seat-claim is SSH-verb-only
-  in V1 (AGT-453 will add WS seat-claim).
 
 **Descoped items** (do not test in this runbook — separate tickets):
 - `claim_seat: always` extras-post path → AGT-451

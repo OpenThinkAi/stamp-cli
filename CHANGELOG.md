@@ -29,6 +29,17 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ### Removed
 
+- **`stamp pr listen --ws` flag (peer-agentic review).** The WebSocket listen
+  transport (AGT-434) is retired in favour of SSE (AGT-454), which is now the
+  sole event-delivery transport. `--ws` no longer exists — scripts or agent
+  loops that pass it will get commander's `unknown option` error (exit 2). The
+  SSH-verb long-poll fallback for listening is also removed. **Migration:**
+  drop `--ws` from `stamp pr listen` invocations and set `http_url` in
+  `~/.stamp/server.yml` (the HTTP origin of the stamp-server). The legacy
+  `ws_url` config key is still accepted and its `ws://`/`wss://` scheme is
+  rewritten to `http://`/`https://`. The seat protocol
+  (claim/heartbeat/release/re-review) is unchanged — it stays on the SSH verbs.
+
 - **Shape 2 (mirror-mode PR) deployment topology.** `stamp init --pr-mode`
   and `--pr-mode-force`, the scaffolded `.github/workflows/stamp-mirror.yml`,
   and the `STAMP_MIRROR_KEY` org-secret flow are removed. Shape 2 is
@@ -47,6 +58,15 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
   Existing signed merges continue to verify.
 
 ### Changed
+
+- **Peer-agentic review event delivery now rides SSE (`GET /peer/events`)**
+  instead of WebSocket (AGT-454). The server authenticates the stream with a
+  sign-with-key header set (`x-stamp-pubkey` / `x-stamp-timestamp` /
+  `x-stamp-signature`) verified against the `users` table, replacing the old
+  WS nonce handshake that authenticated against an unpopulated trusted-key
+  directory. The SSE notification payload is metadata-only; after claiming a
+  seat the listener fetches the real diff via `gh pr diff` (the per-repo
+  GitHub authorization boundary). The `ws` npm dependency is dropped.
 
 - Documentation no longer brands the no-server / local-only path as
   "Shape 3." The capability is unchanged — `stamp review --plan` and
