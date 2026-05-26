@@ -850,7 +850,7 @@ indefinitely:
   - Claims a reviewer seat; fetches the diff via 'gh pr diff'; runs the
     builtin-default review via the Claude Agent SDK
   - Posts the result via 'gh pr review --comment'
-  - Sends a heartbeat every 60 s to keep the seat alive
+  - Sends a heartbeat every 60 s to keep the seat alive (seat heartbeat; the SSE stream uses TCP keepalive to keep the socket open)
 
 Default mode (session-hosted): stamp pr listen requires an active Claude Code
 session as its host. The session is the presence; the listener is a managed
