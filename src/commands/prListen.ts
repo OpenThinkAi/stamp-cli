@@ -179,6 +179,34 @@ export interface PrListenOptions {
    * parser deterministically without a server.
    */
   _sseStreamForTest?: Readable;
+  /**
+   * Test-only: replace `sleep` (used by the reconnect backoff loop) so tests
+   * can capture requested delay values without actually waiting. The injected
+   * function receives the delay in milliseconds; it should return a resolved
+   * Promise immediately (or after any synthetic wait the test requires).
+   */
+  _sleepForTest?: (ms: number) => Promise<void>;
+  /**
+   * Test-only: replace the entire `connectSseTransport` call so tests can
+   * control connection success/failure, stream lifecycle, and reconnect
+   * behaviour without a real server. The factory is called once per
+   * connection attempt (including reconnects). Signature matches
+   * `connectSseTransport`'s return type.
+   */
+  _connectSseForTest?: (
+    attempt: number,
+  ) => Promise<
+    | { ok: true; nextEvent: () => Promise<PeerReviewEvent | null>; close: () => void }
+    | { ok: false; reason: string }
+  >;
+  /**
+   * Test-only: cap the number of reconnect attempts before the reconnect loop
+   * gives up and returns null (which causes the outer event loop to call
+   * process.exit(0)). Without this, the reconnect loop in SSE mode only
+   * terminates when `shuttingDown` is set (SIGINT). Use this seam in tests
+   * that exercise the reconnect loop but don't want to fire real SIGINT.
+   */
+  _maxReconnectAttemptsForTest?: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -403,11 +431,29 @@ async function connectSseTransport(
         resolve({ ok: true, nextEvent, close: () => req.destroy() });
       },
     );
+    // SSE streams are long-lived; the default HTTPS agent idle timeout tears
+    // down quiet sockets (seen as CLIENT socket onTimeout in NODE_DEBUG=https).
+    // Override the per-socket idle timeout and enable TCP keepalive so the
+    // connection survives quiet windows between events.
+    req.on("socket", (socket) => {
+      socket.setKeepAlive(true, 30_000);
+      socket.setTimeout(0);
+    });
+    // Defensive: if a timeout fires (e.g. from a future caller override),
+    // destroy the request so the reconnect loop can restart the connection.
+    req.on("timeout", () => {
+      req.destroy(new Error("SSE socket idle timeout"));
+    });
     req.on("error", (err: Error) => {
       if (!ended) resolve({ ok: false, reason: `SSE connection error: ${err.message}` });
     });
     req.end();
   });
+}
+
+/** Sleep for `ms` milliseconds (used by the SSE reconnect backoff loop). */
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -536,23 +582,121 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   let sseCleanup: (() => void) | null = null;
   // sseNextEvent: the per-event resolver fed by the SSE parser.
   let sseNextEvent: (() => Promise<PeerReviewEvent | null>) | null = null;
+  // Whether the outer reconnect loop should keep running.
+  let shuttingDown = false;
+
+  // Reconnect backoff constants for the SSE loop.
+  const BACKOFF_BASE_MS = 1_000;
+  const BACKOFF_CAP_MS = 60_000;
+
+  // sleepFn: injectable for tests so they don't actually wait.
+  const sleepFn = opts._sleepForTest ?? sleep;
 
   if (!useQueueMode) {
-    const sseResult = await connectSseTransport(
-      keypair,
-      orgs,
-      serverCfg,
-      opts._sseStreamForTest,
-    );
-    if (!sseResult.ok) {
+    // ── Initial connection with reconnect-on-end loop ────────────────
+    // The first connection attempt happens here before the event loop starts.
+    // If it fails, we exit(1) (same as before). Subsequent disconnections
+    // (stream ended, socket teardown, etc.) trigger the reconnect loop below
+    // once we're inside the event loop.
+    let connectAttempt = 0;
+    const connectFn = opts._connectSseForTest
+      ? (attempt: number) => opts._connectSseForTest!(attempt)
+      : (_attempt: number) =>
+          connectSseTransport(keypair, orgs, serverCfg, opts._sseStreamForTest);
+
+    // First attempt — exit 1 on failure (keeps existing startup-failure UX).
+    const firstResult = await connectFn(connectAttempt);
+    if (!firstResult.ok) {
       process.stderr.write(
-        `error: SSE connect failed — ${sseResult.reason}\n`,
+        `error: SSE connect failed — ${firstResult.reason}\n`,
       );
       process.exit(1);
     }
-    sseNextEvent = sseResult.nextEvent;
-    sseCleanup = sseResult.close;
+    // innerNextEvent tracks the *current stream's* nextEvent function and is
+    // updated on each successful reconnect. It is intentionally separate from
+    // sseNextEvent (which is overwritten below with the reconnecting wrapper).
+    let innerNextEvent: () => Promise<PeerReviewEvent | null> = firstResult.nextEvent;
+    sseCleanup = firstResult.close;
     process.stderr.write(`⟳ subscribed (SSE); listening for PR events\n`);
+
+    // ── Reconnect-on-end inner loop ─────────────────────────────────
+    // Wraps innerNextEvent so that when the stream ends (null returned), the
+    // listener reconnects with exponential backoff rather than exiting.
+    // This is the fix for the silent-deaf bug: the SSE stream can end at any
+    // time (socket teardown, server hangup, network hiccup) and the listener
+    // must re-establish the connection transparently.
+    //
+    // Key: this function closes over `innerNextEvent` (a `let` variable) rather
+    // than over `sseNextEvent` (which is replaced with this very function below).
+    // Updating `innerNextEvent` on reconnect avoids the self-calling recursion
+    // that would result from closing over `sseNextEvent`.
+    // totalReconnects tracks reconnect cycles (stream-end → reconnect) across
+    // the lifetime of this listener. Declared outside the closure so it
+    // accumulates correctly across multiple outer-loop calls to nextEvent().
+    // Used only for the _maxReconnectAttemptsForTest cap seam.
+    let totalReconnects = 0;
+
+    const reconnectingNextEvent = async (): Promise<PeerReviewEvent | null> => {
+      for (;;) {
+        if (shuttingDown) return null;
+        const event = await innerNextEvent();
+        if (event !== null) {
+          // Normal event — return it to the event loop.
+          return event;
+        }
+        // Stream ended. If we're shutting down, propagate the null.
+        if (shuttingDown) return null;
+
+        // Test seam: stop reconnecting after a configured number of cycles.
+        totalReconnects += 1;
+        if (
+          opts._maxReconnectAttemptsForTest !== undefined &&
+          totalReconnects > opts._maxReconnectAttemptsForTest
+        ) {
+          return null;
+        }
+
+        process.stderr.write(`note: SSE stream ended; reconnecting…\n`);
+
+        // Reconnect with exponential backoff. connectAttempt counts how many
+        // times we have attempted a reconnect since the last clean connection.
+        let succeeded = false;
+        while (!shuttingDown) {
+          const delay = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** connectAttempt);
+          await sleepFn(delay);
+          if (shuttingDown) return null;
+
+          const retryResult = await connectFn(connectAttempt);
+          connectAttempt += 1;
+
+          if (retryResult.ok) {
+            sseCleanup = retryResult.close;
+            innerNextEvent = retryResult.nextEvent;
+            const totalRetries = connectAttempt;
+            const retryMsg =
+              totalRetries === 1
+                ? `⟳ resubscribed (SSE)\n`
+                : `⟳ resubscribed (SSE) after ${totalRetries} retries\n`;
+            process.stderr.write(retryMsg);
+            connectAttempt = 0;
+            succeeded = true;
+            break;
+          }
+          // Still failing — log the reason and the next delay.
+          const nextDelay = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** connectAttempt);
+          process.stderr.write(
+            `note: SSE connect failed (${retryResult.reason}); retrying in ${Math.round(nextDelay / 1000)}s (attempt ${connectAttempt + 1})\n`,
+          );
+        }
+        if (!succeeded) return null;
+        // Loop back to try reading from the fresh stream.
+      }
+    };
+
+    // sseNextEvent now points to the reconnecting wrapper; the outer event
+    // loop will call it for every event. innerNextEvent (updated on reconnect)
+    // is what actually reads from the current live stream.
+    sseNextEvent = reconnectingNextEvent;
   }
 
   // ─── Daily spend accumulator (AGT-432 AC #2) ──────────────────────
@@ -586,6 +730,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
   async function shutdown(): Promise<void> {
     process.stderr.write(`note: shutting down\n`);
+    shuttingDown = true;
     clearHeartbeat();
     // Close the SSE stream (no-op in queue-mode tests).
     if (sseCleanup) sseCleanup();

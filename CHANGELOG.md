@@ -5,6 +5,25 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.1.2 — 2026-05-26
+
+### Fixed
+
+- **`stamp pr listen` no longer goes silently deaf after a quiet period.**
+  The 3.1.x SSE transport relied on the default Node HTTPS agent socket
+  behavior, which tears down idle sockets after a short timeout. The
+  listener didn't install a `'timeout'` handler, override the per-socket
+  idle timeout, or reconnect when the stream ended, so the underlying
+  socket would silently die while the process kept reporting "subscribed
+  (SSE)" — PRs broadcast during the half-open window were never
+  delivered. 3.1.2 disables the per-socket idle timeout on the SSE
+  request, sets TCP keepalive (30 s), wraps the listen loop in a
+  reconnect-on-end retry with exponential backoff (1 s → 60 s, capped),
+  and adds visible reconnect log lines so silent-deaf states surface as
+  reconnect notes instead of nothing.
+
+---
+
 ## 3.1.1 — 2026-05-26
 
 ### Developer experience
