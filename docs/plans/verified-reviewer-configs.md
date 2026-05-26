@@ -79,16 +79,22 @@ At this step, verifiers have a hash to compare against *something* — but witho
 
 **Backward compat:** attestations produced before this feature shipped don't carry the hash fields. The attestation payload already has a `version` integer; this step bumps it. The server hook and `stamp verify` treat attestations at the old payload version as valid without hash checks (fail-open on legacy), and attestations at the new version as invalid without hash checks (fail-closed). That keeps existing stamp repos from breaking mid-upgrade while forcing new attestations to include the stronger evidence.
 
-### Step 3 — Remote canonical personas + lock files
+### Step 3 — Remote canonical personas + lock files + signed manifests — SHIPPED (AGT-113)
 
-Organizations publish canonical reviewer definitions to a source (git repo, npm package, or HTTP endpoint). A manifest lists acceptable `(persona, version, prompt_sha256, tools_sha256, mcp_sha256)` tuples.
+Organizations publish canonical reviewer definitions to a source (git repo, HTTP endpoint).
+A manifest (`personas/manifest.json`) lists the expected hashes for every reviewer the
+source provides, plus a `signed_by` fingerprint and a detached Ed25519 signature
+(`personas/manifest.json.sig`) over the manifest's canonical bytes.
 
-New subcommand: `stamp reviewers fetch <source>@<version> <reviewer>`. Downloads the prompt and config into `.stamp/reviewers/`, writes a lock file `.stamp/reviewers/<name>.lock.json` recording:
+`stamp reviewers fetch <name> --from <source>@<ref>` downloads the prompt + optional
+`config.yaml` into `.stamp/reviewers/`, verifies the manifest signature against
+`.stamp/verifying-keys/<fingerprint>.pub` (if an allowlist exists), and writes a lock
+file `.stamp/reviewers/<name>.lock.json` recording:
 
 ```json
 {
-  "source": "github.com/acme/stamp-personas",
-  "version": "v3.2",
+  "source": "acme/stamp-personas",
+  "ref": "v3.2",
   "reviewer": "standards",
   "prompt_sha256": "...",
   "tools_sha256": "...",
@@ -97,20 +103,45 @@ New subcommand: `stamp reviewers fetch <source>@<version> <reviewer>`. Downloads
 }
 ```
 
-At review time, `stamp review` hashes the current prompt + config and compares against the lock file. Mismatch → exit 3 (new dedicated code for config drift, distinct from exit 1 "review genuinely rejected" so agent loops can branch on the difference). Error message shape:
+**Manifest trust policy (fail-open by default — AGT-113 G3):**
 
-```
-error: reviewer 'standards' prompt hash mismatch
-  expected: sha256:abc123...  (from .stamp/reviewers/standards.lock.json)
-  observed: sha256:def456...  (current .stamp/reviewers/standards.md)
-  fix: re-run 'stamp reviewers fetch <source>@<version> standards' or update the lock file deliberately
-```
+| Manifest published? | Allowlist present? | Result |
+|---|---|---|
+| No | No | TOFU — no verification, existing behaviour preserved |
+| Yes | No | TOFU with warning — manifest found but no key to verify against |
+| No | Yes | Fail CLOSED — allowlist signals intent to verify; source must publish a manifest |
+| Yes | Yes, signer in allowlist | Verify signature + per-reviewer hashes; fail closed on mismatch |
+| Yes | Yes, signer NOT in allowlist | Fail CLOSED — unknown signer |
 
-Planned verbs in the `stamp reviewers` family at completion of Step 3: existing `list / add / edit / remove / test / show` + new `fetch` (pull + pin from remote manifest) + new `verify` (run the hash check without invoking the reviewer, useful for CI pre-flight). No separate `update` verb — `fetch` with a newer version string is the update path.
+`--expect-prompt-sha` remains the manual trust anchor throughout (works regardless of
+manifest presence). `--no-verify-manifest` is an escape hatch to skip manifest
+verification for a single fetch.
 
-The attestation's per-reviewer entry grows `reviewer_source` pointing at the manifest. Downstream verifiers (server hook, third-party auditors) can independently query the manifest source, confirm the `(source, version, hashes)` tuple is listed as acceptable, and reject attestations referencing unknown or obsolete versions.
+**Verifying-keys trust plane (Option B — AGT-113 G1):**
 
-Optional: sign the manifest itself with an org key. Verifier checks the signature before trusting the hash list.
+`.stamp/verifying-keys/<fingerprint>.pub` — a SEPARATE directory from
+`.stamp/trusted-keys/`. Manifest-signing trust is deliberately distinct from
+merge-signing trust; a co-maintainer must be explicitly onboarded to both planes
+independently.
+
+**Publisher tooling (AGT-113 G6):**
+
+`stamp manifest sign <manifest.json>` — sign with the operator's local key;
+writes `<manifest.json>.sig`.
+
+`stamp manifest verify <manifest.json> [--key <pub>]` — verify a manifest+sig pair.
+
+**Canonicalization (AGT-113 G5):**
+
+Manifest signing uses the SAME `canonicalize()` (recursive key-sort → JSON) pattern as
+`reviewerHash.ts` and `trustedKeysManifest.ts`. This is NOT a new canonical form;
+the same `snapshotSha256`/`reviewerHash` form is reused throughout.
+
+**Key rotation:**
+
+The allowlist supports multiple `.pub` files. Dual-sign overlap during rotation: add the
+new key's `.pub` to `.stamp/verifying-keys/` and publish a manifest signed by the new
+key; the old key's file can be removed once all manifests have been re-signed.
 
 ### Step 4 — Tool-invocation trace in attestation — shipped
 

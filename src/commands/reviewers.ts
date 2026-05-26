@@ -46,6 +46,16 @@ import {
   type DriftResult,
   type LockFile,
 } from "../lib/reviewerLock.js";
+import {
+  parseReviewerManifest,
+  verifyManifestSignature,
+  MANIFEST_URL_SUFFIX,
+  MANIFEST_SIG_URL_SUFFIX,
+} from "../lib/reviewerManifest.js";
+import {
+  findVerifyingKey,
+  hasVerifyingKeyAllowlist,
+} from "../lib/verifyingKeys.js";
 
 // Names are interpolated into filesystem paths and URL segments. Keep the
 // allowed alphabet tight so there's no path-traversal ('../../evil') or
@@ -373,6 +383,13 @@ export interface ReviewersFetchOptions {
   expectPromptSha?: string;
   expectToolsSha?: string;
   expectMcpSha?: string;
+  /**
+   * Skip signed-manifest verification even when a manifest is published.
+   * Escape hatch for operators who trust TOFU and haven't set up an
+   * allowlist, but the source publishes a manifest. Use `--expect-prompt-sha`
+   * as the preferred manual trust anchor instead.
+   */
+  noVerifyManifest?: boolean;
 }
 
 // SHA-256 hex is exactly 64 lowercase hex chars. Reject other shapes early
@@ -449,6 +466,156 @@ export async function reviewersFetch(
 
   console.log(`fetching reviewer '${reviewerName}' from ${source}@${ref}...`);
 
+  // -----------------------------------------------------------------------
+  // Manifest verification (AGT-113 G3 fail-open policy)
+  //
+  // Attempt to fetch manifest.json + manifest.json.sig alongside the
+  // individual persona files. Three outcomes:
+  //   A. No manifest published AND no verifying-key allowlist → TOFU
+  //      (fail-open; existing behaviour preserved for unsigned sources).
+  //   B. Manifest published, signer key found in allowlist → verify; fail
+  //      closed on bad signature or missing reviewer entry.
+  //   C. No manifest but allowlist present → fail closed (allowlist opt-in
+  //      signals the operator expects verification from this source).
+  //
+  // --expect-prompt-sha remains the manual trust anchor throughout and is
+  // always checked when provided, independent of manifest verification.
+  // --no-verify-manifest disables the manifest path entirely (escape hatch).
+  // -----------------------------------------------------------------------
+
+  // These may be overridden by the manifest path (manifest hashes used as
+  // implicit trust anchors when the caller didn't supply explicit flags).
+  let effectiveExpectPromptSha: string | undefined = expectPromptSha;
+  let effectiveExpectToolsSha: string | undefined = expectToolsSha;
+  let effectiveExpectMcpSha: string | undefined = expectMcpSha;
+
+  if (!opts.noVerifyManifest) {
+    const manifestUrl = buildRawUrl(source, ref, MANIFEST_URL_SUFFIX);
+    const manifestSigUrl = buildRawUrl(source, ref, MANIFEST_SIG_URL_SUFFIX);
+
+    const manifestText = await fetchOptional(manifestUrl, "manifest.json");
+    const manifestSig = manifestText !== null
+      ? await fetchOptional(manifestSigUrl, "manifest.json.sig")
+      : null;
+
+    const allowlistPresent = hasVerifyingKeyAllowlist(repoRoot);
+
+    // Trust policy — full 5-cell table (keep this comment in sync with
+    // the table in docs/plans/verified-reviewer-configs.md):
+    //   1. no manifest, no allowlist           → TOFU (silent)
+    //   2. no manifest, allowlist present      → fail CLOSED (handled below in `else if`)
+    //   3. manifest present, no allowlist:
+    //        a. malformed manifest             → TOFU with warning
+    //        b. signature missing/empty        → TOFU with warning
+    //        c. valid manifest, unknown signer → TOFU with warning
+    //   4. manifest present + allowlist + signer in allowlist  → verify; fail CLOSED on bad sig
+    //   5. manifest present + allowlist + signer NOT in allowlist → fail CLOSED
+    if (manifestText !== null) {
+      // Manifest is published — parse + verify. Per the 5-cell policy table:
+      // parse/sig/signer failures fail CLOSED only when an allowlist is
+      // present; otherwise warn and fall through to TOFU (effective*Sha
+      // stays undefined, which the downstream lock-write treats as TOFU).
+      const manifest = parseReviewerManifest(manifestText);
+      if (!manifest) {
+        if (allowlistPresent) {
+          throw new Error(
+            `personas/manifest.json from ${source}@${ref} is malformed — ` +
+              `cannot verify reviewer hashes. ` +
+              `Use --no-verify-manifest to skip, or --expect-prompt-sha as a manual trust anchor.`,
+          );
+        }
+        console.warn(
+          `warning: personas/manifest.json from ${source}@${ref} is malformed ` +
+            `and no verifying-key allowlist is present (.stamp/verifying-keys/). ` +
+            `Proceeding with TOFU (use --expect-prompt-sha for a manual anchor).`,
+        );
+      } else if (!manifestSig || !manifestSig.trim()) {
+        if (allowlistPresent) {
+          throw new Error(
+            `personas/manifest.json exists at ${source}@${ref} but no signature file ` +
+              `(personas/manifest.json.sig) was found. ` +
+              `Use --no-verify-manifest to skip, or --expect-prompt-sha as a manual trust anchor.`,
+          );
+        }
+        console.warn(
+          `warning: personas/manifest.json found at ${source}@${ref} but no signature ` +
+            `(personas/manifest.json.sig) and no verifying-key allowlist is present. ` +
+            `Proceeding with TOFU (use --expect-prompt-sha for a manual anchor).`,
+        );
+      } else {
+        const signerFp = manifest.signed_by;
+        const verifyingKey = findVerifyingKey(repoRoot, signerFp);
+        if (verifyingKey === null) {
+          if (allowlistPresent) {
+            // Allowlist exists but signer not in it — fail closed.
+            throw new Error(
+              `personas/manifest.json from ${source}@${ref} is signed by key ${signerFp}, ` +
+                `which is not in .stamp/verifying-keys/. ` +
+                `Add the publisher's public key to .stamp/verifying-keys/ to trust this source, ` +
+                `or use --expect-prompt-sha as a manual trust anchor.`,
+            );
+          }
+          // Manifest published, no allowlist → TOFU (G3: fail-open when neither
+          // side has opted into verification). Warn so the operator is aware.
+          console.warn(
+            `warning: personas/manifest.json found at ${source}@${ref} but no ` +
+              `verifying-key allowlist is present (.stamp/verifying-keys/ is absent or empty). ` +
+              `Add the publisher's public key to .stamp/verifying-keys/ to enable signature ` +
+              `verification. Proceeding with TOFU (use --expect-prompt-sha for a manual anchor).`,
+          );
+        } else {
+          // Signer key is in the allowlist — verify the detached signature.
+          const sigB64 = manifestSig.trim();
+          const valid = verifyManifestSignature(manifest, sigB64, verifyingKey);
+          if (!valid) {
+            throw new Error(
+              `personas/manifest.json signature verification FAILED for ${source}@${ref}. ` +
+                `The manifest may have been tampered with, or the signature does not match ` +
+                `the key in .stamp/verifying-keys/. ` +
+                `Use --expect-prompt-sha as a manual trust anchor if you can verify the hash out-of-band.`,
+            );
+          }
+          // Signature valid — confirm the manifest covers this reviewer.
+          const entry = manifest.reviewers[reviewerName];
+          if (!entry) {
+            throw new Error(
+              `personas/manifest.json from ${source}@${ref} does not contain an entry for ` +
+                `reviewer '${reviewerName}'. The signed manifest does not cover this reviewer — ` +
+                `the source may be incomplete or the manifest may be stale. ` +
+                `Use --expect-prompt-sha to proceed with a manual trust anchor.`,
+            );
+          }
+          // Use the manifest's per-reviewer hashes as implicit trust anchors.
+          // Explicit --expect-*-sha flags take precedence (let operator override
+          // if they have a more specific anchor).
+          console.log(
+            `  ✓ manifest signature verified (signer: ${signerFp.slice(0, 18)}...)`,
+          );
+          if (effectiveExpectPromptSha === undefined) {
+            effectiveExpectPromptSha = entry.prompt_sha256;
+          }
+          if (effectiveExpectToolsSha === undefined) {
+            effectiveExpectToolsSha = entry.tools_sha256;
+          }
+          if (effectiveExpectMcpSha === undefined) {
+            effectiveExpectMcpSha = entry.mcp_sha256;
+          }
+        }
+      }
+    } else if (allowlistPresent) {
+      // No manifest published, but an allowlist is present — fail closed.
+      // The allowlist opt-in signals the operator expects verified personas.
+      throw new Error(
+        `No signed manifest (personas/manifest.json) was found at ${source}@${ref}, ` +
+          `but a verifying-key allowlist exists at .stamp/verifying-keys/. ` +
+          `This source does not publish a signed manifest. ` +
+          `Remove the allowlist to fall back to TOFU, use --expect-prompt-sha as a manual trust anchor, ` +
+          `or use --no-verify-manifest to skip verification for this fetch.`,
+      );
+    }
+    // else: no manifest, no allowlist → TOFU (fail-open). No action needed.
+  }
+
   const promptUrl = buildRawUrl(source, ref, `personas/${reviewerName}/prompt.md`);
   const configUrl = buildRawUrl(source, ref, `personas/${reviewerName}/config.yaml`);
 
@@ -482,22 +649,22 @@ export async function reviewersFetch(
   const toolsSha = hashTools(tools);
   const mcpSha = hashMcpServers(mcpServers);
 
-  if (expectPromptSha !== undefined) {
-    verifyExpectedHash("prompt.md", "--expect-prompt-sha", expectPromptSha, promptSha);
+  if (effectiveExpectPromptSha !== undefined) {
+    verifyExpectedHash("prompt.md", "--expect-prompt-sha", effectiveExpectPromptSha, promptSha);
   }
-  if (expectToolsSha !== undefined) {
+  if (effectiveExpectToolsSha !== undefined) {
     verifyExpectedHash(
       "tools (from config.yaml)",
       "--expect-tools-sha",
-      expectToolsSha,
+      effectiveExpectToolsSha,
       toolsSha,
     );
   }
-  if (expectMcpSha !== undefined) {
+  if (effectiveExpectMcpSha !== undefined) {
     verifyExpectedHash(
       "mcp_servers (from config.yaml)",
       "--expect-mcp-sha",
-      expectMcpSha,
+      effectiveExpectMcpSha,
       mcpSha,
     );
   }

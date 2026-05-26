@@ -28,6 +28,16 @@ export function stampTrustedKeysDir(repoRoot: string): string {
   return join(repoRoot, ".stamp", "trusted-keys");
 }
 
+/**
+ * Directory that holds verifying keys for reviewer-manifest signature
+ * verification (`.stamp/verifying-keys/<fingerprint>.pub`). This is a
+ * SEPARATE trust plane from `.stamp/trusted-keys/` (merge-signing trust)
+ * — the two directories carry distinct authorities (Option B, AGT-113).
+ */
+export function stampVerifyingKeysDir(repoRoot: string): string {
+  return join(repoRoot, ".stamp", "verifying-keys");
+}
+
 export function stampConfigFile(repoRoot: string): string {
   return join(repoRoot, ".stamp", "config.yml");
 }
