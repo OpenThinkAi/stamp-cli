@@ -361,7 +361,7 @@ export function findPeerReviewEventsAfter(
     WHERE e.id > ?
     ORDER BY e.id ASC
     LIMIT ?
-  `).all(afterId, limit) as PeerReviewEventRow[];
+  `).all(afterId, limit) as unknown as PeerReviewEventRow[];
   // node:sqlite returns null-prototype rows; rebuild as plain objects.
   return rows.map((r) => ({
     id: r.id,
