@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { generateKeypair, saveUserKeypair } from "../src/lib/keys.ts";
+import { generateKeypair } from "../src/lib/keys.ts";
 import { parseReviewerManifest, verifyManifestSignature, type ReviewerManifest } from "../src/lib/reviewerManifest.ts";
 import { runManifestSign, runManifestVerify } from "../src/commands/manifest.ts";
 
@@ -45,21 +45,15 @@ describe("stamp manifest sign / verify (AGT-113)", () => {
   let tmp: string;
   let manifestPath: string;
   let sigPath: string;
-  let origUserStampDir: string | undefined;
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "stamp-manifest-cmd-"));
     manifestPath = join(tmp, "manifest.json");
     sigPath = join(tmp, "manifest.json.sig");
-    // Snapshot HOME-based paths so we can restore
-    origUserStampDir = process.env["HOME"];
   });
 
   afterEach(() => {
     rmSync(tmp, { recursive: true, force: true });
-    if (origUserStampDir !== undefined) {
-      process.env["HOME"] = origUserStampDir;
-    }
   });
 
   // -----------------------------------------------------------------------

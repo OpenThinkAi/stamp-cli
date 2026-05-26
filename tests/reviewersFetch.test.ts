@@ -654,6 +654,102 @@ describe("reviewersFetch — signed-manifest verification (AGT-113)", () => {
   });
 
   // -----------------------------------------------------------------------
+  // 5-cell policy coverage: the four cases the policy table calls out that
+  // depend on whether an allowlist is present. The "manifest published, no
+  // allowlist, valid-but-unverifiable" case is the test directly above.
+  // -----------------------------------------------------------------------
+
+  it("malformed manifest + no allowlist → TOFU (warn, still writes)", async () => {
+    const promptText = "tofu prompt\n";
+    // No verifying-keys dir; malformed manifest body
+    const mock = installFetchMock({
+      prompt: promptText,
+      configYaml: null,
+      manifestJson: "{not valid json",
+      manifestSig: "not-a-real-sig",
+    });
+    try {
+      await reviewersFetch("security", { from: "acme/personas@v1" });
+      assert.ok(existsSync(join(repo, ".stamp", "reviewers", "security.md")));
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it("malformed manifest + allowlist present → fail CLOSED", async () => {
+    const kp = generateKeypair();
+    const vkDir = stampVerifyingKeysDir(repo);
+    mkdirSync(vkDir, { recursive: true });
+    writeFileSync(join(vkDir, publicKeyFingerprintFilename(kp.fingerprint)), kp.publicKeyPem);
+
+    const mock = installFetchMock({
+      prompt: "prompt\n",
+      configYaml: null,
+      manifestJson: "{not valid json",
+      manifestSig: "doesnt-matter",
+    });
+    try {
+      await assert.rejects(
+        reviewersFetch("security", { from: "acme/personas@v1" }),
+        /malformed/,
+      );
+      assert.equal(existsSync(join(repo, ".stamp", "reviewers", "security.md")), false);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it("manifest published, no signature, no allowlist → TOFU (warn, still writes)", async () => {
+    const kp = generateKeypair();
+    const promptText = "tofu prompt\n";
+    const promptBytes = Buffer.from(promptText, "utf8");
+    const promptSha = hashPromptBytes(promptBytes);
+    const { manifestJson } = buildSignedManifest(
+      kp, "security", promptSha, hashTools(undefined), hashMcpServers(undefined),
+    );
+
+    // Manifest exists but sig file doesn't (publisher accident); no allowlist
+    const mock = installFetchMock({
+      prompt: promptText,
+      configYaml: null,
+      manifestJson,
+      manifestSig: null,
+    });
+    try {
+      await reviewersFetch("security", { from: "acme/personas@v1" });
+      assert.ok(existsSync(join(repo, ".stamp", "reviewers", "security.md")));
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it("manifest published, no signature, allowlist present → fail CLOSED", async () => {
+    const kp = generateKeypair();
+    const { manifestJson } = buildSignedManifest(
+      kp, "security", hashPromptBytes(Buffer.from("p\n", "utf8")), hashTools(undefined), hashMcpServers(undefined),
+    );
+    const vkDir = stampVerifyingKeysDir(repo);
+    mkdirSync(vkDir, { recursive: true });
+    writeFileSync(join(vkDir, publicKeyFingerprintFilename(kp.fingerprint)), kp.publicKeyPem);
+
+    const mock = installFetchMock({
+      prompt: "p\n",
+      configYaml: null,
+      manifestJson,
+      manifestSig: null,
+    });
+    try {
+      await assert.rejects(
+        reviewersFetch("security", { from: "acme/personas@v1" }),
+        /no signature file/,
+      );
+      assert.equal(existsSync(join(repo, ".stamp", "reviewers", "security.md")), false);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // AC#6d: no manifest but allowlist present → fail closed
   // -----------------------------------------------------------------------
 

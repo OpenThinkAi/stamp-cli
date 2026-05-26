@@ -74,8 +74,10 @@ export function runManifestSign(opts: ManifestSignOptions): void {
     }
     privateKeyPem = readFileSync(keyPath, "utf8");
     // Derive the fingerprint from the private key's public component.
-    const privKey = createPublicKey(privateKeyPem);
-    const publicKeyPem = privKey.export({ type: "spki", format: "pem" }) as string;
+    // createPublicKey(<private PEM>) returns the public KeyObject — naming
+    // it as such avoids the appearance of exporting private material.
+    const derivedPub = createPublicKey(privateKeyPem);
+    const publicKeyPem = derivedPub.export({ type: "spki", format: "pem" }) as string;
     fingerprint = fingerprintFromPem(publicKeyPem);
   } else {
     const kp = loadUserKeypair();
@@ -206,14 +208,18 @@ export function runManifestVerify(opts: ManifestVerifyOptions): void {
     console.log(`  reviewers:    ${Object.keys(manifest.reviewers).join(", ")}`);
     console.log(bar);
   } else {
-    console.error(bar);
-    console.error(`manifest signature: INVALID`);
-    console.error(bar);
-    console.error(`  manifest:  ${manifestPath}`);
-    console.error(`  signature: ${sigPath}`);
-    console.error(bar);
+    // Structural blocks ALWAYS go to stdout; only the `error: ` prefix line
+    // (emitted by handleCliError from the thrown Error) belongs on stderr.
+    // Label padding matches the VALID block above (14 chars) for consistency.
+    console.log(bar);
+    console.log(`manifest signature: INVALID`);
+    console.log(bar);
+    console.log(`  manifest:     ${manifestPath}`);
+    console.log(`  signature:    ${sigPath}`);
+    console.log(bar);
     throw new Error(
-      `signature verification failed. The manifest may have been modified after signing, ` +
+      `signature verification failed for ${manifestPath} (signature: ${sigPath}). ` +
+        `The manifest may have been modified after signing, ` +
         `or the wrong key was used for verification.`,
     );
   }
