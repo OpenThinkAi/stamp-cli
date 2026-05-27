@@ -474,4 +474,74 @@ describe("peer-events poll worker — tick delivery", () => {
     assert.ok(framesAcme.length > 0, "acme client must receive the event");
     assert.equal(framesOther.length, 0, "other client must NOT receive the acme event");
   });
+
+  // ─── Org case-normalisation tests (AGT org-case-norm) ────────────────
+
+  it("delivers when listener is lowercase but broadcast repo org is mixed-case", () => {
+    const { dbPath } = dbFixture;
+    // Repo path uses mixed-case org — as emitted by pr-opened from payload.repo.
+    seedPatchAndEvent(dbPath, { patchId: "case-1", repo: "MicroMediaSites/fx-tracker" });
+
+    const { res, frames } = makeFakeRes();
+    // Listener subscribed with lowercase (the natural CLI default).
+    __injectSseConnectionForTests("fp-case-lower", { res, orgs: ["micromediasites"] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.ok(
+      frames.length > 0,
+      "lowercase-subscribed client must receive events from a mixed-case repo org",
+    );
+  });
+
+  it("delivers when listener is mixed-case but broadcast repo org is lowercase", () => {
+    const { dbPath } = dbFixture;
+    seedPatchAndEvent(dbPath, { patchId: "case-2", repo: "micromediasites/fx-tracker" });
+
+    const { res, frames } = makeFakeRes();
+    // Listener subscribed with mixed-case — server must normalise on ingest.
+    __injectSseConnectionForTests("fp-case-mixed", { res, orgs: ["MicroMediaSites"] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.ok(
+      frames.length > 0,
+      "mixed-case-subscribed client must receive events from a lowercase repo org",
+    );
+  });
+
+  it("delivers when subscribed to multiple mixed-case orgs and broadcast org differs in case", () => {
+    const { dbPath } = dbFixture;
+    // Broadcast FOO (uppercase).
+    seedPatchAndEvent(dbPath, { patchId: "case-3a", repo: "FOO/repo" });
+    // Broadcast bar (lowercase).
+    seedPatchAndEvent(dbPath, { patchId: "case-3b", repo: "bar/repo" });
+
+    const { res, frames } = makeFakeRes();
+    // Subscribed with ["foo", "BAR"] — both should match after normalisation.
+    __injectSseConnectionForTests("fp-case-multi", { res, orgs: ["foo", "BAR"] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.ok(frames.length >= 2, "client subscribed to ['foo','BAR'] must receive both FOO and bar events");
+  });
+
+  it("does not store empty or whitespace-only org entries from query string", () => {
+    // Verify that a client injected with an empty-string org never receives
+    // events: an empty string cannot match any real org slug via .includes().
+    const { dbPath } = dbFixture;
+    seedPatchAndEvent(dbPath, { patchId: "empty-org-1", repo: "acme/r" });
+
+    const { res, frames } = makeFakeRes();
+    // Simulate a misconfigured client with an empty org entry.
+    __injectSseConnectionForTests("fp-empty-org", { res, orgs: [""] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.equal(
+      frames.length,
+      0,
+      "client with empty-string org must not match any org",
+    );
+  });
 });

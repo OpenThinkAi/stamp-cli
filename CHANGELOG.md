@@ -5,6 +5,21 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.1.3 — 2026-05-26
+
+### Fixed
+
+- **`stamp pr listen --org <org>` is now matched case-insensitively.** The
+  3.1.x SSE delivery path compared the subscribed org against the broadcast's
+  derived org using strict equality, so a listener subscribed with a
+  different case than the repo's actual org slug (e.g. `--org micromediasites`
+  vs. a repo path of `MicroMediaSites/fx-tracker`) silently received no
+  events. The match is now case-insensitive — orgs are lowercased canonically
+  at registration and at compare time, matching the existing lowercase
+  convention used elsewhere in the peer-review path.
+
+---
+
 ## 3.1.2 — 2026-05-26
 
 ### Fixed

@@ -829,7 +829,7 @@ pr
   )
   .requiredOption(
     "--org <org>",
-    "org slug to subscribe to (repeat for multiple orgs)",
+    "org slug to subscribe to (repeat for multiple orgs); matched case-insensitively against the repo's <org>/<repo> slug — values are normalized to lowercase server-side",
     (v: string, acc: string[]) => { acc.push(v); return acc; },
     [] as string[],
   )

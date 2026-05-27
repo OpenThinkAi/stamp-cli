@@ -155,12 +155,19 @@ import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 // Module-scoped registry: fingerprint → listener handle.
 const listenerRegistry = new Map<string, ListenerHandle>();
 
-/** Register (or replace) a listener for the given fingerprint. */
+/**
+ * Register (or replace) a listener for the given fingerprint. Org slugs in
+ * `handle.orgs` are lowercased on storage so that `fanoutEvent` comparisons
+ * are case-insensitive by construction. Callers may pass any-case orgs.
+ */
 export function registerListener(
   fingerprint: string,
   handle: ListenerHandle,
 ): void {
-  listenerRegistry.set(fingerprint, handle);
+  listenerRegistry.set(fingerprint, {
+    ...handle,
+    orgs: handle.orgs.map((o) => o.toLowerCase()),
+  });
 }
 
 /** Unregister a listener (used by subscribe-verb teardown / tests). */
@@ -178,12 +185,18 @@ export function getListener(fingerprint: string): ListenerHandle | null {
  * subscribed to the event's org. `org` is derived from the `repo` field
  * (`<org>/<repo>`). Returns the count of listeners notified.
  *
+ * Org matching is case-insensitive: the incoming `org` is lowercased on
+ * entry; listener orgs are stored in lowercase via `parseOrgQuery`. This
+ * means a listener subscribed as "micromediasites" will receive events
+ * broadcast under "MicroMediaSites" (and vice versa).
+ *
  * STUB: cross-process delivery is not implemented (see module-level note).
  */
 export function fanoutEvent(org: string, event: PeerReviewEvent): number {
+  const orgLower = org.toLowerCase();
   let notified = 0;
   for (const [, handle] of listenerRegistry) {
-    if (handle.orgs.includes(org)) {
+    if (handle.orgs.includes(orgLower)) {
       try {
         handle.onEvent(event);
       } catch {
