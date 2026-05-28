@@ -1217,6 +1217,26 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       continue;
     }
 
+    // ─── AGT-452: dry-run — log payload, no gh post, no draft file ───
+    if (triageDecision.post_mode === "dry-run") {
+      process.stderr.write(
+        `⟳ dry-run for PR #${prNumber} (verdict=${reviewVerdict}); would have posted via gh, no review sent\n`,
+      );
+      process.stderr.write(`--- dry-run review body for PR #${prNumber} ---\n${reviewBody}\n--- end dry-run body ---\n`);
+      currentSeatPatchId = null;
+      await callReleaseSeat({
+        patch_id: patchId,
+        claimant_fp: keypair.fingerprint,
+        signature: canonicalSign(keypair, {
+          patch_id: patchId,
+          claimant_fp: keypair.fingerprint,
+        }),
+        serverConfig: serverCfg,
+        _sshSpawnForTest: opts._sshSpawnForTest,
+      });
+      continue;
+    }
+
     // ─── AC #7: post review via gh ───────────────────────────────
     const ghVerdictFlag = ({
       "approve": "--approve",
