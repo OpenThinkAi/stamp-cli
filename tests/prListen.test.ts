@@ -1457,6 +1457,47 @@ describe("AGT-432: draft save — listener saves draft when post_mode='draft'", 
   });
 });
 
+describe("AGT-452: dry-run — listener logs but does not post when post_mode='dry-run'", () => {
+  it("logs the would-be review payload, does not call gh, and writes no draft file", async () => {
+    const fakeKeypair = genKeypair();
+    const drafts: Array<{ filePath: string; content: string }> = [];
+    let ghCalled = false;
+
+    const haikuRunner = async (): Promise<string> =>
+      '{"claim_seat":"if_available","post_mode":"dry-run","prompt":"default"}';
+
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _sdkRunnerForTest: async () => "dry-run review body",
+        _ghReviewForTest: () => { ghCalled = true; return { status: 0, stderr: "" }; },
+        _haikuRunnerForTest: haikuRunner,
+        _peerWatchRulesForTest: { rules: "dry-run mode", hash: "abc" },
+        _appendTripletForTest: () => {},
+        _writeDraftForTest: (filePath, content) => { drafts.push({ filePath, content }); },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+
+    assert.equal(exitCode, 0);
+    // AC #1: gh must NOT be called for dry-run
+    assert.equal(ghCalled, false, "gh review must NOT be called when post_mode='dry-run'");
+    // AC #3: dry-run must NOT write a draft file
+    assert.equal(drafts.length, 0, "dry-run must not write a draft file");
+    // AC #2: the would-be payload is logged to stderr
+    assert.ok(stderr.includes("dry-run"), `expected 'dry-run' in stderr: ${stderr}`);
+    assert.ok(
+      stderr.includes("dry-run review body"),
+      `expected would-be review body in stderr: ${stderr}`,
+    );
+  });
+});
+
 describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
   it("cost-cap check applies to re-review-requested events too", async () => {
     const fakeKeypair = genKeypair();
