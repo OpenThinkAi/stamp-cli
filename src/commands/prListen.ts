@@ -1222,7 +1222,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       process.stderr.write(
         `⟳ dry-run for PR #${prNumber} (verdict=${reviewVerdict}); would have posted via gh, no review sent\n`,
       );
-      process.stderr.write(`--- dry-run review body for PR #${prNumber} ---\n${reviewBody}\n--- end dry-run body ---\n`);
+      process.stderr.write(`─── dry-run review body for PR #${prNumber} ───\n${reviewBody}\n─── end dry-run body ───\n`);
       currentSeatPatchId = null;
       await callReleaseSeat({
         patch_id: patchId,
