@@ -216,6 +216,7 @@ COPY --from=builder /build/dist/server/release-seat.cjs /usr/local/bin/stamp-rel
 COPY --from=builder /build/dist/server/heartbeat.cjs /usr/local/bin/stamp-heartbeat
 COPY --from=builder /build/dist/server/re-review-request.cjs /usr/local/bin/stamp-re-review-request
 COPY --from=builder /build/dist/server/subscribe.cjs /usr/local/bin/stamp-subscribe
+COPY --from=builder /build/dist/server/register-extra.cjs /usr/local/bin/stamp-register-extra
 # HTTP listener for invite/accept. Started by entrypoint.sh as the git
 # user, runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
 # the hosting platform's job (Railway terminates at its edge proxy).
@@ -286,6 +287,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/stamp-heartbeat \
              /usr/local/bin/stamp-re-review-request \
              /usr/local/bin/stamp-subscribe \
+             /usr/local/bin/stamp-register-extra \
              /usr/local/sbin/stamp-ensure-repo-key \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
@@ -325,6 +327,7 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/stamp-heartbeat /home/git/git-shell-commands/stamp-heartbeat \
  && ln -s /usr/local/bin/stamp-re-review-request /home/git/git-shell-commands/stamp-re-review-request \
  && ln -s /usr/local/bin/stamp-subscribe /home/git/git-shell-commands/stamp-subscribe \
+ && ln -s /usr/local/bin/stamp-register-extra /home/git/git-shell-commands/stamp-register-extra \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands
 
