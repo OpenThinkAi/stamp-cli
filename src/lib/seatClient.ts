@@ -511,6 +511,130 @@ export async function callReleaseSeat(input: ReleaseSeatInput): Promise<ReleaseS
   };
 }
 
+// ─── register-extra ──────────────────────────────────────────────────
+//
+// Sixth parallel SSH-verb client (AGT-451), mirroring the five above.
+// Invoked when a listener's triage decision is `claim_seat: always` and the
+// primary claim-seat call returns `seats_full`. Records the intent on the
+// server (writes an `extras-register` event row) without allocating a seat
+// slot. Returns `{ ok: true, patch_id }` on success.
+//
+// Server exit-code mapping:
+//   0 — success (or feature-not-configured)
+//   1 — server-side / unexpected error
+//   4 — validation / auth failure
+//   5 — registration rejected (author-exclusion / rate-limit exceeded)
+
+export interface RegisterExtraSuccess {
+  ok: true;
+  patch_id: string;
+}
+
+export interface RegisterExtraFailure {
+  ok: false;
+  reason: "register_failed" | "register_rejected" | "peer_reviews_not_configured";
+  message: string;
+  serverStderr: string;
+}
+
+export type RegisterExtraResult = RegisterExtraSuccess | RegisterExtraFailure;
+
+export interface RegisterExtraInput {
+  patch_id: string;
+  claimant_fp: string;
+  base_sha: string;
+  repo: string;
+  /** SPKI PEM of the stamp signing key (AGT-454). Included in canonical signed bytes. */
+  pubkey: string;
+  signature: string;
+  serverConfig: ServerConfig;
+  _sshSpawnForTest?: SshSpawnFn;
+}
+
+export async function callRegisterExtra(
+  input: RegisterExtraInput,
+): Promise<RegisterExtraResult> {
+  const spawnFn = input._sshSpawnForTest ?? defaultSshSpawn;
+  const payload = JSON.stringify({
+    patch_id: input.patch_id,
+    claimant_fp: input.claimant_fp,
+    base_sha: input.base_sha,
+    repo: input.repo,
+    pubkey: input.pubkey,
+    signature: input.signature,
+  });
+
+  let result: SshSpawnResult;
+  try {
+    result = await spawnFn(input.serverConfig, PEER_SSH_VERBS.registerExtra, payload);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "register_failed",
+      message: `ssh spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+      serverStderr: "",
+    };
+  }
+
+  if (result.exitCode === 5) {
+    const stderr = result.stderr.trim();
+    return {
+      ok: false,
+      reason: "register_rejected",
+      message: `register-extra rejected: ${stderr}`,
+      serverStderr: stderr,
+    };
+  }
+
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr.trim();
+    return {
+      ok: false,
+      reason: "register_failed",
+      message:
+        `stamp-server register-extra returned exit ${result.exitCode}. ` +
+        (stderr ? `server stderr: ${stderr}` : ""),
+      serverStderr: stderr,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout.trim());
+  } catch {
+    return {
+      ok: false,
+      reason: "register_failed",
+      message: `stamp-server returned malformed JSON: ${JSON.stringify(result.stdout.slice(0, 200))}`,
+      serverStderr: result.stderr.trim(),
+    };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+
+  if (obj.ok === false && obj.error === "peer_reviews_not_configured") {
+    return {
+      ok: false,
+      reason: "peer_reviews_not_configured",
+      message: "stamp-server has peer reviews disabled",
+      serverStderr: result.stderr.trim(),
+    };
+  }
+
+  if (obj.ok === true) {
+    const patch_id = typeof obj.patch_id === "string" ? obj.patch_id : input.patch_id;
+    return { ok: true, patch_id };
+  }
+
+  const errMsg = typeof obj.error === "string" ? obj.error : JSON.stringify(obj);
+  return {
+    ok: false,
+    reason: "register_failed",
+    message: `stamp-server returned error: ${errMsg}`,
+    serverStderr: result.stderr.trim(),
+  };
+}
+
 // ─── re-review-request ────────────────────────────────────────────────
 //
 // Fifth parallel SSH-verb client (AGT-431), mirroring the four above

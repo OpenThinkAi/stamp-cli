@@ -38,6 +38,7 @@ const PEER_VERB_PREFIXES: ReadonlySet<string> = new Set([
   "stamp-heartbeat",
   "stamp-release-seat",
   "stamp-re-review-request",
+  "stamp-register-extra",
 ]);
 
 function parseDockerfilePeerVerbs(): Set<string> {
@@ -58,7 +59,7 @@ function parseDockerfilePeerVerbs(): Set<string> {
       symlinkName,
       `Dockerfile mismatch: binary '${binaryName}' != symlink '${symlinkName}'`,
     );
-    // Only track the six peer verbs we care about
+    // Only track the seven peer verbs we care about
     if (PEER_VERB_PREFIXES.has(symlinkName)) {
       found.add(symlinkName);
     }
@@ -69,7 +70,7 @@ function parseDockerfilePeerVerbs(): Set<string> {
 describe("peerSshVerbs: client↔server verb agreement", () => {
   const serverVerbs = parseDockerfilePeerVerbs();
 
-  it("Dockerfile exposes all six expected peer-verb symlinks", () => {
+  it("Dockerfile exposes all seven expected peer-verb symlinks", () => {
     for (const expected of PEER_VERB_PREFIXES) {
       assert.ok(
         serverVerbs.has(expected),

@@ -52,6 +52,7 @@ import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 import {
   callClaimSeat,
   callHeartbeat,
+  callRegisterExtra,
   callReleaseSeat,
   type SshSpawnFn,
 } from "../lib/seatClient.js";
@@ -1011,7 +1012,19 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       promptName = promptNameRaw;
     }
 
-    // ─── Claim seat ──────────────────────────────────────────────
+    // ─── Claim seat (or register as extra) ──────────────────────
+    // AGT-451: when the triage decision is `claim_seat: always`, the listener
+    // MUST run and post regardless of seat availability. It still attempts a
+    // primary seat claim first (per AC #2 — `always` means "run regardless",
+    // not "always use extras"). Only on a `seats_full` rejection does it fall
+    // through to the extras-registration path.
+    //
+    // `reviewMode` is the local discriminator that governs the post-claim
+    // lifecycle (heartbeat, release-seat) — both are gated on `kind === "seat"`.
+    // Extras hold no numbered slot, so they skip heartbeat and release-seat.
+    type ReviewMode = { kind: "seat"; seat: number } | { kind: "extra" };
+    let reviewMode: ReviewMode;
+
     // AGT-454: include pubkey in the payload so server can verify without repo access.
     const claimResult = await callClaimSeat({
       patch_id: patchId,
@@ -1033,40 +1046,74 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     if (!claimResult.ok) {
       if (claimResult.reason === "claim_rejected") {
         const { claimRejectionReason } = claimResult;
-        if (claimRejectionReason === "seats_full") {
+        if (claimRejectionReason === "seats_full" && triageDecision.claim_seat === "always") {
+          // AGT-451 AC #1: seats_full + always → register as extra and continue.
+          process.stderr.write(
+            `⟳ no primary seat available; posting as extra\n`,
+          );
+          const registerResult = await callRegisterExtra({
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+            base_sha: baseSha,
+            repo,
+            pubkey: keypair.publicKeyPem,
+            signature: canonicalSign(keypair, {
+              patch_id: patchId,
+              claimant_fp: keypair.fingerprint,
+              base_sha: baseSha,
+              repo,
+              pubkey: keypair.publicKeyPem,
+            }),
+            serverConfig: serverCfg,
+            _sshSpawnForTest: opts._sshSpawnForTest,
+          });
+          if (!registerResult.ok) {
+            process.stderr.write(
+              `note: register-extra failed for PR #${prNumber}: ${registerResult.message}; skipping\n`,
+            );
+            continue;
+          }
+          reviewMode = { kind: "extra" };
+        } else if (claimRejectionReason === "seats_full") {
           process.stderr.write(
             `note: seats full for PR #${prNumber}; skipping\n`,
           );
+          continue;
         } else if (claimRejectionReason === "author_cannot_claim_own_pr") {
           process.stderr.write(
             `note: cannot claim own PR #${prNumber} (author_cannot_claim_own_pr); skipping\n`,
           );
+          continue;
         } else if (claimRejectionReason === "already_holds_other_seat") {
           process.stderr.write(
             `note: already holding another seat (already_holds_other_seat); skipping PR #${prNumber}\n`,
           );
+          continue;
         } else {
           process.stderr.write(
             `note: claim rejected for PR #${prNumber}: ${claimResult.message}; skipping\n`,
           );
+          continue;
         }
+      } else {
+        // claim_failed or peer_reviews_not_configured — log and continue.
+        process.stderr.write(
+          `note: claim-seat failed for PR #${prNumber}: ${claimResult.message}; skipping\n`,
+        );
         continue;
       }
-      // claim_failed or peer_reviews_not_configured — log and continue.
-      process.stderr.write(
-        `note: claim-seat failed for PR #${prNumber}: ${claimResult.message}; skipping\n`,
-      );
-      continue;
+    } else {
+      // Primary seat claimed successfully.
+      reviewMode = { kind: "seat", seat: claimResult.seat };
+      currentSeatPatchId = patchId;
+      process.stderr.write(`⟳ claimed seat ${claimResult.seat}; running review\n`);
     }
-
-    const seatNumber = claimResult.seat;
-    currentSeatPatchId = patchId;
-    process.stderr.write(`⟳ claimed seat ${seatNumber}; running review\n`);
 
     // ─── AGT-454: fetch the real diff via gh (per-repo auth boundary) ──
     // The notification payload is metadata-only; the unified diff is fetched
-    // from GitHub here, AFTER claiming the seat. GitHub gates this — a listener
-    // that lacks repo access cannot fetch the diff and releases the seat.
+    // from GitHub here, AFTER claiming the seat (or registering as extra).
+    // GitHub gates this — a listener that lacks repo access cannot fetch the
+    // diff. On failure: seat holders release; extras just continue.
     let diff: string;
     {
       let ghDiffStatus: number;
@@ -1090,11 +1137,37 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
       if (ghDiffStatus !== 0 || ghDiffStdout.trim() === "") {
         const reason = ghDiffStderr || (ghDiffStdout.trim() === "" ? "empty diff" : `exit ${ghDiffStatus}`);
-        process.stderr.write(
-          `✗ could not fetch diff (gh): ${reason}; releasing seat\n`,
-        );
-        currentSeatPatchId = null;
-        await callReleaseSeat({
+        if (reviewMode.kind === "seat") {
+          process.stderr.write(
+            `✗ could not fetch diff (gh): ${reason}; releasing seat\n`,
+          );
+          currentSeatPatchId = null;
+          await callReleaseSeat({
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+            signature: canonicalSign(keypair, {
+              patch_id: patchId,
+              claimant_fp: keypair.fingerprint,
+            }),
+            serverConfig: serverCfg,
+            _sshSpawnForTest: opts._sshSpawnForTest,
+          });
+        } else {
+          process.stderr.write(
+            `✗ could not fetch diff (gh): ${reason}; skipping extra\n`,
+          );
+        }
+        continue;
+      }
+      diff = ghDiffStdout;
+    }
+
+    // ─── Heartbeat timer (seat holders only) ────────────────────
+    // Extras hold no numbered slot, so they skip heartbeat and release-seat.
+    if (reviewMode.kind === "seat") {
+      const setIntervalFn = opts._setIntervalForTest ?? setInterval;
+      currentHeartbeatHandle = setIntervalFn(() => {
+        void callHeartbeat({
           patch_id: patchId,
           claimant_fp: keypair.fingerprint,
           signature: canonicalSign(keypair, {
@@ -1104,27 +1177,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           serverConfig: serverCfg,
           _sshSpawnForTest: opts._sshSpawnForTest,
         });
-        continue;
-      }
-      diff = ghDiffStdout;
+      }, 60_000);
     }
 
-    // ─── AC #5: heartbeat timer ──────────────────────────────────
-    const setIntervalFn = opts._setIntervalForTest ?? setInterval;
-    currentHeartbeatHandle = setIntervalFn(() => {
-      void callHeartbeat({
-        patch_id: patchId,
-        claimant_fp: keypair.fingerprint,
-        signature: canonicalSign(keypair, {
-          patch_id: patchId,
-          claimant_fp: keypair.fingerprint,
-        }),
-        serverConfig: serverCfg,
-        _sshSpawnForTest: opts._sshSpawnForTest,
-      });
-    }, 60_000);
-
-    // ─── Run review with named prompt (AC #4) ───────────────────
+    // ─── Run review with named prompt ───────────────────────────
     const reviewInput: RunBuiltinReviewInput = {
       diff,
       cwd: opts._cwdForTest ?? process.cwd(),
@@ -1139,21 +1195,27 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       process.stderr.write(`⟳ running review with prompt "${promptName}"\n`);
       const reviewResult = await runBuiltinReview(reviewInput);
       if (!reviewResult.ok) {
-        process.stderr.write(
-          `✗ review failed (prompt: ${promptName}): ${reviewResult.message}; releasing seat\n`,
-        );
-        // clearHeartbeat() is called in finally — no explicit call needed here.
-        currentSeatPatchId = null;
-        await callReleaseSeat({
-          patch_id: patchId,
-          claimant_fp: keypair.fingerprint,
-          signature: canonicalSign(keypair, {
+        if (reviewMode.kind === "seat") {
+          process.stderr.write(
+            `✗ review failed (prompt: ${promptName}): ${reviewResult.message}; releasing seat\n`,
+          );
+          // clearHeartbeat() is called in finally — no explicit call needed here.
+          currentSeatPatchId = null;
+          await callReleaseSeat({
             patch_id: patchId,
             claimant_fp: keypair.fingerprint,
-          }),
-          serverConfig: serverCfg,
-          _sshSpawnForTest: opts._sshSpawnForTest,
-        });
+            signature: canonicalSign(keypair, {
+              patch_id: patchId,
+              claimant_fp: keypair.fingerprint,
+            }),
+            serverConfig: serverCfg,
+            _sshSpawnForTest: opts._sshSpawnForTest,
+          });
+        } else {
+          process.stderr.write(
+            `✗ review failed (prompt: ${promptName}): ${reviewResult.message}; skipping extra\n`,
+          );
+        }
         continue;
       }
       reviewBody = reviewResult.body;
@@ -1173,17 +1235,19 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         process.stderr.write(
           `✗ refusing to save draft for PR #${prNumber}: invalid patchId format ${JSON.stringify(patchId)}\n`,
         );
-        currentSeatPatchId = null;
-        await callReleaseSeat({
-          patch_id: patchId,
-          claimant_fp: keypair.fingerprint,
-          signature: canonicalSign(keypair, {
+        if (reviewMode.kind === "seat") {
+          currentSeatPatchId = null;
+          await callReleaseSeat({
             patch_id: patchId,
             claimant_fp: keypair.fingerprint,
-          }),
-          serverConfig: serverCfg,
-          _sshSpawnForTest: opts._sshSpawnForTest,
-        });
+            signature: canonicalSign(keypair, {
+              patch_id: patchId,
+              claimant_fp: keypair.fingerprint,
+            }),
+            serverConfig: serverCfg,
+            _sshSpawnForTest: opts._sshSpawnForTest,
+          });
+        }
         continue;
       }
       const draftContent =
@@ -1202,18 +1266,20 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           `✗ draft save failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
-      currentSeatPatchId = null;
-      // Release seat after draft save (no gh post).
-      await callReleaseSeat({
-        patch_id: patchId,
-        claimant_fp: keypair.fingerprint,
-        signature: canonicalSign(keypair, {
+      if (reviewMode.kind === "seat") {
+        currentSeatPatchId = null;
+        // Release seat after draft save (no gh post).
+        await callReleaseSeat({
           patch_id: patchId,
           claimant_fp: keypair.fingerprint,
-        }),
-        serverConfig: serverCfg,
-        _sshSpawnForTest: opts._sshSpawnForTest,
-      });
+          signature: canonicalSign(keypair, {
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+          }),
+          serverConfig: serverCfg,
+          _sshSpawnForTest: opts._sshSpawnForTest,
+        });
+      }
       continue;
     }
 
@@ -1223,21 +1289,24 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         `⟳ dry-run for PR #${prNumber} (verdict=${reviewVerdict}); would have posted via gh, no review sent\n`,
       );
       process.stderr.write(`─── dry-run review body for PR #${prNumber} ───\n${reviewBody}\n─── end dry-run body ───\n`);
-      currentSeatPatchId = null;
-      await callReleaseSeat({
-        patch_id: patchId,
-        claimant_fp: keypair.fingerprint,
-        signature: canonicalSign(keypair, {
+      if (reviewMode.kind === "seat") {
+        currentSeatPatchId = null;
+        await callReleaseSeat({
           patch_id: patchId,
           claimant_fp: keypair.fingerprint,
-        }),
-        serverConfig: serverCfg,
-        _sshSpawnForTest: opts._sshSpawnForTest,
-      });
+          signature: canonicalSign(keypair, {
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+          }),
+          serverConfig: serverCfg,
+          _sshSpawnForTest: opts._sshSpawnForTest,
+        });
+      }
       continue;
     }
 
-    // ─── AC #7: post review via gh ───────────────────────────────
+    // ─── Post review via gh (AC #5 / AC #7) ─────────────────────
+    // Identical body/verb regardless of seat vs extra (AC #5).
     const ghVerdictFlag = ({
       "approve": "--approve",
       "request-changes": "--request-changes",
@@ -1266,25 +1335,33 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     if (ghStatus !== 0) {
       const reason = ghStderr || `exit ${ghStatus}`;
-      process.stderr.write(
-        `✗ gh pr review failed (${reason}); seat released\n`,
-      );
-      currentSeatPatchId = null;
-      await callReleaseSeat({
-        patch_id: patchId,
-        claimant_fp: keypair.fingerprint,
-        signature: canonicalSign(keypair, {
+      if (reviewMode.kind === "seat") {
+        process.stderr.write(
+          `✗ gh pr review failed (${reason}); seat released\n`,
+        );
+        currentSeatPatchId = null;
+        await callReleaseSeat({
           patch_id: patchId,
           claimant_fp: keypair.fingerprint,
-        }),
-        serverConfig: serverCfg,
-        _sshSpawnForTest: opts._sshSpawnForTest,
-      });
+          signature: canonicalSign(keypair, {
+            patch_id: patchId,
+            claimant_fp: keypair.fingerprint,
+          }),
+          serverConfig: serverCfg,
+          _sshSpawnForTest: opts._sshSpawnForTest,
+        });
+      } else {
+        process.stderr.write(
+          `✗ gh pr review failed (${reason}); extra skipped\n`,
+        );
+      }
       continue;
     }
 
     // Success.
-    currentSeatPatchId = null;
+    if (reviewMode.kind === "seat") {
+      currentSeatPatchId = null;
+    }
     process.stderr.write(`✓ posted review (verdict=${reviewVerdict}) for PR #${prNumber}\n`);
   }
 }

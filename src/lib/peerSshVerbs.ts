@@ -18,6 +18,7 @@ export const PEER_SSH_VERBS = {
   heartbeat: "stamp-heartbeat",
   releaseSeat: "stamp-release-seat",
   reReviewRequest: "stamp-re-review-request",
+  registerExtra: "stamp-register-extra",
 } as const;
 
 export type PeerSshVerb = (typeof PEER_SSH_VERBS)[keyof typeof PEER_SSH_VERBS];
