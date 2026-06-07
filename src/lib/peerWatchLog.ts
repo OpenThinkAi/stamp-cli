@@ -11,10 +11,52 @@
  * Injection seam: `_appendForTest` replaces real `appendFileSync` in tests.
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import type { TriageDecision } from "./peerTriage.js";
 import { peerWatchLogPath } from "./paths.js";
+
+// ─── Rotation policy ──────────────────────────────────────────────────
+
+/**
+ * Rotate `peer-watch.log` once it reaches this many bytes. Keeps the
+ * operator log bounded so a stuck/hot listener loop can't exhaust disk
+ * (a 7.9 GB file was observed in the wild — OpenThinkAi/stamp-cli#47).
+ */
+export const PEER_WATCH_LOG_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+
+/** Number of rotated archives to keep: `peer-watch.log.1` … `.KEEP`. */
+export const PEER_WATCH_LOG_KEEP = 3;
+
+/**
+ * Size-based rotation. If `logPath` is at/over `maxBytes`, shift the
+ * archives down (`.2`→`.3`, `.1`→`.2`) and rename the live log to `.1`,
+ * dropping the oldest. Best-effort: any fs error is swallowed so the
+ * listener loop never crashes from rotation (matches the append contract).
+ */
+function rotateIfNeeded(logPath: string, maxBytes: number): void {
+  let size: number;
+  try {
+    size = statSync(logPath).size;
+  } catch {
+    return; // no log yet (or unstattable) — nothing to rotate
+  }
+  if (size < maxBytes) return;
+
+  // Shift archives down so `.1` is free, dropping the oldest via overwrite.
+  for (let i = PEER_WATCH_LOG_KEEP - 1; i >= 1; i--) {
+    try {
+      renameSync(`${logPath}.${i}`, `${logPath}.${i + 1}`);
+    } catch {
+      /* missing source archive is fine */
+    }
+  }
+  try {
+    renameSync(logPath, `${logPath}.1`);
+  } catch {
+    /* best-effort: leave the live log in place if the rename fails */
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -50,6 +92,10 @@ export interface AppendTripletInput extends TripletRecord {
    * Receives (path, line) where `line` is the NDJSON string including trailing newline.
    */
   _appendForTest?: (path: string, line: string) => void;
+  /** Test-only: override the log path (default: `peerWatchLogPath()`). */
+  _logPathForTest?: string;
+  /** Test-only: override the rotation threshold (default: `PEER_WATCH_LOG_MAX_BYTES`). */
+  _maxBytesForTest?: number;
 }
 
 // ─── Append ──────────────────────────────────────────────────────────
@@ -74,7 +120,7 @@ export function appendTriplet(input: AppendTripletInput): void {
   };
 
   const line = JSON.stringify(record) + "\n";
-  const logPath = peerWatchLogPath();
+  const logPath = input._logPathForTest ?? peerWatchLogPath();
 
   try {
     if (input._appendForTest) {
@@ -82,6 +128,8 @@ export function appendTriplet(input: AppendTripletInput): void {
     } else {
       // Ensure the parent dir exists before writing.
       mkdirSync(dirname(logPath), { recursive: true });
+      // Bound total size before appending (OpenThinkAi/stamp-cli#47).
+      rotateIfNeeded(logPath, input._maxBytesForTest ?? PEER_WATCH_LOG_MAX_BYTES);
       appendFileSync(logPath, line, "utf8");
     }
   } catch (err) {
