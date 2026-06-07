@@ -57,6 +57,11 @@ export default defineConfig([
       "server/heartbeat": "src/server/heartbeat.ts",
       "server/re-review-request": "src/server/re-review-request.ts",
       "server/subscribe": "src/server/subscribe.ts",
+      // Extras-post path SSH verb (AGT-451). Invoked by listeners whose
+      // triage decision is `claim_seat: always` when claim-seat returns
+      // `seats_full`. Records an `extras-register` event so the listener
+      // can proceed to run and post its review unconditionally.
+      "server/register-extra": "src/server/register-extra.ts",
     },
     format: ["cjs"],
     target: "node22",
