@@ -104,9 +104,9 @@ export function peerWatchPath(): string {
   return join(homedir(), ".stamp", "peer-watch.md");
 }
 
-/** Path to `~/.stamp/peer-watch.log` (triage triplet log). */
+/** Path to `~/.stamp/peer-watch.log` (triage triplet log). `STAMP_PEER_WATCH_LOG` overrides — set in `tests/setup-env.ts` so tests never write to the user's real log (#48). */
 export function peerWatchLogPath(): string {
-  return join(homedir(), ".stamp", "peer-watch.log");
+  return process.env.STAMP_PEER_WATCH_LOG ?? join(homedir(), ".stamp", "peer-watch.log");
 }
 
 /** Directory containing named peer-review prompt files (`~/.stamp/personal/peers/`). */
