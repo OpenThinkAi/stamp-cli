@@ -27,6 +27,8 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
@@ -944,7 +946,6 @@ function listNewCommits(oldSha: string, newSha: string): string[] {
 function readAllStdin(): string {
   const chunks: Buffer[] = [];
   const fd = 0;
-  const { readFileSync } = require("node:fs") as typeof import("node:fs");
   try {
     chunks.push(readFileSync(fd));
   } catch {
@@ -964,8 +965,8 @@ function reject(refname: string, reason: string): never {
 // Run main() only when this module is the executed entrypoint — not
 // when it's been imported by another module (notably the unit tests).
 // Without this guard, importing the module invokes main() →
-// readAllStdin() → require("node:fs") (ReferenceError under ESM) → the
-// outer catch calls process.exit(1) → the test runner dies.
+// readAllStdin() → the outer catch calls process.exit(1) → the test
+// runner dies.
 //
 // FAIL-OPEN by design: this is a security gate. If we CAN'T determine
 // whether we're the entrypoint (URL parse error, missing argv, etc.),
@@ -975,6 +976,16 @@ function reject(refname: string, reason: string): never {
 // catch returns `true` so any path-comparison oddity surfaces as a
 // hook that runs (and either passes or rejects on its own merits)
 // rather than a hook that silently no-ops.
+//
+// Bundle-safe: when this module is bundled into dist/index.js (CLI),
+// import.meta.url collapses to the bundle URL. A direct
+// `node dist/index.js` run then makes the URL comparison return true
+// (both sides resolve to the same bundle file), hijacking the CLI.
+// To prevent this, we require argv[1]'s basename to be "pre-receive"
+// before trusting the URL comparison — the hook is always installed
+// under that name, and no CLI invocation will have that basename.
+// This is safe to check first because a non-"pre-receive" argv[1]
+// unambiguously indicates we're NOT the hook entrypoint.
 //
 // Uses `fileURLToPath` (from node:url) rather than constructing a URL
 // by string concatenation: it handles symlink resolution AND
@@ -992,6 +1003,13 @@ function isMainModule(): boolean {
     // No argv[1] at all — almost certainly an import; don't run main.
     // But for a hook invocation argv[1] is always set, so the `false`
     // branch here only triggers in clearly non-hook contexts.
+    return false;
+  }
+  // Bundle-safety gate: the hook is always installed as "pre-receive".
+  // If argv[1]'s basename is anything else (e.g. "index.js", "stamp"),
+  // this module has been bundled into a larger entry and we must not
+  // fire main(). No need to fall through to the URL comparison.
+  if (basename(argv1) !== "pre-receive") {
     return false;
   }
   try {
