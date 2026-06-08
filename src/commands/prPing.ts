@@ -30,6 +30,7 @@ import { loadServerConfig } from "../lib/serverConfig.js";
 import type { ServerConfig } from "../lib/serverConfig.js";
 import {
   callReReviewRequest,
+  type HttpFetchFn,
   type ReReviewRequestResult,
   type SshSpawnFn,
 } from "../lib/seatClient.js";
@@ -43,8 +44,10 @@ export interface PrPingOptions {
   reviewer: string[];
   /** `--server <host:port>` override. */
   server?: string;
-  /** Test-only: inject a fake SSH spawn function. */
+  /** @deprecated inject _fetchForTest instead — SSH transport retired (AGT-453). */
   _sshSpawnForTest?: SshSpawnFn;
+  /** Test-only: inject a fake HTTP fetch function for seat-protocol calls. */
+  _fetchForTest?: HttpFetchFn;
   /** Test-only: inject a keypair directly. `null` → simulate missing keypair. */
   _keypairForTest?: Keypair | null;
   /** Test-only: inject a fake `gh pr view` result for the HEAD PR lookup. */
@@ -241,6 +244,8 @@ export async function runPrPing(opts: PrPingOptions): Promise<void> {
     signature,
     serverConfig: serverCfg,
     _sshSpawnForTest: opts._sshSpawnForTest,
+    _fetchForTest: opts._fetchForTest,
+    _privateKeyPemForHttp: keypair.privateKeyPem,
   });
 
   // ─── Map result → exit code ───────────────────────────────────────

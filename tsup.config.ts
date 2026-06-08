@@ -46,22 +46,11 @@ export default defineConfig([
       // unset (Phase A bundled-prompts path); clones/fetches the
       // external prompts repo into /srv/git/.prompts-cache otherwise.
       "server/prompts-cache-bootstrap": "src/server/prompts-cache-bootstrap.ts",
-      // Peer-agentic review SSH verbs (AGT-427). Each verb is a
-      // standalone CJS entry. All verbs are dark unless
-      // STAMP_PEER_REVIEWS_ENABLED=1 is set; the SQLite migration
-      // (peer_review_patches + peer_review_events tables) always runs
-      // at boot regardless of the env-gate.
+      // Peer-agentic review SSH verbs (AGT-427 / AGT-453). Only
+      // stamp-pr-opened remains — the six seat-protocol verbs (subscribe,
+      // claim-seat, heartbeat, release-seat, re-review-request,
+      // register-extra) were migrated to HTTP POST endpoints in AGT-453.
       "server/pr-opened": "src/server/pr-opened.ts",
-      "server/claim-seat": "src/server/claim-seat.ts",
-      "server/release-seat": "src/server/release-seat.ts",
-      "server/heartbeat": "src/server/heartbeat.ts",
-      "server/re-review-request": "src/server/re-review-request.ts",
-      "server/subscribe": "src/server/subscribe.ts",
-      // Extras-post path SSH verb (AGT-451). Invoked by listeners whose
-      // triage decision is `claim_seat: always` when claim-seat returns
-      // `seats_full`. Records an `extras-register` event so the listener
-      // can proceed to run and post its review unconditionally.
-      "server/register-extra": "src/server/register-extra.ts",
     },
     format: ["cjs"],
     target: "node22",

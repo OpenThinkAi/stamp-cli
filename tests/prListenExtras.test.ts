@@ -25,7 +25,7 @@ import {
 import { runPrListen, type PrListenOptions } from "../src/commands/prListen.ts";
 import type { PeerReviewEvent } from "../src/lib/peerReviewEvent.ts";
 import type { TripletRecord } from "../src/lib/peerWatchLog.ts";
-import type { SshSpawnFn } from "../src/lib/seatClient.ts";
+import type { HttpFetchFn, SshSpawnFn } from "../src/lib/seatClient.ts";
 import type { Keypair } from "../src/lib/keys.ts";
 import { clearListenerRegistry } from "../src/server/peerReviews.ts";
 
@@ -105,85 +105,67 @@ async function runAndCapture(opts: PrListenOptions): Promise<{ stderr: string; e
   return { stderr: lines.join(""), exitCode };
 }
 
-// ─── Shared seam builders ─────────────────────────────────────────────
+// ─── Shared seam builders (AGT-453: HTTP fetch seam) ─────────────────
 
-function makeSshSpawnSeatsFull(): { spawn: SshSpawnFn; claimCalls: string[]; registerExtraCalls: string[] } {
+// Keep SshSpawnFn import in scope for type compat — it's re-exported as a
+// back-compat alias from seatClient.ts (actual spawn logic is gone).
+type _SshCompat = SshSpawnFn; void (undefined as unknown as _SshCompat);
+
+/** HTTP fetch seam where claim-seat returns seats_full (409 conflict). */
+function makeHttpFetchSeatsFull(): { fetch: HttpFetchFn; claimCalls: string[]; registerExtraCalls: string[] } {
   const claimCalls: string[] = [];
   const registerExtraCalls: string[] = [];
 
-  const spawn: SshSpawnFn = async (_cfg, verb, _payload) => {
-    if (verb === "stamp-subscribe") {
-      return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
+  const fetch: HttpFetchFn = async (url, _headers, _body) => {
+    if (url.endsWith("/peer/claim-seat")) {
+      claimCalls.push(url);
+      return { status: 409, body: JSON.stringify({ ok: false, error: "seats_full" }) };
     }
-    if (verb === "stamp-claim-seat") {
-      claimCalls.push(verb);
-      // seats_full rejection
-      return {
-        stdout: "",
-        stderr: "seats_full",
-        exitCode: 5,
-        signal: null,
-      };
+    if (url.endsWith("/peer/register-extra")) {
+      registerExtraCalls.push(url);
+      return { status: 200, body: JSON.stringify({ ok: true, patch_id: PATCH_ID }) };
     }
-    if (verb === "stamp-register-extra") {
-      registerExtraCalls.push(verb);
-      return {
-        stdout: JSON.stringify({ ok: true, patch_id: PATCH_ID }) + "\n",
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-      };
+    if (url.endsWith("/peer/release-seat")) {
+      return { status: 200, body: JSON.stringify({ ok: true, released: true, patch_id: PATCH_ID }) };
     }
-    if (verb === "stamp-release-seat") {
-      return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
-    }
-    return { stdout: "", stderr: `unknown verb: ${verb}`, exitCode: 1, signal: null };
+    return { status: 200, body: JSON.stringify({ ok: true }) };
   };
 
-  return { spawn, claimCalls, registerExtraCalls };
+  return { fetch, claimCalls, registerExtraCalls };
 }
 
-function makeSshSpawnSeatAvailable(): { spawn: SshSpawnFn; claimCalls: string[]; registerExtraCalls: string[] } {
+/** HTTP fetch seam where claim-seat succeeds with seat 1. */
+function makeHttpFetchSeatAvailable(): { fetch: HttpFetchFn; claimCalls: string[]; registerExtraCalls: string[] } {
   const claimCalls: string[] = [];
   const registerExtraCalls: string[] = [];
 
-  const spawn: SshSpawnFn = async (_cfg, verb, _payload) => {
-    if (verb === "stamp-subscribe") {
-      return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
+  const fetch: HttpFetchFn = async (url, _headers, _body) => {
+    if (url.endsWith("/peer/claim-seat")) {
+      claimCalls.push(url);
+      return { status: 200, body: JSON.stringify({ ok: true, seat: 1, patch_id: PATCH_ID }) };
     }
-    if (verb === "stamp-claim-seat") {
-      claimCalls.push(verb);
-      // Primary seat claimed successfully.
-      return {
-        stdout: JSON.stringify({ ok: true, seat: 1, patch_id: PATCH_ID }) + "\n",
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-      };
+    if (url.endsWith("/peer/register-extra")) {
+      registerExtraCalls.push(url);
+      return { status: 200, body: JSON.stringify({ ok: true, patch_id: PATCH_ID }) };
     }
-    if (verb === "stamp-register-extra") {
-      registerExtraCalls.push(verb);
-      return {
-        stdout: JSON.stringify({ ok: true, patch_id: PATCH_ID }) + "\n",
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-      };
+    if (url.endsWith("/peer/release-seat")) {
+      return { status: 200, body: JSON.stringify({ ok: true, released: true, patch_id: PATCH_ID }) };
     }
-    if (verb === "stamp-release-seat") {
-      return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
-    }
-    return { stdout: "", stderr: `unknown verb: ${verb}`, exitCode: 1, signal: null };
+    return { status: 200, body: JSON.stringify({ ok: true }) };
   };
 
-  return { spawn, claimCalls, registerExtraCalls };
+  return { fetch, claimCalls, registerExtraCalls };
 }
+
+/** @deprecated kept for backward compat with helpers that use this name. */
+function makeSshSpawnSeatsFull() { return makeHttpFetchSeatsFull(); }
+function makeSshSpawnSeatAvailable() { return makeHttpFetchSeatAvailable(); }
 
 // ─── AC #1 + AC #4: always + seats_full → extras path, gh post fires ───
 
 describe("AGT-451 AC #1/#4: claim_seat: always + seats_full → register-extra, review, gh post", () => {
   it("calls register-extra, emits the extras log line, posts the review", async () => {
-    const { spawn, claimCalls, registerExtraCalls } = makeSshSpawnSeatsFull();
+    const { fetch, claimCalls, registerExtraCalls } = makeSshSpawnSeatsFull();
     const ghReviewCalls: Array<{ prUrl: string; body: string; verdictFlag: string }> = [];
 
     const opts: PrListenOptions = {
@@ -191,7 +173,7 @@ describe("AGT-451 AC #1/#4: claim_seat: always + seats_full → register-extra, 
       server: "127.0.0.1:2222",
       _keypairForTest: reviewerKp,
       _eventQueueForTest: [makePrOpenedEvent()],
-      _sshSpawnForTest: spawn,
+      _fetchForTest: fetch,
       _haikuRunnerForTest: async () =>
         JSON.stringify({
           claim_seat: "always",
@@ -239,7 +221,7 @@ describe("AGT-451 AC #1/#4: claim_seat: always + seats_full → register-extra, 
 
 describe("AGT-451 AC #2: claim_seat: always + seat available → primary seat, no register-extra", () => {
   it("takes the primary seat path; does NOT call register-extra", async () => {
-    const { spawn, claimCalls, registerExtraCalls } = makeSshSpawnSeatAvailable();
+    const { fetch, claimCalls, registerExtraCalls } = makeSshSpawnSeatAvailable();
     const ghReviewCalls: string[] = [];
 
     const opts: PrListenOptions = {
@@ -247,7 +229,7 @@ describe("AGT-451 AC #2: claim_seat: always + seat available → primary seat, n
       server: "127.0.0.1:2222",
       _keypairForTest: reviewerKp,
       _eventQueueForTest: [makePrOpenedEvent()],
-      _sshSpawnForTest: spawn,
+      _fetchForTest: fetch,
       _haikuRunnerForTest: async () =>
         JSON.stringify({
           claim_seat: "always",
@@ -299,7 +281,7 @@ describe("AGT-451 AC #2: claim_seat: always + seat available → primary seat, n
 
 describe("AGT-451 AC #6: cost-cap hit → skip (no register-extra)", () => {
   it("skips without calling register-extra when daily cap is pre-seeded at threshold", async () => {
-    const { spawn, claimCalls, registerExtraCalls } = makeSshSpawnSeatsFull();
+    const { fetch, claimCalls, registerExtraCalls } = makeSshSpawnSeatsFull();
     const triplets: TripletRecord[] = [];
 
     const opts: PrListenOptions = {
@@ -307,7 +289,7 @@ describe("AGT-451 AC #6: cost-cap hit → skip (no register-extra)", () => {
       server: "127.0.0.1:2222",
       _keypairForTest: reviewerKp,
       _eventQueueForTest: [makePrOpenedEvent()],
-      _sshSpawnForTest: spawn,
+      _fetchForTest: fetch,
       _haikuRunnerForTest: async () =>
         JSON.stringify({
           claim_seat: "always",
@@ -346,7 +328,7 @@ describe("AGT-451 AC #6: cost-cap hit → skip (no register-extra)", () => {
 
 describe("AGT-451 AC #7: dry-run + always + seats_full → extras path, gh post skipped", () => {
   it("registers as extra, runs review, logs dry-run body, does NOT call gh pr review", async () => {
-    const { spawn, registerExtraCalls } = makeSshSpawnSeatsFull();
+    const { fetch, registerExtraCalls } = makeSshSpawnSeatsFull();
     const ghReviewCalls: string[] = [];
 
     const opts: PrListenOptions = {
@@ -354,7 +336,7 @@ describe("AGT-451 AC #7: dry-run + always + seats_full → extras path, gh post 
       server: "127.0.0.1:2222",
       _keypairForTest: reviewerKp,
       _eventQueueForTest: [makePrOpenedEvent()],
-      _sshSpawnForTest: spawn,
+      _fetchForTest: fetch,
       _haikuRunnerForTest: async () =>
         JSON.stringify({
           claim_seat: "always",

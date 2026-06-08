@@ -206,17 +206,12 @@ COPY --from=builder /build/dist/server/stamp-review.cjs /usr/local/bin/stamp-rev
 # Wrapped by `stamp server-repos purge`; symlinked into git-shell-commands
 # below. SSH-access-gated only, like its delete/restore/list-trash siblings.
 COPY --from=builder /build/dist/server/purge-trash.cjs /usr/local/bin/purge-trash
-# Peer-agentic review SSH verbs (AGT-427). All verbs are dark unless
-# STAMP_PEER_REVIEWS_ENABLED=1 is set. The SQLite migration always runs
-# at boot regardless of the env-gate (so an operator enabling the feature
-# on a running deploy finds the tables already present).
+# Peer-agentic review SSH verbs (AGT-427 / AGT-453). Only stamp-pr-opened
+# remains — the six seat-protocol verbs were migrated to HTTP POST
+# endpoints in AGT-453. The SQLite migration always runs at boot regardless
+# of STAMP_PEER_REVIEWS_ENABLED (so an operator enabling the feature on a
+# running deploy finds the tables already present).
 COPY --from=builder /build/dist/server/pr-opened.cjs /usr/local/bin/stamp-pr-opened
-COPY --from=builder /build/dist/server/claim-seat.cjs /usr/local/bin/stamp-claim-seat
-COPY --from=builder /build/dist/server/release-seat.cjs /usr/local/bin/stamp-release-seat
-COPY --from=builder /build/dist/server/heartbeat.cjs /usr/local/bin/stamp-heartbeat
-COPY --from=builder /build/dist/server/re-review-request.cjs /usr/local/bin/stamp-re-review-request
-COPY --from=builder /build/dist/server/subscribe.cjs /usr/local/bin/stamp-subscribe
-COPY --from=builder /build/dist/server/register-extra.cjs /usr/local/bin/stamp-register-extra
 # HTTP listener for invite/accept. Started by entrypoint.sh as the git
 # user, runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
 # the hosting platform's job (Railway terminates at its edge proxy).
@@ -282,12 +277,6 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/purge-trash \
              /usr/local/bin/stamp-users \
              /usr/local/bin/stamp-pr-opened \
-             /usr/local/bin/stamp-claim-seat \
-             /usr/local/bin/stamp-release-seat \
-             /usr/local/bin/stamp-heartbeat \
-             /usr/local/bin/stamp-re-review-request \
-             /usr/local/bin/stamp-subscribe \
-             /usr/local/bin/stamp-register-extra \
              /usr/local/sbin/stamp-ensure-repo-key \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
@@ -322,12 +311,6 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/purge-trash /home/git/git-shell-commands/purge-trash \
  && ln -s /usr/local/bin/stamp-users /home/git/git-shell-commands/stamp-users \
  && ln -s /usr/local/bin/stamp-pr-opened /home/git/git-shell-commands/stamp-pr-opened \
- && ln -s /usr/local/bin/stamp-claim-seat /home/git/git-shell-commands/stamp-claim-seat \
- && ln -s /usr/local/bin/stamp-release-seat /home/git/git-shell-commands/stamp-release-seat \
- && ln -s /usr/local/bin/stamp-heartbeat /home/git/git-shell-commands/stamp-heartbeat \
- && ln -s /usr/local/bin/stamp-re-review-request /home/git/git-shell-commands/stamp-re-review-request \
- && ln -s /usr/local/bin/stamp-subscribe /home/git/git-shell-commands/stamp-subscribe \
- && ln -s /usr/local/bin/stamp-register-extra /home/git/git-shell-commands/stamp-register-extra \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands
 

@@ -63,7 +63,7 @@ import { canonicalSerializePeerPayload } from "../src/lib/attestationV4.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import { runPrListen, type PrListenOptions } from "../src/commands/prListen.ts";
 import type { TripletRecord } from "../src/lib/peerWatchLog.ts";
-import type { SshSpawnFn } from "../src/lib/seatClient.ts";
+import type { HttpFetchFn, SshSpawnFn } from "../src/lib/seatClient.ts";
 import type { Keypair } from "../src/lib/keys.ts";
 
 // ─── Key generation helpers ──────────────────────────────────────────
@@ -313,27 +313,24 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
       fingerprint: reviewerB.fp,
     };
 
-    // Fake SSH spawn — subscribe and release-seat succeed; claim should not
+    // Fake HTTP fetch — claim-seat and release-seat succeed; claim should not
     // be called when the cap is pre-hit.
     let seatClaimCount = 0;
-    const fakeSshSpawn: SshSpawnFn = async (_cfg, verb, _payload) => {
-      if (verb === "stamp-subscribe") {
-        return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
-      }
-      if (verb === "stamp-claim-seat") {
+    const fakeFetch: HttpFetchFn = async (url, _headers, _body) => {
+      if (url.endsWith("/peer/claim-seat")) {
         seatClaimCount++;
         return {
-          stdout: JSON.stringify({ ok: true, seat: 1, patch_id: patchId }) + "\n",
-          stderr: "",
-          exitCode: 0,
-          signal: null,
+          status: 200,
+          body: JSON.stringify({ ok: true, seat: 1, patch_id: patchId }),
         };
       }
-      if (verb === "stamp-release-seat") {
-        return { stdout: JSON.stringify({ ok: true }) + "\n", stderr: "", exitCode: 0, signal: null };
+      if (url.endsWith("/peer/release-seat")) {
+        return { status: 200, body: JSON.stringify({ ok: true, released: true, patch_id: patchId }) };
       }
-      return { stdout: "", stderr: `unknown verb: ${verb}`, exitCode: 1, signal: null };
+      return { status: 200, body: JSON.stringify({ ok: true }) };
     };
+    // Keep SshSpawnFn reference to avoid unused import warning.
+    const _unusedSshType: SshSpawnFn | undefined = undefined; void _unusedSshType;
 
     // Two identical pr-opened events for the same patch.
     // author.fp !== reviewerB.fp → no author-exclusion.
@@ -360,7 +357,7 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
       server: "127.0.0.1:2222",
       _keypairForTest: kp,
       _eventQueueForTest: [{ ...event }, { ...event }],
-      _sshSpawnForTest: fakeSshSpawn,
+      _fetchForTest: fakeFetch,
       // Haiku triage: $0.01 cap, if_available, draft mode.
       _haikuRunnerForTest: async (_system, _user) =>
         JSON.stringify({
