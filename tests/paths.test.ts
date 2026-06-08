@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { ensureDir, gitCommonDir, stampStateDbPath } from "../src/lib/paths.ts";
+import { ensureDir, gitCommonDir, peerWatchLogPath, stampStateDbPath } from "../src/lib/paths.ts";
 
 function git(args: string[], cwd: string): void {
   execFileSync("git", args, { cwd, stdio: "pipe" });
@@ -77,5 +77,31 @@ describe("gitCommonDir / stampStateDbPath", () => {
     const dbPath = stampStateDbPath(wt);
     ensureDir(join(dbPath, ".."));
     assert.ok(existsSync(join(repo, ".git", "stamp")));
+  });
+});
+
+// Pins the sandboxing fix for #48 — without the env override, the test suite
+// writes synthetic peer-watch records into the user's real ~/.stamp/peer-watch.log
+// and triggers macOS cap notifications.
+describe("peerWatchLogPath: STAMP_PEER_WATCH_LOG override", () => {
+  it("honors the STAMP_PEER_WATCH_LOG env var when set", () => {
+    const original = process.env.STAMP_PEER_WATCH_LOG;
+    try {
+      process.env.STAMP_PEER_WATCH_LOG = "/tmp/peer-watch-test-override.log";
+      assert.equal(peerWatchLogPath(), "/tmp/peer-watch-test-override.log");
+    } finally {
+      if (original === undefined) delete process.env.STAMP_PEER_WATCH_LOG;
+      else process.env.STAMP_PEER_WATCH_LOG = original;
+    }
+  });
+
+  it("falls back to ~/.stamp/peer-watch.log when the env var is unset", () => {
+    const original = process.env.STAMP_PEER_WATCH_LOG;
+    try {
+      delete process.env.STAMP_PEER_WATCH_LOG;
+      assert.match(peerWatchLogPath(), /\.stamp\/peer-watch\.log$/);
+    } finally {
+      if (original !== undefined) process.env.STAMP_PEER_WATCH_LOG = original;
+    }
   });
 });
