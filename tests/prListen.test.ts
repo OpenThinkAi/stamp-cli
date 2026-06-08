@@ -40,7 +40,7 @@ import {
   clearListenerRegistry,
   type PeerReviewEvent,
 } from "../src/server/peerReviews.ts";
-import type { SshSpawnFn } from "../src/lib/seatClient.ts";
+import type { HttpFetchFn, SshSpawnFn } from "../src/lib/seatClient.ts";
 import type { Keypair } from "../src/lib/keys.ts";
 import type { ResolveNamedPromptInput } from "../src/lib/namedPrompt.ts";
 
@@ -173,43 +173,44 @@ function makeEvent(opts: {
   };
 }
 
-/** SSH spawn seam returning success for all seat verbs. */
-function makeSuccessSshSpawn(seatNum = 1): SshSpawnFn {
-  return async (_cfg, verb) => {
-    if (verb === "stamp-subscribe") {
-      return {
-        stdout: JSON.stringify({ ok: true, fingerprint: "fp", orgs: ["acme"] }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-      };
+// ─── HTTP fetch seam helpers (AGT-453: replaced SSH spawn seam) ─────────
+
+/** Test server config with httpUrl set so the HTTP seat-protocol transport works. */
+const TEST_SERVER_CONFIG_HTTP = {
+  host: "stamp.example.com",
+  port: 2222,
+  user: "git",
+  repoRootPrefix: "/srv/git",
+  httpUrl: "http://stamp.example.com:8080",
+} as const;
+
+/**
+ * HTTP fetch seam returning success for all seat-protocol endpoints.
+ * Replaces the old `makeSuccessSshSpawn` for the HTTP transport.
+ */
+function makeSuccessHttpFetch(seatNum = 1): HttpFetchFn {
+  return async (url, _headers, _body) => {
+    if (url.endsWith("/peer/claim-seat")) {
+      return { status: 200, body: JSON.stringify({ ok: true, seat: seatNum, patch_id: "a".repeat(40) }) };
     }
-    if (verb === "stamp-claim-seat") {
-      return {
-        stdout: JSON.stringify({ ok: true, seat: seatNum, patch_id: "a".repeat(40) }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-      };
+    if (url.endsWith("/peer/heartbeat")) {
+      return { status: 200, body: JSON.stringify({ ok: true, seat: seatNum, patch_id: "a".repeat(40) }) };
     }
-    if (verb === "stamp-heartbeat") {
-      return {
-        stdout: JSON.stringify({ ok: true, seat: seatNum, patch_id: "a".repeat(40) }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-      };
+    if (url.endsWith("/peer/release-seat")) {
+      return { status: 200, body: JSON.stringify({ ok: true, released: true, patch_id: "a".repeat(40) }) };
     }
-    if (verb === "stamp-release-seat") {
-      return {
-        stdout: JSON.stringify({ ok: true, released: true, patch_id: "a".repeat(40) }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
-      };
+    if (url.endsWith("/peer/register-extra")) {
+      return { status: 200, body: JSON.stringify({ ok: true, patch_id: "a".repeat(40) }) };
     }
-    return { stdout: "", stderr: "unknown verb", exitCode: 1, signal: null };
+    return { status: 500, body: JSON.stringify({ ok: false, error: "unknown_url" }) };
   };
+}
+
+/** @deprecated SSH spawn seam — kept for type compatibility only. Use makeSuccessHttpFetch instead. */
+function makeSuccessSshSpawn(_seatNum = 1): SshSpawnFn {
+  // SSH transport is retired (AGT-453). Return a value that TypeScript accepts
+  // but that will never be called by the HTTP transport.
+  return async () => ({ stdout: "", stderr: "", exitCode: 0, signal: null });
 }
 
 /**
@@ -246,7 +247,7 @@ describe("AC #12: auth failure — no keypair → exit 1", () => {
       orgs: ["acme"],
       server: FIXTURE_SERVER,
       _keypairForTest: null,
-      _sshSpawnForTest: makeSuccessSshSpawn(),
+      _fetchForTest: makeSuccessHttpFetch(),
       _eventQueueForTest: [],
     });
     assert.equal(code, 1, `expected exit 1 for missing keypair, got ${code}`);
@@ -258,10 +259,11 @@ describe("AC #12: auth failure — no keypair → exit 1", () => {
 describe("AC #10: full loop via _eventQueueForTest injection", () => {
   it("event → claim → fetch diff (gh) → review → post → exit 0", async () => {
     const fakeKeypair = genKeypair();
-    const sshCalls: string[] = [];
-    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      sshCalls.push(verb);
-      return makeSuccessSshSpawn(1)(cfg, verb);
+    // Track which HTTP seat-protocol endpoints were called.
+    const httpCalls: string[] = [];
+    const trackingFetch: HttpFetchFn = async (url, headers, body) => {
+      httpCalls.push(url);
+      return makeSuccessHttpFetch(1)(url, headers, body);
     };
 
     let sdkCallCount = 0;
@@ -296,7 +298,7 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: sshSpawn,
+        _fetchForTest: trackingFetch,
         _sdkRunnerForTest: sdkRunner,
         _ghReviewForTest: ghReview,
         _ghDiffForTest: ghDiff,
@@ -342,10 +344,10 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
     // Verify heartbeat tick doesn't throw.
     if (intervalFnRef) intervalFnRef();
 
-    // SSH calls include claim-seat (the seat protocol stays on SSH; subscribe
-    // is gone — SSE replaced the listen subscription).
-    assert.ok(sshCalls.includes("stamp-claim-seat"), `expected stamp-claim-seat in: ${sshCalls}`);
-    assert.ok(!sshCalls.includes("stamp-subscribe"), `stamp-subscribe should NOT be called: ${sshCalls}`);
+    // HTTP seat-protocol calls: claim-seat was called via HTTP (AGT-453).
+    assert.ok(httpCalls.some((u) => u.endsWith("/peer/claim-seat")), `expected /peer/claim-seat call in: ${httpCalls}`);
+    // subscribe is gone — SSE replaced the listen subscription.
+    assert.ok(!httpCalls.some((u) => u.endsWith("/peer/subscribe")), `/peer/subscribe should NOT be called: ${httpCalls}`);
   });
 
   it("AC #13: stdout is empty on a normal run", async () => {
@@ -357,7 +359,7 @@ describe("AC #10: full loop via _eventQueueForTest injection", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
@@ -395,7 +397,7 @@ describe("AC #8: loop re-enters — two events, both processed", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: sdkRunner,
         _ghReviewForTest: ghReview,
         _cwdForTest: "/tmp",
@@ -429,7 +431,7 @@ describe("AC #3: author-exclusion — own-fingerprint event skipped", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async (_diff) => { sdkCalled = true; return "body"; },
         _ghReviewForTest: (_url, _body) => { ghCalled = true; return { status: 0, stderr: "" }; },
         _cwdForTest: "/tmp",
@@ -451,20 +453,14 @@ describe("AC #3: author-exclusion — own-fingerprint event skipped", () => {
 // ─── AC #4: seat-claim rejection codes ───────────────────────────────
 
 describe("AC #4: seat-claim rejections", () => {
-  function makeSeatRejectionSshSpawn(stderrMsg: string): SshSpawnFn {
-    return async (_cfg, verb) => {
-      if (verb === "stamp-subscribe") {
-        return {
-          stdout: JSON.stringify({ ok: true, fingerprint: "fp", orgs: ["acme"] }),
-          stderr: "",
-          exitCode: 0,
-          signal: null,
-        };
+  // AGT-453: HTTP fetch seam returning a 409 rejection for claim-seat.
+  function makeSeatRejectionHttpFetch(errorKey: string): HttpFetchFn {
+    return async (url, _headers, _body) => {
+      if (url.endsWith("/peer/claim-seat")) {
+        return { status: 409, body: JSON.stringify({ ok: false, error: errorKey }) };
       }
-      if (verb === "stamp-claim-seat") {
-        return { stdout: "", stderr: stderrMsg, exitCode: 5, signal: null };
-      }
-      return { stdout: "", stderr: "", exitCode: 0, signal: null };
+      // Other verbs succeed.
+      return makeSuccessHttpFetch()(url, _headers, _body);
     };
   }
 
@@ -477,7 +473,7 @@ describe("AC #4: seat-claim rejections", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSeatRejectionSshSpawn("error: claim rejected: seats_full"),
+        _fetchForTest: makeSeatRejectionHttpFetch("seats_full"),
         _sdkRunnerForTest: async (_diff) => { sdkCalled = true; return "body"; },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
@@ -497,7 +493,7 @@ describe("AC #4: seat-claim rejections", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSeatRejectionSshSpawn("error: claim rejected: author_cannot_claim_own_pr"),
+        _fetchForTest: makeSeatRejectionHttpFetch("author_cannot_claim_own_pr"),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
         ...bypassOperatorGate(),
@@ -518,7 +514,7 @@ describe("AC #4: seat-claim rejections", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSeatRejectionSshSpawn("error: claim rejected: already_holds_other_seat"),
+        _fetchForTest: makeSeatRejectionHttpFetch("already_holds_other_seat"),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [makeEvent()],
         ...bypassOperatorGate(),
@@ -537,10 +533,10 @@ describe("AC #4: seat-claim rejections", () => {
 describe("AC #7: gh pr review failure → release-seat called", () => {
   it("emits ✗ and calls release-seat when gh fails", async () => {
     const fakeKeypair = genKeypair();
-    const sshCalls: string[] = [];
-    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      sshCalls.push(verb);
-      return makeSuccessSshSpawn(1)(cfg, verb);
+    const httpCalls: string[] = [];
+    const trackingFetch: HttpFetchFn = async (url, headers, body) => {
+      httpCalls.push(url);
+      return makeSuccessHttpFetch(1)(url, headers, body);
     };
 
     const sdkRunner = async (_diff: string): Promise<string> => "review body";
@@ -552,7 +548,7 @@ describe("AC #7: gh pr review failure → release-seat called", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: sshSpawn,
+        _fetchForTest: trackingFetch,
         _sdkRunnerForTest: sdkRunner,
         _ghReviewForTest: ghReview,
         _cwdForTest: "/tmp",
@@ -565,10 +561,10 @@ describe("AC #7: gh pr review failure → release-seat called", () => {
       stderr.includes("✗ gh pr review failed"),
       `expected '✗ gh pr review failed' in: ${stderr}`,
     );
-    // release-seat should have been called.
+    // release-seat should have been called via HTTP (AGT-453).
     assert.ok(
-      sshCalls.includes("stamp-release-seat"),
-      `expected stamp-release-seat in calls: ${sshCalls.join(",")}`,
+      httpCalls.some((u) => u.endsWith("/peer/release-seat")),
+      `expected /peer/release-seat call in: ${httpCalls.join(",")}`,
     );
   });
 });
@@ -585,7 +581,7 @@ describe("Security: pr_url validation — flag-shaped or empty pr_url skipped", 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async (_diff) => { sdkCalled = true; return "body"; },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [
@@ -610,7 +606,7 @@ describe("Security: pr_url validation — flag-shaped or empty pr_url skipped", 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async (_diff) => { sdkCalled = true; return "body"; },
         _cwdForTest: "/tmp",
         _eventQueueForTest: [
@@ -648,6 +644,8 @@ describe("STAMP_NO_LLM=1: builtin review refuses before SDK call", () => {
 });
 
 // ─── seatClient unit tests (AC #4 rejection reason parsing) ──────────
+//
+// AGT-453: updated from SSH spawn seam to HTTP fetch seam.
 
 describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
   const SEAT_INPUT = {
@@ -657,18 +655,19 @@ describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
     repo: "acme/widget",
     pubkey: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfakepubkeyforthisunittest=\n-----END PUBLIC KEY-----\n",
     signature: "sig",
+    // httpUrl not needed when _fetchForTest is provided (test-seam bypass).
     serverConfig: { host: "stamp.example.com", port: 2222, user: "git", repoRootPrefix: "/srv/git" },
   } as const;
 
-  function makeRejectSshSpawn(stderrMsg: string): SshSpawnFn {
-    return async () => ({ stdout: "", stderr: stderrMsg, exitCode: 5, signal: null });
+  function makeRejectHttpFetch(errorKey: string): HttpFetchFn {
+    return async () => ({ status: 409, body: JSON.stringify({ ok: false, error: errorKey }) });
   }
 
-  it("maps 'seats_full' stderr → claimRejectionReason='seats_full'", async () => {
+  it("maps 'seats_full' 409 → claimRejectionReason='seats_full'", async () => {
     const { callClaimSeat } = await import("../src/lib/seatClient.ts");
     const result = await callClaimSeat({
       ...SEAT_INPUT,
-      _sshSpawnForTest: makeRejectSshSpawn("error: claim rejected: seats_full"),
+      _fetchForTest: makeRejectHttpFetch("seats_full"),
     });
     assert.equal(result.ok, false);
     if (!result.ok && result.reason === "claim_rejected") {
@@ -682,7 +681,7 @@ describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
     const { callClaimSeat } = await import("../src/lib/seatClient.ts");
     const result = await callClaimSeat({
       ...SEAT_INPUT,
-      _sshSpawnForTest: makeRejectSshSpawn("error: claim rejected: author_cannot_claim_own_pr"),
+      _fetchForTest: makeRejectHttpFetch("author_cannot_claim_own_pr"),
     });
     assert.equal(result.ok, false);
     if (!result.ok && result.reason === "claim_rejected") {
@@ -696,7 +695,7 @@ describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
     const { callClaimSeat } = await import("../src/lib/seatClient.ts");
     const result = await callClaimSeat({
       ...SEAT_INPUT,
-      _sshSpawnForTest: makeRejectSshSpawn("error: claim rejected: already_holds_other_seat"),
+      _fetchForTest: makeRejectHttpFetch("already_holds_other_seat"),
     });
     assert.equal(result.ok, false);
     if (!result.ok && result.reason === "claim_rejected") {
@@ -706,11 +705,11 @@ describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
     }
   });
 
-  it("falls back to 'unknown' for unrecognised reason", async () => {
+  it("falls back to 'unknown' for unrecognised error key", async () => {
     const { callClaimSeat } = await import("../src/lib/seatClient.ts");
     const result = await callClaimSeat({
       ...SEAT_INPUT,
-      _sshSpawnForTest: makeRejectSshSpawn("error: claim rejected: something_weird"),
+      _fetchForTest: makeRejectHttpFetch("something_weird"),
     });
     assert.equal(result.ok, false);
     if (!result.ok && result.reason === "claim_rejected") {
@@ -720,15 +719,13 @@ describe("seatClient: callClaimSeat rejection reason parsing (AC #4)", () => {
     }
   });
 
-  it("returns ok:true with seat number on success", async () => {
+  it("returns ok:true with seat number on success (200)", async () => {
     const { callClaimSeat } = await import("../src/lib/seatClient.ts");
     const result = await callClaimSeat({
       ...SEAT_INPUT,
-      _sshSpawnForTest: async () => ({
-        stdout: JSON.stringify({ ok: true, seat: 2, patch_id: "a".repeat(40) }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
+      _fetchForTest: async () => ({
+        status: 200,
+        body: JSON.stringify({ ok: true, seat: 2, patch_id: "a".repeat(40) }),
       }),
     });
     assert.equal(result.ok, true);
@@ -781,7 +778,7 @@ describe("AGT-430 AC #1+4: triage → named prompt used as systemPrompt for revi
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: sdkRunner,
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "Claim if security-related", hash: "abc123" },
@@ -826,7 +823,7 @@ describe("AGT-430 AC #3: missing named prompt → ✗ log + skip (no claim, no S
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => { sdkCalled = true; return "body"; },
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "rules text", hash: "abc" },
@@ -865,7 +862,7 @@ describe("AGT-430 AC #6: triplet logged regardless of skip vs. claim", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "Skip all", hash: "deadbeef" },
         _appendTripletForTest: (rec) => triplets.push(rec),
@@ -904,7 +901,7 @@ describe("AGT-430 AC #6: triplet logged regardless of skip vs. claim", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "some rules", hash: EXPECTED_HASH },
@@ -936,7 +933,7 @@ describe("AGT-430 AC #8: peer-watch.md missing → ⟳ notice + fallback decisio
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => { sdkCalled = true; return "review body"; },
         // No haikuRunner needed since triage is skipped on missing rules
         _peerWatchRulesForTest: null, // simulates missing peer-watch.md
@@ -974,10 +971,10 @@ describe("AGT-430 AC triage skip: triage returns skip → no claim, no SDK, no g
       '{"claim_seat":"skip","post_mode":"auto-post","prompt":"default"}';
 
     let sdkCalled = false;
-    let sshClaimCalled = false;
-    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "stamp-claim-seat") sshClaimCalled = true;
-      return makeSuccessSshSpawn(1)(cfg, verb);
+    let httpClaimCalled = false;
+    const trackingFetch: HttpFetchFn = async (url, headers, body) => {
+      if (url.endsWith("/peer/claim-seat")) httpClaimCalled = true;
+      return makeSuccessHttpFetch(1)(url, headers, body);
     };
 
     const { result: exitCode, stderr } = await captureStderrAsync(() =>
@@ -985,7 +982,7 @@ describe("AGT-430 AC triage skip: triage returns skip → no claim, no SDK, no g
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: sshSpawn,
+        _fetchForTest: trackingFetch,
         _sdkRunnerForTest: async () => { sdkCalled = true; return "body"; },
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "Skip all PRs", hash: "abc" },
@@ -999,32 +996,32 @@ describe("AGT-430 AC triage skip: triage returns skip → no claim, no SDK, no g
     assert.equal(exitCode, 0);
     // Skip notice logged.
     assert.ok(stderr.includes("skip"), `expected skip notice in stderr: ${stderr}`);
-    // SSH claim-seat should NOT have been called.
-    assert.equal(sshClaimCalled, false, "claim-seat should NOT be called when triage returns skip");
+    // HTTP claim-seat should NOT have been called.
+    assert.equal(httpClaimCalled, false, "claim-seat should NOT be called when triage returns skip");
     assert.equal(sdkCalled, false, "review SDK should NOT be called when triage returns skip");
   });
 });
 
-// ─── AGT-431: callReReviewRequest exit-code mapping ──────────────────
+// ─── AGT-431: callReReviewRequest HTTP status mapping (AGT-453) ──────
 
-describe("AGT-431: callReReviewRequest SSH exit-code mapping", () => {
+describe("AGT-431: callReReviewRequest HTTP status mapping", () => {
   const RE_REVIEW_INPUT = {
     patch_id: "a".repeat(40),
     requester_fp: "sha256:" + "a".repeat(64),
     reviewer_filter: [] as string[],
+    pubkey: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfakepubkeyforthisunittest=\n-----END PUBLIC KEY-----\n",
     signature: "sig",
+    // httpUrl not needed when _fetchForTest is provided.
     serverConfig: { host: "stamp.example.com", port: 2222, user: "git", repoRootPrefix: "/srv/git" },
   } as const;
 
-  it("maps server exit 5 → reason: 'not_author'", async () => {
+  it("maps HTTP 403 → reason: 'not_author'", async () => {
     const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
     const result = await callReReviewRequest({
       ...RE_REVIEW_INPUT,
-      _sshSpawnForTest: async () => ({
-        stdout: "",
-        stderr: "error: requester_fp is not the original author",
-        exitCode: 5,
-        signal: null,
+      _fetchForTest: async () => ({
+        status: 403,
+        body: JSON.stringify({ ok: false, error: "not_author", reason: "requester_fp is not the original author" }),
       }),
     });
     assert.equal(result.ok, false);
@@ -1033,15 +1030,13 @@ describe("AGT-431: callReReviewRequest SSH exit-code mapping", () => {
     }
   });
 
-  it("maps server exit 4 → reason: 'patch_not_found'", async () => {
+  it("maps HTTP 404 (patch not found) → reason: 'patch_not_found'", async () => {
     const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
     const result = await callReReviewRequest({
       ...RE_REVIEW_INPUT,
-      _sshSpawnForTest: async () => ({
-        stdout: "",
-        stderr: "error: patch xxx not found",
-        exitCode: 4,
-        signal: null,
+      _fetchForTest: async () => ({
+        status: 404,
+        body: JSON.stringify({ ok: false, error: "patch_not_found" }),
       }),
     });
     assert.equal(result.ok, false);
@@ -1050,15 +1045,13 @@ describe("AGT-431: callReReviewRequest SSH exit-code mapping", () => {
     }
   });
 
-  it("maps peer_reviews_not_configured JSON → reason: 'peer_reviews_not_configured'", async () => {
+  it("maps HTTP 404 (feature disabled) → reason: 'peer_reviews_not_configured'", async () => {
     const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
     const result = await callReReviewRequest({
       ...RE_REVIEW_INPUT,
-      _sshSpawnForTest: async () => ({
-        stdout: JSON.stringify({ ok: false, error: "peer_reviews_not_configured" }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
+      _fetchForTest: async () => ({
+        status: 404,
+        body: JSON.stringify({ ok: false, error: "not_found" }),
       }),
     });
     assert.equal(result.ok, false);
@@ -1067,15 +1060,13 @@ describe("AGT-431: callReReviewRequest SSH exit-code mapping", () => {
     }
   });
 
-  it("returns ok:true with seat_holders_notified on success", async () => {
+  it("returns ok:true with seat_holders_notified on HTTP 200 success", async () => {
     const { callReReviewRequest } = await import("../src/lib/seatClient.ts");
     const result = await callReReviewRequest({
       ...RE_REVIEW_INPUT,
-      _sshSpawnForTest: async () => ({
-        stdout: JSON.stringify({ ok: true, patch_id: "a".repeat(40), seat_holders_notified: 2 }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
+      _fetchForTest: async () => ({
+        status: 200,
+        body: JSON.stringify({ ok: true, patch_id: "a".repeat(40), seat_holders_notified: 2 }),
       }),
     });
     assert.equal(result.ok, true);
@@ -1112,7 +1103,7 @@ describe("AGT-431 AC #11: re-review-requested event triggers re-triage + review 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => {
           sdkCallCount++;
           return "re-review body";
@@ -1162,7 +1153,7 @@ describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'",
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _peerWatchRulesForTest: null,
@@ -1186,7 +1177,7 @@ describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'",
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _peerWatchRulesForTest: null,
@@ -1214,16 +1205,16 @@ describe("AGT-432 AC #3: cost-cap — cap NOT hit when dailySpend < cost_cap_usd
     const triplets: Array<Record<string, unknown>> = [];
     const notifyCalls: Array<{ title: string; body: string }> = [];
     let sdkCalled = false;
-    let sshClaimCalled = false;
+    let httpClaimCalled = false;
 
     // cap=0.001, _initialDailySpendForTest not set (defaults to 0)
     // 0 < 0.001 → cap NOT triggered
     const haikuRunner = async (): Promise<string> =>
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
-    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "stamp-claim-seat") sshClaimCalled = true;
-      return makeSuccessSshSpawn(1)(cfg, verb);
+    const trackingFetch: HttpFetchFn = async (url, headers, body) => {
+      if (url.endsWith("/peer/claim-seat")) httpClaimCalled = true;
+      return makeSuccessHttpFetch(1)(url, headers, body);
     };
 
     const { result: exitCode } = await captureStderrAsync(() =>
@@ -1231,7 +1222,7 @@ describe("AGT-432 AC #3: cost-cap — cap NOT hit when dailySpend < cost_cap_usd
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: sshSpawn,
+        _fetchForTest: trackingFetch,
         _sdkRunnerForTest: async () => { sdkCalled = true; return "review body"; },
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "claim if available", hash: "abc" },
@@ -1245,7 +1236,7 @@ describe("AGT-432 AC #3: cost-cap — cap NOT hit when dailySpend < cost_cap_usd
     );
 
     assert.equal(exitCode, 0);
-    assert.equal(sshClaimCalled, true, "seat should be claimed when cap is not hit");
+    assert.equal(httpClaimCalled, true, "seat should be claimed when cap is not hit");
     assert.equal(sdkCalled, true, "SDK should run when cap is not hit");
     assert.equal(notifyCalls.length, 0, "notification should NOT fire when cap is not hit");
   });
@@ -1257,15 +1248,15 @@ describe("AGT-432 AC #3: cost-cap — cap HIT when _initialDailySpendForTest >= 
     const triplets: Array<Record<string, unknown>> = [];
     const notifyCalls: Array<{ title: string; body: string }> = [];
     let sdkCalled = false;
-    let sshClaimCalled = false;
+    let httpClaimCalled = false;
 
     // cap=0.001, _initialDailySpendForTest=0.002 → dailySpend(0.002) >= cap(0.001) → IS triggered
     const haikuRunner = async (): Promise<string> =>
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
-    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "stamp-claim-seat") sshClaimCalled = true;
-      return makeSuccessSshSpawn(1)(cfg, verb);
+    const trackingFetch: HttpFetchFn = async (url, headers, body) => {
+      if (url.endsWith("/peer/claim-seat")) httpClaimCalled = true;
+      return makeSuccessHttpFetch(1)(url, headers, body);
     };
 
     const { result: exitCode } = await captureStderrAsync(() =>
@@ -1273,7 +1264,7 @@ describe("AGT-432 AC #3: cost-cap — cap HIT when _initialDailySpendForTest >= 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: sshSpawn,
+        _fetchForTest: trackingFetch,
         _sdkRunnerForTest: async () => { sdkCalled = true; return "review body"; },
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "claim if available", hash: "abc" },
@@ -1289,7 +1280,7 @@ describe("AGT-432 AC #3: cost-cap — cap HIT when _initialDailySpendForTest >= 
 
     assert.equal(exitCode, 0);
     // Cap is HIT → seat should NOT be claimed, SDK should NOT run
-    assert.equal(sshClaimCalled, false, "seat should NOT be claimed when cap is hit");
+    assert.equal(httpClaimCalled, false, "seat should NOT be claimed when cap is hit");
     assert.equal(sdkCalled, false, "SDK should NOT run when cap is hit");
     // Notification should fire once
     assert.equal(notifyCalls.length, 1, "notification should fire when cap is hit");
@@ -1314,7 +1305,7 @@ describe("AGT-432 AC #4: cost-cap log — normal skip does NOT get reason field"
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _haikuRunnerForTest: haikuRunner,
         _peerWatchRulesForTest: { rules: "skip all", hash: "abc" },
         _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
@@ -1359,7 +1350,7 @@ describe("AGT-432 AC #2: day rollover — daily spend resets at local midnight",
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _haikuRunnerForTest: haikuRunner,
@@ -1394,7 +1385,7 @@ describe("AGT-432: draft save — listener saves draft when post_mode='draft'", 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "draft review body",
         _ghReviewForTest: () => { ghCalled = true; return { status: 0, stderr: "" }; },
         _haikuRunnerForTest: haikuRunner,
@@ -1432,7 +1423,7 @@ describe("AGT-432: draft save — listener saves draft when post_mode='draft'", 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _haikuRunnerForTest: haikuRunner,
@@ -1471,7 +1462,7 @@ describe("AGT-452: dry-run — listener logs but does not post when post_mode='d
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "dry-run review body",
         _ghReviewForTest: () => { ghCalled = true; return { status: 0, stderr: "" }; },
         _haikuRunnerForTest: haikuRunner,
@@ -1526,7 +1517,7 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => { sdkCalled = true; return "re-review body"; },
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _haikuRunnerForTest: haikuRunner,
@@ -1553,15 +1544,15 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
     const triplets: Array<Record<string, unknown>> = [];
     const notifyCalls: Array<{ title: string; body: string }> = [];
     let sdkCalled = false;
-    let sshClaimCalled = false;
+    let httpClaimCalled = false;
 
     // cap=0.001; _initialDailySpendForTest=0.002 → dailySpend(0.002) >= cap(0.001) → IS triggered
     const haikuRunner = async (): Promise<string> =>
       '{"claim_seat":"if_available","post_mode":"auto-post","prompt":"default","cost_cap_usd":0.001}';
 
-    const sshSpawn: SshSpawnFn = async (cfg, verb) => {
-      if (verb === "stamp-claim-seat") sshClaimCalled = true;
-      return makeSuccessSshSpawn(1)(cfg, verb);
+    const trackingFetch: HttpFetchFn = async (url, headers, body) => {
+      if (url.endsWith("/peer/claim-seat")) httpClaimCalled = true;
+      return makeSuccessHttpFetch(1)(url, headers, body);
     };
 
     const reReviewEvent: PeerReviewEvent = {
@@ -1582,7 +1573,7 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: sshSpawn,
+        _fetchForTest: trackingFetch,
         _sdkRunnerForTest: async () => { sdkCalled = true; return "re-review body"; },
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _haikuRunnerForTest: haikuRunner,
@@ -1597,7 +1588,7 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
 
     assert.equal(exitCode, 0);
     // Cap is HIT → seat should NOT be claimed, SDK should NOT run
-    assert.equal(sshClaimCalled, false, "seat should NOT be claimed for re-review when cap is hit");
+    assert.equal(httpClaimCalled, false, "seat should NOT be claimed for re-review when cap is hit");
     assert.equal(sdkCalled, false, "SDK should NOT run for re-review when cap is hit");
     // Notification should fire once
     assert.equal(notifyCalls.length, 1, "notification should fire when cap is hit on re-review");
@@ -1791,7 +1782,7 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _ghDiffForTest: (prUrl) => {
           ghDiffPrUrl = prUrl;
           return { status: 0, stdout: GH_DIFF, stderr: "" };
@@ -1816,7 +1807,7 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
 
   it("releases the seat and skips when gh pr diff fails (non-zero)", async () => {
     const fakeKeypair = genKeypair();
-    const sshCalls: string[] = [];
+    const httpCalls: string[] = [];
     let sdkCalled = false;
 
     const { stderr } = await captureStderrAsync(() =>
@@ -1824,9 +1815,9 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: async (cfg, verb) => {
-          sshCalls.push(verb);
-          return makeSuccessSshSpawn()(cfg, verb);
+        _fetchForTest: async (url, headers, body) => {
+          httpCalls.push(url);
+          return makeSuccessHttpFetch()(url, headers, body);
         },
         _ghDiffForTest: () => ({ status: 1, stdout: "", stderr: "gh: no access to acme/widget" }),
         _sdkRunnerForTest: async () => {
@@ -1842,13 +1833,13 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
 
     assert.equal(sdkCalled, false, "review must NOT run when the diff fetch fails");
     assert.ok(stderr.includes("could not fetch diff (gh)"), `expected gh-diff failure note: ${stderr}`);
-    assert.ok(sshCalls.includes("stamp-claim-seat"), "seat should have been claimed first");
-    assert.ok(sshCalls.includes("stamp-release-seat"), "seat should be released after the diff fetch fails");
+    assert.ok(httpCalls.some((u) => u.endsWith("/peer/claim-seat")), "seat should have been claimed first");
+    assert.ok(httpCalls.some((u) => u.endsWith("/peer/release-seat")), "seat should be released after the diff fetch fails");
   });
 
   it("releases the seat and skips when gh pr diff returns an empty diff", async () => {
     const fakeKeypair = genKeypair();
-    const sshCalls: string[] = [];
+    const httpCalls: string[] = [];
     let sdkCalled = false;
 
     const { stderr } = await captureStderrAsync(() =>
@@ -1856,9 +1847,9 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: async (cfg, verb) => {
-          sshCalls.push(verb);
-          return makeSuccessSshSpawn()(cfg, verb);
+        _fetchForTest: async (url, headers, body) => {
+          httpCalls.push(url);
+          return makeSuccessHttpFetch()(url, headers, body);
         },
         _ghDiffForTest: () => ({ status: 0, stdout: "   \n", stderr: "" }),
         _sdkRunnerForTest: async () => {
@@ -1874,7 +1865,7 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
 
     assert.equal(sdkCalled, false, "review must NOT run on an empty diff");
     assert.ok(stderr.includes("could not fetch diff (gh)"), `expected gh-diff failure note: ${stderr}`);
-    assert.ok(sshCalls.includes("stamp-release-seat"), "seat should be released on empty diff");
+    assert.ok(httpCalls.some((u) => u.endsWith("/peer/release-seat")), "seat should be released on empty diff");
   });
 });
 
@@ -1919,7 +1910,7 @@ describe("session-hosted guard: no env + --headless → warnings + proceeds", ()
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
@@ -1971,7 +1962,7 @@ describe("session-hosted guard: valid env + no --headless → 'bound to Claude s
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
@@ -2018,7 +2009,7 @@ describe("verdict flag: gh receives --approve when model returns approve", () =>
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () =>
           "Clean change, no issues found.\n\nverdict: approve",
         _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
@@ -2050,7 +2041,7 @@ describe("verdict flag: gh receives --request-changes when model returns request
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () =>
           "Missing null check on the new endpoint.\n\nverdict: request-changes",
         _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
@@ -2082,7 +2073,7 @@ describe("verdict flag: gh receives --comment when model returns comment (or no 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () =>
           "Informational note on the diff format.\n\nverdict: comment",
         _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
@@ -2112,7 +2103,7 @@ describe("verdict flag: gh receives --comment when model returns comment (or no 
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () =>
           "The diff looks fine but no verdict line is emitted.",
         _ghReviewForTest: (_prUrl, _body, verdictFlag) => {
@@ -2143,7 +2134,7 @@ describe("verdict log line: '✓ posted review (verdict=X) for PR #N'", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () =>
           "Clean change.\n\nverdict: approve",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
@@ -2209,7 +2200,7 @@ describe("SSE reconnect: stream-close triggers reconnect loop", () => {
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
@@ -2288,7 +2279,7 @@ describe("SSE reconnect: exponential backoff delays on repeated connect failures
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _sdkRunnerForTest: async () => "review body",
         _ghReviewForTest: () => ({ status: 0, stderr: "" }),
         _cwdForTest: "/tmp",
@@ -2367,7 +2358,7 @@ describe("SSE reconnect: reconnect loop terminates via _maxReconnectAttemptsForT
         orgs: ["acme"],
         server: FIXTURE_SERVER,
         _keypairForTest: fakeKeypair,
-        _sshSpawnForTest: makeSuccessSshSpawn(),
+        _fetchForTest: makeSuccessHttpFetch(),
         _cwdForTest: "/tmp",
         _connectSseForTest: connectSseFactory,
         _sleepForTest: async (ms) => { sleepDelays.push(ms); },

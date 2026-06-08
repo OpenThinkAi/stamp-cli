@@ -1,14 +1,13 @@
 /**
  * Guard test: client↔server peer SSH verb agreement.
  *
- * Parses `server/Dockerfile` for the `git-shell-commands` symlink block and
- * asserts that every entry in `PEER_SSH_VERBS` has a matching server-side
- * symlink, and that every peer symlink present in the Dockerfile is covered by
- * a constant in `PEER_SSH_VERBS`.
+ * AGT-453: six seat-protocol SSH verbs were retired and migrated to HTTP POST
+ * endpoints. Only `stamp-pr-opened` remains as an SSH verb. This test asserts
+ * that the one remaining SSH verb constant in PEER_SSH_VERBS has a matching
+ * server-side Dockerfile symlink, and that no additional peer verb symlinks
+ * exist in the Dockerfile without a corresponding constant.
  *
  * This test is hermetic (reads the Dockerfile at a relative path, no network).
- * Adding or renaming a verb on either side without updating the other will
- * cause this test to fail.
  */
 
 import { strict as assert } from "node:assert";
@@ -21,24 +20,14 @@ import { PEER_SSH_VERBS } from "../src/lib/peerSshVerbs.ts";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 
-// ── Parse the Dockerfile for git-shell-commands peer verb symlinks ────────────
+// ── The one remaining peer SSH verb ──────────────────────────────────────────
 //
-// We look for lines of the form:
-//   && ln -s /usr/local/bin/stamp-<verb> /home/git/git-shell-commands/stamp-<verb>
-// Only capture the peer-review verbs (those whose binary name starts with
-// "stamp-" and whose target is in /home/git/git-shell-commands/stamp-*).
-//
-// Non-peer verbs (new-stamp-repo, delete-stamp-repo, stamp-review, etc.) are
-// intentionally excluded — this test is specifically about the peer protocol.
+// AGT-453: stamp-subscribe, stamp-claim-seat, stamp-heartbeat,
+// stamp-release-seat, stamp-re-review-request, stamp-register-extra were
+// retired. Only stamp-pr-opened remains.
 
 const PEER_VERB_PREFIXES: ReadonlySet<string> = new Set([
   "stamp-pr-opened",
-  "stamp-subscribe",
-  "stamp-claim-seat",
-  "stamp-heartbeat",
-  "stamp-release-seat",
-  "stamp-re-review-request",
-  "stamp-register-extra",
 ]);
 
 function parseDockerfilePeerVerbs(): Set<string> {
@@ -59,7 +48,7 @@ function parseDockerfilePeerVerbs(): Set<string> {
       symlinkName,
       `Dockerfile mismatch: binary '${binaryName}' != symlink '${symlinkName}'`,
     );
-    // Only track the seven peer verbs we care about
+    // Only track peer verbs in our witness set
     if (PEER_VERB_PREFIXES.has(symlinkName)) {
       found.add(symlinkName);
     }
@@ -67,10 +56,10 @@ function parseDockerfilePeerVerbs(): Set<string> {
   return found;
 }
 
-describe("peerSshVerbs: client↔server verb agreement", () => {
+describe("peerSshVerbs: client↔server verb agreement (post-AGT-453)", () => {
   const serverVerbs = parseDockerfilePeerVerbs();
 
-  it("Dockerfile exposes all seven expected peer-verb symlinks", () => {
+  it("Dockerfile exposes the one expected peer-verb symlink (stamp-pr-opened)", () => {
     for (const expected of PEER_VERB_PREFIXES) {
       assert.ok(
         serverVerbs.has(expected),
@@ -103,12 +92,12 @@ describe("peerSshVerbs: client↔server verb agreement", () => {
     }
   });
 
-  it("PEER_SSH_VERBS has exactly as many entries as the peer verb witness set", () => {
+  it("PEER_SSH_VERBS has exactly one entry (stamp-pr-opened)", () => {
     const count = Object.keys(PEER_SSH_VERBS).length;
     assert.equal(
       count,
       PEER_VERB_PREFIXES.size,
-      `Expected ${PEER_VERB_PREFIXES.size} PEER_SSH_VERBS entries, got ${count}`,
+      `Expected ${PEER_VERB_PREFIXES.size} PEER_SSH_VERBS entries (only prOpened), got ${count}`,
     );
   });
 });

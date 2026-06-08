@@ -127,15 +127,16 @@ function spawnVerb(
   );
 }
 
-// ─── AC 8: env-gate — all verbs return peer_reviews_not_configured ───
+// ─── AC 8: env-gate — SSH verbs return peer_reviews_not_configured ───
+//
+// AGT-453: the five seat-protocol SSH verbs (subscribe, claim-seat,
+// heartbeat, release-seat, re-review-request) were retired and replaced
+// by HTTP POST endpoints. Only stamp-pr-opened remains as an SSH verb.
+// The HTTP endpoint env-gate is covered by serverHttp.test.ts (POST /peer/*
+// returns 404 when STAMP_PEER_REVIEWS_ENABLED is absent).
 
 const GATED_VERBS = [
   "pr-opened",
-  "claim-seat",
-  "release-seat",
-  "heartbeat",
-  "re-review-request",
-  "subscribe",
 ] as const;
 
 describe("env-gate: STAMP_PEER_REVIEWS_ENABLED not set → peer_reviews_not_configured (AC 8)", () => {

@@ -21,7 +21,7 @@ import {
 } from "node:crypto";
 
 import { runPrPing, type PrPingOptions } from "../src/commands/prPing.ts";
-import type { SshSpawnFn } from "../src/lib/seatClient.ts";
+import type { HttpFetchFn, SshSpawnFn } from "../src/lib/seatClient.ts";
 import type { Keypair } from "../src/lib/keys.ts";
 import type { ServerConfig } from "../src/lib/serverConfig.ts";
 
@@ -117,43 +117,44 @@ const FIXTURE_SERVER: ServerConfig = {
 
 const PATCH_ID = "a".repeat(40);
 
-/** SSH spawn seam that simulates a successful re-review-request. */
-function makeSuccessSshSpawn(seatHoldersNotified = 2): SshSpawnFn {
-  return async (_cfg, verb) => {
-    if (verb === "stamp-re-review-request") {
+// ─── HTTP fetch seam helpers (AGT-453: replaced SSH spawn seam) ──────────
+
+/** HTTP fetch seam that simulates a successful re-review-request (HTTP 200). */
+function makeSuccessHttpFetch(seatHoldersNotified = 2): HttpFetchFn {
+  return async (url) => {
+    if (url.endsWith("/peer/re-review-request")) {
       return {
-        stdout: JSON.stringify({
+        status: 200,
+        body: JSON.stringify({
           ok: true,
           patch_id: PATCH_ID,
           seat_holders_notified: seatHoldersNotified,
         }),
-        stderr: "",
-        exitCode: 0,
-        signal: null,
       };
     }
-    return { stdout: "", stderr: "unknown verb", exitCode: 1, signal: null };
+    return { status: 500, body: JSON.stringify({ ok: false, error: "unknown_url" }) };
   };
 }
 
-/** SSH spawn seam that simulates the non-author rejection (server exit 5). */
-function makeNotAuthorSshSpawn(): SshSpawnFn {
+/** HTTP fetch seam that simulates the non-author rejection (HTTP 403). */
+function makeNotAuthorHttpFetch(): HttpFetchFn {
   return async () => ({
-    stdout: "",
-    stderr: "error: requester_fp xxx is not the original author",
-    exitCode: 5,
-    signal: null,
+    status: 403,
+    body: JSON.stringify({ ok: false, error: "not_author", reason: "requester_fp xxx is not the original author" }),
   });
 }
 
-/** SSH spawn seam that simulates patch not found (server exit 4). */
-function makePatchNotFoundSshSpawn(): SshSpawnFn {
+/** HTTP fetch seam that simulates patch not found (HTTP 404). */
+function makePatchNotFoundHttpFetch(): HttpFetchFn {
   return async () => ({
-    stdout: "",
-    stderr: "error: patch xxx not found",
-    exitCode: 4,
-    signal: null,
+    status: 404,
+    body: JSON.stringify({ ok: false, error: "patch_not_found" }),
   });
+}
+
+/** @deprecated SSH spawn seam — kept for type compatibility only. */
+function makeSuccessSshSpawn(_seatHoldersNotified = 2): SshSpawnFn {
+  return async () => ({ stdout: "", stderr: "", exitCode: 0, signal: null });
 }
 
 /** Patch-id resolver seam that returns null (simulates no PR from HEAD). */
@@ -180,7 +181,7 @@ describe("AC #15: no PR detectable from HEAD → exit 3", () => {
       _keypairForTest: keypair,
       _serverConfigForTest: FIXTURE_SERVER,
       _patchIdForTest: makeNoPrPatchId(),
-      _sshSpawnForTest: makeSuccessSshSpawn(),
+      _fetchForTest: makeSuccessHttpFetch(),
     });
     assert.equal(code, 3, `expected exit 3, got ${code}`);
   });
@@ -197,7 +198,7 @@ describe("AC #14: non-author key → exit 1", () => {
         _keypairForTest: keypair,
         _serverConfigForTest: FIXTURE_SERVER,
         _patchIdForTest: makeValidPatchId(),
-        _sshSpawnForTest: makeNotAuthorSshSpawn(),
+        _fetchForTest: makeNotAuthorHttpFetch(),
       }),
     );
     assert.equal(code, 1, `expected exit 1, got ${code}`);
@@ -219,7 +220,7 @@ describe("AC #16: no active seat-holders → exit 0 + stderr note", () => {
         _keypairForTest: keypair,
         _serverConfigForTest: FIXTURE_SERVER,
         _patchIdForTest: makeValidPatchId(),
-        _sshSpawnForTest: makeSuccessSshSpawn(0),
+        _fetchForTest: makeSuccessHttpFetch(0),
       }),
     );
     assert.equal(code, 0, `expected exit 0, got ${code}`);
@@ -241,7 +242,7 @@ describe("AC #1: happy path — sends re-review-request and exits 0", () => {
         _keypairForTest: keypair,
         _serverConfigForTest: FIXTURE_SERVER,
         _patchIdForTest: makeValidPatchId(),
-        _sshSpawnForTest: makeSuccessSshSpawn(2),
+        _fetchForTest: makeSuccessHttpFetch(2),
       }),
     );
     assert.equal(code, 0, `expected exit 0, got ${code}`);
@@ -251,21 +252,19 @@ describe("AC #1: happy path — sends re-review-request and exits 0", () => {
     );
   });
 
-  it("calls re-review-request SSH verb with correct patch_id and reviewer_filter", async () => {
+  it("calls POST /peer/re-review-request with correct patch_id and reviewer_filter", async () => {
     const keypair = genKeypair();
-    const capturedPayloads: string[] = [];
+    const capturedBodies: string[] = [];
 
-    const spawnFn: SshSpawnFn = async (_cfg, verb, payload) => {
-      if (verb === "stamp-re-review-request") {
-        capturedPayloads.push(payload);
+    const fetchFn: HttpFetchFn = async (url, _headers, body) => {
+      if (url.endsWith("/peer/re-review-request")) {
+        capturedBodies.push(body);
         return {
-          stdout: JSON.stringify({ ok: true, patch_id: PATCH_ID, seat_holders_notified: 1 }),
-          stderr: "",
-          exitCode: 0,
-          signal: null,
+          status: 200,
+          body: JSON.stringify({ ok: true, patch_id: PATCH_ID, seat_holders_notified: 1 }),
         };
       }
-      return { stdout: "", stderr: "unknown verb", exitCode: 1, signal: null };
+      return { status: 500, body: JSON.stringify({ ok: false, error: "unknown_url" }) };
     };
 
     await captureStdoutAsync(() =>
@@ -274,12 +273,12 @@ describe("AC #1: happy path — sends re-review-request and exits 0", () => {
         _keypairForTest: keypair,
         _serverConfigForTest: FIXTURE_SERVER,
         _patchIdForTest: makeValidPatchId(),
-        _sshSpawnForTest: spawnFn,
+        _fetchForTest: fetchFn,
       }),
     );
 
-    assert.equal(capturedPayloads.length, 1, "SSH spawn should have been called once");
-    const parsed = JSON.parse(capturedPayloads[0]!) as {
+    assert.equal(capturedBodies.length, 1, "HTTP fetch should have been called once");
+    const parsed = JSON.parse(capturedBodies[0]!) as {
       patch_id: string;
       reviewer_filter: string[];
     };
@@ -298,7 +297,7 @@ describe("AC #3 (server): server returns exit 4 (patch not found) → CLI exit 3
       _keypairForTest: keypair,
       _serverConfigForTest: FIXTURE_SERVER,
       _patchIdForTest: makeValidPatchId(),
-      _sshSpawnForTest: makePatchNotFoundSshSpawn(),
+      _fetchForTest: makePatchNotFoundHttpFetch(),
     });
     assert.equal(code, 3, `expected exit 3, got ${code}`);
   });
@@ -309,11 +308,9 @@ describe("AC #3 (server): server returns exit 4 (patch not found) → CLI exit 3
 describe("peer_reviews_not_configured → exit 0 (informational)", () => {
   it("exits 0 when server has peer reviews disabled", async () => {
     const keypair = genKeypair();
-    const spawnFn: SshSpawnFn = async () => ({
-      stdout: JSON.stringify({ ok: false, error: "peer_reviews_not_configured" }),
-      stderr: "",
-      exitCode: 0,
-      signal: null,
+    const fetchFn: HttpFetchFn = async () => ({
+      status: 404,
+      body: JSON.stringify({ ok: false, error: "not_found" }),
     });
     const { result: code, stderr } = await captureStderrAsync(() =>
       runWithExitCapture({
@@ -321,7 +318,7 @@ describe("peer_reviews_not_configured → exit 0 (informational)", () => {
         _keypairForTest: keypair,
         _serverConfigForTest: FIXTURE_SERVER,
         _patchIdForTest: makeValidPatchId(),
-        _sshSpawnForTest: spawnFn,
+        _fetchForTest: fetchFn,
       }),
     );
     assert.equal(code, 0, `expected exit 0, got ${code}`);
@@ -341,7 +338,7 @@ describe("missing keypair → exit 1", () => {
       _keypairForTest: null,
       _serverConfigForTest: FIXTURE_SERVER,
       _patchIdForTest: makeValidPatchId(),
-      _sshSpawnForTest: makeSuccessSshSpawn(),
+      _fetchForTest: makeSuccessHttpFetch(),
     });
     assert.equal(code, 1, `expected exit 1, got ${code}`);
   });

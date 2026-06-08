@@ -14,20 +14,24 @@
  */
 
 import { strict as assert } from "node:assert";
+import { createHash, createPublicKey, generateKeyPairSync } from "node:crypto";
 import { request } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 
 import { startServer } from "../src/server/http-server.ts";
 import { mintInvite } from "../src/lib/invites.ts";
 import {
   findUserByShortName,
+  insertPatch,
   insertUser,
   openServerDb,
 } from "../src/lib/serverDb.ts";
+import { signBytes } from "../src/lib/signing.ts";
+import { canonicalSerializePeerPayload } from "../src/lib/attestationV4.ts";
 
 // Pinned ed25519 fixture (same one tests/sshKeys.test.ts uses — generated
 // once with ssh-keygen, fingerprint cross-verified).
@@ -489,6 +493,426 @@ describe("HTTP server: POST /invite/accept — errors", () => {
       const r = await post(h.port, "/nope", { token: "x" });
       assert.equal(r.status, 404);
       assert.equal(r.body.error, "not_found");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+// ─── POST /peer/* endpoint tests (AGT-453) ───────────────────────────────
+//
+// Tests the five new HTTP seat-protocol endpoints:
+//   POST /peer/claim-seat
+//   POST /peer/heartbeat
+//   POST /peer/release-seat
+//   POST /peer/re-review-request
+//   POST /peer/register-extra
+//
+// Also includes the regression test for ssh-fp ≠ stamp-fp identity:
+// migrating to HTTP makes identity uniformly stamp-fp; an enrolled user
+// whose ssh_fp and stamp_fp differ should succeed on HTTP heartbeat.
+
+// ─── Shared test key helpers ──────────────────────────────────────────
+
+interface TestKeypair {
+  privateKeyPem: string;
+  publicKeyPem: string;
+  fingerprint: string; // sha256:<hex> SPKI fingerprint
+}
+
+function genTestKeypair(): TestKeypair {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+  const spkiDer = createPublicKey(publicKeyPem).export({ type: "spki", format: "der" }) as Buffer;
+  const fingerprint = "sha256:" + createHash("sha256").update(spkiDer).digest("hex");
+  return { privateKeyPem, publicKeyPem, fingerprint };
+}
+
+/**
+ * Build the x-stamp-* auth headers for a POST /peer/<verb> request.
+ * Mirrors the server's `postCanonicalBytes` + `authenticatePostRequest`.
+ */
+function buildPeerPostHeaders(
+  kp: TestKeypair,
+  verb: string,
+  bodyJson: string,
+): Record<string, string> {
+  const timestamp = new Date().toISOString();
+  const bodyHex = createHash("sha256").update(Buffer.from(bodyJson, "utf8")).digest("hex");
+  const canonical = Buffer.from(`peer-${verb}\n${timestamp}\n${bodyHex}`, "utf8");
+  const signature = signBytes(kp.privateKeyPem, canonical);
+  return {
+    "x-stamp-pubkey": Buffer.from(kp.publicKeyPem, "utf8").toString("base64"),
+    "x-stamp-timestamp": timestamp,
+    "x-stamp-signature": signature,
+  };
+}
+
+// ─── Peer harness: startServer with STAMP_PEER_REVIEWS_ENABLED ───────
+
+interface PeerHarness {
+  port: number;
+  dbPath: string;
+  server: ReturnType<typeof startServer>;
+  cleanup: () => Promise<void>;
+}
+
+async function startPeer(): Promise<PeerHarness> {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "stamp-peer-http-"));
+  const dbPath = path.join(dir, "users.db");
+
+  // Seed an admin user so we can insert patches etc.
+  const db = openServerDb({ path: dbPath, skipChmod: true });
+  try {
+    insertUser(db, {
+      short_name: "admin",
+      ssh_pubkey: "ssh-ed25519 AAAAseed admin@host",
+      ssh_fp: "SHA256:admin-fp",
+      role: "admin",
+      source: "env",
+    });
+  } finally {
+    db.close();
+  }
+
+  process.env["STAMP_SERVER_DB_PATH"] = dbPath;
+  process.env["STAMP_PEER_REVIEWS_ENABLED"] = "1";
+  const server = startServer(0);
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("bad address");
+  const port = (addr as { port: number }).port;
+
+  return {
+    port,
+    dbPath,
+    server,
+    cleanup: async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      delete process.env["STAMP_SERVER_DB_PATH"];
+      delete process.env["STAMP_PEER_REVIEWS_ENABLED"];
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Insert an enrolled user (with stamp_pubkey) and a test patch row. */
+function seedPeerUser(
+  dbPath: string,
+  kp: TestKeypair,
+  shortName: string,
+): number {
+  const db = openServerDb({ path: dbPath, skipChmod: true });
+  try {
+    return insertUser(db, {
+      short_name: shortName,
+      ssh_pubkey: `ssh-ed25519 AAAASeed${shortName} ${shortName}@host`,
+      ssh_fp: `SHA256:ssh-fp-${shortName}`,
+      role: "member",
+      source: "invite",
+      stamp_pubkey: kp.publicKeyPem,
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function seedPatch(
+  dbPath: string,
+  patchId: string,
+  requestedByFp: string,
+): void {
+  const db = openServerDb({ path: dbPath, skipChmod: true });
+  try {
+    insertPatch(db, {
+      patch_id: patchId,
+      requested_by_fp: requestedByFp,
+      base_sha: "0".repeat(40),
+      head_sha: "1".repeat(40),
+      repo: "acme/widget",
+      pr_url: "https://github.com/acme/widget/pull/1",
+    });
+  } finally {
+    db.close();
+  }
+}
+
+// ─── POST /peer/claim-seat ────────────────────────────────────────────
+
+describe("POST /peer/claim-seat: auth + success path (AGT-453)", () => {
+  it("returns 401 with missing auth headers", async () => {
+    const h = await startPeer();
+    try {
+      const r = await post(h.port, "/peer/claim-seat", {});
+      assert.equal(r.status, 401);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 404 when STAMP_PEER_REVIEWS_ENABLED is absent", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "stamp-peer-dark-"));
+    const dbPath = path.join(dir, "users.db");
+    process.env["STAMP_SERVER_DB_PATH"] = dbPath;
+    delete process.env["STAMP_PEER_REVIEWS_ENABLED"];
+    const db = openServerDb({ path: dbPath, skipChmod: true });
+    db.close();
+    const server = startServer(0);
+    await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+    const addr = server.address() as { port: number };
+    try {
+      const r = await post(addr.port, "/peer/claim-seat", {});
+      assert.equal(r.status, 404);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      delete process.env["STAMP_SERVER_DB_PATH"];
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns 200 on claim-seat success", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const reviewerKp = genTestKeypair();
+    const patchId = "a".repeat(40);
+
+    seedPeerUser(h.dbPath, authorKp, "author1");
+    seedPeerUser(h.dbPath, reviewerKp, "reviewer1");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    try {
+      const bodyPayload = {
+        patch_id: patchId,
+        claimant_fp: reviewerKp.fingerprint,
+        base_sha: "0".repeat(40),
+        repo: "acme/widget",
+        pubkey: reviewerKp.publicKeyPem,
+      };
+      const bodyJson = JSON.stringify({
+        ...bodyPayload,
+        signature: signBytes(reviewerKp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)),
+      });
+      const headers = buildPeerPostHeaders(reviewerKp, "claim-seat", bodyJson);
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson), headers);
+      assert.equal(r.status, 200, `expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.ok, true);
+      assert.ok(typeof r.body.seat === "number", "response should include seat number");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 409 seats_full when both seats are taken", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const r1Kp = genTestKeypair();
+    const r2Kp = genTestKeypair();
+    const r3Kp = genTestKeypair();
+    const patchId = "b".repeat(40);
+
+    seedPeerUser(h.dbPath, authorKp, "author2");
+    seedPeerUser(h.dbPath, r1Kp, "reviewer2a");
+    seedPeerUser(h.dbPath, r2Kp, "reviewer2b");
+    seedPeerUser(h.dbPath, r3Kp, "reviewer2c");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    // Claim both seats.
+    const claimFor = async (kp: TestKeypair) => {
+      const bodyPayload = { patch_id: patchId, claimant_fp: kp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: kp.publicKeyPem };
+      const bodyJson = JSON.stringify({ ...bodyPayload, signature: signBytes(kp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)) });
+      return post(h.port, "/peer/claim-seat", JSON.parse(bodyJson), buildPeerPostHeaders(kp, "claim-seat", bodyJson));
+    };
+
+    try {
+      const r1 = await claimFor(r1Kp);
+      assert.equal(r1.status, 200, "first claim should succeed");
+      const r2 = await claimFor(r2Kp);
+      assert.equal(r2.status, 200, "second claim should succeed");
+      const r3 = await claimFor(r3Kp);
+      assert.equal(r3.status, 409, "third claim should be rejected (seats_full)");
+      assert.equal(r3.body.error, "seats_full");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+// ─── POST /peer/heartbeat ─────────────────────────────────────────────
+
+describe("POST /peer/heartbeat: success + 404 no-seat (AGT-453)", () => {
+  it("returns 200 when seat holder sends heartbeat", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const reviewerKp = genTestKeypair();
+    const patchId = "c".repeat(40);
+
+    seedPeerUser(h.dbPath, authorKp, "author3");
+    seedPeerUser(h.dbPath, reviewerKp, "reviewer3");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    // First claim a seat.
+    const claimBody = { patch_id: patchId, claimant_fp: reviewerKp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: reviewerKp.publicKeyPem };
+    const claimJson = JSON.stringify({ ...claimBody, signature: signBytes(reviewerKp.privateKeyPem, canonicalSerializePeerPayload(claimBody)) });
+    const cr = await post(h.port, "/peer/claim-seat", JSON.parse(claimJson), buildPeerPostHeaders(reviewerKp, "claim-seat", claimJson));
+    assert.equal(cr.status, 200, "claim should succeed first");
+
+    try {
+      // Now heartbeat.
+      const hbBody = { patch_id: patchId, claimant_fp: reviewerKp.fingerprint, signature: "sig" };
+      const hbJson = JSON.stringify(hbBody);
+      const r = await post(h.port, "/peer/heartbeat", hbBody, buildPeerPostHeaders(reviewerKp, "heartbeat", hbJson));
+      assert.equal(r.status, 200, `expected 200 on heartbeat, got ${r.status}: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.ok, true);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 404 when no seat held", async () => {
+    const h = await startPeer();
+    const reviewerKp = genTestKeypair();
+
+    seedPeerUser(h.dbPath, reviewerKp, "reviewer4");
+
+    try {
+      const hbBody = { patch_id: "d".repeat(40), claimant_fp: reviewerKp.fingerprint, signature: "sig" };
+      const hbJson = JSON.stringify(hbBody);
+      const r = await post(h.port, "/peer/heartbeat", hbBody, buildPeerPostHeaders(reviewerKp, "heartbeat", hbJson));
+      assert.equal(r.status, 404, `expected 404 when no seat held, got ${r.status}`);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+// ─── POST /peer/release-seat ──────────────────────────────────────────
+
+describe("POST /peer/release-seat: success path (AGT-453)", () => {
+  it("returns 200 and released:true after releasing a held seat", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const reviewerKp = genTestKeypair();
+    const patchId = "e".repeat(40);
+
+    seedPeerUser(h.dbPath, authorKp, "author5");
+    seedPeerUser(h.dbPath, reviewerKp, "reviewer5");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    // Claim.
+    const claimBody = { patch_id: patchId, claimant_fp: reviewerKp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: reviewerKp.publicKeyPem };
+    const claimJson = JSON.stringify({ ...claimBody, signature: signBytes(reviewerKp.privateKeyPem, canonicalSerializePeerPayload(claimBody)) });
+    await post(h.port, "/peer/claim-seat", JSON.parse(claimJson), buildPeerPostHeaders(reviewerKp, "claim-seat", claimJson));
+
+    try {
+      const relBody = { patch_id: patchId, claimant_fp: reviewerKp.fingerprint, signature: "sig" };
+      const relJson = JSON.stringify(relBody);
+      const r = await post(h.port, "/peer/release-seat", relBody, buildPeerPostHeaders(reviewerKp, "release-seat", relJson));
+      assert.equal(r.status, 200, `expected 200 on release, got ${r.status}`);
+      assert.equal(r.body.released, true);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+// ─── POST /peer/register-extra ────────────────────────────────────────
+
+describe("POST /peer/register-extra: extras path (AGT-453)", () => {
+  it("returns 200 on valid register-extra", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const reviewerKp = genTestKeypair();
+    const patchId = "f".repeat(40);
+
+    seedPeerUser(h.dbPath, authorKp, "author6");
+    seedPeerUser(h.dbPath, reviewerKp, "reviewer6");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    try {
+      const bodyPayload = { patch_id: patchId, claimant_fp: reviewerKp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: reviewerKp.publicKeyPem };
+      const bodyJson = JSON.stringify({ ...bodyPayload, signature: signBytes(reviewerKp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)) });
+      const r = await post(h.port, "/peer/register-extra", JSON.parse(bodyJson), buildPeerPostHeaders(reviewerKp, "register-extra", bodyJson));
+      assert.equal(r.status, 200, `expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.ok, true);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 409 when reviewer is the PR author", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const patchId = "g".repeat(40);
+
+    seedPeerUser(h.dbPath, authorKp, "author7");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    try {
+      // Author tries to register-extra for their own PR.
+      const bodyPayload = { patch_id: patchId, claimant_fp: authorKp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: authorKp.publicKeyPem };
+      const bodyJson = JSON.stringify({ ...bodyPayload, signature: signBytes(authorKp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)) });
+      const r = await post(h.port, "/peer/register-extra", JSON.parse(bodyJson), buildPeerPostHeaders(authorKp, "register-extra", bodyJson));
+      assert.equal(r.status, 409, `expected 409 for author self-register, got ${r.status}`);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+// ─── Regression: ssh-fp ≠ stamp-fp identity case (AGT-453) ──────────
+//
+// Prior SSH verbs bound identity to ssh-fp (caller.fingerprint from
+// SSH_USER_AUTH). For users where ssh-fp ≠ stamp-fp, heartbeat/release-seat
+// would silently fail or bind to the wrong seat. HTTP endpoints bind to
+// stamp-fp uniformly — this test verifies the correct identity is used.
+
+describe("AGT-453 regression: ssh-fp ≠ stamp-fp identity — HTTP heartbeat uses stamp-fp", () => {
+  it("succeeds when stamp-fp matches claimant_fp even when ssh_fp differs", async () => {
+    const h = await startPeer();
+    // User has a DIFFERENT ssh_fp from their stamp-fp (diverged-key scenario).
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+    const spkiDer = createPublicKey(publicKeyPem).export({ type: "spki", format: "der" }) as Buffer;
+    const stampFp = "sha256:" + createHash("sha256").update(spkiDer).digest("hex");
+    // ssh_fp intentionally different.
+    const differentSshFp = "SHA256:totally-different-ssh-key-fingerprint";
+
+    const db = openServerDb({ path: h.dbPath, skipChmod: true });
+    try {
+      insertUser(db, {
+        short_name: "diverged-user",
+        ssh_pubkey: "ssh-ed25519 AAAADifferent diverged@host",
+        ssh_fp: differentSshFp,
+        role: "member",
+        source: "invite",
+        stamp_pubkey: publicKeyPem,
+      });
+    } finally {
+      db.close();
+    }
+
+    const authorKp = genTestKeypair();
+    seedPeerUser(h.dbPath, authorKp, "author8");
+    const patchId = "h".repeat(40);
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    const kp: TestKeypair = { privateKeyPem, publicKeyPem, fingerprint: stampFp };
+
+    // Claim a seat using stamp-fp.
+    const claimBody = { patch_id: patchId, claimant_fp: stampFp, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: publicKeyPem };
+    const claimJson = JSON.stringify({ ...claimBody, signature: signBytes(privateKeyPem, canonicalSerializePeerPayload(claimBody)) });
+    const cr = await post(h.port, "/peer/claim-seat", JSON.parse(claimJson), buildPeerPostHeaders(kp, "claim-seat", claimJson));
+    assert.equal(cr.status, 200, `claim with stamp-fp should succeed even when ssh-fp differs: ${JSON.stringify(cr.body)}`);
+
+    try {
+      // Heartbeat using stamp-fp — should succeed.
+      const hbBody = { patch_id: patchId, claimant_fp: stampFp, signature: "sig" };
+      const hbJson = JSON.stringify(hbBody);
+      const r = await post(h.port, "/peer/heartbeat", hbBody, buildPeerPostHeaders(kp, "heartbeat", hbJson));
+      assert.equal(r.status, 200, `heartbeat with stamp-fp (ssh-fp ≠ stamp-fp) should succeed: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.ok, true, "heartbeat response should be ok:true");
     } finally {
       await h.cleanup();
     }

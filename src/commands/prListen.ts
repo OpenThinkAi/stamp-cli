@@ -54,6 +54,7 @@ import {
   callHeartbeat,
   callRegisterExtra,
   callReleaseSeat,
+  type HttpFetchFn,
   type SshSpawnFn,
 } from "../lib/seatClient.js";
 import {
@@ -99,8 +100,10 @@ export interface PrListenOptions {
    * When set, the session detection uses this env instead of `process.env`.
    */
   _envForTest?: NodeJS.ProcessEnv;
-  /** Test-only: inject a fake SSH spawn function to avoid real network calls. */
+  /** @deprecated inject _fetchForTest instead — SSH transport retired (AGT-453). */
   _sshSpawnForTest?: SshSpawnFn;
+  /** Test-only: inject a fake HTTP fetch function for seat-protocol calls. */
+  _fetchForTest?: HttpFetchFn;
   /** Test-only: inject a fake `gh pr review` spawn result. */
   _ghReviewForTest?: (prUrl: string, body: string, verdictFlag: string) => { status: number; stderr: string };
   /** Test-only: inject a fake `gh pr diff` spawn result. */
@@ -746,6 +749,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         }),
         serverConfig: serverCfg!,
         _sshSpawnForTest: opts._sshSpawnForTest,
+        _fetchForTest: opts._fetchForTest,
+        _privateKeyPemForHttp: keypair?.privateKeyPem,
+        _publicKeyPemForHttp: keypair?.publicKeyPem,
       });
     }
     process.exit(0);
@@ -1041,6 +1047,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       }),
       serverConfig: serverCfg,
       _sshSpawnForTest: opts._sshSpawnForTest,
+      _fetchForTest: opts._fetchForTest,
+      _privateKeyPemForHttp: keypair?.privateKeyPem,
+      _publicKeyPemForHttp: keypair?.publicKeyPem,
     });
 
     if (!claimResult.ok) {
@@ -1066,6 +1075,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             }),
             serverConfig: serverCfg,
             _sshSpawnForTest: opts._sshSpawnForTest,
+            _fetchForTest: opts._fetchForTest,
+            _privateKeyPemForHttp: keypair?.privateKeyPem,
+            _publicKeyPemForHttp: keypair?.publicKeyPem,
           });
           if (!registerResult.ok) {
             process.stderr.write(
@@ -1151,6 +1163,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             }),
             serverConfig: serverCfg,
             _sshSpawnForTest: opts._sshSpawnForTest,
+            _fetchForTest: opts._fetchForTest,
+            _privateKeyPemForHttp: keypair?.privateKeyPem,
+            _publicKeyPemForHttp: keypair?.publicKeyPem,
           });
         } else {
           process.stderr.write(
@@ -1176,6 +1191,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           }),
           serverConfig: serverCfg,
           _sshSpawnForTest: opts._sshSpawnForTest,
+        _fetchForTest: opts._fetchForTest,
+        _privateKeyPemForHttp: keypair?.privateKeyPem,
+        _publicKeyPemForHttp: keypair?.publicKeyPem,
         });
       }, 60_000);
     }
@@ -1210,6 +1228,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             }),
             serverConfig: serverCfg,
             _sshSpawnForTest: opts._sshSpawnForTest,
+            _fetchForTest: opts._fetchForTest,
+            _privateKeyPemForHttp: keypair?.privateKeyPem,
+            _publicKeyPemForHttp: keypair?.publicKeyPem,
           });
         } else {
           process.stderr.write(
@@ -1246,6 +1267,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             }),
             serverConfig: serverCfg,
             _sshSpawnForTest: opts._sshSpawnForTest,
+            _fetchForTest: opts._fetchForTest,
+            _privateKeyPemForHttp: keypair?.privateKeyPem,
+            _publicKeyPemForHttp: keypair?.publicKeyPem,
           });
         }
         continue;
@@ -1278,6 +1302,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           }),
           serverConfig: serverCfg,
           _sshSpawnForTest: opts._sshSpawnForTest,
+        _fetchForTest: opts._fetchForTest,
+        _privateKeyPemForHttp: keypair?.privateKeyPem,
+        _publicKeyPemForHttp: keypair?.publicKeyPem,
         });
       }
       continue;
@@ -1300,6 +1327,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           }),
           serverConfig: serverCfg,
           _sshSpawnForTest: opts._sshSpawnForTest,
+        _fetchForTest: opts._fetchForTest,
+        _privateKeyPemForHttp: keypair?.privateKeyPem,
+        _publicKeyPemForHttp: keypair?.publicKeyPem,
         });
       }
       continue;
@@ -1349,6 +1379,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           }),
           serverConfig: serverCfg,
           _sshSpawnForTest: opts._sshSpawnForTest,
+        _fetchForTest: opts._fetchForTest,
+        _privateKeyPemForHttp: keypair?.privateKeyPem,
+        _publicKeyPemForHttp: keypair?.publicKeyPem,
         });
       } else {
         process.stderr.write(

@@ -35,6 +35,7 @@
  */
 
 import {
+  createHash,
   createHmac,
   timingSafeEqual,
   type BinaryLike,
@@ -42,12 +43,20 @@ import {
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
 import {
+  appendEvent,
+  checkAndConsumeToken,
+  claimSeatTx,
+  findPatch,
   findPeerReviewEventsAfter,
+  findUserByShortName,
   findUserByStampPubkey,
   insertUser,
   maxPeerReviewEventId,
   openServerDb,
+  releaseSeat,
   sweepExpiredSeats,
+  touchHeartbeat,
+  touchLastSeen,
 } from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
 import { verifyBytes } from "../lib/signing.js";
@@ -63,12 +72,16 @@ import {
   type CloneOrFetchOpts,
   type RefreshResult,
 } from "./prompts-cache.js";
+import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import {
+  fanoutToSeatHoldersFiltered,
+  PR_OPENED_RATE_CAP_DEFAULT,
   resolvePeerReviewsEnabled,
   resolvePeerReviewLimit,
   registerListener,
   unregisterListener,
   SEAT_TTL_SECONDS_DEFAULT,
+  verifyPeerPayloadSignatureFromPubkey,
 } from "./peerReviews.js";
 import type { PeerReviewEvent } from "../lib/peerReviewEvent.js";
 
@@ -1671,6 +1684,611 @@ export function __clearSseConnectionsForTests(): void {
   sseConnections.clear();
 }
 
+// ─── POST /peer/* — HTTP seat-protocol endpoints (AGT-453) ───────────
+//
+// Five POST routes replace the SSH seat verbs retired in this PR:
+//   POST /peer/claim-seat
+//   POST /peer/heartbeat
+//   POST /peer/release-seat
+//   POST /peer/re-review-request
+//   POST /peer/register-extra
+//
+// Auth: same ±5-min timestamp-window pattern as GET /peer/events, but the
+// canonical string binds the request verb and SHA-256 of the body:
+//
+//   peer-<verb>\n<x-stamp-timestamp>\n<sha256-hex(body)>
+//
+// This additive body-binding (vs. the bodyless SSE stream) prevents a captured
+// (pubkey, ts, sig) triple from being replayed against a different payload
+// during the replay window.
+//
+// Identity is uniformly the stamp-fp derived from x-stamp-pubkey (ssh-fp
+// disappears with the SSH verbs — this is the correct per-AGT-454 identity).
+
+const PEER_POST_TIMESTAMP_WINDOW_MS = 300_000; // same ±5 min as SSE
+
+/**
+ * Canonical bytes the client signs for a POST /peer/<verb> request.
+ * Binds the verb name + timestamp + sha256(body) so a captured sig
+ * cannot be replayed against a different payload during the replay window.
+ */
+function postCanonicalBytes(verb: string, timestamp: string, bodyHex: string): Buffer {
+  return Buffer.from(`peer-${verb}\n${timestamp}\n${bodyHex}`, "utf8");
+}
+
+/** Authenticate an inbound POST /peer/<verb> request.
+ *  Returns `{ ok: true, pubkeyPem, fingerprint }` or `{ ok: false, reason }`.
+ *
+ *  Steps:
+ *    1. Require x-stamp-pubkey / x-stamp-timestamp / x-stamp-signature headers.
+ *    2. Timestamp within ±PEER_POST_TIMESTAMP_WINDOW_MS.
+ *    3. Verify sig over `peer-<verb>\n<ts>\n<sha256-hex(body)>`.
+ *    4. Confirm enrolled (stamp_pubkey lookup).
+ */
+function authenticatePostRequest(
+  req: IncomingMessage,
+  body: Buffer,
+  verb: string,
+): { ok: true; pubkeyPem: string; fingerprint: string } | { ok: false; reason: string } {
+  const rawPubkey = headerValue(req, "x-stamp-pubkey");
+  const timestamp = headerValue(req, "x-stamp-timestamp");
+  const signature = headerValue(req, "x-stamp-signature");
+  if (!rawPubkey || !timestamp || !signature) {
+    return { ok: false, reason: "missing auth headers" };
+  }
+
+  const pubkeyPem = decodePubkeyHeader(rawPubkey);
+  if (!pubkeyPem) {
+    return { ok: false, reason: "x-stamp-pubkey is not an SPKI PEM" };
+  }
+
+  // Timestamp window check.
+  const ts = Date.parse(timestamp);
+  if (Number.isNaN(ts)) {
+    return { ok: false, reason: "x-stamp-timestamp is not a valid ISO-8601 timestamp" };
+  }
+  if (Math.abs(Date.now() - ts) > PEER_POST_TIMESTAMP_WINDOW_MS) {
+    return { ok: false, reason: "x-stamp-timestamp outside the allowed window" };
+  }
+
+  // Signature — verb + timestamp + sha256(body).
+  const bodyHex = createHash("sha256").update(body).digest("hex");
+  let validSig: boolean;
+  try {
+    validSig = verifyBytes(pubkeyPem, postCanonicalBytes(verb, timestamp, bodyHex), signature);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `signature verify threw: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!validSig) {
+    return { ok: false, reason: "signature invalid" };
+  }
+
+  // Enrollment check.
+  let fp: string;
+  try {
+    fp = fingerprintFromPem(pubkeyPem);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `pubkey fingerprint failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  let enrolled = false;
+  try {
+    const db = openServerDb({ readOnly: true });
+    try {
+      enrolled = findUserByStampPubkey(db, pubkeyPem) !== null;
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `user lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (!enrolled) {
+    return { ok: false, reason: "key is not an enrolled user" };
+  }
+
+  return { ok: true, pubkeyPem, fingerprint: fp };
+}
+
+/** Max body for POST /peer/* requests (same as invite-accept). */
+const PEER_POST_MAX_BODY_BYTES = MAX_BODY_BYTES;
+
+/**
+ * Handle POST /peer/claim-seat.
+ *
+ * Body: { patch_id, claimant_fp, base_sha, repo, pubkey, signature }
+ *
+ * Auth: stamp-key signed-timestamp (authenticatePostRequest) + inner
+ * Ed25519 payload signature (verifyPeerPayloadSignatureFromPubkey).
+ * Identity is stamp-fp throughout — ssh-fp is not used.
+ */
+async function handlePeerClaimSeat(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { buf, tooLarge } = await readBody(req, PEER_POST_MAX_BODY_BYTES);
+  if (tooLarge) {
+    sendJson(res, 413, { ok: false, error: "request_too_large" });
+    return;
+  }
+
+  const auth = authenticatePostRequest(req, buf, "claim-seat");
+  if (!auth.ok) {
+    logLine("warn", `POST /peer/claim-seat: auth failed: ${auth.reason}`);
+    sendJson(res, 401, { ok: false, error: "unauthorized", reason: auth.reason });
+    return;
+  }
+
+  // Parse and validate body.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(buf.toString("utf8"));
+  } catch {
+    sendJson(res, 400, { ok: false, error: "invalid_json" });
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    sendJson(res, 400, { ok: false, error: "body_must_be_object" });
+    return;
+  }
+  const p = parsed as Record<string, unknown>;
+  for (const k of ["patch_id", "claimant_fp", "base_sha", "repo", "pubkey", "signature"]) {
+    if (typeof p[k] !== "string") {
+      sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
+      return;
+    }
+  }
+  if (!/^[0-9a-f]{40}$/.test(p["base_sha"] as string)) {
+    sendJson(res, 400, { ok: false, error: "base_sha_invalid" });
+    return;
+  }
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(p["repo"] as string)) {
+    sendJson(res, 400, { ok: false, error: "repo_invalid" });
+    return;
+  }
+
+  const payload = p as {
+    patch_id: string; claimant_fp: string; base_sha: string;
+    repo: string; pubkey: string; signature: string;
+  };
+
+  // Inner Ed25519 payload signature (same AGT-454 pure-crypto path as SSH verb).
+  const { signature: _sig, ...payloadWithoutSig } = payload;
+  const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
+  const sigResult = verifyPeerPayloadSignatureFromPubkey(
+    payload.pubkey, payload.claimant_fp, canonicalBytes, payload.signature,
+  );
+  if (!sigResult.ok) {
+    logLine("warn", `POST /peer/claim-seat: payload auth failed: ${sigResult.reason}`);
+    sendJson(res, 401, { ok: false, error: "payload_auth_failed", reason: sigResult.reason });
+    return;
+  }
+
+  const db = openServerDb({ skipChmod: true });
+  try {
+    // touch last_seen for this user (by stamp-fp = auth.fingerprint).
+    const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
+    if (userRow) touchLastSeen(db, userRow.id);
+
+    // Per-fingerprint rate limit (seat-squat mitigation, same as SSH verb).
+    const claimSeatRateCap = resolvePeerReviewLimit("CLAIM_SEAT_RATE_CAP", PR_OPENED_RATE_CAP_DEFAULT);
+    if (userRow && !checkAndConsumeToken(db, userRow.id, "claim-seat", claimSeatRateCap)) {
+      sendJson(res, 429, { ok: false, error: "rate_limit_exceeded", reason: "claim-seat cap" });
+      return;
+    }
+
+    const now = Date.now();
+    const result = claimSeatTx(db, payload.patch_id, payload.claimant_fp, now);
+
+    if (!result.ok) {
+      // Map the DB error to HTTP status codes mirroring SSH exit codes.
+      const status = result.error === "seats_full" ||
+        result.error === "author_cannot_claim_own_pr" ||
+        result.error === "already_holds_other_seat" ? 409 : 500;
+      sendJson(res, status, { ok: false, error: result.error });
+      return;
+    }
+
+    appendEvent(db, payload.patch_id, "claim-seat", payload.claimant_fp, {
+      seat: result.seat,
+      repo: payload.repo,
+    }, now);
+
+    logLine("info", `POST /peer/claim-seat: fp=${auth.fingerprint} patch=${payload.patch_id} seat=${result.seat}`);
+    sendJson(res, 200, { ok: true, seat: result.seat, patch_id: payload.patch_id });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Handle POST /peer/heartbeat.
+ *
+ * Body: { patch_id, claimant_fp, signature }
+ *
+ * Refreshes the seat_N_claimed_at timestamp. Returns 404 when the caller
+ * holds no seat for the given patch. Identity is stamp-fp (uniform with claim-seat).
+ */
+async function handlePeerHeartbeat(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { buf, tooLarge } = await readBody(req, PEER_POST_MAX_BODY_BYTES);
+  if (tooLarge) {
+    sendJson(res, 413, { ok: false, error: "request_too_large" });
+    return;
+  }
+
+  const auth = authenticatePostRequest(req, buf, "heartbeat");
+  if (!auth.ok) {
+    logLine("warn", `POST /peer/heartbeat: auth failed: ${auth.reason}`);
+    sendJson(res, 401, { ok: false, error: "unauthorized", reason: auth.reason });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(buf.toString("utf8"));
+  } catch {
+    sendJson(res, 400, { ok: false, error: "invalid_json" });
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    sendJson(res, 400, { ok: false, error: "body_must_be_object" });
+    return;
+  }
+  const p = parsed as Record<string, unknown>;
+  for (const k of ["patch_id", "claimant_fp", "signature"]) {
+    if (typeof p[k] !== "string") {
+      sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
+      return;
+    }
+  }
+  const payload = p as { patch_id: string; claimant_fp: string; signature: string };
+
+  // Identity bind: the stamp-fp in the header must match the claimant_fp in the body.
+  if (auth.fingerprint !== payload.claimant_fp) {
+    sendJson(res, 401, {
+      ok: false,
+      error: "fingerprint_mismatch",
+      reason: `header stamp-fp (${auth.fingerprint}) ≠ body claimant_fp (${payload.claimant_fp})`,
+    });
+    return;
+  }
+
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
+    if (userRow) touchLastSeen(db, userRow.id);
+
+    const now = Date.now();
+    const seat = touchHeartbeat(db, payload.patch_id, payload.claimant_fp, now);
+
+    if (seat === null) {
+      sendJson(res, 404, {
+        ok: false, error: "no_seat",
+        reason: `${payload.claimant_fp} holds no seat for patch ${payload.patch_id}`,
+      });
+      return;
+    }
+
+    appendEvent(db, payload.patch_id, "heartbeat", payload.claimant_fp, { seat }, now);
+
+    sendJson(res, 200, { ok: true, seat, patch_id: payload.patch_id });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Handle POST /peer/release-seat.
+ *
+ * Body: { patch_id, claimant_fp, signature }
+ */
+async function handlePeerReleaseSeat(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { buf, tooLarge } = await readBody(req, PEER_POST_MAX_BODY_BYTES);
+  if (tooLarge) {
+    sendJson(res, 413, { ok: false, error: "request_too_large" });
+    return;
+  }
+
+  const auth = authenticatePostRequest(req, buf, "release-seat");
+  if (!auth.ok) {
+    logLine("warn", `POST /peer/release-seat: auth failed: ${auth.reason}`);
+    sendJson(res, 401, { ok: false, error: "unauthorized", reason: auth.reason });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(buf.toString("utf8"));
+  } catch {
+    sendJson(res, 400, { ok: false, error: "invalid_json" });
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    sendJson(res, 400, { ok: false, error: "body_must_be_object" });
+    return;
+  }
+  const p = parsed as Record<string, unknown>;
+  for (const k of ["patch_id", "claimant_fp", "signature"]) {
+    if (typeof p[k] !== "string") {
+      sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
+      return;
+    }
+  }
+  const payload = p as { patch_id: string; claimant_fp: string; signature: string };
+
+  if (auth.fingerprint !== payload.claimant_fp) {
+    sendJson(res, 401, {
+      ok: false,
+      error: "fingerprint_mismatch",
+      reason: `header stamp-fp (${auth.fingerprint}) ≠ body claimant_fp (${payload.claimant_fp})`,
+    });
+    return;
+  }
+
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
+    if (userRow) touchLastSeen(db, userRow.id);
+
+    const now = Date.now();
+    const released = releaseSeat(db, payload.patch_id, payload.claimant_fp);
+
+    appendEvent(db, payload.patch_id, "release-seat", payload.claimant_fp, { released }, now);
+
+    logLine("info", `POST /peer/release-seat: fp=${auth.fingerprint} patch=${payload.patch_id} released=${released}`);
+    sendJson(res, 200, { ok: true, released, patch_id: payload.patch_id });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Handle POST /peer/re-review-request.
+ *
+ * Body: { patch_id, requester_fp, reviewer_filter?, pubkey, signature }
+ *
+ * Only the original PR author may call this. Fans out a re-review-requested
+ * event to active seat-holders (optionally filtered by short_name).
+ */
+async function handlePeerReReviewRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { buf, tooLarge } = await readBody(req, PEER_POST_MAX_BODY_BYTES);
+  if (tooLarge) {
+    sendJson(res, 413, { ok: false, error: "request_too_large" });
+    return;
+  }
+
+  const auth = authenticatePostRequest(req, buf, "re-review-request");
+  if (!auth.ok) {
+    logLine("warn", `POST /peer/re-review-request: auth failed: ${auth.reason}`);
+    sendJson(res, 401, { ok: false, error: "unauthorized", reason: auth.reason });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(buf.toString("utf8"));
+  } catch {
+    sendJson(res, 400, { ok: false, error: "invalid_json" });
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    sendJson(res, 400, { ok: false, error: "body_must_be_object" });
+    return;
+  }
+  const p = parsed as Record<string, unknown>;
+  for (const k of ["patch_id", "requester_fp", "pubkey", "signature"]) {
+    if (typeof p[k] !== "string") {
+      sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
+      return;
+    }
+  }
+  if ("reviewer_filter" in p) {
+    if (!Array.isArray(p["reviewer_filter"]) || !p["reviewer_filter"].every((x) => typeof x === "string")) {
+      sendJson(res, 400, { ok: false, error: "reviewer_filter_must_be_string_array" });
+      return;
+    }
+  }
+
+  const payload = p as {
+    patch_id: string; requester_fp: string;
+    reviewer_filter?: string[]; pubkey: string; signature: string;
+  };
+
+  // Inner Ed25519 payload signature.
+  const { signature: _sig, ...payloadWithoutSig } = payload;
+  const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
+  const sigResult = verifyPeerPayloadSignatureFromPubkey(
+    payload.pubkey, payload.requester_fp, canonicalBytes, payload.signature,
+  );
+  if (!sigResult.ok) {
+    sendJson(res, 401, { ok: false, error: "payload_auth_failed", reason: sigResult.reason });
+    return;
+  }
+
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
+    if (userRow) touchLastSeen(db, userRow.id);
+
+    const patch = findPatch(db, payload.patch_id);
+    if (!patch) {
+      sendJson(res, 404, { ok: false, error: "patch_not_found" });
+      return;
+    }
+
+    if (payload.requester_fp !== patch.requested_by_fp) {
+      sendJson(res, 403, {
+        ok: false,
+        error: "not_author",
+        reason: `requester_fp ${payload.requester_fp} is not the original author`,
+      });
+      return;
+    }
+
+    // Resolve reviewer_filter: short_names → fingerprints (server-side).
+    let resolvedFilter: string[] = [];
+    const rawFilter = payload.reviewer_filter ?? [];
+    if (rawFilter.length > 0) {
+      for (const name of rawFilter) {
+        const ur = findUserByShortName(db, name);
+        if (ur) {
+          resolvedFilter.push(ur.ssh_fp);
+        } else {
+          logLine("warn", `POST /peer/re-review-request: reviewer_filter name "${name}" not found`);
+        }
+      }
+      if (resolvedFilter.length === 0) {
+        sendJson(res, 200, {
+          ok: true,
+          patch_id: payload.patch_id,
+          seat_holders_notified: 0,
+          note: "no reviewer_filter names resolved; no seat-holders notified",
+        });
+        return;
+      }
+    }
+
+    // Build seat map and fan out.
+    const seatMap: Array<{ fp: string; seat: 1 | 2 }> = [];
+    if (patch.seat_1_holder) seatMap.push({ fp: patch.seat_1_holder, seat: 1 });
+    if (patch.seat_2_holder) seatMap.push({ fp: patch.seat_2_holder, seat: 2 });
+
+    const now = Date.now();
+    const eventPayload = {
+      patch_id: payload.patch_id,
+      requested_by_fp: payload.requester_fp,
+      pr_url: patch.pr_url ?? null,
+      repo: patch.repo,
+    };
+
+    const notified = fanoutToSeatHoldersFiltered(
+      seatMap,
+      {
+        event_type: "re-review-requested",
+        patch_id: payload.patch_id,
+        actor_fp: payload.requester_fp,
+        payload: eventPayload,
+      },
+      resolvedFilter,
+    );
+
+    appendEvent(
+      db, payload.patch_id, "re-review-requested", payload.requester_fp,
+      { notified_fps: notified, reviewer_filter: rawFilter }, now,
+    );
+
+    logLine("info", `POST /peer/re-review-request: fp=${auth.fingerprint} patch=${payload.patch_id} notified=${notified.length}`);
+    sendJson(res, 200, {
+      ok: true,
+      patch_id: payload.patch_id,
+      seat_holders_notified: notified.length,
+      ...(notified.length === 0 ? { note: "no active seat-holders to notify" } : {}),
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Handle POST /peer/register-extra (AGT-453: migrated from SSH stamp-register-extra).
+ *
+ * Body: { patch_id, claimant_fp, base_sha, repo, pubkey, signature }
+ *
+ * Invoked when claim_seat: always and seats_full. Records an extras-register
+ * event; does NOT allocate a numbered seat slot.
+ */
+async function handlePeerRegisterExtra(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const { buf, tooLarge } = await readBody(req, PEER_POST_MAX_BODY_BYTES);
+  if (tooLarge) {
+    sendJson(res, 413, { ok: false, error: "request_too_large" });
+    return;
+  }
+
+  const auth = authenticatePostRequest(req, buf, "register-extra");
+  if (!auth.ok) {
+    logLine("warn", `POST /peer/register-extra: auth failed: ${auth.reason}`);
+    sendJson(res, 401, { ok: false, error: "unauthorized", reason: auth.reason });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(buf.toString("utf8"));
+  } catch {
+    sendJson(res, 400, { ok: false, error: "invalid_json" });
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    sendJson(res, 400, { ok: false, error: "body_must_be_object" });
+    return;
+  }
+  const p = parsed as Record<string, unknown>;
+  for (const k of ["patch_id", "claimant_fp", "base_sha", "repo", "pubkey", "signature"]) {
+    if (typeof p[k] !== "string") {
+      sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
+      return;
+    }
+  }
+  if (!/^[0-9a-f]{40}$/.test(p["base_sha"] as string)) {
+    sendJson(res, 400, { ok: false, error: "base_sha_invalid" });
+    return;
+  }
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(p["repo"] as string)) {
+    sendJson(res, 400, { ok: false, error: "repo_invalid" });
+    return;
+  }
+
+  const payload = p as {
+    patch_id: string; claimant_fp: string; base_sha: string;
+    repo: string; pubkey: string; signature: string;
+  };
+
+  // Inner Ed25519 payload signature.
+  const { signature: _sig, ...payloadWithoutSig } = payload;
+  const canonicalBytes = canonicalSerializePeerPayload(payloadWithoutSig);
+  const sigResult = verifyPeerPayloadSignatureFromPubkey(
+    payload.pubkey, payload.claimant_fp, canonicalBytes, payload.signature,
+  );
+  if (!sigResult.ok) {
+    sendJson(res, 401, { ok: false, error: "payload_auth_failed", reason: sigResult.reason });
+    return;
+  }
+
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
+    if (userRow) touchLastSeen(db, userRow.id);
+
+    // Per-fingerprint rate limit (own "register-extra" bucket — preserves existing
+    // token-bucket state on deploy, per retro).
+    const registerExtraRateCap = resolvePeerReviewLimit("REGISTER_EXTRA_RATE_CAP", PR_OPENED_RATE_CAP_DEFAULT);
+    if (userRow && !checkAndConsumeToken(db, userRow.id, "register-extra", registerExtraRateCap)) {
+      sendJson(res, 429, { ok: false, error: "rate_limit_exceeded", reason: "register-extra cap" });
+      return;
+    }
+
+    // Author-exclusion: claimant must not be the original PR author.
+    const patchRow = findPatch(db, payload.patch_id);
+    if (patchRow && patchRow.requested_by_fp === payload.claimant_fp) {
+      sendJson(res, 409, { ok: false, error: "author_cannot_review_own_pr" });
+      return;
+    }
+
+    const now = Date.now();
+    appendEvent(db, payload.patch_id, "extras-register", payload.claimant_fp, { repo: payload.repo }, now);
+
+    logLine("info", `POST /peer/register-extra: fp=${auth.fingerprint} patch=${payload.patch_id}`);
+    sendJson(res, 200, { ok: true, patch_id: payload.patch_id });
+  } finally {
+    db.close();
+  }
+}
+
 // ─── Server lifecycle ─────────────────────────────────────────────────
 
 export const HTTP_DEFAULT_PORT = DEFAULT_PORT;
@@ -1699,6 +2317,48 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
         return;
       }
       handlePeerEventsRequest(req, res);
+      return;
+    }
+    // AGT-453: POST /peer/* HTTP seat-protocol endpoints (replace SSH verbs).
+    // All five are dark unless STAMP_PEER_REVIEWS_ENABLED=1.
+    if (req.method === "POST" && url === "/peer/claim-seat") {
+      if (!resolvePeerReviewsEnabled()) {
+        sendJson(res, 404, { ok: false, error: "not_found" });
+        return;
+      }
+      void handlePeerClaimSeat(req, res);
+      return;
+    }
+    if (req.method === "POST" && url === "/peer/heartbeat") {
+      if (!resolvePeerReviewsEnabled()) {
+        sendJson(res, 404, { ok: false, error: "not_found" });
+        return;
+      }
+      void handlePeerHeartbeat(req, res);
+      return;
+    }
+    if (req.method === "POST" && url === "/peer/release-seat") {
+      if (!resolvePeerReviewsEnabled()) {
+        sendJson(res, 404, { ok: false, error: "not_found" });
+        return;
+      }
+      void handlePeerReleaseSeat(req, res);
+      return;
+    }
+    if (req.method === "POST" && url === "/peer/re-review-request") {
+      if (!resolvePeerReviewsEnabled()) {
+        sendJson(res, 404, { ok: false, error: "not_found" });
+        return;
+      }
+      void handlePeerReReviewRequest(req, res);
+      return;
+    }
+    if (req.method === "POST" && url === "/peer/register-extra") {
+      if (!resolvePeerReviewsEnabled()) {
+        sendJson(res, 404, { ok: false, error: "not_found" });
+        return;
+      }
+      void handlePeerRegisterExtra(req, res);
       return;
     }
     sendJson(res, 404, { ok: false, error: "not_found" });
