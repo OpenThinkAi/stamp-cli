@@ -63,3 +63,49 @@ export function runChecks(
 export function allPassed(results: CheckResult[]): boolean {
   return results.every((r) => r.exit_code === 0);
 }
+
+/**
+ * Canonical signature emitted by vitest's fork-pool when a worker process
+ * fails to start within the startup timeout. On macOS this is most often
+ * caused by `syspolicyd`'s ExecPolicy DB bloating under heavy subagent
+ * churn (every short-lived binary launch goes through ExecPolicy), which
+ * slows process spawn enough that vitest's fork worker exceeds its
+ * startup deadline. The failure is indistinguishable from a real test
+ * failure at the exit-code level, so the diagnostic below surfaces the
+ * suspected cause and recovery path.
+ *
+ * Kept as a single regex so future vitest wording shifts are a one-line fix.
+ */
+const VITEST_FORK_POOL_FLAKE_RE = /Failed to start forks worker/;
+
+/**
+ * Returns true when the captured check output bears the vitest fork-pool
+ * worker-startup-timeout signature. Pure — caller is responsible for
+ * formatting and printing the diagnostic message.
+ */
+export function detectVitestForkPoolFlake(output: string): boolean {
+  if (!output) return false;
+  return VITEST_FORK_POOL_FLAKE_RE.test(output);
+}
+
+/**
+ * The diagnostic line(s) to print when `detectVitestForkPoolFlake` matches.
+ * Identifies the suspected root cause (macOS syspolicyd ExecPolicy DB bloat
+ * from heavy subagent churn) and points at the recovery path so the operator
+ * doesn't burn time debugging a flake as a real test failure.
+ */
+export const VITEST_FORK_POOL_FLAKE_DIAGNOSTIC = [
+  "── stamp diagnostic ───────────────────────────────────────────────────",
+  "This looks like a vitest fork-pool worker-startup timeout, NOT a real",
+  "test failure. On macOS this is typically caused by syspolicyd's",
+  "ExecPolicy DB bloating under heavy subagent churn — every short-lived",
+  "binary launch goes through ExecPolicy, slowing process spawn enough",
+  "that vitest's fork worker exceeds its startup deadline.",
+  "",
+  "Recovery: reboot the machine (clears the in-memory backlog). If it",
+  "recurs immediately after reboot, reset the ExecPolicy DB:",
+  "  sudo mv /var/db/SystemPolicyConfiguration/ExecPolicy{,.bak.$(date +%s)}",
+  "  sudo reboot",
+  "Then re-run `stamp merge`. If the same check fails with a different",
+  "signature, treat it as a real test failure.",
+].join("\n");
