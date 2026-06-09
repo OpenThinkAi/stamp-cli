@@ -214,9 +214,35 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
     exit 1
   fi
   export GIT_SSH_KNOWN_HOSTS="${STAMP_PROMPTS_KNOWN_HOSTS_PATH:-${GIT_SSH_KNOWN_HOSTS:-/etc/ssh/ssh_known_hosts}}"
-  if ! /usr/local/sbin/stamp-prompts-cache-bootstrap; then
+  # Fix A (AGT-468): run bootstrap as the git user, not root. The deploy key
+  # at STAMP_PROMPTS_DEPLOY_KEY_PATH is git-readable (mode 0600, git-owned via
+  # the ssh-client-keys ownership loop above), so the user-switch is clean.
+  # The -p flag preserves the exported env (STAMP_PROMPTS_*, GIT_SSH_*) so the
+  # bootstrap binary sees the same variables it would see when invoked as root.
+  # Running as git ensures the cache dir and its contents are created with
+  # git:git ownership — the poll worker (startPromptsPollWorker in http-server)
+  # also runs as git and would otherwise hit "fatal: dubious ownership" when
+  # fetching into a root-owned repo (AGT-376 / git safe.directory semantics).
+  if ! su -s /bin/sh -p git -c '/usr/local/sbin/stamp-prompts-cache-bootstrap'; then
     echo "error: stamp-prompts-cache-bootstrap failed; aborting startup" >&2
     exit 1
+  fi
+  # Fix B (AGT-468, belt-and-braces): ensure the cache dir is git-owned before
+  # the http-server's poll worker tries to fetch into it. Covers deployment
+  # layouts where the cache was migrated from an older root-owned install or
+  # where a manual operator chown went wrong. The || true keeps the boot alive
+  # if, e.g., the dir doesn't exist yet (Phase B disabled mid-deploy).
+  _pcroot="${STAMP_PROMPTS_CACHE_ROOT:-/srv/git/.prompts-cache}"
+  if [ -d "$_pcroot" ]; then
+    chown -R git:git "$_pcroot" || true
+  fi
+  # The .old dir is the atomic-swap staging area used by cloneOrFetchPromptsCache
+  # during in-place refreshes. Chown it too: a previous root-owned bootstrap
+  # could have left an orphaned .old dir that the poll worker's rename(2) call
+  # would EACCES on (git user cannot rmdir a root-owned directory, even with
+  # write perms on the parent).
+  if [ -d "${_pcroot}.old" ]; then
+    chown -R git:git "${_pcroot}.old" || true
   fi
 fi
 
