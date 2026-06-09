@@ -486,11 +486,19 @@ write_env_var STAMP_PROMPTS_DIR
 # STAMP_SSH_PASS_ENV — space-separated list of env var names to inject.
 # Defaults to "STAMP_PUBLIC_URL" so mint-invite Just Works in v2.0.2+ with
 # no additional operator config. Operators can extend this list if future
-# SSH-invoked verbs need other container vars:
+# SSH-invoked verbs need other NON-SECRET container vars:
 #
-#   STAMP_SSH_PASS_ENV="STAMP_PUBLIC_URL MY_CUSTOM_VAR"
+#   STAMP_SSH_PASS_ENV="STAMP_PUBLIC_URL STAMP_PUBLIC_REGION"
 #
-# Security — validate each value before writing to sshd_config. `printf '%s'`
+# !!! SECURITY: NON-SECRET VALUES ONLY !!!
+# sshd_config is mode 0644 (world-readable on the host). DO NOT add API
+# tokens, credentials, or any other secret to STAMP_SSH_PASS_ENV — they
+# would land in a world-readable file. Use the /etc/stamp/env pattern above
+# (write_env_var, mode 0640 root:git) for anything sensitive — that's why
+# GITHUB_BOT_TOKEN / ANTHROPIC_API_KEY take that path and STAMP_PUBLIC_URL
+# (an externally-published URL, by definition not secret) takes this one.
+#
+# Security — values are validated before writing to sshd_config. `printf '%s'`
 # does not sanitize, so an embedded newline in a value would be passed through
 # and create a new sshd directive (PermitRootLogin yes, AuthorizedKeysFile
 # override, etc.). The value is operator-supplied via the container env, which
@@ -498,8 +506,8 @@ write_env_var STAMP_PROMPTS_DIR
 # injection vectors.
 #
 # The accepted charset [A-Za-z0-9.:/_@=+-] is the conservative safe set for
-# sshd SetEnv values: covers URLs, tokens, version strings, and key=value
-# pairs while excluding whitespace, quotes, semicolons, dollar signs, and
+# sshd SetEnv values: covers URLs, region codes, hostnames, and version
+# strings while excluding whitespace, quotes, semicolons, dollar signs, and
 # other characters that have special meaning in sshd_config or shell expansion.
 # STAMP_PUBLIC_URL additionally requires an http(s):// prefix — a semantics
 # check that catches operator fat-finger before it breaks mint-invite at

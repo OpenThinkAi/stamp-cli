@@ -61,8 +61,12 @@ function runInject(
   varName: string,
   env: Record<string, string | undefined>,
 ): { status: number | null; stderr: string } {
-  const snippet = `. "${INJECT_SCRIPT}" && _inject_sshd_setenv "${varName}"`;
-  const result = spawnSync("sh", ["-c", snippet], {
+  // Pass varName as $1 to the snippet (not interpolated into the shell
+  // string) so values containing shell metacharacters like `$` or `;`
+  // reach _inject_sshd_setenv literally — exercising its defensive
+  // name validation rather than getting eaten by string interpolation.
+  const snippet = `. "${INJECT_SCRIPT}" && _inject_sshd_setenv "$1"`;
+  const result = spawnSync("sh", ["-c", snippet, "sh", varName], {
     env: {
       PATH: process.env["PATH"],
       SSHD_CONFIG: sshdConfig,
@@ -192,7 +196,25 @@ describe("AGT-469: inject-sshd-setenv.sh", () => {
     }
   });
 
-  it("case 8: existing unrelated sshd_config lines are preserved", () => {
+  it("case 8a: rejects an invalid env var name (defensive guard against shell metachars)", () => {
+    // Names with shell metacharacters or non-conforming shapes must be
+    // rejected before any value lookup — closes a latent attack surface
+    // even though printenv (not eval) does the actual value read.
+    const h = setupHarness();
+    try {
+      for (const badName of ["bad name", "bad;name", "1abc", "bad$name", ""]) {
+        const r = runInject(h.sshdConfig, badName, {});
+        assert.equal(r.status, 1, `expected exit 1 for name="${badName}", got ${r.status}`);
+        assert.match(r.stderr, /invalid env var name/);
+      }
+      const content = readFileSync(h.sshdConfig, "utf8");
+      assert.doesNotMatch(content, /SetEnv/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("case 9: existing unrelated sshd_config lines are preserved", () => {
     const hardening =
       "PasswordAuthentication no\nPermitRootLogin no\nAllowUsers git\n";
     const h = setupHarness(hardening);
