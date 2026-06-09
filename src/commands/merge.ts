@@ -58,6 +58,7 @@ import { parseToolCalls, redactToolCallsForAttestation } from "../lib/toolCalls.
 import { signBytes, verifyBytes } from "../lib/signing.js";
 import { requireHumanMerge } from "../lib/humanMerge.js";
 import { maybePrintDeprecationNotice } from "../lib/deprecationNotice.js";
+import { acquireMergeLock } from "../lib/mergeLock.js";
 
 export interface MergeOptions {
   branch: string;
@@ -112,6 +113,37 @@ export function runMerge(opts: MergeOptions): void {
     );
   }
 
+  // Acquire the per-repo exclusive merge lock immediately after the
+  // pre-flight gates and BEFORE we begin reading the diff / running checks
+  // / advancing HEAD. The lock serializes concurrent `stamp merge`
+  // invocations against the same checkout so two agents cannot interleave
+  // their `git merge --no-ff` + `git commit --amend` windows and produce a
+  // commit whose Stamp-Payload.head_sha doesn't match its actual second
+  // parent (AGT-474 / GH#31). Lock is per-repo (per gitCommonDir) and
+  // local-checkout-scoped only — no cross-host coordination per AC#5.
+  //
+  // The lock is released in the `finally` block that wraps everything
+  // through the success summary AND the rollback catch — every exit path,
+  // throw, or normal return must release.
+  const mergeLock = acquireMergeLock(repoRoot);
+  try {
+    runMergeLocked(opts, repoRoot, config);
+  } finally {
+    mergeLock.release();
+  }
+}
+
+/**
+ * Inner body of `runMerge`, executed under the per-repo merge lock acquired
+ * by the outer entry point. Split out so the lock's try/finally wraps every
+ * exit path (success, gate-closed throw, post-merge rollback throw) without
+ * threading lock state through twenty layers of try/catch.
+ */
+function runMergeLocked(
+  opts: MergeOptions,
+  repoRoot: string,
+  config: ReturnType<typeof loadConfig>,
+): void {
   // 2. Resolve diff and verify gate is open against the target branch rule.
   const revspec = `${opts.into}..${opts.branch}`;
   const resolved = resolveDiff(revspec, repoRoot);
