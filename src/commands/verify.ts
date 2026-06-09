@@ -286,7 +286,11 @@ function printSuccess(
     head_sha: string;
     signer_key_id: string;
     approvals: { reviewer: string; verdict: string }[];
-    checks?: { name: string; exit_code: number }[];
+    checks?: {
+      name: string;
+      exit_code: number;
+      quarantine?: { test: string; reason: string }[];
+    }[];
   },
 ): void {
   const bar = "─".repeat(72);
@@ -308,6 +312,16 @@ function printSuccess(
     for (const c of payload.checks) {
       const mark = c.exit_code === 0 ? "✓" : "✗";
       console.log(`    ${mark} ${c.name}   exit ${c.exit_code}`);
+      // AGT-476: surface the operator-declared flake-quarantine list so
+      // verify output names every gate the signer declared not-enforced
+      // for this commit. The trust property is "the list is signed and
+      // auditable" — verify does NOT re-run the check to confirm the
+      // named tests were the only ones the command skipped.
+      if (c.quarantine && c.quarantine.length > 0) {
+        for (const q of c.quarantine) {
+          console.log(`      quarantine: ${q.test} — ${q.reason}`);
+        }
+      }
     }
   }
   console.log(bar);
