@@ -111,6 +111,10 @@ import {
   type MigrationBootstrapMarker,
 } from "../lib/migrationBootstrap.js";
 import { collectTrustAnchorSignatures } from "../lib/trustAnchorCollection.js";
+import {
+  listChangedFiles,
+  readNote,
+} from "../lib/trustAnchorNotes.js";
 import { parsePathRules, pathMatchesAny, type PathRule } from "../lib/v4Trust.js";
 
 export interface AttestOptions {
@@ -127,6 +131,14 @@ export interface AttestOptions {
    * leave the operator to do it manually.
    */
   pushTo?: string;
+  /**
+   * AGT-471: when true, exit with code 3 (instead of just warning) if the
+   * diff touches a `path_rules`-gated path and the collected admin-signature
+   * count is below `minimum_signatures`. Default (false) emits a `warning:`
+   * line but lets attest continue — the operator may be deferring sigs or
+   * running a dry-run check.
+   */
+  requireAdminSigsMet?: boolean;
   /**
    * AGT-398: when true, produce a Shape 4 migration-bootstrap envelope
    * (empty `server_signatures`, bootstrap marker in the operator-signed
@@ -182,6 +194,51 @@ export function runAttest(opts: AttestOptions): void {
   ).trim();
 
   const { keypair } = ensureUserKeypair();
+
+  // AGT-471: early admin-sig pre-flight.
+  //
+  // For v3 (server-attested PR mode) only — v2 has no path_rules concept
+  // and the bootstrap path manages its own admin-sig gate. When the diff
+  // touches a path_rules-gated path and the locally-collected admin-sig
+  // count is short, emit a `warning:` line at the top of output so the
+  // operator learns about the gap before the slower envelope-build work
+  // runs. If `--require-admin-sigs-met` is set, exit 3 instead of
+  // warning — useful for CI pre-checks or scripts that want a hard gate.
+  //
+  // Intentionally non-blocking by default: the operator might be
+  // deliberately running attest before collecting sigs (e.g. to confirm
+  // the review cycle is green before going around to admins), and the
+  // downstream `collectTrustAnchorSignatures` call will enforce the hard
+  // threshold at envelope-build time anyway.
+  if (rule.review_server && !opts.migrateExisting) {
+    const shortage = detectAdminSigShortage({
+      repoRoot,
+      baseSha: resolved.base_sha,
+      headSha: resolved.head_sha,
+    });
+    if (shortage !== null) {
+      const headShort = resolved.head_sha.slice(0, 12);
+      const gapSuffix =
+        `${shortage.matchedPattern} but only ` +
+        `${shortage.collectedCount}/${shortage.minimumRequired} admin ` +
+        `signature(s) collected on refs/notes/stamp-trust-anchor-sigs ` +
+        `for ${headShort}. ` +
+        `Run \`stamp admin sign --pending ${headShort}\` ` +
+        `before pushing to avoid a red PR check.`;
+      if (opts.requireAdminSigsMet) {
+        // Hard gate: use `error:` prefix — the process exits 3. Using the
+        // same `warning:`-prefixed string for both fatal and advisory paths
+        // would break agent parsers that key on prefix to decide whether to
+        // retry or abort (product reviewer round 1 finding).
+        console.error(`error: --require-admin-sigs-met: diff touches ${gapSuffix}`);
+        process.exit(3);
+      }
+      // Advisory path: `warning:` prefix signals non-fatal; operator
+      // sees this before the slower envelope-build work begins and can
+      // choose to abort and collect sigs, or let attest continue.
+      console.warn(`warning: diff touches ${gapSuffix}`);
+    }
+  }
 
   // Dispatch — bootstrap (AGT-398) vs. v3 (server-attested) vs. v2
   // (legacy / operator-only).
@@ -1033,6 +1090,104 @@ function buildBootstrapEnvelope(
     signature,
     reviewerNames: [],
   };
+}
+
+// ─── AGT-471 early admin-sig pre-flight ────────────────────────────
+
+/**
+ * Describes a detected shortfall between locally-collected admin
+ * signatures and the `minimum_signatures` threshold of a matched
+ * `path_rules` entry. Returned by `detectAdminSigShortage` when a
+ * gap exists; `null` means no rule matched or the threshold is already
+ * met (no warning needed).
+ *
+ * Only the WORST (highest threshold) matching rule is reported — the
+ * one most likely to cause a verifier rejection — so the operator
+ * sees a single actionable gap rather than one line per matching rule.
+ */
+interface AdminSigShortage {
+  /** Glob pattern of the worst-matching rule. */
+  matchedPattern: string;
+  /** Number of signatures currently in the notes-ref for headSha. */
+  collectedCount: number;
+  /** Threshold the rule requires. */
+  minimumRequired: number;
+}
+
+/**
+ * Cheap pre-flight: read `path_rules` at `baseSha`, list changed files,
+ * and check how many signatures are in `refs/notes/stamp-trust-anchor-sigs`
+ * for `headSha`. Returns a shortage descriptor when at least one
+ * matching rule is below threshold; returns `null` when:
+ *   - no path_rules are configured at baseSha
+ *   - no changed file matches any rule's pattern
+ *   - every matching rule's threshold is already met
+ *   - any git I/O fails (the downstream build will surface the real error)
+ *
+ * This is PURELY for early-warning UX. It does NOT do signature
+ * cryptographic verification — that remains in `collectTrustAnchorSignatures`
+ * at envelope-build time. Unverified counts are fine for a "you might
+ * be short" advisory.
+ */
+function detectAdminSigShortage(input: {
+  repoRoot: string;
+  baseSha: string;
+  headSha: string;
+}): AdminSigShortage | null {
+  // Read path_rules at baseSha (same source as the verifier).
+  let configYaml: string;
+  try {
+    configYaml = showAtRef(input.baseSha, ".stamp/config.yml", input.repoRoot);
+  } catch {
+    return null;
+  }
+  let parsedYaml: unknown;
+  try {
+    parsedYaml = parseYaml(configYaml);
+  } catch {
+    return null;
+  }
+  if (!parsedYaml || typeof parsedYaml !== "object") return null;
+  const rawPathRules = (parsedYaml as { path_rules?: unknown }).path_rules;
+  const { rules: pathRules } = parsePathRules(rawPathRules);
+  if (pathRules.length === 0) return null;
+
+  // List changed files (base→head three-dot diff).
+  const changedFiles = listChangedFiles(
+    input.repoRoot,
+    input.baseSha,
+    input.headSha,
+  );
+  if (!changedFiles) return null;
+
+  // Find matching rules.
+  const matchingRules = pathRules.filter((r) =>
+    changedFiles.some((f) => pathMatchesAny(f, [r.pattern])),
+  );
+  if (matchingRules.length === 0) return null;
+
+  // Count how many raw signatures are in the notes-ref for headSha.
+  // We use the raw count (no Ed25519 verification) — this is advisory only.
+  const note = readNote(input.repoRoot, input.headSha);
+  const rawCount = note?.signatures.length ?? 0;
+
+  // Report the rule with the highest threshold that is NOT yet met.
+  let worst: AdminSigShortage | null = null;
+  for (const rule of matchingRules) {
+    if (rawCount < rule.minimum_signatures) {
+      if (
+        worst === null ||
+        rule.minimum_signatures > worst.minimumRequired
+      ) {
+        worst = {
+          matchedPattern: rule.pattern,
+          collectedCount: rawCount,
+          minimumRequired: rule.minimum_signatures,
+        };
+      }
+    }
+  }
+  return worst;
 }
 
 /** Read the working-tree `.stamp/trusted-keys/manifest.yml`. */

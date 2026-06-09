@@ -849,3 +849,261 @@ describe("WS1 — stamp attest PR-mode admin trust-anchor signatures", () => {
     }
   });
 });
+
+// ─── AGT-471: early admin-sig warning ───────────────────────────────
+
+describe("AGT-471 — stamp attest: early admin-sig warning", () => {
+  /**
+   * Captures console.warn calls for the duration of `fn`, then restores
+   * the original implementation.  Returns all captured warning strings.
+   */
+  function captureWarnings(fn: () => void): string[] {
+    const captured: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => {
+      captured.push(args.map(String).join(" "));
+    };
+    try {
+      fn();
+    } finally {
+      console.warn = orig;
+    }
+    return captured;
+  }
+
+  it("warn-only: emits a warning: line and still produces the envelope when sigs are short but threshold not enforced", () => {
+    // Use adminCount:1 but do NOT seed any admin signature.
+    // runAttest should emit a warning but proceed to the hard-fail from
+    // collectTrustAnchorSignatures (because sigs are still needed for the
+    // v3 envelope). We capture the warning before the downstream error.
+    const h = setupHarness({ adminCount: 1, touchStamp: true });
+    try {
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "feature");
+      const diff = git(h.repo, ["diff", `${base}...${head}`]);
+      const diffSha256 = sha256Hex(diff);
+      seedServerSignedReview({
+        repo: h.repo,
+        reviewer: "security",
+        baseSha: base,
+        headSha: head,
+        diffSha256,
+        serverKey: h.serverKey,
+      });
+
+      // No admin signature seeded — collectTrustAnchorSignatures will
+      // throw AFTER the warning fires. We only want to verify the warning
+      // was emitted before the error propagated.
+      let caught: Error | null = null;
+      const warnings = captureWarnings(() => {
+        try {
+          runFromRepo(h.repo, () => runAttest({ into: "main", branch: "feature" }));
+        } catch (err) {
+          caught = err as Error;
+        }
+      });
+
+      // At least one warning must name the gap before the hard-fail.
+      assert.ok(
+        warnings.some((w) => w.includes("warning:") && w.includes("stamp admin sign --pending")),
+        `expected a warning: line referencing 'stamp admin sign --pending', got: ${JSON.stringify(warnings)}`,
+      );
+      // The warning mentions the specific pattern.
+      assert.ok(
+        warnings.some((w) => w.includes(".stamp/**")),
+        `expected warning to mention '.stamp/**', got: ${JSON.stringify(warnings)}`,
+      );
+      // The downstream hard-fail still fires (warn-only doesn't suppress it).
+      assert.ok(caught !== null, "expected downstream hard-fail from collectTrustAnchorSignatures");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("warn-only: no warning emitted when diff does not touch path_rules paths", () => {
+    // touchStamp:false → diff is just feature.txt, path-rule doesn't match.
+    const h = setupHarness({ adminCount: 1, touchStamp: false });
+    try {
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "feature");
+      const diff = git(h.repo, ["diff", `${base}...${head}`]);
+      const diffSha256 = sha256Hex(diff);
+      seedServerSignedReview({
+        repo: h.repo,
+        reviewer: "security",
+        baseSha: base,
+        headSha: head,
+        diffSha256,
+        serverKey: h.serverKey,
+      });
+
+      const warnings = captureWarnings(() => {
+        runFromRepo(h.repo, () => runAttest({ into: "main", branch: "feature" }));
+      });
+      assert.ok(
+        warnings.filter((w) => w.includes("warning:")).length === 0,
+        `expected no warning: lines for a non-.stamp/** diff, got: ${JSON.stringify(warnings)}`,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("warn-only: no warning emitted when threshold is already met", () => {
+    // Seed a valid admin signature so the count meets minimum_signatures: 1.
+    const h = setupHarness({ adminCount: 1, touchStamp: true });
+    try {
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "feature");
+      const diff = git(h.repo, ["diff", `${base}...${head}`]);
+      const diffSha256 = sha256Hex(diff);
+      const manifest = parseManifest(
+        git(h.repo, ["show", `${base}:.stamp/trusted-keys/manifest.yml`]),
+      );
+      assert.ok(manifest);
+      const manifestSnapshot = snapshotSha256(manifest);
+
+      const { entry } = seedServerSignedReview({
+        repo: h.repo,
+        reviewer: "security",
+        baseSha: base,
+        headSha: head,
+        diffSha256,
+        serverKey: h.serverKey,
+      });
+
+      // Seed 1 admin sig — minimum_signatures is 1, so threshold is met.
+      seedAdminSignature({
+        repo: h.repo,
+        baseSha: base,
+        headSha: head,
+        targetBranch: "main",
+        diffSha256,
+        manifestSnapshotSha256: manifestSnapshot,
+        approvals: [entry],
+        checks: [],
+        operatorFingerprint: h.operatorFingerprint,
+        admin: h.adminKeys[0]!,
+      });
+
+      const warnings = captureWarnings(() => {
+        runFromRepo(h.repo, () => runAttest({ into: "main", branch: "feature" }));
+      });
+      assert.ok(
+        warnings.filter((w) => w.includes("warning:")).length === 0,
+        `expected no warning: lines when threshold is met, got: ${JSON.stringify(warnings)}`,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("--require-admin-sigs-met: exits 3 with error: prefix on stderr when sigs are short, no envelope written", () => {
+    const h = setupHarness({ adminCount: 1, touchStamp: true });
+    // Intercept process.exit so the test process doesn't actually die.
+    let exitCode: number | undefined;
+    const origExit = process.exit.bind(process);
+    const mockExit = (code?: number): never => {
+      exitCode = code;
+      throw new Error(`process.exit(${code})`);
+    };
+    process.exit = mockExit as typeof process.exit;
+    // Capture stderr to verify the `error:` prefix (fatal path convention).
+    const stderrLines: string[] = [];
+    const origErr = console.error;
+    console.error = (...args: unknown[]) => {
+      stderrLines.push(args.map(String).join(" "));
+    };
+    try {
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "feature");
+      const diff = git(h.repo, ["diff", `${base}...${head}`]);
+      const diffSha256 = sha256Hex(diff);
+      seedServerSignedReview({
+        repo: h.repo,
+        reviewer: "security",
+        baseSha: base,
+        headSha: head,
+        diffSha256,
+        serverKey: h.serverKey,
+      });
+
+      // No admin sigs — should exit 3.
+      let threw = false;
+      try {
+        runFromRepo(h.repo, () =>
+          runAttest({ into: "main", branch: "feature", requireAdminSigsMet: true }),
+        );
+      } catch {
+        threw = true;
+      }
+      assert.ok(threw, "expected process.exit to be intercepted as a throw");
+      assert.equal(exitCode, 3, `expected exit code 3, got ${exitCode}`);
+      // Stderr must carry `error:` prefix (not `warning:`) — fatal path.
+      assert.ok(
+        stderrLines.some((l) => l.startsWith("error:")),
+        `expected stderr to start with 'error:', got: ${JSON.stringify(stderrLines)}`,
+      );
+      // No envelope should have been written.
+      assert.equal(listAttestationPatchIds(h.repo).length, 0);
+    } finally {
+      console.error = origErr;
+      process.exit = origExit;
+      h.cleanup();
+    }
+  });
+
+  it("--require-admin-sigs-met: does NOT exit 3 when sigs are sufficient", () => {
+    const h = setupHarness({ adminCount: 1, touchStamp: true });
+    let exitCalled = false;
+    const origExit = process.exit.bind(process);
+    process.exit = ((code?: number) => {
+      exitCalled = true;
+      throw new Error(`unexpected process.exit(${code})`);
+    }) as typeof process.exit;
+    try {
+      const base = shaOf(h.repo, "main");
+      const head = shaOf(h.repo, "feature");
+      const diff = git(h.repo, ["diff", `${base}...${head}`]);
+      const diffSha256 = sha256Hex(diff);
+      const manifest = parseManifest(
+        git(h.repo, ["show", `${base}:.stamp/trusted-keys/manifest.yml`]),
+      );
+      assert.ok(manifest);
+      const manifestSnapshot = snapshotSha256(manifest);
+
+      const { entry } = seedServerSignedReview({
+        repo: h.repo,
+        reviewer: "security",
+        baseSha: base,
+        headSha: head,
+        diffSha256,
+        serverKey: h.serverKey,
+      });
+      seedAdminSignature({
+        repo: h.repo,
+        baseSha: base,
+        headSha: head,
+        targetBranch: "main",
+        diffSha256,
+        manifestSnapshotSha256: manifestSnapshot,
+        approvals: [entry],
+        checks: [],
+        operatorFingerprint: h.operatorFingerprint,
+        admin: h.adminKeys[0]!,
+      });
+
+      // Threshold met — should NOT exit 3 even with the flag.
+      runFromRepo(h.repo, () =>
+        runAttest({ into: "main", branch: "feature", requireAdminSigsMet: true }),
+      );
+
+      assert.ok(!exitCalled, "process.exit should not have been called when threshold is met");
+      // Envelope should have been written normally.
+      assert.equal(listAttestationPatchIds(h.repo).length, 1);
+    } finally {
+      process.exit = origExit;
+      h.cleanup();
+    }
+  });
+});
