@@ -479,54 +479,46 @@ check_prompts_dir
 write_env_var STAMP_PROMPTS_DIR
 
 # SSH sessions strip env vars by default; sshd_config's SetEnv bypasses
-# that for explicitly-listed vars. Inject STAMP_PUBLIC_URL so SSH-invoked
-# commands like stamp-mint-invite (which reads process.env directly) see
-# it. The persist-to-/etc/stamp/env pattern above doesn't help here —
-# hooks read that file, but stamp-mint-invite doesn't.
+# that for explicitly-listed vars. Inject a whitelist of operator-declared
+# variables so SSH-invoked commands (stamp-mint-invite, stamp-review, etc.)
+# see them via process.env without needing a /etc/stamp/env file fallback.
 #
-# Security — validate before writing. `printf '%s'` does not sanitize, so
-# an embedded newline in $STAMP_PUBLIC_URL would be passed through and
-# create a new sshd directive (PermitRootLogin yes, AuthorizedKeysFile
-# override, etc.). The value is operator-supplied via the container env,
-# which sits downstream of Railway/Helm/Terraform/CI secret stores — all
-# realistic injection vectors. The accepted charset is the minimum
-# needed for the HTTP(S) host + path that mint-invite.ts pulls via
-# `new URL(value).host`; anything outside it is never a legitimate value
-# and is rejected with a clear error.
+# STAMP_SSH_PASS_ENV — space-separated list of env var names to inject.
+# Defaults to "STAMP_PUBLIC_URL" so mint-invite Just Works in v2.0.2+ with
+# no additional operator config. Operators can extend this list if future
+# SSH-invoked verbs need other container vars:
 #
-# Idempotent across container restarts AND value changes — filter any
-# prior `SetEnv STAMP_PUBLIC_URL=` line out before appending. Without
-# this, in-place restarts accumulate stale lines (OpenSSH takes first
-# match for duplicate SetEnv, so correctness is preserved but the file
-# grows), and changing STAMP_PUBLIC_URL between deploys would leave the
-# OLD value in effect forever (the OLD first-match wins over the new
-# appended line).
-if [ -n "$STAMP_PUBLIC_URL" ]; then
-  # Validation runs on the raw bytes, not on lines. `grep -qxE` exits 0
-  # on the FIRST matching line, so a newline-bearing value whose first
-  # line happens to be a valid URL would pass a line-anchored regex and
-  # still inject arbitrary sshd directives on the trailing lines. The
-  # tr-based whole-stream check below is immune: it strips every allowed
-  # byte and rejects if anything (newline, space, semicolon, &, etc.)
-  # remains. Combined with the http(s):// prefix check, this matches the
-  # original regex's INTENT without inheriting its multi-line surprise.
-  if [ -n "$(printf '%s' "$STAMP_PUBLIC_URL" | tr -d 'A-Za-z0-9.:/_-')" ]; then
-    echo "error: STAMP_PUBLIC_URL contains illegal characters (allowed: [A-Za-z0-9.:/_-]); refusing to inject into sshd_config" >&2
-    exit 1
-  fi
-  case "$STAMP_PUBLIC_URL" in
-    http://*|https://*) ;;
-    *)
-      echo "error: STAMP_PUBLIC_URL must start with http:// or https://; refusing to inject into sshd_config" >&2
-      exit 1
-      ;;
-  esac
-  { grep -v '^SetEnv STAMP_PUBLIC_URL=' /etc/ssh/sshd_config || true; \
-    printf 'SetEnv STAMP_PUBLIC_URL=%s\n' "$STAMP_PUBLIC_URL"; \
-  } > /etc/ssh/sshd_config.new
-  mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config
-  chmod 0644 /etc/ssh/sshd_config
-fi
+#   STAMP_SSH_PASS_ENV="STAMP_PUBLIC_URL MY_CUSTOM_VAR"
+#
+# Security — validate each value before writing to sshd_config. `printf '%s'`
+# does not sanitize, so an embedded newline in a value would be passed through
+# and create a new sshd directive (PermitRootLogin yes, AuthorizedKeysFile
+# override, etc.). The value is operator-supplied via the container env, which
+# sits downstream of Railway/Helm/Terraform/CI secret stores — all realistic
+# injection vectors.
+#
+# The accepted charset [A-Za-z0-9.:/_@=+-] is the conservative safe set for
+# sshd SetEnv values: covers URLs, tokens, version strings, and key=value
+# pairs while excluding whitespace, quotes, semicolons, dollar signs, and
+# other characters that have special meaning in sshd_config or shell expansion.
+# STAMP_PUBLIC_URL additionally requires an http(s):// prefix — a semantics
+# check that catches operator fat-finger before it breaks mint-invite at
+# runtime.
+#
+# Idempotent across container restarts AND value changes — for each var, filter
+# any prior `SetEnv <NAME>=` line out before appending the current value.
+# Without this, in-place restarts accumulate stale lines (OpenSSH takes first
+# match for duplicate SetEnv, so correctness is preserved but the file grows),
+# and changing a var between deploys would leave the OLD value in effect forever.
+
+STAMP_SSH_PASS_ENV="${STAMP_SSH_PASS_ENV:-STAMP_PUBLIC_URL}"
+
+. "$(dirname "$0")/lib/inject-sshd-setenv.sh"
+
+for _ssh_env_var in $STAMP_SSH_PASS_ENV; do
+  _inject_sshd_setenv "$_ssh_env_var" || exit 1
+done
+unset _ssh_env_var
 
 # Refresh stamp hooks in every existing bare repo before accepting connections.
 #
