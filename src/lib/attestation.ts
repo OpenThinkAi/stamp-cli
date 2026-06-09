@@ -1,3 +1,4 @@
+import type { QuarantineEntry } from "./config.js";
 import type { Verdict } from "./db.js";
 import type { ToolCall } from "./toolCalls.js";
 
@@ -69,6 +70,24 @@ export interface CheckAttestation {
   command: string;
   exit_code: number;
   output_sha: string;
+  /**
+   * AGT-476: operator-declared flake-quarantine list active when this
+   * check ran. Optional/additive — envelopes from repos without
+   * quarantine omit the field entirely and remain byte-identical to
+   * pre-AGT-476 v3 envelopes.
+   *
+   * Stamp records what the operator declared; it does NOT cryptograph-
+   * ically prove that those tests were the only ones the check command
+   * skipped. The trust property is "the declared list at merge time is
+   * signed and auditable" — a future verifier or auditor can answer
+   * "which gates were declared not-enforced for this commit?" from the
+   * signed envelope alone.
+   *
+   * Adding/removing an entry is admin-gated automatically: the change
+   * is to `.stamp/config.yml`, which is under `.stamp/**` and already
+   * carries the `path_rules` admin-signature requirement.
+   */
+  quarantine?: QuarantineEntry[];
 }
 
 export interface AttestationPayload {

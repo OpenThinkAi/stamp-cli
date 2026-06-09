@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import type { CheckDef } from "./config.js";
+import type { CheckDef, QuarantineEntry } from "./config.js";
 
 export interface CheckResult {
   name: string;
@@ -13,7 +13,21 @@ export interface CheckResult {
    * signed payload — just for the prose report the caller prints. */
   tail: string;
   duration_ms: number;
+  /**
+   * Operator-declared flake-quarantine list copied from `CheckDef.quarantine`,
+   * forwarded onto the result so the merge code can fold it into the
+   * signed attestation alongside the check's verdict. Undefined when the
+   * check has no quarantine (preserves byte-identity for envelopes from
+   * repos that don't use the feature).
+   */
+  quarantine?: QuarantineEntry[];
 }
+
+/** Env var the check's shell command receives when a quarantine list is
+ *  active for that check. Comma-joined `test` IDs from `QuarantineEntry`.
+ *  Stamp does not interpret the IDs — the operator's command consumes
+ *  them in whatever shape its test runner expects. */
+export const QUARANTINE_ENV_VAR = "STAMP_QUARANTINE_TESTS";
 
 /**
  * Run each check command in sequence. Returns one result per check.
@@ -29,12 +43,28 @@ export function runChecks(
 ): CheckResult[] {
   const results: CheckResult[] = [];
   for (const check of checks) {
+    // Quarantine env-var pass-through (AGT-476). When the check has a
+    // non-empty quarantine list, export comma-joined `test` IDs via
+    // STAMP_QUARANTINE_TESTS so the operator's command can opt to skip
+    // them. We never strip the check itself — the operator's runner
+    // does the actual skipping. The signed list on the result side is
+    // what gets folded into the attestation, so a verifier can audit
+    // which gates were declared not-enforced for this merge.
+    const env =
+      check.quarantine && check.quarantine.length > 0
+        ? {
+            ...process.env,
+            [QUARANTINE_ENV_VAR]: check.quarantine.map((q) => q.test).join(","),
+          }
+        : process.env;
+
     const start = Date.now();
     const proc = spawnSync(check.run, {
       cwd,
       shell: true,
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,
+      env,
     });
     const duration_ms = Date.now() - start;
 
@@ -55,6 +85,9 @@ export function runChecks(
       output_sha,
       tail,
       duration_ms,
+      ...(check.quarantine && check.quarantine.length > 0
+        ? { quarantine: check.quarantine }
+        : {}),
     });
   }
   return results;

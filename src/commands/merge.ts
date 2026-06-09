@@ -335,6 +335,14 @@ function runMergeLocked(
           command: r.command,
           exit_code: r.exit_code,
           output_sha: r.output_sha,
+          // AGT-476: fold the operator-declared quarantine list onto the
+          // attested check so the signed envelope records which tests
+          // the operator declared skipped for this gate. Optional —
+          // checks without quarantine omit the field, keeping envelopes
+          // byte-identical to pre-AGT-476.
+          ...(r.quarantine && r.quarantine.length > 0
+            ? { quarantine: r.quarantine }
+            : {}),
         });
       }
       if (!allPassed(results)) {
@@ -459,6 +467,19 @@ function runMergeLocked(
     console.log(
       `  checks:     ${checkAttestations.map((c) => `${c.name}=exit${c.exit_code}`).join(", ")}`,
     );
+  }
+  // AGT-476 AC#5: banner the active flake-quarantine entries so the
+  // operator sees the declared gate gap at merge time. One line per
+  // (check, entry) pair, silent when no checks have quarantine. The
+  // same list is folded into the signed attestation above — this is
+  // just operator visibility at merge time.
+  for (const c of checkAttestations) {
+    if (!c.quarantine) continue;
+    for (const q of c.quarantine) {
+      console.log(
+        `  quarantine: ${c.name}/${q.test} — ${q.reason}`,
+      );
+    }
   }
   // AC#4: one line per matched path_rule, v4 path only, silent when none.
   for (const pr of matchedPathRules) {
@@ -859,6 +880,13 @@ function buildV4Trailers(input: {
     command: c.command,
     exit_code: c.exit_code,
     output_sha: c.output_sha,
+    // AGT-476: quarantine field flows through the v3→v4 shape cast.
+    // canonicalSerializePayload sortKeys-deep + JSON.stringify handles
+    // the additive field transparently; envelopes without quarantine
+    // remain byte-identical to pre-AGT-476.
+    ...(c.quarantine && c.quarantine.length > 0
+      ? { quarantine: c.quarantine }
+      : {}),
   }));
 
   // Trust-anchor signatures (AGT-337). If the diff touches paths

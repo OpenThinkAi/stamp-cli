@@ -161,12 +161,24 @@ export interface ApprovalEntryV4 {
  * envelope's signer signature (no per-check server signature in
  * Phase 1 — checks run on the operator's machine, same trust model
  * as today's `CheckAttestation` in `attestation.ts`).
+ *
+ * AGT-476: optional `quarantine` field carries the operator-declared
+ * flake-quarantine list active when this check ran. Additive — v4
+ * envelopes from repos without quarantine omit the field entirely and
+ * remain byte-identical to pre-AGT-476 v4 envelopes. The trust
+ * property is "the declared list is operator-signed and auditable" —
+ * stamp does NOT prove the named tests were the only ones skipped.
+ * See `QuarantineEntry` in `./config.ts` for the field shape and the
+ * security note.
  */
 export interface CheckAttestationV4 {
   name: string;
   command: string;
   exit_code: number;
   output_sha: string;
+  /** AGT-476. See `CheckAttestation.quarantine` in `./attestation.ts`
+   *  for the security note (mirrored shape). */
+  quarantine?: import("./config.js").QuarantineEntry[];
 }
 
 /**

@@ -3,11 +3,52 @@ import { parse, stringify } from "yaml";
 import { globToRegex, isGlobPattern } from "./refPatterns.js";
 import { SAFE_TOOLS } from "./toolAllowlist.js";
 
+/**
+ * A single test that an operator has declared "skip in the pre-merge
+ * required_check suite" for this branch. Carried on `CheckDef.quarantine`
+ * and on the resulting `CheckResult` / `CheckAttestation` so the
+ * declaration is folded into the signed merge attestation.
+ *
+ * Stamp does NOT enforce the skip — it surfaces the declaration via the
+ * `STAMP_QUARANTINE_TESTS` env var (comma-joined `test` IDs) to the
+ * check's shell command, which is free to interpret the IDs in whatever
+ * shape its test runner expects (vitest filename, Jest pattern, Go test
+ * prefix, etc.). The trust property is "the declared list at merge time
+ * is signed and auditable" — NOT "stamp guarantees the listed tests
+ * were the only ones skipped." A verifier can audit which gates the
+ * operator declared not-enforced for each merge.
+ *
+ * Adding or removing a quarantine entry is admin-gated automatically:
+ * the change is to `.stamp/config.yml`, which is under `.stamp/**` and
+ * already gated by the existing `path_rules` machinery.
+ */
+export interface QuarantineEntry {
+  /** Test ID (or pattern). Free-form — interpretation is the check
+   *  command's responsibility. Non-empty string. */
+  test: string;
+  /** Operator-supplied reason. Folded into the attestation so a future
+   *  auditor sees WHY this gate was skipped. Non-empty string. */
+  reason: string;
+}
+
 export interface CheckDef {
   /** Short name used in config and attestation payloads — e.g. "build", "test" */
   name: string;
   /** Shell command to run; non-zero exit blocks merge */
   run: string;
+  /**
+   * Optional opt-in flake quarantine: tests the operator has declared
+   * skipped for this check. When non-empty, the check runner sets
+   * `STAMP_QUARANTINE_TESTS` (comma-joined `test` IDs) in the spawn env,
+   * and the full list is folded into the merge attestation so verifiers
+   * can audit which gates were not enforced. See `QuarantineEntry`.
+   *
+   * Absent or empty array → no env var is set, no quarantine field
+   * appears in the attestation, and the resulting envelope is
+   * byte-identical to pre-AGT-476 envelopes. The opt-in shape is
+   * deliberate so repos without quarantine see zero attestation churn.
+   */
+  quarantine?: QuarantineEntry[];
 }
 
 export interface BranchRule {
@@ -734,7 +775,53 @@ function parseChecks(input: unknown, branchName: string): CheckDef[] | undefined
         `config.branches.${branchName}.required_checks[].run must be a non-empty string`,
       );
     }
-    out.push({ name: e.name, run: e.run });
+    const quarantine = parseQuarantine(e.quarantine, branchName, e.name);
+    out.push({
+      name: e.name,
+      run: e.run,
+      ...(quarantine ? { quarantine } : {}),
+    });
+  }
+  return out;
+}
+
+function parseQuarantine(
+  input: unknown,
+  branchName: string,
+  checkName: string,
+): QuarantineEntry[] | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (!Array.isArray(input)) {
+    throw new Error(
+      `config.branches.${branchName}.required_checks[name=${checkName}].quarantine must be an array`,
+    );
+  }
+  // Empty array → return undefined so we don't fold an empty
+  // `quarantine: []` into the attestation (preserves byte-identity with
+  // pre-AGT-476 envelopes for repos that scaffold the field but leave
+  // it empty).
+  if (input.length === 0) return undefined;
+  const out: QuarantineEntry[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const entry = input[i];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(
+        `config.branches.${branchName}.required_checks[name=${checkName}].quarantine[${i}] must be an object`,
+      );
+    }
+    const q = entry as Record<string, unknown>;
+    if (typeof q.test !== "string" || !q.test) {
+      throw new Error(
+        `config.branches.${branchName}.required_checks[name=${checkName}].quarantine[${i}].test must be a non-empty string`,
+      );
+    }
+    if (typeof q.reason !== "string" || !q.reason) {
+      throw new Error(
+        `config.branches.${branchName}.required_checks[name=${checkName}].quarantine[${i}].reason must be a non-empty string ` +
+          `— operator-supplied rationale is mandatory so future auditors see WHY this gate was skipped`,
+      );
+    }
+    out.push({ test: q.test, reason: q.reason });
   }
   return out;
 }
