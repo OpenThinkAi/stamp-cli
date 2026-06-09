@@ -231,6 +231,10 @@ COPY server/entrypoint.sh /entrypoint.sh
 # (i.e. /lib/check-prompts-dir.sh). Must be copied into the image or the
 # entrypoint aborts under `set -e` on boot (AGT-411 regression).
 COPY server/lib/check-prompts-dir.sh /lib/check-prompts-dir.sh
+# entrypoint.sh sources this helper via `. "$(dirname "$0")/lib/inject-sshd-setenv.sh"`
+# (i.e. /lib/inject-sshd-setenv.sh). Must be copied into the image or the
+# entrypoint aborts on first boot when STAMP_SSH_PASS_ENV injection runs (AGT-469).
+COPY server/lib/inject-sshd-setenv.sh /lib/inject-sshd-setenv.sh
 
 # Sudoers fragment that grants the unprivileged git user passwordless
 # invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root
