@@ -642,10 +642,12 @@ describe("checkReviewerTool — WebFetch query controls (AGT-419)", () => {
   });
 });
 
-describe("checkReviewerTool — pass-through", () => {
-  // Tools not specifically gated (the verdict-submission MCP tool, MCP
-  // tools the operator wired in) pass through. SAFE_TOOLS at config-load
-  // time already gatekeeps which tool names can reach this function.
+describe("checkReviewerTool — MCP pass-through (AGT-472 explicit allow)", () => {
+  // MCP-prefixed tool names (`mcp__<server>__<tool>`) are the only
+  // category that passes the AGT-472 tightened fallthrough. The
+  // verdict-submission server and any operator-wired MCP servers
+  // produce this shape; mcp_servers config-gating at invocation time
+  // already constrains which servers can launch.
   it("allows the verdict-submission MCP tool", () => {
     const r = checkReviewerTool({
       toolName: "mcp__stamp-verdict__submit_verdict",
@@ -654,6 +656,179 @@ describe("checkReviewerTool — pass-through", () => {
       webFetchPolicy: noWebHosts,
     });
     assert.equal(r.allow, true);
+  });
+  it("allows submit_retro (sibling MCP tool on the same server)", () => {
+    const r = checkReviewerTool({
+      toolName: "mcp__stamp-verdict__submit_retro",
+      toolInput: { observation: "x" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, true);
+  });
+  it("allows operator-wired MCP tools (linear, github, etc.)", () => {
+    const r = checkReviewerTool({
+      toolName: "mcp__linear__get_issue",
+      toolInput: { id: "ENG-1" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, true);
+  });
+});
+
+// ---- AGT-472: deny-by-default fallthrough + Bash opt-in --------------
+//
+// Prior to AGT-472, `checkReviewerTool`'s terminal branch returned
+// `{ allow: true }` for any tool name not explicitly handled — including
+// SDK built-ins like Bash. Because `hooks.PreToolUse` fires for every
+// tool regardless of `allowedTools` membership, a model could invoke
+// Bash, hit the fallthrough, and run with capabilities the SAFE_TOOLS
+// gate was meant to deny. The tightened contract:
+//   - Bash: gated by the reviewer's `bash: true` opt-in (which is folded
+//     into `tools_sha256` so flipping it requires a signed merge).
+//   - MCP-prefixed names: pass through (see suite above).
+//   - Everything else: deny.
+
+describe("checkReviewerTool — Bash gating (AGT-472)", () => {
+  it("denies Bash by default (bashAllowed unset)", () => {
+    const r = checkReviewerTool({
+      toolName: "Bash",
+      toolInput: { command: "git log --oneline -5" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) {
+      assert.match(r.reason, /bash: true/);
+      assert.match(r.reason, /tools_sha256/);
+    }
+  });
+
+  it("denies Bash when bashAllowed: false (explicit opt-out)", () => {
+    const r = checkReviewerTool({
+      toolName: "Bash",
+      toolInput: { command: "git log -1" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+      bashAllowed: false,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("allows Bash when bashAllowed: true", () => {
+    const r = checkReviewerTool({
+      toolName: "Bash",
+      toolInput: { command: "git log --oneline -5" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+      bashAllowed: true,
+    });
+    assert.equal(r.allow, true);
+  });
+});
+
+describe("checkReviewerTool — deny-by-default fallthrough (AGT-472)", () => {
+  it("denies an unknown SDK built-in like Edit", () => {
+    const r = checkReviewerTool({
+      toolName: "Edit",
+      toolInput: { file_path: "README.md", old_string: "x", new_string: "y" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) {
+      assert.match(r.reason, /not in the reviewer allowlist/);
+      assert.match(r.reason, /Edit/);
+    }
+  });
+
+  it("denies Task (sub-agent spawn)", () => {
+    const r = checkReviewerTool({
+      toolName: "Task",
+      toolInput: { prompt: "do a thing" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("denies Write", () => {
+    const r = checkReviewerTool({
+      toolName: "Write",
+      toolInput: { file_path: "x", content: "y" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("denies a fabricated tool name (the original AGT-472 vulnerability shape)", () => {
+    // Pre-AGT-472, ANY unknown name returned allow: true. The fix is
+    // that the allowlist is now closed: only explicitly-handled tool
+    // names + MCP-prefixed names are permitted.
+    const r = checkReviewerTool({
+      toolName: "totally_made_up_tool",
+      toolInput: {},
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) {
+      assert.match(r.reason, /not in the reviewer allowlist/);
+    }
+  });
+
+  it("does NOT allow a name that LOOKS like MCP but isn't (`mcp__foo` — missing tool segment)", () => {
+    const r = checkReviewerTool({
+      toolName: "mcp__just-server",
+      toolInput: {},
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("does NOT allow `mcpish_imposter` (no double-underscore separators)", () => {
+    const r = checkReviewerTool({
+      toolName: "mcpish_imposter",
+      toolInput: {},
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("still allows the safe tools after the tightening (regression guard)", () => {
+    // Sanity: Read/Grep/Glob continue to work — the tightening only
+    // closes the fallthrough, it doesn't narrow the per-tool gates.
+    assert.equal(
+      checkReviewerTool({
+        toolName: "Read",
+        toolInput: { file_path: "README.md" },
+        repoRoot,
+        webFetchPolicy: noWebHosts,
+      }).allow,
+      true,
+    );
+    assert.equal(
+      checkReviewerTool({
+        toolName: "Grep",
+        toolInput: { pattern: "foo" },
+        repoRoot,
+        webFetchPolicy: noWebHosts,
+      }).allow,
+      true,
+    );
+    assert.equal(
+      checkReviewerTool({
+        toolName: "Glob",
+        toolInput: { pattern: "**/*.ts" },
+        repoRoot,
+        webFetchPolicy: noWebHosts,
+      }).allow,
+      true,
+    );
   });
 });
 

@@ -237,7 +237,10 @@ function verifyReviewerHashes(
       );
     }
     checkHash(sha, approval.reviewer, "prompt", hashPromptBytes(Buffer.from(promptBytes, "utf8")), approval.prompt_sha256!);
-    checkHash(sha, approval.reviewer, "tools", hashTools(def.tools), approval.tools_sha256!);
+    // AGT-472: fold `def.bash` into tools_sha256 verification. Existing
+    // pre-AGT-472 attestations have def.bash undefined here and hash
+    // byte-identically to before.
+    checkHash(sha, approval.reviewer, "tools", hashTools(def.tools, def.bash), approval.tools_sha256!);
     checkHash(sha, approval.reviewer, "mcp_servers", hashMcpServers(def.mcp_servers), approval.mcp_sha256!);
   }
 }

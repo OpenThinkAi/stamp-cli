@@ -1183,6 +1183,65 @@ reviewers:
   });
 });
 
+// AGT-472: the `bash: true` opt-in is a per-reviewer boolean field that
+// enters the reviewer attestation hash chain via `hashTools`. The parser
+// must accept absence (back-compat), accept `true`/`false` explicitly, and
+// reject non-boolean values loudly (same shape as enforce_reads_on_dotstamp).
+
+describe("parseConfigFromYaml — reviewers.<name>.bash opt-in (AGT-472)", () => {
+  it("absent bash → undefined on parsed ReviewerDef (back-compat: hash unchanged)", () => {
+    const yaml = `
+branches:
+  main: { required: [r] }
+reviewers:
+  r: { prompt: .stamp/reviewers/r.md }
+`;
+    const c = parseConfigFromYaml(yaml);
+    assert.equal(c.reviewers.r!.bash, undefined);
+  });
+
+  it("bash: true → true on parsed ReviewerDef", () => {
+    const yaml = `
+branches:
+  main: { required: [product] }
+reviewers:
+  product:
+    prompt: .stamp/reviewers/product.md
+    bash: true
+`;
+    const c = parseConfigFromYaml(yaml);
+    assert.equal(c.reviewers.product!.bash, true);
+  });
+
+  it("bash: false → false on parsed ReviewerDef (explicit opt-out still records the field)", () => {
+    const yaml = `
+branches:
+  main: { required: [product] }
+reviewers:
+  product:
+    prompt: .stamp/reviewers/product.md
+    bash: false
+`;
+    const c = parseConfigFromYaml(yaml);
+    assert.equal(c.reviewers.product!.bash, false);
+  });
+
+  it("rejects a non-boolean bash value with a typed error", () => {
+    const yaml = `
+branches:
+  main: { required: [r] }
+reviewers:
+  r:
+    prompt: .stamp/reviewers/r.md
+    bash: "yes"
+`;
+    assert.throws(
+      () => parseConfigFromYaml(yaml),
+      /config\.reviewers\.r\.bash must be a boolean/,
+    );
+  });
+});
+
 // ---------- decideMirrorStatus (mirror hook commit-status decision) ----------
 
 describe("decideMirrorStatus", () => {
@@ -1772,6 +1831,43 @@ describe("hashTools (backward-compat between string and object forms)", () => {
       },
     ]);
     assert.notEqual(before, withPrefix);
+  });
+
+  // AGT-472: the `bash` opt-in is folded into tools_sha256 via a sentinel
+  // injected into the canonicalized tools list. Backward-compat invariant:
+  // when `bash` is absent or false, the hash must be byte-identical to
+  // pre-AGT-472 (otherwise every pre-existing v3/v4 attestation would
+  // re-verify as "tools_sha256 mismatch" after the upgrade).
+  it("omitting the bash argument hashes identically to passing it false (back-compat)", () => {
+    const noArg = hashTools(["Read", "Grep"]);
+    const explicitFalse = hashTools(["Read", "Grep"], false);
+    const explicitUndef = hashTools(["Read", "Grep"], undefined);
+    assert.equal(noArg, explicitFalse);
+    assert.equal(noArg, explicitUndef);
+  });
+
+  it("bash: true changes the hash (the visible-at-verify-time invariant)", () => {
+    const off = hashTools(["Read", "Grep"], false);
+    const on = hashTools(["Read", "Grep"], true);
+    assert.notEqual(off, on);
+  });
+
+  it("bash: true with an empty tools list still differs from bash: false / empty", () => {
+    // A reviewer with zero declared tools but `bash: true` still needs
+    // the sentinel — the capability change is the point of attestation.
+    assert.notEqual(hashTools([], true), hashTools([], false));
+    assert.notEqual(hashTools(undefined, true), hashTools(undefined, false));
+    assert.notEqual(hashTools(undefined, true), hashTools(undefined));
+  });
+
+  it("bash sentinel is order-independent with respect to other tools", () => {
+    // Sentinel + tools sort with everything else, so adding bash: true
+    // to ["Read", "Grep"] hashes the same as adding bash: true to
+    // ["Grep", "Read"].
+    assert.equal(
+      hashTools(["Read", "Grep"], true),
+      hashTools(["Grep", "Read"], true),
+    );
   });
 
   // AGT-419: adding the optional query_param_allowlist / query_param_max_length

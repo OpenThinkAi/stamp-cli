@@ -554,7 +554,8 @@ function buildV3Trailers(input: {
     return {
       ...a,
       prompt_sha256: hashPromptBytes(Buffer.from(promptText, "utf8")),
-      tools_sha256: hashTools(def.tools),
+      // AGT-472: fold `def.bash` into tools_sha256 (back-compat when unset).
+      tools_sha256: hashTools(def.tools, def.bash),
       mcp_sha256: hashMcpServers(def.mcp_servers),
       ...(source ? { reviewer_source: source } : {}),
     };

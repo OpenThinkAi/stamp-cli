@@ -619,7 +619,9 @@ function verifyReviewerHashesAtMergeBase(input: PhaseInput): PhaseResult {
 
     const fields: Array<{ field: string; computed: string; expected: string }> = [
       { field: "prompt", computed: hashPromptBytes(Buffer.from(promptBytes, "utf8")), expected: approval.prompt_sha256! },
-      { field: "tools", computed: hashTools(def.tools), expected: approval.tools_sha256! },
+      // AGT-472: fold `def.bash` into tools_sha256 verification. Pre-AGT-472
+      // reviewers have `def.bash` undefined here and hash byte-identically.
+      { field: "tools", computed: hashTools(def.tools, def.bash), expected: approval.tools_sha256! },
       { field: "mcp_servers", computed: hashMcpServers(def.mcp_servers), expected: approval.mcp_sha256! },
     ];
     for (const f of fields) {
