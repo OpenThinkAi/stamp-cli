@@ -246,6 +246,20 @@ export interface WebFetchHostPolicy {
 }
 
 /**
+ * MCP tool names follow the SDK convention `mcp__<server>__<tool>`. The
+ * verdict-submission server (`mcp__stamp-verdict__submit_verdict` /
+ * `submit_retro`) and any operator-wired MCP servers under
+ * `reviewers.<name>.mcp_servers` produce names matching this shape. The
+ * fallthrough used to allow ANY unknown tool name, which was the
+ * AGT-472 vulnerability — Bash hit the fallthrough and ran with shell
+ * access the SAFE_TOOLS allowlist was supposed to deny. The new contract
+ * (see `checkReviewerTool` below) is deny-by-default; MCP-prefixed names
+ * are the only allowed category for "tool we don't know about specifically
+ * but the operator wired up via config."
+ */
+const MCP_TOOL_NAME_PATTERN = /^mcp__[A-Za-z0-9_.\-]+__[A-Za-z0-9_.\-]+$/;
+
+/**
  * Single source of truth for reviewer-tool gating. Called from the
  * `hooks.PreToolUse` callback in `invokeReviewer` AND directly from unit
  * tests, so the production logic and the test logic are the same code —
@@ -259,6 +273,20 @@ export interface WebFetchHostPolicy {
  * for every tool invocation regardless of `allowedTools` membership, which
  * is what we actually want. (See AGT-035 spike notes / QA bounce.)
  *
+ * AGT-472 — deny-by-default contract:
+ *   - WebFetch/Read/Grep/Glob: per-call gated (the explicit branches below).
+ *   - Bash: allowed iff `bashAllowed === true` (sourced from the
+ *     committed `reviewers.<name>.bash` config field, which enters the
+ *     attestation hash chain via `hashTools`, so flipping it requires a
+ *     signed merge).
+ *   - MCP-prefixed names (`mcp__<server>__<tool>`): allowed (verdict
+ *     server + operator-wired servers). The `mcp_servers` config gate
+ *     already constrains which servers can launch, so the tool surface
+ *     under that prefix is already operator-attested.
+ *   - Everything else: deny. Previously this fell through to
+ *     `{ allow: true }`, which contradicted SAFE_TOOLS and let SDK
+ *     built-ins like Bash run unchecked.
+ *
  * Returns `{ allow: true }` for permitted calls or `{ allow: false, reason }`
  * for denials. The hook caller maps that to the SDK's
  * `hookSpecificOutput.permissionDecision` shape.
@@ -268,8 +296,10 @@ export function checkReviewerTool(args: {
   toolInput: unknown;
   repoRoot: string;
   webFetchPolicy: Map<string, WebFetchHostPolicy>;
+  /** AGT-472: per-reviewer Bash opt-in, threaded from `invokeReviewer`. */
+  bashAllowed?: boolean;
 }): { allow: true } | { allow: false; reason: string } {
-  const { toolName, toolInput, repoRoot, webFetchPolicy } = args;
+  const { toolName, toolInput, repoRoot, webFetchPolicy, bashAllowed } = args;
   const input =
     toolInput && typeof toolInput === "object"
       ? (toolInput as Record<string, unknown>)
@@ -466,11 +496,51 @@ export function checkReviewerTool(args: {
     return { allow: true };
   }
 
-  // Other tools (the verdict-submission MCP tool, MCP-server tools the
-  // operator wired in) pass through. Config-load time has already
-  // gatekept which tools can appear in `allowedTools` at all via
-  // SAFE_TOOLS — there is no untrusted tool name reaching this branch.
-  return { allow: true };
+  // AGT-472: explicit Bash branch. Allowed iff the reviewer's config opts
+  // in via `bash: true` (folded into the reviewer's `tools_sha256` so
+  // flipping requires a signed merge). No per-call gating of the command
+  // string — the threat model is "operator declared the capability,
+  // attestation chain records the choice." Operators who want
+  // narrower-than-shell access should compose with MCP servers instead.
+  if (toolName === "Bash") {
+    if (bashAllowed) return { allow: true };
+    return {
+      allow: false,
+      reason:
+        `Bash is denied for this reviewer. Set \`bash: true\` under ` +
+        `\`reviewers.<name>:\` in .stamp/config.yml at the merge-base ` +
+        `tree to opt this reviewer into shell access. The opt-in is ` +
+        `folded into the reviewer-prompt hash chain (tools_sha256), so ` +
+        `the choice is visible at \`stamp verify\` time.`,
+    };
+  }
+
+  // AGT-472: MCP-prefixed names pass through. The verdict-submission
+  // server (`mcp__stamp-verdict__*`) and any operator-wired MCP servers
+  // produce this shape; the `mcp_servers` config gate at invocation time
+  // already constrains which servers can launch, so the tool surface
+  // under this prefix is already operator-attested.
+  if (MCP_TOOL_NAME_PATTERN.test(toolName)) {
+    return { allow: true };
+  }
+
+  // AGT-472: deny-by-default fallthrough. Previously this returned
+  // `{ allow: true }`, which let SDK built-ins like Bash run unchecked
+  // (PreToolUse fires for every tool regardless of `allowedTools`
+  // membership; without a deny here, a model that names a tool we
+  // didn't preauthorize would still execute it). The deny now matches
+  // the SAFE_TOOLS contract: only tools we've explicitly thought about
+  // are reachable.
+  return {
+    allow: false,
+    reason:
+      `Tool "${toolName}" is not in the reviewer allowlist. The ` +
+      `gated set is { WebFetch, Read, Grep, Glob, Bash (opt-in), ` +
+      `mcp__<server>__<tool> }. If this is an MCP tool, check that ` +
+      `its name follows the \`mcp__<server>__<tool>\` shape. If this ` +
+      `is a new SDK built-in, it needs an explicit branch in ` +
+      `checkReviewerTool and a SAFE_TOOLS entry in toolAllowlist.ts.`,
+  };
 }
 
 /**
@@ -733,6 +803,17 @@ export async function invokeReviewer(params: {
     "mcp__stamp-verdict__submit_verdict",
     "mcp__stamp-verdict__submit_retro",
   ];
+  // AGT-472: per-reviewer Bash opt-in. The `bash: true` field in
+  // .stamp/config.yml does two things: (1) adds `"Bash"` to the SDK's
+  // allowedTools so the model can see it, and (2) is threaded into
+  // checkReviewerTool so PreToolUse allows it through. The opt-in is
+  // folded into `tools_sha256` via `hashTools(def.tools, def.bash)`, so
+  // flipping it requires a signed merge — a feature branch cannot
+  // unilaterally widen its own reviewer's shell access.
+  const bashAllowed = def.bash === true;
+  if (bashAllowed) {
+    allowedTools.push("Bash");
+  }
   for (const spec of def.tools ?? []) {
     if (typeof spec === "string") {
       allowedTools.push(spec);
@@ -840,6 +921,7 @@ export async function invokeReviewer(params: {
                   toolInput: input.tool_input,
                   repoRoot: params.repoRoot,
                   webFetchPolicy,
+                  bashAllowed,
                 });
                 if (result.allow) return {};
                 return {

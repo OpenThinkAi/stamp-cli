@@ -13,6 +13,11 @@ export interface ReviewerDefForHashing {
   prompt: string;
   tools?: ToolSpec[];
   mcp_servers?: Record<string, unknown>;
+  /** AGT-472: surfaced for the v3 verify path so the loose parser sees the
+   *  same `bash` opt-in `loadConfig` does. Omit-on-unset so callers can
+   *  pass the unmodified field through to `hashTools` and existing configs
+   *  hash byte-identically. */
+  bash?: boolean;
 }
 
 export function readReviewersFromYaml(
@@ -31,6 +36,7 @@ export function readReviewersFromYaml(
       ...(d.mcp_servers && typeof d.mcp_servers === "object"
         ? { mcp_servers: d.mcp_servers as Record<string, unknown> }
         : {}),
+      ...(typeof d.bash === "boolean" ? { bash: d.bash } : {}),
     };
   }
   return out;
@@ -81,23 +87,57 @@ export function hashPromptBytes(bytes: Buffer): string {
 }
 
 /**
+ * Sentinel injected into the canonicalized tools list when a reviewer has
+ * `bash: true` set in `.stamp/config.yml` (AGT-472). Double-underscore
+ * prefix guarantees it cannot collide with a real SDK tool name (real
+ * names are either CamelCase like `Bash`/`Read` or `mcp__<server>__<tool>`,
+ * both shapes distinct from `__bash`). Pure-ASCII so JSON serialization
+ * is deterministic across encodings.
+ *
+ * Exported for the unit-test surface — production callers should not
+ * reference it directly; they call `hashTools(def.tools, def.bash)`.
+ */
+export const BASH_OPT_IN_SENTINEL = "__bash";
+
+/**
  * Canonicalize a tools list into a deterministic JSON form for hashing.
  *
- * Backward compat: pre-A.2 configs were `string[]`; new configs are
- * `(string | { name, allowed_hosts? })[]`. The canonical form preserves
- * the original shape per-entry — a string entry hashes as a JSON string,
- * an object entry hashes as a canonicalized JSON object — so existing
- * v3 attestations whose hashes were computed against pure-string tools
- * continue to verify identically.
+ * Backward compat (the strict invariant this function preserves):
+ *
+ *   1. Pre-A.2 configs were `string[]`; A.2+ are
+ *      `(string | { name, allowed_hosts? })[]`. The canonical form
+ *      preserves the original shape per-entry — a string entry hashes as
+ *      a JSON string, an object entry hashes as a canonicalized JSON
+ *      object — so existing v3 attestations whose hashes were computed
+ *      against pure-string tools continue to verify identically.
+ *
+ *   2. AGT-472: the `bash` opt-in is folded into this same hash by
+ *      injecting a `BASH_OPT_IN_SENTINEL` string entry into the
+ *      canonicalized list when `bash === true`. When `bash` is absent or
+ *      false, NOTHING is injected — so every reviewer that existed
+ *      before AGT-472 hashes byte-identically (omit-on-unset). Flipping
+ *      `bash: false → true` is the only edit that changes `tools_sha256`,
+ *      which is exactly the visibility property we want: a feature
+ *      branch cannot silently widen its own reviewer's shell capability
+ *      because the attestation chain visibly differs.
  *
  * Entries are sorted by their JSON string representation for determinism;
  * this keeps tool ORDER from affecting the hash (a reviewer with tools
  * `["Read", "Grep"]` and one with `["Grep", "Read"]` hash equally).
  */
-export function hashTools(tools: ToolSpec[] | string[] | undefined): string {
+export function hashTools(
+  tools: ToolSpec[] | string[] | undefined,
+  bash?: boolean,
+): string {
   const normalized: unknown[] = (tools ?? []).map((t) =>
     typeof t === "string" ? t : (canonicalize(t) as unknown),
   );
+  // Inject ONLY on bash === true. `false` and `undefined` both produce
+  // the pre-AGT-472 hash (byte-identical) so existing attestations remain
+  // valid without re-signing.
+  if (bash === true) {
+    normalized.push(BASH_OPT_IN_SENTINEL);
+  }
   const sorted = [...normalized].sort((a, b) => {
     const aKey = typeof a === "string" ? a : JSON.stringify(a);
     const bKey = typeof b === "string" ? b : JSON.stringify(b);

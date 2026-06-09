@@ -630,6 +630,11 @@ export async function reviewersFetch(
   // for invocation, not at fetch time.
   let tools: ToolSpec[] | undefined;
   let mcpServers: Record<string, McpServerDef> | undefined;
+  // AGT-472: a fetched reviewer config may also declare `bash: true`. We
+  // mirror it into the lock so a later drift check sees the same hash the
+  // source author intended. Pre-AGT-472 source configs leave bash
+  // undefined → tools_sha256 byte-identical to before.
+  let bash: boolean | undefined;
   if (configYaml !== null) {
     const parsed = (parseYaml(configYaml) ?? {}) as Record<string, unknown>;
     if (Array.isArray(parsed.tools)) {
@@ -637,6 +642,9 @@ export async function reviewersFetch(
     }
     if (parsed.mcp_servers !== undefined) {
       mcpServers = validateMcpServersFromSource(parsed.mcp_servers, source, ref);
+    }
+    if (typeof parsed.bash === "boolean") {
+      bash = parsed.bash;
     }
   }
 
@@ -646,7 +654,7 @@ export async function reviewersFetch(
   const promptPath = join(reviewersDir, `${reviewerName}.md`);
   const promptBytes = Buffer.from(promptText, "utf8");
   const promptSha = hashPromptBytes(promptBytes);
-  const toolsSha = hashTools(tools);
+  const toolsSha = hashTools(tools, bash);
   const mcpSha = hashMcpServers(mcpServers);
 
   if (effectiveExpectPromptSha !== undefined) {

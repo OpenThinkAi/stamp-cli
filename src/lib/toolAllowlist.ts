@@ -3,19 +3,29 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 /**
- * Built-in allowlist of Claude Agent SDK tool names a reviewer is permitted
- * to use. The set is deliberately tight — read-only investigation tools only.
+ * Built-in allowlist of Claude Agent SDK tool names a reviewer may list in
+ * `reviewers.<name>.tools` in `.stamp/config.yml`. The set is deliberately
+ * tight — read-only investigation tools only.
  *
  * Adding a tool here is a code change, not a config change, so it is
  * reviewed and signed like any other diff. Operators who legitimately need
- * a riskier tool (Bash for compile checks, Edit for codemod review, etc.)
- * must vendor their own stamp-cli build or contribute the addition with
- * the threat model spelled out.
+ * a riskier tool (Edit for codemod review, etc.) must vendor their own
+ * stamp-cli build or contribute the addition with the threat model
+ * spelled out.
  *
  * Excluded by design:
- *   - Bash / Task            (arbitrary command execution)
  *   - Edit / Write / NotebookEdit  (filesystem mutation in reviewer context)
- *   - WebSearch              (query strings can leak diff content)
+ *   - Task                         (sub-agent spawn = recursive capability)
+ *   - WebSearch                    (query strings can leak diff content)
+ *
+ * Bash is intentionally NOT in this list, but is reachable via a separate
+ * per-reviewer opt-in: `reviewers.<name>.bash: true` (AGT-472). That field
+ * gets folded into the reviewer-prompt hash chain via `hashTools`, so a
+ * feature branch cannot silently widen a reviewer's capabilities — flipping
+ * `bash: false → true` changes `tools_sha256` and is visible at
+ * `stamp verify` time. The `bash` opt-in does not appear in `tools:` because
+ * it has no per-call gating shape (no `allowed_hosts`-equivalent for shell);
+ * it is a pure boolean capability switch.
  */
 export const SAFE_TOOLS = ["Read", "Grep", "Glob", "WebFetch"] as const;
 export type SafeTool = (typeof SAFE_TOOLS)[number];

@@ -201,7 +201,11 @@ export interface ReviewerDef {
    * Claude Agent SDK built-in tools the reviewer may call during review.
    * The set of permitted tool names is constrained at invocation time to
    * the SAFE_TOOLS list in lib/toolAllowlist.ts (read-only investigation
-   * tools only — Bash / Edit / Write / Task are disallowed).
+   * tools only — Edit / Write / Task remain disallowed unconditionally).
+   *
+   * Bash is the one exception: it is NOT in `SAFE_TOOLS` (cannot be listed
+   * here) but is reachable via the separate per-reviewer `bash: true`
+   * opt-in field below — see that field for the security model.
    *
    * Object form (e.g. `{ name: "WebFetch", allowed_hosts: ["linear.app"] }`)
    * is required for tools that need per-call gating. Plain strings remain
@@ -254,6 +258,30 @@ export interface ReviewerDef {
    * shape, rationale, and merge-base-tree sourcing as `max_turns`.
    */
   timeout_ms?: number;
+  /**
+   * AGT-472: per-reviewer opt-in to the SDK `Bash` tool. When true,
+   * `invokeReviewer` appends `"Bash"` to `allowedTools` and
+   * `checkReviewerTool` lets Bash calls through; default (absent/false) is
+   * deny, matching the `SAFE_TOOLS` policy in `toolAllowlist.ts`. This is
+   * the escape hatch for reviewers that legitimately need shell access
+   * (e.g. running `git log` to inspect commit history beyond the diff).
+   *
+   * Security model: `bash` is folded into the reviewer-prompt hash chain
+   * via `hashTools` (a synthetic `"__bash"` sentinel is appended to the
+   * canonicalized tools list when `bash === true`), so flipping a
+   * reviewer from `bash: false → true` changes its `tools_sha256` and is
+   * visible at `stamp verify` time. A feature branch cannot silently
+   * widen its own reviewer's capabilities — the config edit goes through
+   * the same merge gate as any other `.stamp/` change, and the
+   * attestation chain visibly differs.
+   *
+   * Operators enabling this should understand that the SDK Bash tool
+   * gives the reviewer unconstrained shell within the repoRoot cwd. We
+   * deliberately do NOT gate the command string here — that would be a
+   * Maginot Line; the threat model is "operator opted in, signed merges
+   * record the choice."
+   */
+  bash?: boolean;
 }
 
 export interface McpServerDef {
@@ -522,6 +550,18 @@ function validateConfig(input: unknown): StampConfig {
       `config.reviewers.${name}.timeout_ms`,
     );
 
+    // AGT-472: per-reviewer Bash opt-in. Omit-on-unset to preserve
+    // byte-identical hash chains for pre-AGT-472 configs.
+    let bash: boolean | undefined;
+    if (d.bash !== undefined) {
+      if (typeof d.bash !== "boolean") {
+        throw new Error(
+          `config.reviewers.${name}.bash must be a boolean (got ${JSON.stringify(d.bash)})`,
+        );
+      }
+      bash = d.bash;
+    }
+
     reviewers[name] = {
       ...(prompt !== undefined ? { prompt } : {}),
       ...(tools ? { tools } : {}),
@@ -531,6 +571,7 @@ function validateConfig(input: unknown): StampConfig {
         : {}),
       ...(max_turns !== undefined ? { max_turns } : {}),
       ...(timeout_ms !== undefined ? { timeout_ms } : {}),
+      ...(bash !== undefined ? { bash } : {}),
     };
   }
 

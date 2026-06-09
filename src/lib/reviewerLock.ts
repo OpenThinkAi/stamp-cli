@@ -138,7 +138,10 @@ export function checkReviewerDrift(
   }
   const promptBytes = readFileSync(promptPath);
   const observedPrompt = hashPromptBytes(promptBytes);
-  const observedTools = hashTools(def.tools);
+  // AGT-472: fold `def.bash` into tools_sha256 for drift detection. A
+  // reviewer that flips bash without updating its lock file should report
+  // a tools drift, same as adding/removing a tool entry.
+  const observedTools = hashTools(def.tools, def.bash);
   const observedMcp = hashMcpServers(def.mcp_servers);
 
   const mismatches: DriftMismatch[] = [];
