@@ -730,10 +730,19 @@ program
     "--migrate-existing",
     "Shape 4 migration bootstrap (AGT-398): attest a narrowly-scoped diff that ADDS `review_server:` + `[server]`-capability trust-anchor entries (the chicken-and-egg PR that activates server-attested reviews on an existing repo). Produces a v3 envelope with empty server_signatures, a migration-bootstrap marker in the operator-signed payload, and exactly one operator-self admin counter-signature in `trust_anchor_signatures`. The flag is REFUSED on any diff outside the narrow Shape-4-activation whitelist (no files outside .stamp/, no modifications to existing trust-anchor entries, no removals). Requires the operator's local key to have `admin` capability in the working-tree manifest and `path_rules` to cover the activated paths with `bypass_review_cycle: true` and `minimum_signatures: 1`. See docs/migration-1.x-to-2.x.md for the full Shape 4 bootstrap walkthrough.",
   )
+  .option(
+    "--require-admin-sigs-met",
+    "(AGT-471) exit 3 instead of warning when the diff touches a path_rules-gated path and the locally-collected admin-signature count is below the rule's minimum_signatures threshold. Default (without this flag) emits a warning: line and continues — use the flag in CI pre-checks or scripts that want a hard gate before pushing.",
+  )
   .action(
     (
       branch: string | undefined,
-      opts: { into: string; push?: string | boolean; migrateExisting?: boolean },
+      opts: {
+        into: string;
+        push?: string | boolean;
+        migrateExisting?: boolean;
+        requireAdminSigsMet?: boolean;
+      },
     ) => {
       try {
         // commander gives us:
@@ -752,6 +761,7 @@ program
           into: opts.into,
           pushTo,
           migrateExisting: opts.migrateExisting === true,
+          requireAdminSigsMet: opts.requireAdminSigsMet === true,
         });
       } catch (err) {
         handleCliError(err);
