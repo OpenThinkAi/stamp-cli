@@ -130,6 +130,25 @@ stamp attest --into main --push origin   # signs the v4 attestation envelope + a
 > v3 envelope when the branch rule declares `review_server`; the GH
 > Action accepts the envelope directly with no 1.x-action pin needed.
 
+**Joining an existing Attested-PR repo as a new contributor.** The flow
+above is written from the perspective of the operator who scaffolded
+the repo. If you're contributor #2+ joining a repo that's already on
+Attested-PRs, you need to be enrolled on its review server before
+your `stamp review` calls are accepted:
+
+```sh
+npm install -g @openthink/stamp        # Node 22.5+
+stamp keys generate                    # ~/.stamp/keys/ed25519{,.pub}
+# Ask a maintainer to mint you an invite:
+#   stamp invites mint <you> --role member
+stamp invites accept <share-url>       # enrolls your pubkey on the server
+# Then the per-PR flow above works.
+```
+
+The maintainer's `stamp invites mint` and your `stamp invites accept`
+together deposit your pubkey into the server's trusted-keys set; without
+that, the server rejects review requests signed by your key.
+
 The attestation is keyed on the **content** of the diff (`git patch-id`), so
 it survives every GitHub merge strategy: squash, rebase, and merge-commit
 all preserve the same patch-id and the same attestation.
