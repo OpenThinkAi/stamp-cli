@@ -120,7 +120,7 @@ program
   )
   .option(
     "--mode <mode>",
-    "deployment mode: 'server-gated' (origin is a stamp server, gate is enforced) or 'local-only' (no server, advisory). Auto-detected from the configured remote if omitted.",
+    "deployment mode: 'server-gated' (origin is a stamp server, gate is enforced), 'local-only' (no server, advisory), or 'attested-pr' (GitHub-primary, stamp-verify PR check enforces). Auto-detected from the configured remote if omitted.",
   )
   .option(
     "--remote <name>",
@@ -225,14 +225,18 @@ program
               "or drop --dry-run to run the requested init operation.",
           );
         }
-        let mode: "server-gated" | "local-only" | undefined;
+        let mode: "server-gated" | "local-only" | "attested-pr" | undefined;
         if (opts.mode === undefined) {
           mode = undefined;
-        } else if (opts.mode === "server-gated" || opts.mode === "local-only") {
+        } else if (
+          opts.mode === "server-gated" ||
+          opts.mode === "local-only" ||
+          opts.mode === "attested-pr"
+        ) {
           mode = opts.mode;
         } else {
           throw new Error(
-            `--mode must be 'server-gated' or 'local-only' (got "${opts.mode}")`,
+            `--mode must be 'server-gated', 'local-only', or 'attested-pr' (got "${opts.mode}")`,
           );
         }
         // Validate --action-source shape (org/repo). Reject early so we

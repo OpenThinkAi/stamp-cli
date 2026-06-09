@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { maybeWarnAgentsMdDrift } from "../lib/agentsMd.js";
 import { findBranchRule, loadConfig, type StampConfig } from "../lib/config.js";
 import { latestVerdicts, openDb, type Verdict } from "../lib/db.js";
 import { resolveDiff } from "../lib/git.js";
@@ -7,6 +8,7 @@ import {
   stampConfigFile,
   stampStateDbPath,
 } from "../lib/paths.js";
+import { classifyRemote } from "../lib/remote.js";
 
 export interface StatusOptions {
   diff: string;
@@ -28,6 +30,19 @@ export interface GateResult {
  */
 export function runStatus(opts: StatusOptions): void {
   const repoRoot = findRepoRoot();
+
+  // Drift sniff is informational and runs ahead of any failure path so
+  // an operator who's about to hit "gate CLOSED" still sees the AGENTS.md
+  // staleness call-out. The check is cheap (one file read + a couple of
+  // string searches) and silent on the no-AGENTS.md / non-classifiable
+  // paths.
+  const classification = classifyRemote("origin", repoRoot);
+  maybeWarnAgentsMdDrift({
+    repoRoot,
+    remoteShape: classification.shape,
+    command: "status",
+  });
+
   const configPath = stampConfigFile(repoRoot);
   if (!existsSync(configPath)) {
     throw new Error(

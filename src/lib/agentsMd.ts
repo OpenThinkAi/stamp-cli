@@ -29,12 +29,40 @@ const STAMP_BEGIN_PREFIX = "<!-- stamp:begin ";
 const STAMP_CLAUDE_BEGIN_PREFIX = "<!-- stamp:claude:begin ";
 
 /**
- * Deployment shape selector for the AGENTS.md content. The two shapes have
- * meaningfully different invariants — only the server-gated one can truthfully
- * promise rejection. Lying to a future agent that the gate is enforced when
- * it isn't is worse than not writing anything.
+ * Deployment shape selector for the AGENTS.md content. The three shapes
+ * have meaningfully different invariants — only `server-gated` and
+ * `attested-pr` can truthfully promise rejection, and they reject in
+ * different places (server pre-receive hook vs. GitHub PR check). Lying
+ * to a future agent that the gate is enforced when it isn't is worse
+ * than not writing anything.
+ *
+ * - `server-gated`  — Shape 1: origin is a stamp server with a pre-receive
+ *                     hook. Direct pushes to protected branches are rejected
+ *                     server-side.
+ * - `local-only`    — Shape 2/3: origin is a public forge (GitHub / GitLab /
+ *                     etc.) directly. No server-side rejection; enforcement
+ *                     is on the agent's discipline.
+ * - `attested-pr`   — Shape 4: origin is GitHub (mirror-as-source-of-truth),
+ *                     and a `stamp-verify` GitHub Actions PR check
+ *                     verifies the attestation before merge. Direct pushes
+ *                     to `main` are rejected by GitHub branch protection
+ *                     once configured; the workflow gates everything else.
  */
-export type AgentsMdMode = "server-gated" | "local-only";
+export type AgentsMdMode = "server-gated" | "local-only" | "attested-pr";
+
+/**
+ * Sniffable phrase constants — one distinctive string embedded in each
+ * mode's body. The drift sniffer uses these to read back which mode a
+ * live AGENTS.md was generated for, without re-running classifyRemote.
+ *
+ * Picked to be unambiguous: each phrase must appear ONLY in its own body,
+ * not in either of the other two. Tests pin this invariant (see
+ * `agentsMdDrift.test.ts`); if any of them start collating, change a
+ * phrase rather than weakening the sniffer.
+ */
+export const SNIFF_PHRASE_SERVER_GATED = "server-side pre-receive hook";
+export const SNIFF_PHRASE_LOCAL_ONLY = "The agent following these instructions is the gate.";
+export const SNIFF_PHRASE_ATTESTED_PR = "Shape 4 — attested-pr mode (GitHub-primary)";
 
 /**
  * Mode-agnostic guidance about when to stop iterating on stamp review. Same
@@ -244,6 +272,137 @@ attestation, so the audit trail is preserved even without server-side rejection.
 ${REVIEW_LOOP_HEURISTIC}
 `;
 
+/**
+ * Attested-PR section body — Shape 4 (server-attested mirror). Origin is
+ * GitHub (the canonical mirror-as-source-of-truth), and the stamp server
+ * never sees a git push from the operator. Enforcement happens in two
+ * places: GitHub branch protection rejects direct pushes to \`main\`, and
+ * the \`stamp-verify\` Actions PR check rejects PRs whose merge commit
+ * lacks a valid server-attested envelope.
+ *
+ * The body is deliberately honest about the two-part contract: branch
+ * protection has to be configured on GitHub or the PR check can be
+ * bypassed. We name the prerequisite so a future agent reading this
+ * doesn't assume the gate is closed when it isn't.
+ *
+ * The first line — "Shape 4 — attested-pr mode (GitHub-primary)" — is the
+ * sniffable phrase the drift checker keys on. Do not change it without
+ * updating SNIFF_PHRASE_ATTESTED_PR in lockstep (or the regression tests
+ * that pin the invariant).
+ */
+export const STAMP_AGENTS_SECTION_ATTESTED_PR = `## Stamp-protected repository — Shape 4 — attested-pr mode (GitHub-primary)
+
+This repository is gated by [stamp-cli](https://github.com/OpenThinkAi/stamp-cli)
+in **attested-pr mode**: origin is GitHub (the canonical source-of-truth
+mirror) and a server-side stamp instance signs review attestations that
+get verified by a GitHub Actions \`stamp-verify\` PR check before a
+maintainer can merge. **Direct commits to \`main\` are rejected by
+GitHub branch protection**; every change lands via a PR whose merge
+commit carries a verifiable server-attested envelope.
+
+### The two-part enforcement model (read this carefully)
+
+Enforcement is not in any single hook. It is the **conjunction** of:
+
+1. **GitHub branch protection on \`main\`** — must be configured to require
+   the \`stamp-verify\` check AND block direct pushes. If branch protection
+   is missing or misconfigured, the PR check still runs but a maintainer
+   can merge a PR that failed it. The operator who set this repo up is
+   responsible for the protection rules; verify with
+   \`gh api repos/<owner>/<repo>/branches/main/protection\`.
+2. **\`.github/workflows/stamp-verify.yml\`** — the Action that verifies
+   the attestation envelope on each PR. Its required job name appears in
+   the branch-protection \`required_status_checks\` list.
+
+If either is absent, the gate is **partially open**. Do not assume the
+mode name "attested-pr" means rejection is automatic — confirm both
+pieces are live before treating a green PR check as authoritative.
+
+### The canonical workflow
+
+\`\`\`sh
+git checkout -b feature
+# ...edit, commit, repeat on the feature branch...
+
+stamp review --diff main..feature       # reviewers run; server signs the attestation
+stamp status --diff main..feature       # exit 0 if every required reviewer approved
+
+# Open the PR (GitHub UI or \`gh pr create\`). The \`stamp-verify\`
+# Actions check runs against the merge commit's attestation envelope.
+# A maintainer merges via GitHub once the check is green and branch
+# protection's other requirements (reviews, etc.) are satisfied.
+\`\`\`
+
+\`stamp merge\` and \`stamp push\` are NOT the merge path here — they're
+the server-gated (Shape 1) flow. In attested-pr mode the merge happens
+through GitHub's UI/API, and the attestation lives in the merge commit
+trailers (signed by the server's review-signing key, verified by the
+PR check against \`.stamp/trusted-keys/review-server-prod.pub\`).
+
+### What NOT to do
+
+- **Do not** \`git push origin main\` directly — branch protection rejects.
+- **Do not** merge a PR whose \`stamp-verify\` check is failing or skipped.
+  A skipped check on a PR that touches code is a signal the workflow
+  didn't run; investigate before merging.
+- **Do not** disable or weaken the branch-protection rules without
+  understanding that doing so unilaterally opens the gate.
+- **Do not** edit \`.stamp/config.yml\` or \`.stamp/trusted-keys/*.pub\`
+  casually — those changes go through the same review + attestation gate
+  as any other code change. They are security-sensitive edits.
+- **Do not** delete \`.stamp/trusted-keys/review-server-prod.pub\`. That
+  pubkey is what the workflow uses to verify the server's signature; its
+  removal locks the repo out of all future merges until restored.
+
+### Contributor onboarding
+
+A new contributor needs:
+
+1. Read access to the repo (no special stamp setup for plain reviewers).
+2. To trigger \`stamp review\` for their own PR, write access to push the
+   feature branch, plus the server endpoint reachable (configured by
+   \`~/.stamp/server.yml\` or per-repo \`.stamp/config.yml\`'s
+   \`review_server\`). No client-side signing key is needed — the server
+   holds the review-signing key.
+3. The \`stamp-verify\` workflow is already in the repo; PRs from new
+   contributors run it automatically (assuming the operator's Actions
+   settings allow Action runs from fork PRs, which is the GitHub default
+   for collaborators).
+
+### Where things live
+
+- \`.stamp/config.yml\` — branch rules + \`review_server\` URL (where to send review requests)
+- \`.stamp/trusted-keys/manifest.yml\` — fingerprint-to-capability map (server, operator, admin)
+- \`.stamp/trusted-keys/review-server-prod.pub\` — the server's review-signing pubkey (the workflow verifies attestations against this)
+- \`.github/workflows/stamp-verify.yml\` — the Actions PR check that enforces the attestation envelope
+- \`~/.stamp/server.yml\` — your local pointer to the stamp server endpoint (host:port)
+
+### Useful commands
+
+\`\`\`sh
+stamp --help                              # full command list
+stamp reviewers list                      # configured reviewers + prompt file status
+stamp review --diff main..feature         # request reviews (server-signed)
+stamp verify <sha>                        # re-verify a specific merge commit's attestation against the trusted pubkey
+\`\`\`
+
+### When the gate blocks you
+
+- \`stamp-verify\` PR check failed — read the Actions log. Common causes:
+  the merge commit doesn't carry an attestation trailer (the operator
+  merged without going through the stamp flow), the trailer signature
+  doesn't match \`review-server-prod.pub\` (server key rotated without a
+  manifest update), or the diff doesn't match what was reviewed
+  (post-review commits invalidated the verdict).
+- Branch protection blocked a direct push — that's working as intended.
+  Open a PR instead.
+- The server-side review request failed — see
+  \`docs/troubleshooting.md\` (server unreachable, reviewer prompt
+  mismatch, etc.).
+
+${REVIEW_LOOP_HEURISTIC}
+`;
+
 
 /**
  * Find a managed block in `text` whose open line starts with `openPrefix` and
@@ -299,10 +458,7 @@ export function injectStampSection(
   existing: string | undefined,
   mode: AgentsMdMode = "server-gated",
 ): string {
-  const body =
-    mode === "server-gated"
-      ? STAMP_AGENTS_SECTION_SERVER_GATED
-      : STAMP_AGENTS_SECTION_LOCAL_ONLY;
+  const body = bodyForMode(mode);
   const stampBlock = `${STAMP_BEGIN}\n\n${body.trimEnd()}\n\n${STAMP_END}`;
 
   if (existing === undefined || existing.trim() === "") {
@@ -464,4 +620,213 @@ export function ensureClaudeMd(
       : "appended";
   writeFileSync(path, updated);
   return action;
+}
+
+/**
+ * Map a mode to its rendered section body. Exposed (private to module)
+ * so injectStampSection and the drift sniffer don't drift apart — both
+ * route through the same lookup.
+ */
+function bodyForMode(mode: AgentsMdMode): string {
+  switch (mode) {
+    case "server-gated":
+      return STAMP_AGENTS_SECTION_SERVER_GATED;
+    case "local-only":
+      return STAMP_AGENTS_SECTION_LOCAL_ONLY;
+    case "attested-pr":
+      return STAMP_AGENTS_SECTION_ATTESTED_PR;
+  }
+}
+
+/**
+ * Read a repo's live `AGENTS.md` and infer which `AgentsMdMode` it was
+ * generated for by looking for distinctive phrase constants embedded in
+ * each body.
+ *
+ * Returns:
+ *   - the inferred `AgentsMdMode` when exactly one sniffable phrase matches
+ *   - `"absent"` when no AGENTS.md exists at the repo root, or when one
+ *     exists but contains no managed stamp block
+ *   - `"unknown"` when a managed block exists but no sniffable phrase
+ *     matches — covers legacy hand-written content, future variants we
+ *     don't yet recognise, or a heavily customised body. Treated as a
+ *     silent (no-warning) case by the drift checker; the goal is not to
+ *     punish operators who've forked the template.
+ *
+ * Deliberately tolerant: returns the FIRST mode whose phrase matches,
+ * with ties broken in `AgentsMdMode` enum order. Phrase constants are
+ * picked to be mutually exclusive (regression test pins this) so ties
+ * shouldn't happen in practice; if a future edit collides them, the
+ * test goes red and a phrase has to be re-picked.
+ */
+export function sniffAgentsMdMode(
+  repoRoot: string,
+): AgentsMdMode | "absent" | "unknown" {
+  const path = join(repoRoot, "AGENTS.md");
+  if (!existsSync(path)) return "absent";
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return "absent";
+  }
+  // Locate the managed block first — sniffing outside the managed block
+  // would let unrelated user content trip the phrase check. Only the
+  // unified `<!-- stamp:begin -->` marker is searched here; legacy
+  // markers carry no sniffable mode-specific phrase by definition
+  // (they predate the per-mode bodies) so they'd resolve to "unknown"
+  // anyway. The injectStampSection path migrates legacy markers on the
+  // next stamp init, so anyone with a legacy block still in place will
+  // get one no-op silent run and then start matching on the next push.
+  const found = findManagedBlock(text, STAMP_BEGIN_PREFIX, STAMP_END);
+  if (!found) return "absent";
+  const managed = text.slice(found.beginIdx, found.afterEnd);
+
+  if (managed.includes(SNIFF_PHRASE_ATTESTED_PR)) return "attested-pr";
+  if (managed.includes(SNIFF_PHRASE_SERVER_GATED)) return "server-gated";
+  if (managed.includes(SNIFF_PHRASE_LOCAL_ONLY)) return "local-only";
+  return "unknown";
+}
+
+/**
+ * Result of `expectedModeFromRemoteShape`. `null` means "no opinion" —
+ * the remote shape doesn't tell us enough to assert a particular mode,
+ * so the drift checker should NOT warn (a warning without confidence
+ * is just noise).
+ */
+export type ExpectedAgentsMdMode = AgentsMdMode | null;
+
+/**
+ * Map a `classifyRemote` deployment shape to the AGENTS.md mode it
+ * implies. The mapping is conservative:
+ *
+ *   - `stamp-server` → `server-gated` (pre-receive hook will enforce)
+ *   - `forge-direct` → `local-only`  (no server-side enforcement; if the
+ *                      operator has migrated to Shape 4, they'll have
+ *                      run `--migrate-to-server-attested` which writes
+ *                      the `attested-pr` body — and that case is read
+ *                      by the sniffer, so no drift warning fires.
+ *                      The asymmetry is intentional: we cannot tell
+ *                      a Shape 4 GitHub-mirror remote apart from a plain
+ *                      forge-direct remote by URL alone, so we default
+ *                      to the more cautious `local-only` expectation
+ *                      and rely on the sniffer to say "actually it's
+ *                      attested-pr" when the migration has happened.)
+ *   - `unknown`/`unset` → null (no opinion; never warn)
+ *
+ * The `forge-direct → local-only` mapping is the trigger for AC #5
+ * variant (a): a repo that was init'd with local-only AGENTS.md and
+ * then had its origin re-pointed at a stamp server — origin is now
+ * `stamp-server`, but AGENTS.md still says local-only. Sniffed mode
+ * `local-only` ≠ expected `server-gated` → warn.
+ */
+export function expectedAgentsMdModeFromShape(
+  shape: "stamp-server" | "forge-direct" | "unknown" | "unset",
+  sniffed: AgentsMdMode | "absent" | "unknown",
+): ExpectedAgentsMdMode {
+  // If the sniffer already reports `attested-pr`, the operator opted into
+  // Shape 4 via `--migrate-to-server-attested`. The forge-direct origin
+  // shape is what Shape 4 is supposed to look like (GitHub-mirror), so
+  // no drift. Return `attested-pr` (the live mode) as the expectation
+  // so the drift checker compares apples to apples.
+  if (sniffed === "attested-pr" && shape === "forge-direct") {
+    return "attested-pr";
+  }
+  switch (shape) {
+    case "stamp-server":
+      return "server-gated";
+    case "forge-direct":
+      return "local-only";
+    case "unknown":
+    case "unset":
+      return null;
+  }
+}
+
+/** Environment variable name that suppresses the drift warning. Exported
+ *  so docs and tests can reference the constant rather than the literal
+ *  string. */
+export const DRIFT_WARNING_SUPPRESS_ENV = "STAMP_SUPPRESS_AGENTS_MD_DRIFT_WARNING";
+
+/**
+ * Options for `maybeWarnAgentsMdDrift`. Accepting a pre-computed
+ * `remoteShape` instead of calling `classifyRemote` ourselves keeps the
+ * lib leaf pure (no git dep) and lets tests inject arbitrary shapes
+ * without standing up a fake git repo.
+ */
+export interface AgentsMdDriftCheckOptions {
+  /** Repo root — where to look for AGENTS.md. */
+  repoRoot: string;
+  /** The deployment shape returned by `classifyRemote(remote, repoRoot)`. */
+  remoteShape: "stamp-server" | "forge-direct" | "unknown" | "unset";
+  /** Command name to surface in the warning ("push", "merge", "status"). */
+  command: string;
+  /**
+   * Name of the remote that was classified. Templated into the warning so
+   * `stamp push upstream` reports "upstream looks like ..." rather than
+   * hardcoded "origin". Default `"origin"`.
+   */
+  remote?: string;
+  /** Stream to write the warning to. Default `process.stderr`. Injectable for tests. */
+  stderr?: { write(s: string): boolean | void };
+  /** Env reader. Default `process.env`. Injectable for tests. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Emit a single non-blocking stderr warning when the sniffed AGENTS.md
+ * mode disagrees with the mode implied by the remote shape. Silent on:
+ *
+ *   - `absent` AGENTS.md or no managed block (no claim to drift from)
+ *   - `unknown` sniffed mode (operator forked the template; don't punish)
+ *   - null expectation (remote shape doesn't imply a specific mode)
+ *   - matched mode (the happy path)
+ *   - `STAMP_SUPPRESS_AGENTS_MD_DRIFT_WARNING=1` in env
+ *
+ * Returns `true` iff a warning was emitted; useful for tests that need
+ * to assert silence on the no-warning branches.
+ */
+export function maybeWarnAgentsMdDrift(opts: AgentsMdDriftCheckOptions): boolean {
+  const env = opts.env ?? process.env;
+  if (env[DRIFT_WARNING_SUPPRESS_ENV] === "1") return false;
+
+  const sniffed = sniffAgentsMdMode(opts.repoRoot);
+  if (sniffed === "absent" || sniffed === "unknown") return false;
+
+  const expected = expectedAgentsMdModeFromShape(opts.remoteShape, sniffed);
+  if (expected === null) return false;
+  if (expected === sniffed) return false;
+
+  const stderr = opts.stderr ?? process.stderr;
+  const remoteName = opts.remote ?? "origin";
+  const remind = `         Refresh: \`stamp init --mode ${expected}\`.`;
+  const suppress = `         Suppress: ${DRIFT_WARNING_SUPPRESS_ENV}=1.`;
+  stderr.write(
+    `warning: AGENTS.md says \`${sniffed}\` but ${remoteName} looks like ${describeShapeShort(opts.remoteShape)} (expected \`${expected}\`).\n` +
+      `         The committed agent guidance is stale; future agents will read the wrong enforcement story.\n` +
+      `${remind}\n` +
+      `${suppress}\n`,
+  );
+  return true;
+}
+
+/** One-word human label for a deployment shape, used inside the drift
+ *  warning prose. Kept local so it doesn't get mistaken for a public
+ *  describeShape replacement. The expected mode appears separately
+ *  inside the same warning line (`expected \`<mode>\``); this label
+ *  deliberately does NOT repeat it to avoid the double-parenthetical
+ *  noise an earlier draft produced. */
+function describeShapeShort(
+  shape: "stamp-server" | "forge-direct" | "unknown" | "unset",
+): string {
+  switch (shape) {
+    case "stamp-server":
+      return "a stamp server";
+    case "forge-direct":
+      return "a public forge (GitHub etc.)";
+    case "unknown":
+      return "an unrecognized remote";
+    case "unset":
+      return "no remote";
+  }
 }

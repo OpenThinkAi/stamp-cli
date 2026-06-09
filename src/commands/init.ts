@@ -782,6 +782,16 @@ function resolveMode(
     return { effectiveMode: "server-gated", warnings };
   }
 
+  // Explicit attested-pr is honored without remote validation here — the
+  // operator is acknowledging Shape 4 explicitly. The richer migration
+  // setup (server pubkey fetch, manifest scaffold, workflow file) goes
+  // through `--migrate-to-server-attested`; passing `--mode attested-pr`
+  // alone just writes the AGENTS.md body and leaves the rest to the
+  // operator (matches how `--mode local-only` works for Shape 2/3).
+  if (userMode === "attested-pr") {
+    return { effectiveMode: "attested-pr", warnings };
+  }
+
   // Auto-detect path. Choose the mode that matches the detected shape so the
   // resulting AGENTS.md content is honest about what's actually enforced.
   switch (remoteClass.shape) {
