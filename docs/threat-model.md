@@ -277,6 +277,78 @@ entirely and reduces stamp to its signing/verification primitives.
 The non-repudiation property still holds and the pre-receive hook
 still gates.
 
+## Compensating controls
+
+Several defenses load-bearing for stamp's threat model live *outside*
+stamp's code. They are properties of the operating system, the forge,
+operator configuration choices, or external systems stamp consumes —
+not anything stamp itself can enforce. A stamp deployment that silently
+weakens or removes one of them is quietly weaker than the threat model
+above assumes.
+
+Audit your own setup against this list. If a control is absent, the
+"what fails" column tells you which attacker position becomes viable.
+
+### Operator runtime environment
+
+- **Reviewer-subprocess sandbox** (the Claude Agent SDK today)
+  restricts reviewer Bash to the repo root and blocks arbitrary
+  filesystem / network access. *What fails if weakened:* the
+  trust-boundary attack class against position 3 (author-agent)
+  opens up — a poisoned prompt in the diff could drive a reviewer
+  to exfiltrate from outside the repo.
+- **OS-level protection on `~/.stamp/keys/ed25519`.** Stamp sets
+  mode 0600 / 0700 on creation but cannot defend against another
+  process running as the same user, an unlocked machine, or any
+  lateral compromise. *What fails:* position 4 (trusted-key
+  compromise) goes from "out of scope" to "trivially in scope."
+- **GitHub branch protection on the remote** (PR-check / Attested-PR
+  modes only). The `stamp/verify-attestation` action only *blocks*
+  a merge if branch protection is configured to require it. *What
+  fails:* the verifier becomes advisory — a malicious or careless
+  push can land an unverified commit.
+
+### Operator configuration choices
+
+- **`required:` reviewer set in `.stamp/config.yml`.** Stamp accepts
+  a single-reviewer rule (e.g. `required: [product]`), which is
+  defeatable by an attacker who controls the trust source that one
+  reviewer reads. *What fails:* the defense-in-depth between
+  reviewers — a successful prompt injection on one reviewer is
+  enough to open the gate. Recommended minimum is two
+  independently-prompted reviewers.
+- **Operator-wired MCP servers and WebFetch allowlists in
+  `.stamp/config.yml`.** Once declared, the trust boundary expands
+  to whoever can write to those sources. Stamp doesn't audit
+  them. *What fails:* an attacker who can write to a trusted MCP
+  source can steer reviewer verdicts.
+- **`require_human_merge` per branch** (and the
+  `STAMP_REQUIRE_HUMAN_MERGE=0` / `--yes` opt-outs). Defaults on.
+  *What fails if flipped off:* the last-mile human checkpoint
+  (residual H1 in the architectural-residual section above) is
+  gone — every successful reviewer pass yields an unattended
+  signed merge.
+
+### External systems stamp consumes
+
+- **Trust sources reviewers read** (Linear, oteam, gh-issues,
+  whatever the persona is wired to). Anyone who can write to those
+  sources is part of stamp's trust boundary. *What fails:* a
+  poisoned ticket / comment / issue body can steer the reviewer
+  prose and verdict.
+- **Supply chain** (`@anthropic-ai/claude-agent-sdk`,
+  `@modelcontextprotocol/sdk`, the Claude API itself, transitive
+  npm deps). A poisoned dependency silently undermines reviewer
+  integrity. *What fails:* anything from the reviewer loop down to
+  signing key handling, depending on the compromised surface.
+
+The fix here is **operator visibility, not stamp enforcement** — most
+of these can't be enforced from stamp's code surface. A future
+`stamp doctor` could programmatically check the operator-config
+subset (warn on single-reviewer rules, `require_human_merge: false`
+on a protected branch, missing `stamp-verify` workflow in PR-check
+mode); until it lands, this section is the checklist.
+
 ## Trust dependencies
 
 stamp-cli's correctness depends on:
