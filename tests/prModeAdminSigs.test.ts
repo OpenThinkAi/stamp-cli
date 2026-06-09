@@ -998,17 +998,22 @@ describe("AGT-471 — stamp attest: early admin-sig warning", () => {
     }
   });
 
-  it("--require-admin-sigs-met: exits 3 when sigs are short, no envelope written", () => {
+  it("--require-admin-sigs-met: exits 3 with error: prefix on stderr when sigs are short, no envelope written", () => {
     const h = setupHarness({ adminCount: 1, touchStamp: true });
     // Intercept process.exit so the test process doesn't actually die.
     let exitCode: number | undefined;
     const origExit = process.exit.bind(process);
-    (process.exit as unknown as { mock?: (code?: number) => never }) ;
     const mockExit = (code?: number): never => {
       exitCode = code;
       throw new Error(`process.exit(${code})`);
     };
     process.exit = mockExit as typeof process.exit;
+    // Capture stderr to verify the `error:` prefix (fatal path convention).
+    const stderrLines: string[] = [];
+    const origErr = console.error;
+    console.error = (...args: unknown[]) => {
+      stderrLines.push(args.map(String).join(" "));
+    };
     try {
       const base = shaOf(h.repo, "main");
       const head = shaOf(h.repo, "feature");
@@ -1034,9 +1039,15 @@ describe("AGT-471 — stamp attest: early admin-sig warning", () => {
       }
       assert.ok(threw, "expected process.exit to be intercepted as a throw");
       assert.equal(exitCode, 3, `expected exit code 3, got ${exitCode}`);
+      // Stderr must carry `error:` prefix (not `warning:`) — fatal path.
+      assert.ok(
+        stderrLines.some((l) => l.startsWith("error:")),
+        `expected stderr to start with 'error:', got: ${JSON.stringify(stderrLines)}`,
+      );
       // No envelope should have been written.
       assert.equal(listAttestationPatchIds(h.repo).length, 0);
     } finally {
+      console.error = origErr;
       process.exit = origExit;
       h.cleanup();
     }

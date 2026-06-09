@@ -217,18 +217,26 @@ export function runAttest(opts: AttestOptions): void {
       headSha: resolved.head_sha,
     });
     if (shortage !== null) {
-      const warningLine =
-        `warning: diff touches ${shortage.matchedPattern} but only ` +
+      const headShort = resolved.head_sha.slice(0, 12);
+      const gapSuffix =
+        `${shortage.matchedPattern} but only ` +
         `${shortage.collectedCount}/${shortage.minimumRequired} admin ` +
         `signature(s) collected on refs/notes/stamp-trust-anchor-sigs ` +
-        `for ${resolved.head_sha.slice(0, 12)}. ` +
-        `Run \`stamp admin sign --pending ${resolved.head_sha.slice(0, 12)}\` ` +
+        `for ${headShort}. ` +
+        `Run \`stamp admin sign --pending ${headShort}\` ` +
         `before pushing to avoid a red PR check.`;
       if (opts.requireAdminSigsMet) {
-        console.error(warningLine);
+        // Hard gate: use `error:` prefix — the process exits 3. Using the
+        // same `warning:`-prefixed string for both fatal and advisory paths
+        // would break agent parsers that key on prefix to decide whether to
+        // retry or abort (product reviewer round 1 finding).
+        console.error(`error: --require-admin-sigs-met: diff touches ${gapSuffix}`);
         process.exit(3);
       }
-      console.warn(warningLine);
+      // Advisory path: `warning:` prefix signals non-fatal; operator
+      // sees this before the slower envelope-build work begins and can
+      // choose to abort and collect sigs, or let attest continue.
+      console.warn(`warning: diff touches ${gapSuffix}`);
     }
   }
 
