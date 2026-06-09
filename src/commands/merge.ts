@@ -59,6 +59,8 @@ import { signBytes, verifyBytes } from "../lib/signing.js";
 import { requireHumanMerge } from "../lib/humanMerge.js";
 import { maybePrintDeprecationNotice } from "../lib/deprecationNotice.js";
 import { acquireMergeLock } from "../lib/mergeLock.js";
+import { maybeWarnAgentsMdDrift } from "../lib/agentsMd.js";
+import { classifyRemote } from "../lib/remote.js";
 
 export interface MergeOptions {
   branch: string;
@@ -78,6 +80,21 @@ export function runMerge(opts: MergeOptions): void {
   maybePrintDeprecationNotice();
 
   const repoRoot = findRepoRoot();
+
+  // AGENTS.md drift sniff (AGT-473). Non-blocking stderr warning when the
+  // committed agent guidance disagrees with what the remote shape implies
+  // — catches the case where someone migrated origin (e.g. forge-direct →
+  // stamp-server) but forgot to re-run `stamp init` to refresh AGENTS.md.
+  // Silent on missing/unknown bodies and suppressible via
+  // STAMP_SUPPRESS_AGENTS_MD_DRIFT_WARNING=1 for CI/scripted runs.
+  {
+    const classification = classifyRemote("origin", repoRoot);
+    maybeWarnAgentsMdDrift({
+      repoRoot,
+      remoteShape: classification.shape,
+      command: "merge",
+    });
+  }
   // Branch-rule lookup uses the WORKING TREE config (the operator's local
   // .stamp/config.yml at merge time, which is on the target branch since
   // the pre-flight below requires that). This is correct: the branch rule

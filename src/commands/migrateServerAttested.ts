@@ -36,6 +36,7 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
+import { ensureAgentsMd } from "../lib/agentsMd.js";
 import { readLineSync } from "../lib/humanMerge.js";
 import { fingerprintFromPem } from "../lib/keys.js";
 import {
@@ -391,11 +392,21 @@ export function runMigrateToServerAttested(
     deletedReviewers.push(relative(repoRoot, f));
   }
 
-  // 11e. Workflow file. Default mode = local-only is fine here; the
-  //      forge-direct / server-gated distinction doesn't apply to the
-  //      Shape 4 init (the workflow file should always land). Pass
-  //      prCheckOpt=true to force write regardless of mode.
-  const wf = maybeWriteVerifyWorkflow(repoRoot, true, "local-only");
+  // 11e. Workflow file. Pass prCheckOpt=true to force write regardless
+  //      of mode (the workflow IS the enforcement point in Shape 4).
+  //      The mode arg only matters for the default-on/off branch when
+  //      prCheckOpt is undefined; an explicit `true` short-circuits it.
+  //      Pass `attested-pr` so the (unused) mode arg matches the rest
+  //      of the migration semantically.
+  const wf = maybeWriteVerifyWorkflow(repoRoot, true, "attested-pr");
+
+  // 11f. Refresh AGENTS.md with the Shape 4 (attested-pr) body. Stale
+  //      local-only guidance left behind from the pre-migration init
+  //      would tell future agents "the remote accepts any push" — wrong,
+  //      because branch protection + the verify workflow are now active.
+  //      Idempotent: re-runs against an already-migrated repo report
+  //      "unchanged". (AGT-473)
+  const agentsMdAction = ensureAgentsMd(repoRoot, "attested-pr");
 
   // 12. Summary.
   console.log();
@@ -429,6 +440,7 @@ export function runMigrateToServerAttested(
     console.log(`  removed prompts: ${deletedReviewers.join(", ")}`);
   }
   console.log(`  verify workflow: ${wf.path} (${wf.action})`);
+  console.log(`  AGENTS.md:       attested-pr body (${agentsMdAction})`);
   console.log();
   console.log(
     "Next steps:\n" +
