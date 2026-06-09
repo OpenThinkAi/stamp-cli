@@ -16,7 +16,7 @@
 # reduction (this is a LOW-tier audit finding — see oaudit-may-2-2026
 # rerun-3 L5), and the digest pin still defeats the higher-impact attack
 # of upstream-tag re-push.
-FROM node:24-alpine3.21@sha256:b8f7c9056af700568c1ce76173f1c93743fb64ca1343e18cdf3a6ded8985ad3d AS builder
+FROM node:25-alpine3.21@sha256:32509199057d74a987fdd88cde00fdfd48ef52469adbd6bd11969fc701477761 AS builder
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json tsup.config.ts ./
 RUN npm ci
