@@ -40,6 +40,7 @@ import {
   timingSafeEqual,
   type BinaryLike,
 } from "node:crypto";
+import { statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
 import {
@@ -916,6 +917,32 @@ export function startPromptsPollWorker(): void {
     // the bootstrap binary's silent no-op shape (AGT-375) is the
     // precedent here.
     return;
+  }
+
+  // Fix B (AGT-468, belt-and-braces): warn loudly when the cache root exists
+  // but is owned by a different uid than the running process. The http-server
+  // runs as the git user (uid != 0); a root-owned cache dir causes git to emit
+  // "fatal: dubious ownership" on every fetch attempt, silently breaking prompt
+  // refreshes. We cannot chown from a non-root process, but a clear log line
+  // at startup is far more actionable than a series of cryptic per-tick errors.
+  // The primary fix is Fix A in entrypoint.sh (bootstrap now runs as git, so
+  // first-boot creates git-owned files); this guard covers in-place upgrades,
+  // operator migrations, or any future deployment layout where the cache was
+  // pre-seeded with wrong ownership.
+  try {
+    const st = statSync(opts.cacheRoot);
+    const myUid = typeof process.getuid === "function" ? process.getuid() : null;
+    if (myUid !== null && st.uid !== myUid) {
+      logLine(
+        "error",
+        `prompts-poll: cacheRoot=${opts.cacheRoot} is owned by uid=${st.uid} but this process is uid=${myUid} — git will refuse to fetch (dubious ownership). Fix: run 'chown -R git:git ${opts.cacheRoot}' on the volume (entrypoint.sh does this automatically on the next container restart).`,
+      );
+    }
+  } catch {
+    // cacheRoot does not exist yet — normal on first boot before bootstrap
+    // has run, or when Phase B is being enabled for the first time. Not an
+    // error here; bootstrap creates it and the poll worker will find it on
+    // the next tick.
   }
 
   // AC bullet 2: STAMP_PROMPTS_POLL_INTERVAL_SEC=0 disables.
