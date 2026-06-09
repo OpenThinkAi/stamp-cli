@@ -95,7 +95,6 @@ export function detectVitestForkPoolFlake(output: string): boolean {
  * doesn't burn time debugging a flake as a real test failure.
  */
 export const VITEST_FORK_POOL_FLAKE_DIAGNOSTIC = [
-  "── stamp diagnostic ───────────────────────────────────────────────────",
   "This looks like a vitest fork-pool worker-startup timeout, NOT a real",
   "test failure. On macOS this is typically caused by syspolicyd's",
   "ExecPolicy DB bloating under heavy subagent churn — every short-lived",
