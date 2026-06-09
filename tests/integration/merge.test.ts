@@ -330,6 +330,163 @@ describe("stamp merge rollback safety (AGT-232)", () => {
   });
 
   /**
+   * AGT-475 / GH #24: gate-CLOSED via stale approvals (post-reset) must
+   * never produce an unsigned merge commit on the target branch.
+   *
+   * Repro from the original bug report:
+   *   1. `stamp review` against base A → head, DB rows keyed by (A, head).
+   *   2. `git reset --hard <new-base>` advances main to a different base B
+   *      (or some non-A commit) — the seeded approval no longer matches
+   *      the current `(merge-base(main, feature), head)` lookup.
+   *   3. `stamp merge feature --into main` — gate-CLOSED throws.
+   *
+   * Reported failure: an unsigned `Merge branch 'feature' into main` was
+   * left on main anyway, no Stamp-* trailers, reflog entry
+   * `merge feature: Merge made by the 'ort' strategy.`
+   *
+   * Expected (and currently true post-rewrite): the gate-CLOSED throw
+   * fires at step 2 of runMerge, before `preMergeSha` is captured and
+   * before `git merge --no-ff` runs. This test pins the invariant so a
+   * future refactor that moves the throw inside the post-merge
+   * try/catch wrapper (or otherwise allows the merge to execute first)
+   * is caught immediately.
+   *
+   * The test asserts the full GH #24 contract:
+   *   a) `runMerge` throws with /gate CLOSED/.
+   *   b) Target branch HEAD SHA is byte-equal before/after.
+   *   c) No merge commit (signed or unsigned) is reachable from main
+   *      that wasn't reachable before.
+   *   d) The reflog gained no `merge feature:` entry from this
+   *      invocation.
+   *
+   * Per AC#4: if this test goes red on first run, the bug is back —
+   * fix `merge.ts`, then keep the test as the pin.
+   */
+  it("AGT-475 / GH #24: gate CLOSED via stale approvals → no ref move, no merge in reflog", () => {
+    const h = setupHarness();
+    try {
+      const initialMain = shaOf(h.repo, "main");
+      const oldFeatureHead = shaOf(h.repo, "feature");
+
+      // Seed an approval against the ORIGINAL (base, head) pair —
+      // mirrors the "reviewed at base A → head" step of the GH #24
+      // repro: a DB row exists, but as soon as either side drifts the
+      // gate must close.
+      seedApproval(h.repo, initialMain, oldFeatureHead, "security");
+
+      // Drift the inputs so the seeded (initialMain, oldFeatureHead)
+      // row no longer matches the current (merge-base, head) lookup
+      // that runMerge performs.
+      //
+      // Two concurrent moves cover both halves of the GH #24 repro:
+      //
+      //   (a) Advance feature with a new commit so head_sha shifts off
+      //       oldFeatureHead — analogous to the reporter's stale-head
+      //       case. `latestReviews(db, base, newHead)` returns no row.
+      //
+      //   (b) Advance main with a new commit so initialMain is no
+      //       longer the tip of main — analogous to the reporter's
+      //       `git reset --hard <new-base>` step (a different ref
+      //       position). Combined with (a), this guarantees the
+      //       (merge-base, head) pair we're about to check has no
+      //       matching row regardless of how resolveDiff picks the
+      //       base.
+      git(h.repo, ["checkout", "-q", "feature"]);
+      writeFileSync(path.join(h.repo, "feature-drift.txt"), "head moved\n");
+      git(h.repo, ["add", "-A"]);
+      git(h.repo, ["commit", "-q", "-m", "advance feature past the reviewed head"]);
+      git(h.repo, ["checkout", "-q", "main"]);
+      writeFileSync(path.join(h.repo, "main-drift.txt"), "main moved\n");
+      git(h.repo, ["add", "-A"]);
+      git(h.repo, ["commit", "-q", "-m", "advance main past the reviewed base"]);
+
+      const beforeMain = shaOf(h.repo, "main");
+      const currentFeatureHead = shaOf(h.repo, "feature");
+      assert.notEqual(
+        beforeMain,
+        initialMain,
+        "harness sanity: main must have moved off the reviewed base",
+      );
+      assert.notEqual(
+        currentFeatureHead,
+        oldFeatureHead,
+        "harness sanity: feature must have moved off the reviewed head",
+      );
+
+      // Capture reflog length BEFORE the merge attempt so we can assert
+      // no new `merge feature:` entries were added by this invocation
+      // (the reflog is append-only; a clean failed merge appends
+      // nothing).
+      const reflogBefore = git(h.repo, [
+        "reflog",
+        "main",
+        "--format=%gs",
+      ]);
+
+      assert.throws(
+        () =>
+          runFromRepo(h.repo, () =>
+            runMerge({ branch: "feature", into: "main", yes: true }),
+          ),
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.ok(
+            /gate CLOSED/i.test(msg),
+            `expected "gate CLOSED" in error message; got: ${msg}`,
+          );
+          return true;
+        },
+      );
+
+      // (a) target ref byte-equal.
+      const afterMain = shaOf(h.repo, "main");
+      assert.equal(
+        afterMain,
+        beforeMain,
+        `main must not have moved when gate is CLOSED; ` +
+          `before=${beforeMain.slice(0, 8)} after=${afterMain.slice(0, 8)}`,
+      );
+
+      // (b) no merge commit reachable on main that wasn't already
+      // there. `git log main` should not have a "Merge branch 'feature'"
+      // subject — covers both unsigned-merge AND stamped-merge cases.
+      const mainLog = git(h.repo, ["log", "--pretty=%s", "main"]);
+      assert.ok(
+        !/^Merge branch 'feature'/m.test(mainLog),
+        `main must contain no "Merge branch 'feature'" commit after a ` +
+          `gate-CLOSED throw; got log:\n${mainLog}`,
+      );
+
+      // (c) reflog gained no `merge feature:` entry from this
+      // invocation. A failed `git merge --no-ff feature` (which is what
+      // would have run if the throw site moved post-merge) leaves
+      // `merge feature: Merge made by the 'ort' strategy.` in the
+      // reflog — exactly what the GH #24 reporter observed. The
+      // reflog text BEFORE and AFTER must be identical.
+      const reflogAfter = git(h.repo, [
+        "reflog",
+        "main",
+        "--format=%gs",
+      ]);
+      assert.equal(
+        reflogAfter,
+        reflogBefore,
+        `reflog for main must be unchanged after a gate-CLOSED throw ` +
+          `(no \`merge feature:\` entry); diff:\n` +
+          `before: ${JSON.stringify(reflogBefore)}\n` +
+          `after:  ${JSON.stringify(reflogAfter)}`,
+      );
+      assert.ok(
+        !/merge feature:/i.test(reflogAfter),
+        `reflog must contain no \`merge feature:\` entry after a ` +
+          `gate-CLOSED throw; got:\n${reflogAfter}`,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  /**
    * AC 3: clean success → Stamp-Payload + Stamp-Verified trailers land
    *        on the merge commit, and runVerify completes without throwing.
    *
