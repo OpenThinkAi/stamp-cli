@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { allPassed, runChecks } from "../lib/checks.js";
+import {
+  allPassed,
+  detectVitestForkPoolFlake,
+  runChecks,
+  VITEST_FORK_POOL_FLAKE_DIAGNOSTIC,
+} from "../lib/checks.js";
 import { findBranchRule, loadConfig } from "../lib/config.js";
 import { latestReviews, openDb, serverApprovalsFor, type McpServerAtInit } from "../lib/db.js";
 import {
@@ -291,6 +296,13 @@ export function runMerge(opts: MergeOptions): void {
           console.error(`FAILED: ${f.name} (${f.command})`);
           console.error(bar);
           if (f.tail) console.error(f.tail);
+          // AGT-470: surface a clear diagnostic when the failure bears the
+          // vitest fork-pool worker-startup-timeout signature so operators
+          // can distinguish a macOS syspolicyd ExecPolicy DB bloat flake
+          // from a real test failure.
+          if (detectVitestForkPoolFlake(f.tail)) {
+            console.error(VITEST_FORK_POOL_FLAKE_DIAGNOSTIC);
+          }
         }
         console.error(bar);
         throw new Error(
