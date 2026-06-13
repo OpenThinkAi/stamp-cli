@@ -27,7 +27,7 @@ jobs:
       # SHA-pinned, matching ci.yml / publish.yml — a mutable tag on a CI
       # action is a supply-chain foot-gun.
       - name: checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       # STAMP_SMOKE_FORCE=1 makes the script build + boot unconditionally
       # (it has no merge commit to diff against here, and we want CI to
