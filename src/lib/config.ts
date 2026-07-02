@@ -1288,7 +1288,10 @@ for guidance on calibrating reviewer prompts.
 
 - Code style, idiom, abstraction choices → **standards** reviewer.
 - User-facing interface decisions (UX, API shape, breaking changes) → **product** reviewer.
-- Anything in \`.stamp/\` — tool meta, separate concern.
+
+\`.stamp/\` changes ARE in scope: Read each modified \`.stamp/*\` file
+before your verdict — you are reviewing stamp's own trust anchors
+(reviewer prompts, config, trusted keys), not tool meta.
 
 ## Verdict criteria
 
