@@ -37,8 +37,12 @@ const NOW = Date.parse("2026-05-24T00:00:00Z");
 const OLD = "20200101T000000Z-old.git"; // ~6 years before NOW
 const RECENT = "20260523T120000Z-recent.git"; // ~12h before NOW
 const fresh = (name = "fresh") => {
-  const d = new Date(NOW).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-  return `${d}-${name}.git`; // exactly NOW
+  // Timestamped at the REAL current time, not the synthetic NOW: the sweep
+  // tick purges against Date.now(), so pinning this to NOW made the test a
+  // time bomb — it started failing 30 days (the TTL) after NOW's date
+  // passed, once the "fresh" entry aged past the cutoff on the real clock.
+  const d = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  return `${d}-${name}.git`; // ~now on the real clock
 };
 
 describe("parseTrashTimestamp (AGT-423)", () => {
@@ -172,7 +176,10 @@ describe("trash-sweep worker tick (AGT-423)", () => {
     mkdirSync(trash);
     // OLD is 2020; with a 30d TTL it's well past the cutoff (uses real now).
     mkdirSync(path.join(trash, OLD));
-    mkdirSync(path.join(trash, fresh())); // ~now → kept
+    // Capture the name once — fresh() derives it from the real clock, so
+    // two calls straddling a second boundary would name different entries.
+    const freshEntry = fresh();
+    mkdirSync(path.join(trash, freshEntry)); // ~now → kept
     process.env["STAMP_TRASH_DIR"] = trash;
     process.env["STAMP_TRASH_TTL_DAYS"] = "30";
 
@@ -180,7 +187,7 @@ describe("trash-sweep worker tick (AGT-423)", () => {
 
     assert.equal(__getTrashSweepTickCountForTests(), 1);
     assert.equal(existsSync(path.join(trash, OLD)), false);
-    assert.equal(existsSync(path.join(trash, fresh())), true);
+    assert.equal(existsSync(path.join(trash, freshEntry)), true);
   });
 });
 

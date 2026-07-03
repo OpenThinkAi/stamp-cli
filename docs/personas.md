@@ -65,10 +65,15 @@ Equally important. Without this, every reviewer drifts into every other reviewer
 
 - Code style, idiom, clean-code concerns → **standards** reviewer.
 - UX, keyboard handling, visual design → **product** reviewer.
-- Anything in `.stamp/` (reviewer prompts, stamp config) — tool meta.
+
+`.stamp/` changes ARE in scope: Read each modified `.stamp/*` file
+before your verdict — you are reviewing stamp's own trust anchors
+(reviewer prompts, config, trusted keys), not tool meta.
 ```
 
 When a reviewer spots something outside its lane, it can still mention it in one line ("worth flagging for X reviewer"), but it shouldn't base its verdict on it.
+
+One caution learned the hard way (issue #52): do **not** exclude `.stamp/` from a reviewer that runs with `enforce_reads_on_dotstamp: true` (the scaffolded security reviewer's default). That flag voids any approval whose tool trace lacks a `Read` of every modified `.stamp/*` path — a persona that declares `.stamp/` out of scope steers the model away from ever Reading those files, and the gate becomes unpassable on `.stamp`-touching diffs. The harness now injects an up-front Read directive that supersedes persona scope exclusions when this situation arises, but keep persona scope and enforcement config consistent anyway.
 
 ### 4. Verdict criteria
 
