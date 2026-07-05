@@ -1,8 +1,9 @@
 /**
  * PR-check-mode attestation: the artifact the `stamp/verify-attestation@v1`
- * GitHub Action consumes (server-side production lands separately under
- * AGT-355; in 1.x, `stamp attest` produces v2 envelopes that this verifier
- * now refuses — see the version-history block below). Lives in a git ref
+ * GitHub Action consumes. Produced by `stamp attest` (`buildV3Envelope`
+ * in `src/commands/attest.ts`, AGT-355): v3 when the branch rule declares
+ * a `review_server`, else the legacy v2 shape that this verifier refuses
+ * — see the version-history block below. Lives in a git ref
  * under `refs/stamp/attestations/<patch-id>` so it survives squash, rebase,
  * and merge-commit on the GitHub side.
  *
@@ -101,29 +102,30 @@ import type {
 import type { MigrationBootstrapMarker } from "./migrationBootstrap.js";
 
 /**
- * Current PR attestation schema version produced by 2.x server-side
- * (AGT-355, not landed yet at AGT-338). The verifier (this module +
- * `verifyPr.ts`) ships at this version *first* so that when AGT-355's
- * producer lands, no client-version skew exists. 1.x `stamp attest` keeps
- * emitting v2 — that production path is the operator-facing producer for
- * existing 1.x installs and remains unchanged. The verifier rejects v2
- * with the actionable error from MIN_ACCEPTED_PR_ATTESTATION_VERSION.
+ * Current PR attestation schema version. Produced by `stamp attest`
+ * (`buildV3Envelope` in `src/commands/attest.ts`, AGT-355) when the
+ * branch rule declares a `review_server` and the local DB holds
+ * server-signed approvals for every required reviewer. Historical note:
+ * the verifier (this module + `verifyPr.ts`) shipped at this version
+ * *first* (AGT-338) so that when AGT-355's producer landed, no
+ * client-version skew existed. The verifier rejects v2 with the
+ * actionable error from MIN_ACCEPTED_PR_ATTESTATION_VERSION.
  */
 export const PR_ATTESTATION_SCHEMA_VERSION = 3;
 
 /**
- * Schema version `stamp attest` (the 1.x client-side producer) emits.
- * Deliberately frozen at 2 — the 2.x v3 envelope can ONLY be produced by
- * stamp-server (AGT-355, not landed yet) because the v4-trust fields it
- * carries require server-signed per-approval bodies that the local CLI
- * can't fabricate without already being the trust root. Operators that
- * want the new envelope shape need an upgraded stamp-server, and 1.x
- * `stamp attest` keeps producing v2 envelopes that the current verifier
- * rejects with a "schema_version too old" actionable error. The constant
- * sits here (next to `PR_ATTESTATION_SCHEMA_VERSION`) so the divergence
- * between "what the local producer emits" and "what the verifier
- * accepts" is named and grep-able rather than left as a magic `2`
- * literal in `attest.ts`.
+ * Schema version `stamp attest` emits on its legacy fallback path —
+ * when the branch rule declares no `review_server`. Deliberately frozen
+ * at 2. The v3 envelope is built client-side by `stamp attest` too, but
+ * its per-approval bodies must be server-signed (`ApprovalEntryV4`) —
+ * signatures the local CLI can't fabricate without already being the
+ * trust root — so v3 production requires a configured stamp-server.
+ * Without one, `stamp attest` produces v2 envelopes that the current
+ * verifier rejects with a "schema_version too old" actionable error.
+ * The constant sits here (next to `PR_ATTESTATION_SCHEMA_VERSION`) so
+ * the divergence between "what the fallback producer emits" and "what
+ * the verifier accepts" is named and grep-able rather than left as a
+ * magic `2` literal in `attest.ts`.
  */
 export const LEGACY_CLIENT_PR_ATTESTATION_SCHEMA_VERSION = 2;
 
