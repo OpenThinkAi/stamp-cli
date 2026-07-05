@@ -26,9 +26,11 @@
  * beyond "use canonicalSerializeApproval / canonicalSerializePayload".
  *
  * Scope notes:
- * - PR-check mode (`prAttestation.ts`, `PR_ATTESTATION_SCHEMA_VERSION = 2`)
- *   is OUT OF SCOPE here. That envelope continues on its own version
- *   axis; it'll get its own server-attested update separately.
+ * - PR-check mode (`prAttestation.ts`, `PR_ATTESTATION_SCHEMA_VERSION = 3`)
+ *   is a different wire format on its own version axis. Its
+ *   server-attested update landed with AGT-338/AGT-355: the v3
+ *   PR-envelope reuses this module's per-approval + trust-anchor types
+ *   so both verifiers share the same `verifyV4*` phase functions.
  * - This file ships only the type contract + canonical serializer +
  *   bounded envelope parser. Wire integration (`stamp merge` folding
  *   server signatures into v4, the pre-receive hook verifying v4) lands
