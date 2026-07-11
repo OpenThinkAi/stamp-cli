@@ -5,6 +5,18 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.2.1 — 2026-07-11
+
+### Changed
+
+- **`stamp init` now scaffolds the verify workflow against the 3.2.0
+  action.** `VERIFY_ACTION_REF` moved from the v1.6.1 commit to
+  `795271be` (the 3.2.0 release: rich check output, collapsed setup-log
+  groups, 1.11.0 default verifier), so newly-provisioned repos get the
+  current action instead of a 2026-05-era pin.
+
+---
+
 ## 3.2.0 — 2026-07-10
 
 ### Added
