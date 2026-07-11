@@ -9,6 +9,12 @@ import {
   stampStateDbPath,
 } from "../lib/paths.js";
 import { classifyRemote } from "../lib/remote.js";
+import { patchIdForSpan } from "../lib/patchId.js";
+import {
+  attestationRefName,
+  readAttestationBlobBytes,
+} from "../lib/prAttestation.js";
+import { hasVerifyWorkflow } from "../lib/verifyWorkflow.js";
 
 export interface StatusOptions {
   diff: string;
@@ -82,6 +88,36 @@ export function runStatus(opts: StatusOptions): void {
   }
 
   printGate(result, resolved.base_sha, resolved.head_sha);
+
+  // AGT-696 / issue #57: in attested-pr mode an OPEN gate is only half
+  // the picture — the PR's stamp/verify-attestation check also needs a
+  // minted `refs/stamp/attestations/<patch-id>` for THIS span. After a
+  // re-review over a new span (base advanced) the gate can read OPEN
+  // from the verdict cache while no attestation exists for the new
+  // patch-id, so the PR check fails with "no attestation found". Warn
+  // explicitly and name the recovery command (`stamp review` now
+  // auto-mints, but a hand-driven status still surfaces the gap).
+  if (result.gateOpen && hasVerifyWorkflow(repoRoot)) {
+    try {
+      const patchId = patchIdForSpan(
+        resolved.base_sha,
+        resolved.head_sha,
+        repoRoot,
+      );
+      if (readAttestationBlobBytes(patchId, repoRoot) === null) {
+        console.warn(
+          `\nwarning: gate is OPEN but no attestation exists at ` +
+            `${attestationRefName(patchId)} for this span. The ` +
+            `stamp/verify-attestation PR check will fail with "no ` +
+            `attestation found" until it is minted.\n` +
+            `  Mint it with: stamp attest --into ${result.target}`,
+        );
+      }
+    } catch {
+      // Patch-id computation is best-effort; never turn a clean status
+      // into an error over an advisory warning.
+    }
+  }
 
   if (!result.gateOpen) {
     process.exit(1);

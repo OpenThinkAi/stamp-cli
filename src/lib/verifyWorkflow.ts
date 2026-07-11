@@ -55,6 +55,25 @@ export const VERIFY_ACTION_REF =
  *  SHA themselves. Update in lockstep with `VERIFY_ACTION_REF`. */
 export const VERIFY_ACTION_VERSION = "v3.2.0";
 
+/** Path of the PR-check workflow, relative to the repo root. Single
+ *  source of truth shared by the writer, the presence check, and the
+ *  review auto-mint gate (AGT-696). */
+export const VERIFY_WORKFLOW_PATH = ".github/workflows/stamp-verify.yml";
+
+/**
+ * True when this repo carries the `stamp/verify-attestation` PR-check
+ * workflow — the signal that a GitHub Action will look up
+ * `refs/stamp/attestations/<patch-id>` on every PR (attested-pr mode,
+ * and local-only setups that opted the check in). Used by `stamp
+ * review` / `stamp status` (AGT-696) to decide whether an open gate is
+ * expected to have a minted attestation ref. Server-gated repos don't
+ * get the workflow (the receive hook enforces instead), so this stays
+ * false there and the auto-mint / warning paths correctly no-op.
+ */
+export function hasVerifyWorkflow(repoRoot: string): boolean {
+  return existsSync(join(repoRoot, VERIFY_WORKFLOW_PATH));
+}
+
 /**
  * Drop the `.github/workflows/stamp-verify.yml` workflow file when
  * appropriate for the resolved deployment mode. Returns a small
@@ -67,7 +86,7 @@ export function maybeWriteVerifyWorkflow(
   effectiveMode: AgentsMdMode,
   actionSource: string = DEFAULT_ACTION_SOURCE,
 ): { action: "wrote" | "exists" | "skipped"; path: string } {
-  const path = ".github/workflows/stamp-verify.yml";
+  const path = VERIFY_WORKFLOW_PATH;
   const fullPath = join(repoRoot, path);
 
   // Mode-aware default: forge-direct + local-only get the workflow;
