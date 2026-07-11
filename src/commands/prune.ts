@@ -2,6 +2,7 @@ import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  bumpVerdictCacheWatermark,
   countProseToExpire,
   expireProse,
   openDb,
@@ -28,6 +29,19 @@ export interface PruneOptions {
  *    file actually shrinks. The `issues` column (verbatim reviewer prose)
  *    is kept intact for surviving rows — `stamp reviewers show` and
  *    `stamp log --reviews` still depend on it.
+ *
+ *    AGT-697 (issue #58): whenever this pass deletes at least one review
+ *    row it ALSO advances the verdict-cache invalidation watermark (see
+ *    `bumpVerdictCacheWatermark`). The verdict cache lives in the same
+ *    `reviews` table, so the age-based DELETE already evicts the rows it
+ *    removes — but a within-retention copy of a stale round survives the
+ *    cutoff and would keep replaying from cache, making the prune invisible
+ *    in the very workflow (clear a stale ratcheted finding) where you'd
+ *    reach for it. The watermark bump makes every pre-prune cache row
+ *    ineligible without deleting it, so the next `stamp review` runs fresh
+ *    while `stamp log` keeps the full history. A no-op prune (nothing older
+ *    than the cutoff) does NOT bump the watermark, so routine retention runs
+ *    that delete nothing leave the cache untouched.
  *
  * 2. Walk `<gitCommonDir>/stamp/failed-parses/` and `failed-runs/` and
  *    unlink files whose `mtime` is older than now − duration. v4 audit
@@ -88,6 +102,11 @@ export function runPrune(opts: PruneOptions): void {
             `would prune ${peek.total} review row${peek.total === 1 ? "" : "s"} older than ${humanLabel} (${peek.perReviewer.length} reviewer${peek.perReviewer.length === 1 ? "" : "s"} affected):`,
           );
           printPerReviewer(peek.perReviewer);
+          // AGT-697: mirror the live path's watermark bump in the preview so
+          // --dry-run accurately advertises the cache-invalidation side effect.
+          console.log(
+            "  would also invalidate the verdict cache (post-prune `stamp review` runs fresh)",
+          );
           any = true;
         }
       }
@@ -142,6 +161,14 @@ export function runPrune(opts: PruneOptions): void {
             `${result.total} review row${result.total === 1 ? "" : "s"} pruned (${result.perReviewer.length} reviewer${result.perReviewer.length === 1 ? "" : "s"} affected); db size ${sizeBefore} → ${sizeAfter} bytes`,
           );
           printPerReviewer(result.perReviewer);
+          // AGT-697 (issue #58): bump the verdict-cache watermark so a stale
+          // round that has a within-retention copy can't keep serving from
+          // cache after the prune. Surviving rows stay put for `stamp log`;
+          // only their eligibility as a `stamp review` cache hit is revoked.
+          bumpVerdictCacheWatermark(db);
+          console.log(
+            "verdict cache invalidated: the next `stamp review` over any diff will run fresh (surviving rows kept for `stamp log`)",
+          );
         }
         if (prosed > 0) {
           console.log(

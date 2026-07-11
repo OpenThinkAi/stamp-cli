@@ -238,6 +238,66 @@ function initSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_reviews_cache
       ON reviews(reviewer, diff_hash, prompt_hash, created_at)
   `);
+
+  // AGT-697 (issue #58): a tiny key/value side table for repo-scoped control
+  // state that doesn't belong on a review row. Its first (and currently only)
+  // key is `verdict_cache_invalidated_before` — a watermark `stamp prune`
+  // bumps so a post-prune `stamp review` runs fresh instead of replaying a
+  // stale verdict from a surviving cache row (see `findCachedVerdict` +
+  // `bumpVerdictCacheWatermark`). Additive and repeat-safe: an old binary
+  // that predates this table simply never reads it.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+}
+
+/** Meta key holding the verdict-cache invalidation watermark (AGT-697). */
+const VERDICT_CACHE_WATERMARK_KEY = "verdict_cache_invalidated_before";
+
+/**
+ * Read the verdict-cache invalidation watermark, or null if never set.
+ *
+ * The watermark is an ISO datetime string (SQLite `datetime('now')` format).
+ * When present, `findCachedVerdict` treats any review row created at or before
+ * it as cache-ineligible — the row still exists for `stamp log` / audit, but
+ * it can no longer short-circuit a fresh `stamp review`. See AGT-697.
+ */
+export function getVerdictCacheWatermark(db: DatabaseSync): string | null {
+  const row = db
+    .prepare("SELECT value FROM meta WHERE key = ?")
+    .get(VERDICT_CACHE_WATERMARK_KEY) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+/**
+ * Advance the verdict-cache invalidation watermark to `now` (AGT-697).
+ *
+ * Called by `stamp prune` after it deletes review rows: pruning history is
+ * the operator's signal that stale rounds should stop resurfacing, but a
+ * within-retention copy of a stale verdict survives the age-based DELETE and
+ * would keep serving from cache (issue #58's exact repro). Bumping the
+ * watermark makes every pre-prune cache row ineligible without deleting it,
+ * so the next `stamp review` over any diff runs fresh — while `stamp log`
+ * and the audit trail keep every surviving row. The cache re-warms naturally
+ * from the fresh post-prune reviews, so the anti-treadmill property is intact
+ * going forward.
+ *
+ * Uses SQLite's own `datetime('now')` (not JS `Date.now()`) so the watermark
+ * shares a clock and format with the `created_at` strings it is compared
+ * against — no wall-clock fencepost between the two. Returns the value written.
+ */
+export function bumpVerdictCacheWatermark(db: DatabaseSync): string {
+  const row = db
+    .prepare(
+      `INSERT INTO meta (key, value) VALUES (?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = datetime('now')
+       RETURNING value`,
+    )
+    .get(VERDICT_CACHE_WATERMARK_KEY) as { value: string };
+  return row.value;
 }
 
 export function recordReview(
@@ -376,6 +436,14 @@ export interface CachedVerdict {
  * (diff, prompt, reviewer) tuple has already been evaluated. The point is
  * to break the treadmill where the model non-deterministically re-flips
  * verdicts on unchanged input.
+ *
+ * AGT-697 (issue #58): rows created at or before the verdict-cache
+ * invalidation watermark are excluded, so a `stamp prune` (which bumps the
+ * watermark) forces the next review over the same diff to run fresh even
+ * when a within-retention copy of the pruned round survived the age-based
+ * row DELETE. The watermark filter lives ONLY here — `stamp log`,
+ * `latestVerdicts`, and the audit/history readers deliberately ignore it and
+ * continue to see every surviving row.
  */
 export function findCachedVerdict(
   db: DatabaseSync,
@@ -383,14 +451,22 @@ export function findCachedVerdict(
   diff_hash: string,
   prompt_hash: string,
 ): CachedVerdict | null {
+  // `created_at > watermark` (strict) is intentional: a fresh review written
+  // in the same whole second as the prune shares the watermark's second-
+  // resolution string and is treated as pre-watermark, costing at most one
+  // extra fresh call in that same second — a benign over-invalidation that
+  // self-heals the next second. Erring toward "fresh" is the safe direction
+  // for the anti-stale-verdict guarantee this filter exists to provide.
+  const watermark = getVerdictCacheWatermark(db);
   const stmt = db.prepare(`
     SELECT verdict, issues, base_sha, head_sha, created_at
     FROM reviews
     WHERE reviewer = ? AND diff_hash = ? AND prompt_hash = ?
+      AND (? IS NULL OR created_at > ?)
     ORDER BY created_at DESC, id DESC
     LIMIT 1
   `);
-  const row = stmt.get(reviewer, diff_hash, prompt_hash) as
+  const row = stmt.get(reviewer, diff_hash, prompt_hash, watermark, watermark) as
     | CachedVerdict
     | undefined;
   return row ?? null;
