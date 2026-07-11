@@ -13,7 +13,13 @@ name: publish
 
 on:
   push:
-    branches: [main]
+    # `release/**` lets maintenance lines (e.g. release/1.11 for the 1.x
+    # verifier that pre-v3-envelope repos pin) publish without touching
+    # main. Same safety valve applies: the version-vs-registry check
+    # below no-ops any push whose package.json version already exists,
+    # and npm Trusted Publishing still scopes publishes to this repo +
+    # workflow file.
+    branches: [main, "release/**"]
 
 jobs:
   publish:

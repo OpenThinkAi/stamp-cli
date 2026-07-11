@@ -58,6 +58,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { findBranchRule, parseConfigFromYaml } from "../lib/config.js";
 import { resolveDiff, runGit, showAtRef } from "../lib/git.js";
@@ -102,6 +103,7 @@ import {
   type PhaseInputV4,
   type PathRule,
 } from "../lib/v4Trust.js";
+import { A, colorEnabled, mdCell, paint, table } from "../lib/renderCheck.js";
 
 export interface VerifyPrOptions {
   /** Head ref (commit SHA, branch name, or any rev-parse-able value). */
@@ -999,29 +1001,110 @@ interface SuccessSummary {
 }
 
 function printSuccess(s: SuccessSummary): void {
-  const bar = "─".repeat(72);
-  console.log(bar);
-  console.log(
-    `target: ${s.target_branch}   base: ${s.base_sha.slice(0, 8)} → head: ${s.head_sha.slice(0, 8)}`,
-  );
-  console.log(bar);
-  console.log(`  patch-id:        ${s.patch_id}`);
-  console.log(
-    `  schema:          v${s.schema_version}${s.bootstrap ? " (Shape 4 migration bootstrap)" : " (v4-trust)"}`,
-  );
-  console.log(`  signer:          ${s.signer_key_id}`);
-  console.log(`  base mode:       ${s.strict_base ? "strict" : "loose"}`);
+  // Two surfaces, two renderings (same split as hal9k's trailer-check):
+  //   - stdout = the CI step LOG, which renders box-drawing + ANSI but
+  //     not markdown → badge banner + tables.
+  //   - GITHUB_STEP_SUMMARY = the run's Summary tab, which renders
+  //     markdown → alert blockquote + pipe table.
+  const color = colorEnabled();
+  const p = paint(color);
+  const maxWidth = Math.min(process.stdout.columns ?? 100, 100);
+  const schemaLabel = s.bootstrap
+    ? `v${s.schema_version} (Shape 4 migration bootstrap)`
+    : `v${s.schema_version} (v4-trust)`;
+  const nApproved = s.approvals.filter((a) => a.verdict === "approved").length;
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const banner = s.bootstrap
+    ? `admin-signed bootstrap, attestation valid, target ${s.target_branch}`
+    : `${plural(nApproved, "reviewer")} approved, attestation valid, target ${s.target_branch}`;
+
+  const out: string[] = [" " + p("stamp attestation check", A.bold)];
+  out.push("");
+  out.push(" " + p(" VERIFIED ", A.bold, A.black, A.bgGreen) + "  " + banner);
+  out.push("");
+
+  const rows: string[][] = [
+    [p("diff", A.gray), `${s.base_sha.slice(0, 8)} → ${s.head_sha.slice(0, 8)}`],
+    [p("patch-id", A.gray), s.patch_id],
+    [p("schema", A.gray), schemaLabel],
+    [p("signer", A.gray), s.signer_key_id],
+    [p("base mode", A.gray), s.strict_base ? "strict" : "loose"],
+  ];
   if (s.bootstrap && s.activated_paths) {
-    console.log(`  activated:       ${s.activated_paths.join(", ")}`);
+    rows.push([p("activated", A.gray), s.activated_paths.join(", ")]);
   } else {
     for (const a of s.approvals) {
-      const mark = a.verdict === "approved" ? "✓" : "✗";
-      console.log(`  ${mark}  ${a.reviewer.padEnd(16)} ${a.verdict}`);
+      const ok = a.verdict === "approved";
+      rows.push([
+        p(a.reviewer, A.gray),
+        `${p(ok ? "✓" : "✗", ok ? A.green : A.red)} ${a.verdict}`,
+      ]);
     }
   }
-  console.log(bar);
-  console.log("result: VERIFIED");
-  console.log(bar);
+  out.push(
+    table([{ header: "check" }, { header: "result", flex: true }], rows, {
+      color,
+      maxWidth,
+      indent: " ",
+    }),
+  );
+  out.push("");
+  // Keep the bare `result:` line — it's the greppable contract older
+  // scripts (and the pre-3.2 output format) key on.
+  out.push(" result: VERIFIED");
+  console.log(out.join("\n"));
+
+  writeStepSummary(successMarkdown(s, schemaLabel, banner));
+}
+
+/** Markdown twin of printSuccess for the Actions Summary tab. */
+function successMarkdown(
+  s: SuccessSummary,
+  schemaLabel: string,
+  banner: string,
+): string {
+  const out: string[] = [
+    "### stamp attestation check",
+    "",
+    "> [!TIP]",
+    `> **Verified** — ${banner}.`,
+    "",
+    "| check | result |",
+    "| :-- | :-- |",
+    `| 🎯 target | \`${mdCell(s.target_branch)}\` |`,
+    `| 🔀 diff | \`${s.base_sha.slice(0, 8)} → ${s.head_sha.slice(0, 8)}\` |`,
+    `| 🧩 patch-id | \`${mdCell(s.patch_id)}\` |`,
+    `| 📦 schema | ${mdCell(schemaLabel)} |`,
+    `| 🔑 signer | \`${mdCell(s.signer_key_id)}\` |`,
+    `| ⚓ base mode | ${s.strict_base ? "strict" : "loose"} |`,
+  ];
+  if (s.bootstrap && s.activated_paths) {
+    out.push(
+      `| 🚧 activated | ${s.activated_paths.map((a) => `\`${mdCell(a)}\``).join(", ")} |`,
+    );
+  } else {
+    for (const a of s.approvals) {
+      out.push(
+        `| ${mdCell(a.reviewer)} | ${a.verdict === "approved" ? "✅" : "❌"} ${mdCell(a.verdict)} |`,
+      );
+    }
+  }
+  return out.join("\n");
+}
+
+/**
+ * Append markdown to the GitHub Actions Summary tab when running in CI.
+ * Outside Actions (local debugging) GITHUB_STEP_SUMMARY is unset → no-op.
+ * Best-effort: a summary-write failure must never flip the check result.
+ */
+function writeStepSummary(markdown: string): void {
+  const target = process.env.GITHUB_STEP_SUMMARY;
+  if (!target) return;
+  try {
+    appendFileSync(target, markdown + "\n");
+  } catch {
+    /* the exit code is the contract; the summary is decoration */
+  }
 }
 
 /**
@@ -1037,13 +1120,49 @@ function fail(
   base_sha: string,
   head_sha: string,
 ): never {
-  const bar = "─".repeat(72);
-  console.error(bar);
-  console.error(`base: ${base_sha.slice(0, 8)} → head: ${head_sha.slice(0, 8)}`);
-  console.error(`patch-id: ${patch_id}`);
-  console.error(bar);
-  console.error(`error: ${reason}`);
-  console.error("result: FAILED");
-  console.error(bar);
+  const color = colorEnabled();
+  const p = paint(color);
+  const maxWidth = Math.min(process.stdout.columns ?? 100, 100);
+
+  const out: string[] = [" " + p("stamp attestation check", A.bold)];
+  out.push("");
+  out.push(
+    " " + p(" FAILED ", A.bold, A.bgRed) + "  attestation did not verify",
+  );
+  out.push("");
+  out.push(
+    table(
+      [{ header: "context" }, { header: "value", flex: true }],
+      [
+        [p("diff", A.gray), `${base_sha.slice(0, 8)} → ${head_sha.slice(0, 8)}`],
+        [p("patch-id", A.gray), patch_id],
+      ],
+      { color, maxWidth, indent: " " },
+    ),
+  );
+  out.push("");
+  // The `error:` line stays verbatim + unwrapped: it's the greppable
+  // contract (agents match `^error:` / reason substrings on stderr).
+  out.push(`error: ${reason}`);
+  out.push("result: FAILED");
+  console.error(out.join("\n"));
+
+  writeStepSummary(
+    [
+      "### stamp attestation check",
+      "",
+      "> [!CAUTION]",
+      "> **Verification failed** — the attestation did not verify for this PR.",
+      "",
+      "| context | value |",
+      "| :-- | :-- |",
+      `| 🔀 diff | \`${base_sha.slice(0, 8)} → ${head_sha.slice(0, 8)}\` |`,
+      `| 🧩 patch-id | \`${mdCell(patch_id)}\` |`,
+      "",
+      "```",
+      reason,
+      "```",
+    ].join("\n"),
+  );
   process.exit(1);
 }
