@@ -13,7 +13,12 @@ name: publish
 
 on:
   push:
-    branches: [main]
+    # `release/1.x` is the maintenance line for the 1.x verifier that
+    # pre-v3-envelope repos pin. Listed literally (not a wildcard) so
+    # the publish surface is exactly two branches; it must carry the
+    # same push protection as main (branch ruleset mirroring
+    # Main_ProtectForStamp) before any new branch is added here.
+    branches: [main, "release/1.x"]
 
 jobs:
   publish:
