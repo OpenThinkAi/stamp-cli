@@ -307,6 +307,47 @@ describe("AGT-696 review auto-mint (maybeMintPrAttestation)", () => {
     }
   });
 
+  it("treats empty required[] as vacuously open (parity with stamp status)", () => {
+    // An attested-pr repo with `required: []` still expects an
+    // attestation. The gate is vacuously OPEN — exactly what `stamp
+    // status` reports — so review must mint (with empty approvals),
+    // not silently skip while status warns.
+    const h = setupHarness();
+    try {
+      // Rewrite main's config to require no reviewers, then re-branch
+      // feature so the merge-base config carries `required: []`.
+      git(h.repo, ["checkout", "-q", "main"]);
+      writeFileSync(
+        path.join(h.repo, ".stamp", "config.yml"),
+        [
+          "branches:",
+          "  main:",
+          "    required: []",
+          "reviewers:",
+          "  security:",
+          "    prompt: .stamp/reviewers/security.md",
+          "    tools: []",
+          "",
+        ].join("\n"),
+      );
+      git(h.repo, ["add", "-A"]);
+      git(h.repo, ["commit", "-q", "-m", "main: drop required reviewers"]);
+      git(h.repo, ["checkout", "-q", "feature"]);
+      git(h.repo, ["rebase", "-q", "main"]);
+
+      const r = resolveDiff("main..feature", h.repo);
+      // No verdicts seeded at all — gate is open purely by vacuity.
+      fromRepo(h.repo, () => mint(h.repo));
+      assert.equal(
+        refExists(h.repo, r.base_sha, r.head_sha),
+        true,
+        "empty-required gate is open → ref minted",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it("warns (AC 2) when the gate is open but minting can't happen", () => {
     // review_server set but NO server-signed rows in the DB → the v3
     // producer throws; the hook must catch, warn, name the ref + the

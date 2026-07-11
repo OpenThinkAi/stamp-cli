@@ -922,19 +922,24 @@ export function maybeMintPrAttestation(args: {
   if (!targetBranch || !branchRule) return;
   if (!hasVerifyWorkflow(repoRoot)) return;
 
-  // Evaluate the gate exactly like `stamp status`: every required
-  // reviewer must have an `approved` latest verdict at this (base, head)
-  // pair. A closed gate needs no attestation — the operator's next move
-  // is to address findings, and status/review already report CLOSED.
+  // Evaluate the gate exactly like `stamp status` (runStatus): start
+  // OPEN and close on the first required reviewer whose latest verdict at
+  // this (base, head) pair isn't `approved`. An empty `required` list is
+  // therefore vacuously OPEN — the SAME verdict status reports, so the
+  // two paths never disagree (an attested-pr repo with `required: []` and
+  // a verify workflow expects an attestation, so review must mint one
+  // rather than let status warn about a ref review silently skipped). A
+  // closed gate needs no attestation — status/review already report
+  // CLOSED and the operator's next move is to address findings.
   let gateOpen: boolean;
   try {
     const db = openDb(stampStateDbPath(repoRoot));
     try {
       const verdicts = latestVerdicts(db, baseSha, headSha);
       const byReviewer = new Map(verdicts.map((v) => [v.reviewer, v.verdict]));
-      gateOpen =
-        branchRule.required.length > 0 &&
-        branchRule.required.every((r) => byReviewer.get(r) === "approved");
+      gateOpen = branchRule.required.every(
+        (r) => byReviewer.get(r) === "approved",
+      );
     } finally {
       db.close();
     }

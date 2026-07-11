@@ -232,7 +232,7 @@ export function runAttest(opts: AttestOptions): void {
     repoRoot,
     into: opts.into,
     branch: branchRef,
-    ...(opts.migrateExisting ? { migrateExisting: true } : {}),
+    migrateExisting: opts.migrateExisting,
   });
 
   const bar = "─".repeat(72);
