@@ -5,6 +5,33 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.2.0 — 2026-07-10
+
+### Added
+
+- **Rich CI check output for `stamp verify-pr`.** The verifier now renders
+  a badge banner (` VERIFIED ` / ` FAILED `) plus box-drawing check/result
+  tables with ANSI color in GitHub Actions step logs and TTYs (NO_COLOR
+  honored), and appends a markdown twin (alert blockquote + table) to
+  `GITHUB_STEP_SUMMARY` so the run's Summary tab shows the verdict at a
+  glance. The greppable contracts are unchanged: `result: VERIFIED` /
+  `result: FAILED` and the verbatim `error: <reason>` stderr line survive
+  restyling, and the exit code remains the only thing CI gates on.
+- **`publish.yml` now also fires on `release/**` branches**, so maintenance
+  lines (e.g. the 1.x verifier that pre-v3-envelope repos pin) can ship
+  patch releases without touching main. The existing version-vs-registry
+  check still no-ops any push whose version is already published.
+
+### Changed
+
+- **`stamp/verify-attestation` action: quieter logs, newer default.** The
+  npm-install and attestation-ref-fetch steps are wrapped in collapsed
+  `::group::` log sections, and the default `stamp-version` moved from
+  1.6.0 to 1.11.0 (same 1.x verifier line — accepts the v2 envelopes
+  local-key repos produce — plus the rich check output above).
+
+---
+
 ## 3.1.3 — 2026-05-26
 
 ### Fixed

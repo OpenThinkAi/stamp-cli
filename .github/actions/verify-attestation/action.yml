@@ -20,7 +20,7 @@ inputs:
       ::warning::-prefixed line in the Action log so operators see
       the floating-version state in their CI run.
     required: false
-    default: "1.6.0"
+    default: "1.11.0"
   node-version:
     description: Node.js version to install. stamp-cli requires >= 22.5.0.
     required: false
@@ -78,7 +78,11 @@ runs:
           # choice in CI logs so operators see it.
           echo "::warning::stamp/verify-attestation is installing stamp@latest. Pin stamp-version in production."
         fi
+        # Collapsed log group: npm's install chatter is setup noise —
+        # the verification verdict below is what operators read.
+        echo "::group::npm install -g @openthink/stamp@${STAMP_VERSION}"
         npm install -g "@openthink/stamp@${STAMP_VERSION}"
+        echo "::endgroup::"
 
     - name: Fetch attestation refs
       shell: bash
@@ -102,7 +106,11 @@ runs:
         # those refs, severs the ancestry, and breaks merge-base. The
         # symptom was a confusing "git merge-base failed" exit from
         # the verifier even though both commits were present locally.
+        # Collapsed log group: the per-ref fetch lines are setup noise
+        # (one line per attestation ref in the repo's history).
+        echo "::group::git fetch refs/stamp/attestations/*"
         git fetch origin "+refs/stamp/attestations/*:refs/stamp/attestations/*"
+        echo "::endgroup::"
 
     - name: Verify attestation
       shell: bash

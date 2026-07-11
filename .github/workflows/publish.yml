@@ -13,7 +13,17 @@ name: publish
 
 on:
   push:
-    branches: [main]
+    # `release/1.x` is the single maintenance line for the 1.x verifier
+    # that pre-v3-envelope repos pin; listing it literally (not a
+    # wildcard) keeps the publish surface to exactly two branches.
+    # SECURITY: any branch listed here can mint an npm release, so it
+    # must carry the same push protection as main — a branch ruleset
+    # covering refs/heads/release/** with creation/update/deletion/
+    # non-fast-forward rules and admin+deploy-key bypass (mirroring
+    # Main_ProtectForStamp). Add the ruleset BEFORE adding a new line
+    # here. The version-vs-registry check below additionally no-ops any
+    # push whose package.json version is already published.
+    branches: [main, "release/1.x"]
 
 jobs:
   publish:
