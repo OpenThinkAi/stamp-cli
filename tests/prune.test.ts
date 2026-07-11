@@ -34,10 +34,14 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { runPrune } from "../src/commands/prune.ts";
 import {
+  bumpVerdictCacheWatermark,
+  findCachedVerdict,
+  getVerdictCacheWatermark,
   openDb,
   peekPrunable,
   pruneReviews,
   recentReviewsByReviewer,
+  recordReview,
 } from "../src/lib/db.ts";
 import { parseRetentionDuration } from "../src/lib/duration.ts";
 import { stampStateDbPath } from "../src/lib/paths.ts";
@@ -528,6 +532,196 @@ describe("pruneReviews / runPrune (AGT-044)", () => {
     assert.match(stdout, /1 review row pruned/);
     assert.match(stdout, /1 failed-parse spool file pruned/);
     assert.ok(!existsSync(oldSpool));
+  });
+});
+
+// ---- AGT-697 (issue #58): prune invalidates the verdict cache ----
+
+describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
+  let tmp: string;
+  let repo: string;
+  let dbPath: string;
+  let prevCwd: string;
+
+  const REVIEWER = "security";
+  const DIFF_HASH = "d".repeat(64);
+  const PROMPT_HASH = "p".repeat(64);
+
+  beforeEach(() => {
+    prevCwd = process.cwd();
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), "stamp-prune-cache-")));
+    repo = join(tmp, "repo");
+    mkdirSync(repo);
+    git(["init", "-q", "-b", "main", repo], tmp);
+    git(["config", "user.email", "t@example.com"], repo);
+    git(["config", "user.name", "Test"], repo);
+    git(["commit", "--allow-empty", "-q", "-m", "init"], repo);
+    dbPath = stampStateDbPath(repo);
+  });
+
+  afterEach(() => {
+    process.chdir(prevCwd);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  /**
+   * Insert a cacheable review row (diff_hash + prompt_hash set) with a
+   * `changes_requested` verdict, then backdate `created_at` via the SQLite
+   * modifier so the age-based prune cutoff is wall-clock-independent.
+   */
+  function seedStaleVerdict(headTag: string, ageModifier: string): void {
+    const db = openDb(dbPath);
+    try {
+      const id = recordReview(db, {
+        reviewer: REVIEWER,
+        base_sha: "b".repeat(40),
+        head_sha: headTag.padEnd(40, "0"),
+        verdict: "changes_requested",
+        issues: "stale ratcheted finding",
+        diff_hash: DIFF_HASH,
+        prompt_hash: PROMPT_HASH,
+      });
+      db.exec(
+        `UPDATE reviews SET created_at = datetime('now', '${ageModifier}') WHERE id = ${id}`,
+      );
+    } finally {
+      db.close();
+    }
+  }
+
+  it("findCachedVerdict skips rows at/before the watermark, keeps newer rows", () => {
+    seedStaleVerdict("h-old", "-1 hours");
+    const db = openDb(dbPath);
+    try {
+      // Pre-watermark: the stale verdict is a live cache hit.
+      assert.equal(
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH)?.verdict,
+        "changes_requested",
+      );
+      // Bump the watermark to now → the -1h row is now cache-ineligible.
+      bumpVerdictCacheWatermark(db);
+      assert.equal(
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH),
+        null,
+        "row created before the watermark must not serve from cache",
+      );
+      // A fresh row written after the watermark re-warms the cache.
+      const freshId = recordReview(db, {
+        reviewer: REVIEWER,
+        base_sha: "b".repeat(40),
+        head_sha: "h-fresh".padEnd(40, "0"),
+        verdict: "approved",
+        diff_hash: DIFF_HASH,
+        prompt_hash: PROMPT_HASH,
+      });
+      db.exec(
+        `UPDATE reviews SET created_at = datetime('now','+5 seconds') WHERE id = ${freshId}`,
+      );
+      assert.equal(
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH)?.verdict,
+        "approved",
+        "a post-watermark review must be cacheable again",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("runPrune bumps the watermark so a within-cutoff stale row no longer cache-hits (the #58 repro)", () => {
+    // The live bug: an OLD prunable copy + a RECENT (within-cutoff) copy of
+    // the same unchanged-diff verdict. The age-based DELETE removes only the
+    // old one; without the watermark the recent copy keeps serving stale.
+    seedStaleVerdict("h-old", "-2 days");
+    seedStaleVerdict("h-recent", "-1 hours");
+    process.chdir(repo);
+
+    // Sanity: cache is warm with the stale verdict before pruning.
+    let db = openDb(dbPath);
+    try {
+      assert.equal(
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH)?.verdict,
+        "changes_requested",
+      );
+    } finally {
+      db.close();
+    }
+
+    const stdout = captureStdout(() => runPrune({ olderThan: "12h" }));
+    assert.match(stdout, /1 review row pruned/);
+    assert.match(stdout, /verdict cache invalidated/);
+
+    db = openDb(dbPath);
+    try {
+      // AC #1 / #3: the re-review cache lookup now MISSES → fresh review.
+      assert.equal(
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH),
+        null,
+        "post-prune cache lookup must miss so the review runs fresh",
+      );
+      // The within-cutoff row is preserved for `stamp log` / audit — only
+      // its cache eligibility was revoked, not the row itself.
+      assert.equal(
+        recentReviewsByReviewer(db, REVIEWER, 10).length,
+        1,
+        "the recent row survives for audit; only the >12h row was deleted",
+      );
+      assert.ok(getVerdictCacheWatermark(db), "watermark must be set");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("a no-op prune (nothing older than cutoff) does NOT bump the watermark", () => {
+    seedStaleVerdict("h-recent", "-1 hours"); // within a 12h cutoff → not pruned
+    process.chdir(repo);
+
+    const stdout = captureStdout(() => runPrune({ olderThan: "12h" }));
+    assert.match(stdout, /nothing to prune/);
+    assert.doesNotMatch(stdout, /verdict cache invalidated/);
+
+    const db = openDb(dbPath);
+    try {
+      assert.equal(
+        getVerdictCacheWatermark(db),
+        null,
+        "a prune that deletes no rows must leave the cache untouched",
+      );
+      // And the recent verdict still cache-hits (cache genuinely untouched).
+      assert.equal(
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH)?.verdict,
+        "changes_requested",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("--dry-run previews the cache invalidation and does NOT bump the watermark", () => {
+    seedStaleVerdict("h-old", "-2 days");
+    process.chdir(repo);
+
+    const stdout = captureStdout(() =>
+      runPrune({ olderThan: "12h", dryRun: true }),
+    );
+    assert.match(stdout, /would prune 1 review row/);
+    assert.match(stdout, /would also invalidate the verdict cache/);
+    assert.match(stdout, /\(dry run — no changes made\)/);
+
+    const db = openDb(dbPath);
+    try {
+      assert.equal(
+        getVerdictCacheWatermark(db),
+        null,
+        "dry-run must not mutate the watermark",
+      );
+      // Row untouched and still a cache hit (dry-run changed nothing).
+      assert.equal(
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH)?.verdict,
+        "changes_requested",
+      );
+    } finally {
+      db.close();
+    }
   });
 });
 
