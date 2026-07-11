@@ -3,11 +3,20 @@ import { existsSync } from "node:fs";
 import { findBranchRule, parseConfigFromYaml, type StampConfig } from "../lib/config.js";
 import {
   findCachedVerdict,
+  latestVerdicts,
   openDb,
   priorReviewByReviewer,
   recordReview,
   type CachedVerdict,
 } from "../lib/db.js";
+import { patchIdForSpan } from "../lib/patchId.js";
+import {
+  attestationRefName,
+  readAttestationBlobBytes,
+} from "../lib/prAttestation.js";
+import { hasVerifyWorkflow } from "../lib/verifyWorkflow.js";
+import { mintAttestation } from "./attest.js";
+import type { BranchRule } from "../lib/config.js";
 import {
   deltaDiff,
   isAncestor,
@@ -857,6 +866,135 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     // config.retention being present — no-ops when the field is absent.
     printRetentionAdvisory(db, repoRoot, config.retention);
     db.close();
+  }
+
+  // AGT-696 / issue #57: in attested-pr mode, mint (or re-mint) the
+  // PR-attestation ref the moment the gate opens. Runs AFTER the DB is
+  // closed above (mintAttestation opens its own connection) and only on
+  // the trusted-mode path — --plan and --headless returned long before
+  // here and explicitly produce no attestation. Non-fatal by contract:
+  // it never changes runReview's exit code; a mint failure downgrades to
+  // the AC-2 warning so a green review never turns red on this step.
+  maybeMintPrAttestation({
+    repoRoot,
+    diff: opts.diff,
+    targetBranch,
+    branchRule,
+    baseSha: resolved.base_sha,
+    headSha: resolved.head_sha,
+  });
+}
+
+/**
+ * AGT-696: after a `stamp review` reaches an open gate in attested-pr
+ * mode, ensure `refs/stamp/attestations/<patch-id>` exists for the
+ * EXACT reviewed span. The bug (issue #57): re-reviewing over a new
+ * span — e.g. local `main` was stale and the operator advanced it, so
+ * the cumulative diff (and therefore the patch-id) changed — reopened
+ * the gate via the verdict cache/ratchet but left NO attestation for
+ * the new patch-id, so the PR's `stamp/verify-attestation` check failed
+ * with "no attestation found" until a manual `stamp attest`.
+ *
+ * Fix: mint here automatically. Signing is fully local (the operator's
+ * own key), so no interactive step is required. If minting can't happen
+ * on some path (server-attested v3 lacking signed rows, an admin-sig
+ * shortage on a `path_rules` diff, a missing key, etc.) we fall back to
+ * an explicit `warning:` that names the missing ref and the recovery
+ * command — AC 2. Every branch is best-effort and swallows its own
+ * errors: a failure to attest must never fail the review it followed.
+ */
+export function maybeMintPrAttestation(args: {
+  repoRoot: string;
+  diff: string;
+  targetBranch: string | null;
+  branchRule: BranchRule | undefined;
+  baseSha: string;
+  headSha: string;
+}): void {
+  const { repoRoot, targetBranch, branchRule, baseSha, headSha } = args;
+
+  // Only attested-pr / PR-check setups expect an attestation ref: the
+  // repo must carry the stamp/verify-attestation workflow. Server-gated
+  // repos enforce at the receive hook (no ref) and local-only repos with
+  // no workflow have nothing to satisfy. A two-dot revspec whose base is
+  // a real branch rule is required so we can evaluate the same gate the
+  // verifier will.
+  if (!targetBranch || !branchRule) return;
+  if (!hasVerifyWorkflow(repoRoot)) return;
+
+  // Evaluate the gate exactly like `stamp status` (runStatus): start
+  // OPEN and close on the first required reviewer whose latest verdict at
+  // this (base, head) pair isn't `approved`. An empty `required` list is
+  // therefore vacuously OPEN — the SAME verdict status reports, so the
+  // two paths never disagree (an attested-pr repo with `required: []` and
+  // a verify workflow expects an attestation, so review must mint one
+  // rather than let status warn about a ref review silently skipped). A
+  // closed gate needs no attestation — status/review already report
+  // CLOSED and the operator's next move is to address findings.
+  let gateOpen: boolean;
+  try {
+    const db = openDb(stampStateDbPath(repoRoot));
+    try {
+      const verdicts = latestVerdicts(db, baseSha, headSha);
+      const byReviewer = new Map(verdicts.map((v) => [v.reviewer, v.verdict]));
+      gateOpen = branchRule.required.every(
+        (r) => byReviewer.get(r) === "approved",
+      );
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Gate evaluation is best-effort; a DB hiccup here must not fail the
+    // review. Skip silently — the operator can still run `stamp status`.
+    return;
+  }
+  if (!gateOpen) return;
+
+  // Content hash of the reviewed span. `patch-id` keys the ref, so a
+  // span change (base advanced → different cumulative diff) yields a new
+  // ref name — the crux of issue #57.
+  let patchId: string;
+  try {
+    patchId = patchIdForSpan(baseSha, headSha, repoRoot);
+  } catch {
+    return;
+  }
+  const ref = attestationRefName(patchId);
+
+  // Idempotent short-circuit: if the ref already exists for THIS span,
+  // there's nothing to do — say so and stop (no re-sign, no noise).
+  if (readAttestationBlobBytes(patchId, repoRoot) !== null) {
+    console.log(`\n✓ attestation present for this span at ${ref}`);
+    return;
+  }
+
+  // Mint it. mintAttestation is the same producer `stamp attest` uses,
+  // so the envelope is byte-identical to a manual attest of this span.
+  try {
+    const minted = mintAttestation({
+      repoRoot,
+      into: targetBranch,
+      branch: headSha,
+    });
+    console.log(
+      `\n✓ minted PR attestation at ${minted.ref}\n` +
+        `  (schema v${minted.payload.schema_version}, signed by ${minted.operatorFingerprint}).\n` +
+        `  Push it alongside your branch so stamp/verify-attestation can find it:\n` +
+        `      git push <remote> HEAD ${minted.ref}`,
+    );
+  } catch (err) {
+    // AC 2: minting is intentionally not performed on this path (e.g.
+    // v3 mode without server-signed rows, or an admin-signature
+    // shortage). Name the missing ref and the recovery command so the
+    // operator isn't left guessing when the PR check goes red.
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `\nwarning: gate is OPEN but no attestation exists at ${ref} for the ` +
+        `reviewed span. The stamp/verify-attestation PR check will fail with ` +
+        `"no attestation found" until it is minted. Auto-mint did not run: ` +
+        `${message}\n` +
+        `  Recover with: stamp attest --into ${targetBranch}`,
+    );
   }
 }
 

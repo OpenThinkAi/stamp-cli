@@ -176,25 +176,6 @@ export function runAttest(opts: AttestOptions): void {
   const revspec = `${opts.into}..${branchRef}`;
   const resolved = resolveDiff(revspec, repoRoot);
 
-  // Compute the content hash (patch-id) — this is what the artifact
-  // is keyed on. Same patch-id across rebase / squash / merge-commit
-  // on the GitHub side, so the attestation survives all three.
-  const patch_id = patchIdForSpan(resolved.base_sha, resolved.head_sha, repoRoot);
-
-  // Also record the TIP of the target branch at attest time, distinct
-  // from resolved.base_sha (which is the merge-base). Verifiers with
-  // strict_base:true compare this against the current tip — any
-  // advancement of main since attest time fails verification, even
-  // when the cumulative diff content is unchanged. resolveDiff above
-  // already validated opts.into resolves, so rev-parse here can't fail
-  // on the same machine for the same name.
-  const target_branch_tip_sha = runGit(
-    ["rev-parse", `${opts.into}^{commit}`],
-    repoRoot,
-  ).trim();
-
-  const { keypair } = ensureUserKeypair();
-
   // AGT-471: early admin-sig pre-flight.
   //
   // For v3 (server-attested PR mode) only — v2 has no path_rules concept
@@ -240,96 +221,41 @@ export function runAttest(opts: AttestOptions): void {
     }
   }
 
-  // Dispatch — bootstrap (AGT-398) vs. v3 (server-attested) vs. v2
-  // (legacy / operator-only).
-  //
-  // `--migrate-existing` short-circuits the normal dispatch: the
-  // Shape 4 migration commit can't have server signatures (review at
-  // base_sha runs locally because base doesn't yet have `review_server`).
-  // The bootstrap envelope captures the operator's intent + an
-  // admin-capability counter-signature to compensate. See
-  // `src/lib/migrationBootstrap.ts` for the trust model.
-  //
-  // Same trigger as `stamp merge`'s v4/v3 dispatch otherwise: the
-  // branch rule's `review_server` field is the operator's declared
-  // intent to use server-attested reviews. When set, we MUST fold real
-  // server-signed approvals into a v3 PR-attestation envelope;
-  // missing/stale server signatures fail loudly rather than silently
-  // degrading to v2 (which the 2.x verifier rejects).
-  //
-  // When `review_server` is absent, this is the 1.6.0 PR-check-mode
-  // flow: produce a v2 envelope with bare `Approval[]`, operator-signs-
-  // outer-only. The 2.x verifier rejects v2 with a schema-too-old
-  // actionable error pointing operators at the `review_server`-driven
-  // path; the v2 path remains for repos pinning the GH Action to a
-  // 1.x stamp-version during the bridge window. AGT-355 ships the
-  // producer side so post-2.0.1 the bridge window is no longer needed.
-  const result = opts.migrateExisting
-    ? buildBootstrapEnvelope({
-        repoRoot,
-        revspec,
-        baseSha: resolved.base_sha,
-        headSha: resolved.head_sha,
-        diff: resolved.diff,
-        targetBranch: opts.into,
-        targetBranchTipSha: target_branch_tip_sha,
-        patchId: patch_id,
-        operatorPrivateKeyPem: keypair.privateKeyPem,
-        operatorPublicKeyPem: keypair.publicKeyPem,
-        operatorFingerprint: keypair.fingerprint,
-      })
-    : rule.review_server
-      ? buildV3Envelope({
-          repoRoot,
-          revspec,
-          baseSha: resolved.base_sha,
-          headSha: resolved.head_sha,
-          diff: resolved.diff,
-          targetBranch: opts.into,
-          targetBranchTipSha: target_branch_tip_sha,
-          patchId: patch_id,
-          requiredReviewers: rule.required,
-          operatorPrivateKeyPem: keypair.privateKeyPem,
-          operatorFingerprint: keypair.fingerprint,
-        })
-      : buildV2Envelope({
-          repoRoot,
-          revspec,
-          baseSha: resolved.base_sha,
-          headSha: resolved.head_sha,
-          targetBranch: opts.into,
-          targetBranchTipSha: target_branch_tip_sha,
-          patchId: patch_id,
-          requiredReviewers: rule.required,
-          operatorPrivateKeyPem: keypair.privateKeyPem,
-          operatorFingerprint: keypair.fingerprint,
-        });
-
-  const { ref, blob_sha } = writeAttestationRef(
-    { payload: result.payload, signature: result.signature },
+  // AGT-696: the mint core (envelope dispatch + ref write) lives in
+  // `mintAttestation` below so `stamp review` can reuse it to re-mint
+  // the ref when it reaches an open gate. That closes issue #57: a
+  // re-review over a NEW span (local base advanced, so the patch-id
+  // changed) used to leave CI red because only `stamp attest` minted
+  // the ref. Keeping ONE producer means the review auto-mint path and
+  // this explicit command sign byte-identical envelopes.
+  const minted = mintAttestation({
     repoRoot,
-  );
+    into: opts.into,
+    branch: branchRef,
+    migrateExisting: opts.migrateExisting,
+  });
 
   const bar = "─".repeat(72);
   console.log(bar);
   console.log(`attested ${branchRef} for merge into '${opts.into}'`);
   console.log(bar);
-  console.log(`  patch-id:   ${patch_id}`);
+  console.log(`  patch-id:   ${minted.patch_id}`);
   console.log(
-    `  base→head:  ${resolved.base_sha.slice(0, 8)} → ${resolved.head_sha.slice(0, 8)}`,
+    `  base→head:  ${minted.base_sha.slice(0, 8)} → ${minted.head_sha.slice(0, 8)}`,
   );
-  console.log(`  signed by:  ${keypair.fingerprint}`);
-  console.log(`  approvals:  ${result.reviewerNames.length > 0 ? result.reviewerNames.join(", ") : "(none — bootstrap envelope)"}`);
-  const schemaLabel = result.payload.migration_bootstrap
+  console.log(`  signed by:  ${minted.operatorFingerprint}`);
+  console.log(`  approvals:  ${minted.reviewerNames.length > 0 ? minted.reviewerNames.join(", ") : "(none — bootstrap envelope)"}`);
+  const schemaLabel = minted.payload.migration_bootstrap
     ? " (Shape 4 migration bootstrap)"
-    : result.payload.schema_version === PR_ATTESTATION_SCHEMA_VERSION
+    : minted.payload.schema_version === PR_ATTESTATION_SCHEMA_VERSION
       ? " (server-attested)"
       : " (legacy)";
-  console.log(`  schema:     v${result.payload.schema_version}${schemaLabel}`);
-  console.log(`  ref:        ${ref}`);
-  console.log(`  blob:       ${blob_sha.slice(0, 12)}`);
+  console.log(`  schema:     v${minted.payload.schema_version}${schemaLabel}`);
+  console.log(`  ref:        ${minted.ref}`);
+  console.log(`  blob:       ${minted.blob_sha.slice(0, 12)}`);
   console.log(bar);
 
+  const ref = minted.ref;
   if (opts.pushTo) {
     pushBranchAndAttestation(opts.pushTo, ref, repoRoot);
     console.log(
@@ -346,6 +272,152 @@ export function runAttest(opts: AttestOptions): void {
         `Or re-run with --push <remote> next time.`,
     );
   }
+}
+
+export interface MintAttestationInput {
+  repoRoot: string;
+  /** Target branch — supplies the branch rule and is recorded in the
+   *  attestation so the verifier knows which rule to evaluate against. */
+  into: string;
+  /** Feature branch (or SHA) to attest. Defaults to HEAD. */
+  branch?: string;
+  /** AGT-398 Shape 4 migration-bootstrap envelope. Only `stamp attest
+   *  --migrate-existing` sets this; the review auto-mint path never does. */
+  migrateExisting?: boolean;
+}
+
+export interface MintAttestationResult {
+  ref: string;
+  blob_sha: string;
+  patch_id: string;
+  base_sha: string;
+  head_sha: string;
+  /** The head ref that was attested (e.g. "HEAD" or a branch name). */
+  branchRef: string;
+  payload: PrAttestationPayload;
+  /** Required reviewers folded into the approvals array. */
+  reviewerNames: string[];
+  operatorFingerprint: string;
+}
+
+/**
+ * Mint (or re-mint) the PR-attestation ref for the span `into..branch`
+ * WITHOUT any CLI banner or push — the pure producer. Extracted from
+ * `runAttest` (AGT-696 / issue #57) so `stamp review` can call it to
+ * re-mint the ref the moment it reaches an open gate, keeping the two
+ * producers byte-identical (same envelope dispatch, same signature).
+ *
+ * Fully non-interactive: it signs with the operator's LOCAL keypair
+ * (`ensureUserKeypair`) and reads approvals from the local review DB.
+ * Throws on any envelope-build failure (gate CLOSED, missing server
+ * signatures in v3 mode, admin-signature shortage on a `path_rules`
+ * diff, etc.) so the caller decides whether that's fatal (the `stamp
+ * attest` command) or a non-fatal warning (the `stamp review` path).
+ *
+ * The write itself is idempotent: the envelope is content-addressed
+ * (`git hash-object`) and Ed25519 signatures are deterministic (RFC
+ * 8032), so re-minting the same span produces the same blob and the
+ * `update-ref` is a no-op.
+ */
+export function mintAttestation(
+  input: MintAttestationInput,
+): MintAttestationResult {
+  const { repoRoot } = input;
+  const config = loadConfig(stampConfigFile(repoRoot));
+  const rule = findBranchRule(config.branches, input.into);
+  if (!rule) {
+    throw new Error(
+      `no branch rule for "${input.into}" in .stamp/config.yml. ` +
+        `Configured branches: ${Object.keys(config.branches).join(", ") || "(none)"}.`,
+    );
+  }
+
+  const branchRef = input.branch ?? "HEAD";
+  const revspec = `${input.into}..${branchRef}`;
+  const resolved = resolveDiff(revspec, repoRoot);
+
+  // Content hash (patch-id) — what the artifact is keyed on. Stable
+  // across rebase / squash / merge-commit on the GitHub side.
+  const patch_id = patchIdForSpan(
+    resolved.base_sha,
+    resolved.head_sha,
+    repoRoot,
+  );
+
+  // TIP of the target branch at attest time (distinct from the
+  // merge-base in resolved.base_sha). `strict_base` verifiers compare
+  // this against the current tip.
+  const target_branch_tip_sha = runGit(
+    ["rev-parse", `${input.into}^{commit}`],
+    repoRoot,
+  ).trim();
+
+  const { keypair } = ensureUserKeypair();
+
+  // Dispatch — bootstrap (AGT-398) vs. v3 (server-attested) vs. v2
+  // (legacy / operator-only). `review_server` on the branch rule is the
+  // operator's declared intent to use server-attested reviews; when set
+  // we MUST fold real server-signed approvals into a v3 envelope, and a
+  // missing/stale signature fails loudly rather than silently degrading
+  // to v2 (which the 2.x verifier rejects). When absent, this is the
+  // local-key PR-check flow that produces a v2 envelope.
+  const result = input.migrateExisting
+    ? buildBootstrapEnvelope({
+        repoRoot,
+        revspec,
+        baseSha: resolved.base_sha,
+        headSha: resolved.head_sha,
+        diff: resolved.diff,
+        targetBranch: input.into,
+        targetBranchTipSha: target_branch_tip_sha,
+        patchId: patch_id,
+        operatorPrivateKeyPem: keypair.privateKeyPem,
+        operatorPublicKeyPem: keypair.publicKeyPem,
+        operatorFingerprint: keypair.fingerprint,
+      })
+    : rule.review_server
+      ? buildV3Envelope({
+          repoRoot,
+          revspec,
+          baseSha: resolved.base_sha,
+          headSha: resolved.head_sha,
+          diff: resolved.diff,
+          targetBranch: input.into,
+          targetBranchTipSha: target_branch_tip_sha,
+          patchId: patch_id,
+          requiredReviewers: rule.required,
+          operatorPrivateKeyPem: keypair.privateKeyPem,
+          operatorFingerprint: keypair.fingerprint,
+        })
+      : buildV2Envelope({
+          repoRoot,
+          revspec,
+          baseSha: resolved.base_sha,
+          headSha: resolved.head_sha,
+          targetBranch: input.into,
+          targetBranchTipSha: target_branch_tip_sha,
+          patchId: patch_id,
+          requiredReviewers: rule.required,
+          operatorPrivateKeyPem: keypair.privateKeyPem,
+          operatorFingerprint: keypair.fingerprint,
+        });
+
+  const { ref, blob_sha } = writeAttestationRef(
+    { payload: result.payload, signature: result.signature },
+    repoRoot,
+  );
+
+  return {
+    ref,
+    blob_sha,
+    patch_id,
+    base_sha: resolved.base_sha,
+    head_sha: resolved.head_sha,
+    branchRef,
+    payload: result.payload,
+    reviewerNames: result.reviewerNames,
+    operatorFingerprint: keypair.fingerprint,
+  };
 }
 
 /**
