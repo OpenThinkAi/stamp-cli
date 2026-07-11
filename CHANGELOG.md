@@ -5,6 +5,31 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.2.2 — 2026-07-11
+
+### Fixed
+
+- **`stamp review` now mints the PR attestation ref itself when the gate
+  opens** (AGT-696, #57). Previously only `stamp attest` wrote
+  `refs/stamp/attestations/<patch-id>`, so a re-review over a corrected
+  span (stale local main advanced under the branch) reopened the gate
+  from cached verdicts while leaving no attestation for the new
+  patch-id — the PR's verify check then failed with "no attestation
+  found" until a manual `stamp attest`. Review and attest now share one
+  minting core; when minting can't run (e.g. v3 envelopes without
+  server-signed rows), `stamp review` and `stamp status` print the
+  missing ref and the exact `stamp attest --into <branch>` recovery.
+- **`stamp prune` now invalidates the verdict cache** (AGT-697, #58).
+  Pruning review rows previously left the cache warm, so the next
+  `stamp review` served the pruned rounds back as `[cached]` verdicts —
+  including stale ratcheted findings the prune was meant to clear. A
+  `verdict_cache_invalidated_before` watermark now advances whenever
+  prune deletes rows; cache lookups exclude rows at/before it (history
+  and audit rows are untouched, and the cache re-warms from fresh
+  reviews). `--dry-run` previews the invalidation.
+
+---
+
 ## 3.2.1 — 2026-07-11
 
 ### Changed
