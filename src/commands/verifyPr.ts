@@ -1049,9 +1049,9 @@ function printSuccess(s: SuccessSummary): void {
     }),
   );
   out.push("");
-  // Keep the bare `result:` line — it's the greppable contract older
-  // scripts (and the pre-3.2 output format) key on.
-  out.push(" result: VERIFIED");
+  // Keep the bare `result:` line at column 0 — it's the greppable
+  // contract older scripts (and the pre-3.2 output format) key on.
+  out.push("result: VERIFIED");
   console.log(out.join("\n"));
 
   writeStepSummary(successMarkdown(s, schemaLabel, banner));
@@ -1122,7 +1122,8 @@ function fail(
 ): never {
   const color = colorEnabled();
   const p = paint(color);
-  const maxWidth = Math.min(process.stdout.columns ?? 100, 100);
+  // fail() writes to stderr, so size against stderr's terminal.
+  const maxWidth = Math.min(process.stderr.columns ?? 100, 100);
 
   const out: string[] = [" " + p("stamp attestation check", A.bold)];
   out.push("");
