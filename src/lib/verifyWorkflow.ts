@@ -42,15 +42,18 @@ export const DEFAULT_ACTION_SOURCE = "OpenThinkAi/stamp-cli";
  * users at an Action that doesn't exist (or worse, that semantically
  * differs from the stamp version they have installed locally).
  */
-// SHA for stamp/verify-attestation@v1.6.1.
+// SHA for the stamp/verify-attestation action as of the 3.2.0 release
+// (rich check output + collapsed setup-log groups; the action's
+// stamp-version input defaults to the 1.11.0 verifier, which accepts
+// the v2 envelopes local-key repos produce).
 export const VERIFY_ACTION_REF =
-  "394f6e1bbdab0e0a1b677a08ed207596a936d590";
+  "795271bedebfb02354c8b17382f5c22916e1da30";
 
 /** Human-readable version that `VERIFY_ACTION_REF` corresponds to.
  *  Surfaced in the rendered workflow's comment line so operators can
  *  cross-reference the SHA against release notes without resolving the
  *  SHA themselves. Update in lockstep with `VERIFY_ACTION_REF`. */
-export const VERIFY_ACTION_VERSION = "v1.6.1";
+export const VERIFY_ACTION_VERSION = "v3.2.0";
 
 /**
  * Drop the `.github/workflows/stamp-verify.yml` workflow file when
