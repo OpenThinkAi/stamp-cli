@@ -5,7 +5,7 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
-## Unreleased
+## 3.2.3 — 2026-07-16
 
 ### Fixed
 
