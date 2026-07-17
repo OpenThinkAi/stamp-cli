@@ -5,6 +5,25 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **The verdict cache is now bound to the reviewed head tree** (#59).
+  Cache keys were `(reviewer, diff bytes, prompt bytes)`, but reviewers
+  also read the working tree through their tools — so a `git rebase`
+  onto a moved base could keep the merge-base-scoped diff bytes
+  identical while materially changing the tree, and `stamp review`
+  replayed a stale `[cached]` verdict recorded against the pre-rebase
+  content state. The cache key now includes `head^{tree}`: message-only
+  amends and squashes still reuse verdicts (the anti-treadmill goal),
+  while any rebase that changes tree content runs a fresh review.
+  Existing cache rows predate the new `tree_sha` column and are
+  cache-ineligible (fail-safe toward fresh reviews); history and audit
+  rows are untouched.
+
+---
+
 ## 3.2.2 — 2026-07-11
 
 ### Fixed

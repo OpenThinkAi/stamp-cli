@@ -59,6 +59,14 @@ export interface ReviewRow {
   /** SHA-256 hex of the reviewer prompt text. Null for rows recorded before
    *  1.8.0 shipped. Cache key with diff_hash + reviewer. */
   prompt_hash: string | null;
+  /** Git tree SHA of the head commit the reviewer evaluated (`head^{tree}`).
+   *  Null for rows recorded before this shipped. Part of the verdict-cache
+   *  key (issue #59): reviewers read the working tree through their tools,
+   *  so two reviews with identical diff + prompt bytes but different head
+   *  trees (e.g. before/after a rebase onto a moved base) are NOT the same
+   *  LLM input and must not share a cached verdict. Message-only amends and
+   *  squashes keep the tree, so the anti-treadmill reuse survives those. */
+  tree_sha: string | null;
   /** JSON-stringified `ApprovalV4` (see `lib/attestationV4.ts`) as returned
    *  by stamp-server's `stamp-review` SSH verb. Null for rows produced by
    *  pre-2.x clients OR by a 2.x client running in local-only mode (no
@@ -103,6 +111,11 @@ export interface RecordReviewInput {
   /** SHA-256 hex of the reviewer prompt text. Optional for pre-1.8.0 call
    *  sites that haven't been updated yet. */
   prompt_hash?: string | null;
+  /** Git tree SHA of the head commit reviewed (`head^{tree}`; caller
+   *  computes — see commands/review.ts). Part of the verdict-cache key
+   *  (issue #59). Optional so pre-existing call sites/tests that never
+   *  serve from cache don't have to thread it. */
+  tree_sha?: string | null;
   /** Server-attested approval persisted as a unit. Either provide all
    *  three fields (server-attested 2.x row) or omit `serverAttestation`
    *  entirely (local / 1.x-style row). Half-populated input is a writer
@@ -174,6 +187,7 @@ function initSchema(db: DatabaseSync): void {
       tool_calls  TEXT,
       diff_hash   TEXT,
       prompt_hash TEXT,
+      tree_sha    TEXT,
       created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -206,6 +220,14 @@ function initSchema(db: DatabaseSync): void {
   }
   if (!have.has("prompt_hash")) {
     db.exec("ALTER TABLE reviews ADD COLUMN prompt_hash TEXT");
+  }
+  // Issue #59: tree binding for the verdict cache. Rows that predate the
+  // column read out with NULL, which `findCachedVerdict`'s strict
+  // `tree_sha = ?` equality can never match — so every legacy cache row
+  // becomes cache-ineligible (the safe direction; the cache re-warms from
+  // fresh reviews) while remaining fully readable for `stamp log` / audit.
+  if (!have.has("tree_sha")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN tree_sha TEXT");
   }
   // AGT-333 (stamp 2.x): server-attested review fields. All TEXT/INTEGER
   // with no DEFAULT and no NOT NULL — that's what makes the 1.x-rows-
@@ -318,10 +340,10 @@ export function recordReview(
   const stmt = db.prepare(
     `INSERT INTO reviews
        (reviewer, base_sha, head_sha, verdict, issues, tool_calls,
-        diff_hash, prompt_hash,
+        diff_hash, prompt_hash, tree_sha,
         server_approval_json, server_signature_b64, server_key_id,
         schema_version, mcp_servers_at_init)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
     input.reviewer,
@@ -332,6 +354,7 @@ export function recordReview(
     input.tool_calls ?? null,
     input.diff_hash ?? null,
     input.prompt_hash ?? null,
+    input.tree_sha ?? null,
     sa?.approval_json ?? null,
     sa?.signature_b64 ?? null,
     sa?.server_key_id ?? null,
@@ -428,14 +451,25 @@ export interface CachedVerdict {
 }
 
 /**
- * Look up the most recent stored verdict for (reviewer, diff_hash, prompt_hash).
- * Both hashes are required — null/missing-hash rows never match, so pre-1.8.0
- * rows are silently skipped. Returns null when no matching row exists.
+ * Look up the most recent stored verdict for
+ * (reviewer, diff_hash, prompt_hash, tree_sha). All key parts are required —
+ * null/missing rows never match, so pre-1.8.0 rows (no hashes) and
+ * pre-tree_sha rows are silently skipped. Returns null when no matching row
+ * exists.
  *
  * Used by `stamp review` to short-circuit the LLM call when an identical
- * (diff, prompt, reviewer) tuple has already been evaluated. The point is
- * to break the treadmill where the model non-deterministically re-flips
- * verdicts on unchanged input.
+ * (diff, prompt, reviewer) tuple has already been evaluated against the same
+ * head tree. The point is to break the treadmill where the model
+ * non-deterministically re-flips verdicts on unchanged input.
+ *
+ * Issue #59: `tree_sha` (the reviewed commit's `^{tree}`) is part of the key
+ * because reviewers read the working tree through their tools — the diff and
+ * prompt bytes alone don't fully determine the LLM's input. A rebase onto a
+ * moved base can keep the merge-base-scoped diff bytes identical while the
+ * tree the reviewer explores changes materially; before this fix such a
+ * rebase replayed a stale verdict recorded against the pre-rebase tree.
+ * Message-only amends and squashes preserve the tree, so cache reuse across
+ * those (the original design goal) is unchanged.
  *
  * AGT-697 (issue #58): rows created at or before the verdict-cache
  * invalidation watermark are excluded, so a `stamp prune` (which bumps the
@@ -450,6 +484,7 @@ export function findCachedVerdict(
   reviewer: string,
   diff_hash: string,
   prompt_hash: string,
+  tree_sha: string,
 ): CachedVerdict | null {
   // `created_at > watermark` (strict) is intentional: a fresh review written
   // in the same whole second as the prune shares the watermark's second-
@@ -461,12 +496,12 @@ export function findCachedVerdict(
   const stmt = db.prepare(`
     SELECT verdict, issues, base_sha, head_sha, created_at
     FROM reviews
-    WHERE reviewer = ? AND diff_hash = ? AND prompt_hash = ?
+    WHERE reviewer = ? AND diff_hash = ? AND prompt_hash = ? AND tree_sha = ?
       AND (? IS NULL OR created_at > ?)
     ORDER BY created_at DESC, id DESC
     LIMIT 1
   `);
-  const row = stmt.get(reviewer, diff_hash, prompt_hash, watermark, watermark) as
+  const row = stmt.get(reviewer, diff_hash, prompt_hash, tree_sha, watermark, watermark) as
     | CachedVerdict
     | undefined;
   return row ?? null;
@@ -603,7 +638,7 @@ export function reviewHistory(
   // this command's call sites.
   const stmt = db.prepare(`
     SELECT id, reviewer, base_sha, head_sha, verdict, issues,
-           tool_calls, diff_hash, prompt_hash,
+           tool_calls, diff_hash, prompt_hash, tree_sha,
            server_approval_json, server_signature_b64, server_key_id,
            schema_version, mcp_servers_at_init, created_at
     FROM reviews
@@ -666,7 +701,7 @@ export function recentReviewsByReviewer(
   // shape rather than a subset.
   const stmt = db.prepare(`
     SELECT id, reviewer, base_sha, head_sha, verdict, issues,
-           tool_calls, diff_hash, prompt_hash,
+           tool_calls, diff_hash, prompt_hash, tree_sha,
            server_approval_json, server_signature_b64, server_key_id,
            schema_version, created_at
     FROM reviews
