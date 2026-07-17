@@ -25,6 +25,7 @@ import {
   repoHasAnyCommit,
   resolveDiff,
   showAtRef,
+  treeSha,
   type ResolvedDiff,
 } from "../lib/git.js";
 import {
@@ -88,7 +89,7 @@ export interface ReviewOptions {
    */
   allowLarge?: boolean;
   /**
-   * Skip the (reviewer, diff_hash, prompt_hash) verdict cache and force a
+   * Skip the (reviewer, diff_hash, prompt_hash, tree_sha) verdict cache and force a
    * fresh LLM call for every reviewer. Use when you want to re-roll a
    * verdict (e.g. testing prompt-side determinism). Also disable-able via
    * STAMP_NO_REVIEW_CACHE=1 for shells where flag plumbing is awkward.
@@ -584,11 +585,17 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   );
   console.log();
 
-  // Cache keys: identical (reviewer, diff bytes, prompt bytes) → identical
-  // verdict, deterministically. Hashing the bytes (not the SHA pair) is what
-  // lets the cache survive rebases and amends — the LLM call's actual input
-  // is what matters, not the git refs surrounding it.
+  // Cache keys: identical (reviewer, diff bytes, prompt bytes, head tree) →
+  // identical verdict, deterministically. Hashing the bytes (not the SHA
+  // pair) is what lets the cache survive message-only amends and squashes —
+  // the LLM call's actual input is what matters, not the git refs
+  // surrounding it. The head TREE is part of the key (issue #59) because
+  // reviewers also read the working tree through their tools: a rebase onto
+  // a moved base can keep the merge-base-scoped diff bytes identical while
+  // changing the tree the reviewer explores, and that is a different review
+  // input that must not replay a stale verdict.
   const diffHash = sha256(resolved.diff);
+  const headTreeSha = treeSha(resolved.head_sha, repoRoot);
   const promptHashes = new Map<string, string>();
   for (const name of reviewerNames) {
     promptHashes.set(name, sha256(promptBytesByReviewer.get(name)!));
@@ -597,8 +604,8 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   const db = openDb(stampStateDbPath(repoRoot));
   try {
     // Verdict-cache short-circuit: when the same (reviewer, diff_hash,
-    // prompt_hash) tuple already has a stored verdict, return it without
-    // calling the LLM. This is the mechanical fix for the treadmill where
+    // prompt_hash, tree_sha) tuple already has a stored verdict, return it
+    // without calling the LLM. This is the mechanical fix for the treadmill where
     // the model non-deterministically re-flips verdicts on identical input.
     // Prompt-level "ratchet" guidance loses to live diff content; pulling
     // the decision out of the model is the only reliable lever.
@@ -612,6 +619,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           name,
           diffHash,
           promptHashes.get(name)!,
+          headTreeSha,
         );
         if (hit) cacheHits.set(name, hit);
       }
@@ -836,6 +844,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
             : serializeToolCalls(outcome.value.tool_calls),
           diff_hash: diffHash,
           prompt_hash: promptHashes.get(name)!,
+          tree_sha: headTreeSha,
           // AGT-246: persist MCP server runtime statuses. Null for cache hits
           // (no fresh SDK init happened) and for reviewers that declared no
           // MCP servers.
@@ -1235,14 +1244,15 @@ async function runServerAttestedReviews(input: {
           head_sha: resolved.head_sha,
           verdict: verdict.verdict,
           issues: opts.noProse ? null : verdict.prose,
-          // The local LLM path's cache index uses (diff_hash, prompt_hash)
-          // — server-attested rows still get the diff hash populated so
+          // The local LLM path's cache index uses (diff_hash, prompt_hash,
+          // tree_sha) — server-attested rows still get these populated so
           // the cache index has a meaningful entry, even though trusted-
           // mode doesn't short-circuit through the verdict cache.
           diff_hash: createHash("sha256").update(resolved.diff, "utf8").digest("hex"),
           prompt_hash: createHash("sha256")
             .update(promptBytesByReviewer.get(name) ?? "", "utf8")
             .digest("hex"),
+          tree_sha: treeSha(resolved.head_sha, repoRoot),
           // Server-attested 2.x row: AGT-333's column trio. recordReview
           // enforces all-or-nothing on these three fields so a downstream
           // verifier can rely on "non-null server_approval_json ⇒ non-null

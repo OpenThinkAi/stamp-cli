@@ -241,6 +241,20 @@ export function parentSha(sha: string, cwd: string): string | null {
 }
 
 /**
+ * Tree SHA of a commit (`<sha>^{tree}`). Used by the verdict cache
+ * (issue #59) to bind cached verdicts to the exact content state the
+ * reviewer's tools could read: message-only amends and squashes keep the
+ * tree (cache reuse survives), while a rebase that pulls in new base
+ * content changes it (cache misses, review runs fresh). Throws if the
+ * commit doesn't resolve — callers pass SHAs already resolved by
+ * `resolveDiff`, so a failure here is a real repo problem, not a
+ * recoverable lookup miss.
+ */
+export function treeSha(sha: string, cwd: string): string {
+  return git(["rev-parse", `${sha}^{tree}`], cwd).trim();
+}
+
+/**
  * Diff between two commits (`<priorHead>..<currentHead>`) with enlarged
  * unified-context lines. Used by `stamp review` to feed the LLM ONLY the
  * code that has changed since a prior approved/rejected review on the same
