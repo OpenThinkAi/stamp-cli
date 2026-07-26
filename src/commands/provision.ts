@@ -48,6 +48,7 @@ import {
   parseServerFlag,
   type ServerConfig,
 } from "../lib/serverConfig.js";
+import { computeMirrorProvisionProblems } from "../lib/provisionVerify.js";
 import { runBootstrap } from "./bootstrap.js";
 import { fetchServerPubkey } from "./server.js";
 
@@ -220,7 +221,20 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
     writeMirrorYml(cloneTarget, mirrorRepo);
   }
 
-  // 8. Run the existing bootstrap flow (in the clone) to land real reviewers.
+  // 8. Optional: apply the GitHub Ruleset + deploy key on the mirror repo.
+  //    This runs BEFORE bootstrap deliberately (issue #64): bootstrap is
+  //    the step most likely to abort (it drives an interactive reviewer
+  //    run and needs a TTY), and the deploy key + Ruleset don't depend on
+  //    it at all. With the old ordering, a bootstrap abort exited before
+  //    the key was ever registered, leaving a mirror that looked
+  //    provisioned but half-failed every later push. As a bonus, the
+  //    per-repo key now exists server-side before bootstrap's own push
+  //    fires the post-receive hook, so the very first mirror leg works.
+  if (mirrorRepo && !opts.noRuleset) {
+    applyMirrorRuleset(mirrorRepo, server);
+  }
+
+  // 9. Run the existing bootstrap flow (in the clone) to land real reviewers.
   //    Bootstrap commits + pushes to origin (= the stamp server), so this
   //    is the merge that activates real reviewers on main going forward.
   //
@@ -231,14 +245,34 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
   //    in printSuccess is correct advice for the operator's shell.
   console.log(`Bootstrapping reviewers on the clone`);
   process.chdir(cloneTarget);
-  await runBootstrap({});
-
-  // 9. Optional: apply the GitHub Ruleset on the mirror repo.
-  if (mirrorRepo && !opts.noRuleset) {
-    applyMirrorRuleset(mirrorRepo, server);
+  try {
+    await runBootstrap({});
+  } catch (err) {
+    // Everything except the reviewer bootstrap is done by this point —
+    // say so explicitly. The old behavior (bail with only bootstrap's
+    // own error) left the operator unable to tell a half-provisioned
+    // repo from a fully-provisioned one with a pending bootstrap.
+    console.error(
+      `\nnote: the server repo, local clone` +
+        (mirrorRepo
+          ? `, and GitHub mirror${opts.noRuleset ? "" : " (deploy key + Ruleset)"}`
+          : "") +
+        ` are all set up — only the reviewer bootstrap failed. Finish it manually:\n` +
+        `  cd ${cloneTarget}\n` +
+        `  stamp bootstrap\n` +
+        `(If bootstrap aborted for lack of a TTY, re-run it from an interactive terminal.)`,
+    );
+    throw err;
   }
 
-  // 10. Final summary.
+  // 10. Verify the mirror is actually wired up before declaring success
+  //     (issue #64): a `✓ provisioned` that hasn't checked the deploy key
+  //     exists is exactly how the half-provisioned state went unnoticed.
+  if (mirrorRepo && !opts.noRuleset) {
+    verifyMirrorProvisioned(mirrorRepo, cloneTarget);
+  }
+
+  // 11. Final summary.
   printSuccess({ cloneTarget, server, repoName: opts.name, mirrorRepo });
 }
 
@@ -505,6 +539,50 @@ function applyMirrorRuleset(
       console.log(`         For manual setup, see docs/github-ruleset-setup.md.`);
       break;
   }
+}
+
+/**
+ * Assert the mirror's deploy key + Ruleset actually exist on GitHub before
+ * `✓ provisioned` gets printed (issue #64). applyMirrorRuleset degrades to
+ * `warning:` lines on partial failure by design (a mirror problem shouldn't
+ * strand an otherwise-working server repo mid-provision), so this is the
+ * step that turns "warned but kept going" into a non-zero exit with the
+ * repair spelled out. Fresh gh reads, not applyMirrorRuleset's return
+ * value — the point is to verify reality, not our own bookkeeping.
+ */
+function verifyMirrorProvisioned(
+  mirror: { owner: string; repo: string },
+  cloneTarget: string,
+): void {
+  console.log(`Verifying mirror provisioning on ${mirror.owner}/${mirror.repo}`);
+  const state = {
+    ownerType: lookupRepoOwnerType(mirror.owner, mirror.repo),
+    deployKeyId: findDeployKey(
+      mirror.owner,
+      mirror.repo,
+      STAMP_MIRROR_DEPLOY_KEY_TITLE,
+    ),
+    rulesetId: findExistingStampRuleset(mirror.owner, mirror.repo),
+  };
+  const problems = computeMirrorProvisionProblems(state, mirror, cloneTarget);
+  if (problems.length === 0) {
+    console.log(
+      `Mirror verification: OK (ruleset ${state.rulesetId}` +
+        (state.deployKeyId !== null
+          ? `, deploy key ${state.deployKeyId})`
+          : `; personal repo — User bypass actor, no deploy key needed)`),
+    );
+    return;
+  }
+  console.error(`\nerror: mirror verification failed:`);
+  for (const p of problems) {
+    console.error(`  - ${p}`);
+  }
+  throw new Error(
+    `repo is NOT fully provisioned — the stamp-server repo and local clone at ` +
+      `${cloneTarget} are usable, but the GitHub mirror has the problem(s) listed ` +
+      `above. Fix them before relying on the mirror.`,
+  );
 }
 
 function printSuccess(args: {

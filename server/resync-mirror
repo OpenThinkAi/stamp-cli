@@ -1,0 +1,113 @@
+#!/bin/sh
+#
+# resync-mirror — re-run the GitHub mirror leg for a repo's branch tip(s).
+#
+# Usage (over SSH):
+#   ssh git@<host> resync-mirror <name>              # default branch only
+#   ssh git@<host> resync-mirror <name> <branch>...  # named branches
+#
+# Why this exists (issue #64): the mirror leg runs from the bare repo's
+# post-receive hook, which only fires when a ref actually moves on the
+# stamp server. When a mirror push fails (most commonly: no deploy key was
+# registered on the GitHub repo), the stamp-server leg has already been
+# accepted — so the next `stamp push` no-ops server-side and the hook
+# never re-fires. After repairing the key (`stamp provision
+# --migrate-bypass`), the mirror would stay stale until the next REAL
+# push. This verb re-feeds the current branch tip(s) into the same
+# post-receive hook a push would have run, so the mirror (and the
+# stamp/verified status on the tip) catches up immediately.
+#
+# The old-sha side of each synthesized line is the zero sha, which the
+# hook treats like a branch creation: it mirrors the tip (a full-history
+# ref push) and posts the tip commit's status only. That's the right
+# shape for a resync — the mirror needs the ref moved, not a replay of
+# per-commit statuses for history that may already be there.
+#
+# Exit codes: 0 all requested branches re-fed; 1 operational failure
+# (missing repo/hook/branch); 2 argument error. Note exit 0 means the
+# hook RAN — the hook itself never fails the invocation (mirror errors
+# are warnings on stderr, same as on a real push), so read the output.
+#
+set -e
+
+usage() {
+  echo "usage: resync-mirror <name> [<branch>...]" >&2
+  exit 2
+}
+
+if [ $# -lt 1 ]; then
+  usage
+fi
+
+NAME="$1"
+shift
+
+# Validate name shape: must start with [A-Za-z0-9_] and match
+# [A-Za-z0-9._-]+. Same rules (and same case+grep double-guard rationale)
+# as the sister scripts new-stamp-repo / delete-stamp-repo — the case
+# arm catches the obvious path-escape shapes fast, the grep catches
+# everything else for direct-ssh callers without the TS wrapper.
+case "$NAME" in
+  ""|"."|".."|*"/"*|*".."*|.*|-*)
+    echo "error: invalid repo name '$NAME' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+    exit 2
+    ;;
+esac
+if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*$'; then
+  echo "error: invalid repo name '$NAME' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
+  exit 2
+fi
+
+# STAMP_GIT_ROOT is a test seam only (lets the test suite point at a temp
+# dir instead of /srv/git). sshd does not AcceptEnv it, so remote callers
+# can't set it; even if one could, it grants nothing the git user's own
+# filesystem permissions don't already.
+GIT_ROOT="${STAMP_GIT_ROOT:-/srv/git}"
+REPO="$GIT_ROOT/${NAME}.git"
+
+if [ ! -d "$REPO" ]; then
+  echo "error: $REPO not found" >&2
+  exit 1
+fi
+
+HOOK="$REPO/hooks/post-receive"
+if [ ! -x "$HOOK" ]; then
+  echo "error: $REPO has no executable post-receive hook — this repo was provisioned without mirror support." >&2
+  echo "error: re-provision with a mirror-capable server image, or install the hook by hand (see server/README.md)." >&2
+  exit 1
+fi
+
+cd "$REPO"
+
+# Default to the repo's HEAD branch when no branches were named — same
+# default-branch resolution the post-receive hook itself uses for tag
+# pushes (symbolic-ref HEAD, so master/trunk/anything works).
+if [ $# -eq 0 ]; then
+  HEAD_REF=$(git symbolic-ref HEAD 2>/dev/null || echo "refs/heads/main")
+  set -- "${HEAD_REF#refs/heads/}"
+fi
+
+ZERO=0000000000000000000000000000000000000000
+
+for BRANCH in "$@"; do
+  # Branch names may legitimately contain '/' (release/1.x), so path-style
+  # validation doesn't apply — delegate to git's own ref grammar. The
+  # leading-dash case guard runs first so a flag-shaped arg can't reach
+  # any git invocation as its first token.
+  case "$BRANCH" in
+    -*)
+      echo "error: invalid branch name '$BRANCH'" >&2
+      exit 2
+      ;;
+  esac
+  if ! git check-ref-format "refs/heads/$BRANCH"; then
+    echo "error: invalid branch name '$BRANCH'" >&2
+    exit 2
+  fi
+  if ! TIP=$(git rev-parse --verify --quiet "refs/heads/$BRANCH"); then
+    echo "error: branch '$BRANCH' not found in $REPO" >&2
+    exit 1
+  fi
+  echo "resync-mirror: re-feeding $BRANCH ($TIP) into post-receive" >&2
+  printf '%s %s refs/heads/%s\n' "$ZERO" "$TIP" "$BRANCH" | "$HOOK"
+done

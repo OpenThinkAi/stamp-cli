@@ -69,6 +69,28 @@ function scrubTokenUrls(s: string): string {
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * Diagnose an SSH mirror-push failure whose stderr shows GitHub refusing
+ * the key. `Permission denied (publickey)` at this point almost always
+ * means the mirror repo has NO deploy key registered (or a stale one) —
+ * the half-provisioned state from issue #64 — and the generic "retry
+ * manually from a host with the deploy key" advice is a dead end there:
+ * no host has a key GitHub will accept. Name the actual repair instead.
+ *
+ * Returns the hint line, or null when the stderr doesn't match. Exported
+ * pure so the trigger condition is unit-testable.
+ */
+export function publickeyRepairHint(stderrText: string): string | null {
+  if (!/permission denied \(publickey\)/i.test(stderrText)) return null;
+  return (
+    `mirror: 'Permission denied (publickey)' usually means the GitHub mirror repo ` +
+    `has no deploy key registered for this server. Repair from a local checkout of ` +
+    `this repo: \`stamp provision --migrate-bypass\` (fetches this server's per-repo ` +
+    `key and registers it on the mirror), then \`stamp push <branch> --resync-mirror\` ` +
+    `to re-run this mirror leg.`
+  );
+}
+
 // Single deterministic context so operators can mark `stamp/verified` as a
 // required check in their GitHub branch ruleset. Don't add a suffix per
 // reviewer or per branch — that would multiply required-check rows on
@@ -300,6 +322,8 @@ async function mirrorRef(
           `Retry manually from a host with the deploy key: ` +
           `${keyHint}git push git@github.com:${githubRepo}.git ${newSha}:${refname}`,
       );
+      const hint = publickeyRepairHint(errOut);
+      if (hint) warn(hint);
     } else {
       warn(
         `mirror: stamp-server push already accepted; mirror out-of-sync. ` +

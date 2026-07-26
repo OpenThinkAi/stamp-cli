@@ -359,7 +359,7 @@ program
   )
   .option(
     "--migrate-bypass",
-    "migrate an existing server-gated repo's stamp-mirror-only Ruleset bypass actor from OrganizationAdmin to a per-repo DeployKey. Identifies the target via cwd's .stamp/mirror.yml. Additive by default (DeployKey added alongside existing actors); pair with --remove-orgadmin to also strip OrganizationAdmin from the bypass list",
+    "migrate an existing server-gated repo's stamp-mirror-only Ruleset bypass actor from OrganizationAdmin to a per-repo DeployKey. Identifies the target via cwd's .stamp/mirror.yml. Additive by default (DeployKey added alongside existing actors); pair with --remove-orgadmin to also strip OrganizationAdmin from the bypass list. Also the REPAIR for a mirror provisioned without a deploy key (pushes failing with 'Permission denied (publickey)'): it fetches the server's per-repo key and registers it; follow with `stamp push <branch> --resync-mirror` to catch the mirror up",
   )
   .option(
     "--remove-orgadmin",
@@ -777,13 +777,23 @@ program
   .command("push <target>")
   .description("push <target> to origin; surfaces stamp-verify hook stderr on rejection")
   .option("--remote <name>", "remote to push to", "origin")
-  .action((target: string, opts: { remote: string }) => {
-    try {
-      runPush({ target, remote: opts.remote });
-    } catch (err) {
-      handleCliError(err);
-    }
-  });
+  .option(
+    "--resync-mirror",
+    "after the push, ask the stamp server to re-run the GitHub mirror leg for <target>'s tip even if the server was already up to date. Recovery for a mirror stranded by an earlier failed mirror push (e.g. it had no deploy key — repair the key first with `stamp provision --migrate-bypass`, then push with this flag). Requires a server image with the resync-mirror verb",
+  )
+  .action(
+    (target: string, opts: { remote: string; resyncMirror?: boolean }) => {
+      try {
+        runPush({
+          target,
+          remote: opts.remote,
+          resyncMirror: opts.resyncMirror,
+        });
+      } catch (err) {
+        handleCliError(err);
+      }
+    },
+  );
 
 const pr = program
   .command("pr")

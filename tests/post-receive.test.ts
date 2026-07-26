@@ -15,7 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { readMirrorConfigFromHeadBranch } from "../src/hooks/post-receive.ts";
+import {
+  publickeyRepairHint,
+  readMirrorConfigFromHeadBranch,
+} from "../src/hooks/post-receive.ts";
 
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" });
@@ -99,5 +102,35 @@ describe("readMirrorConfigFromHeadBranch", () => {
     }
     const out = captured.join("");
     assert.match(out, /mirror:.*doesn't resolve/);
+  });
+});
+
+describe("publickeyRepairHint", () => {
+  it("names the repair when GitHub refuses the key (issue #64)", () => {
+    // Real stderr shape from a mirror push against a repo with no deploy
+    // key registered. The generic "retry from a host with the deploy key"
+    // advice is a dead end here — no host has a key GitHub will accept —
+    // so the hint must name --migrate-bypass and the resync flag.
+    const stderr =
+      `git@github.com: Permission denied (publickey).\n` +
+      `fatal: Could not read from remote repository.`;
+    const hint = publickeyRepairHint(stderr);
+    assert.ok(hint);
+    assert.match(hint, /stamp provision --migrate-bypass/);
+    assert.match(hint, /--resync-mirror/);
+  });
+
+  it("matches case-insensitively", () => {
+    assert.ok(publickeyRepairHint("PERMISSION DENIED (PUBLICKEY)"));
+  });
+
+  it("stays silent on unrelated push failures", () => {
+    assert.equal(
+      publickeyRepairHint(
+        `! [rejected] main -> main (non-fast-forward)\nerror: failed to push some refs`,
+      ),
+      null,
+    );
+    assert.equal(publickeyRepairHint(""), null);
   });
 });
