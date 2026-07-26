@@ -253,7 +253,7 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
     // own error) left the operator unable to tell a half-provisioned
     // repo from a fully-provisioned one with a pending bootstrap.
     console.error(
-      `\nprovision: the server repo, local clone` +
+      `\nnote: the server repo, local clone` +
         (mirrorRepo
           ? `, and GitHub mirror${opts.noRuleset ? "" : " (deploy key + Ruleset)"}`
           : "") +
