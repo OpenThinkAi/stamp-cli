@@ -937,3 +937,8 @@ distributed products.
 
 All other runtime dependencies are permissively licensed (MIT, ISC, BSD,
 Apache-2.0).
+
+---
+
+Built by [Saltline Digital](https://saltline.digital) — custom software and AI
+automation for small businesses.
