@@ -12,6 +12,9 @@ protected branches defined in each repo's committed `.stamp/config.yml`.
 - `/etc/stamp/reviewers/` — canonical reviewer prompts (`security.md`, `standards.md`, `product.md`), bundled at build time from `server/reviewers/` in the repo
 - `/usr/local/bin/setup-repo.sh` — bootstrap script
 - `/usr/local/bin/new-stamp-repo <name>` — one-line repo provisioner
+- `/usr/local/bin/resync-mirror <name> [<branch>...]` — re-run the GitHub
+  mirror leg for a repo's current branch tip(s) (recovery after a failed
+  mirror push; see "GitHub mirror" below)
 - `/entrypoint.sh` — sets up `authorized_keys` + operator pub key from env,
   then boots sshd
 
@@ -478,7 +481,12 @@ import via `gh api -X POST /repos/<owner>/<repo>/rulesets --input ...`.
   already succeeded by the time post-receive runs. Mirror failures are
   logged to stderr (visible to the client via git's `remote:` prefix).
 - A failed mirror leaves GitHub out-of-sync until the next successful push
-  or a manual retry. Not data-loss, just staleness.
+  or a manual retry. Not data-loss, just staleness. To catch the mirror up
+  without waiting for the next real push, run
+  `ssh git@<host> resync-mirror <name> [<branch>...]` (or, from a local
+  checkout, `stamp push <branch> --resync-mirror`) — it re-feeds the
+  current branch tip(s) through the same post-receive hook a push would
+  have run. With no branch argument it resyncs the repo's default branch.
 - First push to a fresh GitHub repo requires the GitHub repo to already
   exist (create it empty on github.com first).
 
@@ -650,6 +658,7 @@ Authenticated pushers can:
 - `ssh git@<host> delete-stamp-repo <name> [--purge]`
 - `ssh git@<host> restore-stamp-repo <name> [--from <trash-entry>] [--as <new-name>]`
 - `ssh git@<host> list-trash`
+- `ssh git@<host> resync-mirror <name> [<branch>...]`
 
 …but cannot get an interactive shell, run arbitrary commands, or read
 the per-deployment env file (`/etc/stamp/env`, which holds the GitHub

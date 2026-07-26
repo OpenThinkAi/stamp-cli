@@ -196,11 +196,29 @@ remote: mirror: main push already accepted; mirror out-of-sync.
 
 4. **Target GitHub repo doesn't exist.** First push to a fresh mirror requires the GitHub repo to already exist. Create it empty and retry.
 
-After fixing, manually sync:
+5. **`Permission denied (publickey)` on the mirror leg** — the GitHub
+   repo has **no deploy key registered** for this server (or a stale one).
+   This is the half-provisioned state from issue #64: an older `stamp
+   provision` could create the mirror repo but abort before the deploy-key
+   step, and every later push then half-fails exactly like this. Confirm
+   with `gh api repos/<owner>/<repo>/keys` (empty array = no key). Repair
+   from a local checkout of the repo:
+   ```sh
+   stamp provision --migrate-bypass    # fetches the server's per-repo key, registers it
+   stamp push main --resync-mirror     # re-runs the mirror leg so the mirror catches up
+   ```
+   The key is **per-repo and server-side** — don't compare it against
+   `~/.stamp/mirror-keys/` or another repo's registered key; those are
+   different keys by design.
+
+After fixing, resync the mirror without waiting for the next real push:
 ```sh
-git fetch origin
-git push https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<owner>/<repo>.git main
+stamp push main --resync-mirror
 ```
+(`--resync-mirror` asks the server to re-feed the branch tip through the
+mirror hook even when the push itself is a no-op. Needs a server image
+with the `resync-mirror` verb; on older images, fall back to the manual
+`git push` printed in the mirror error itself.)
 
 ---
 

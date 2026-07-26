@@ -243,3 +243,44 @@ export function parseServerFlag(value: string, context = "--server"): ServerConf
 export function bareRepoSshUrl(cfg: ServerConfig, repoName: string): string {
   return `ssh://${cfg.user}@${cfg.host}:${cfg.port}${cfg.repoRootPrefix}/${repoName}.git`;
 }
+
+export interface ParsedBareRepoSshUrl {
+  user: string;
+  host: string;
+  port: number;
+  /** Bare repo name on the server, without the `.git` suffix. */
+  repoName: string;
+}
+
+/**
+ * Inverse of bareRepoSshUrl: parse a stamp-server origin URL back into
+ * its SSH connection pieces + repo name. Used by `stamp push
+ * --resync-mirror` to reach the server the repo actually pushes to (the
+ * origin remote), rather than whatever ~/.stamp/server.yml points at —
+ * the two can differ for operators with more than one server.
+ *
+ * Returns null for anything that isn't shaped like the URLs
+ * bareRepoSshUrl emits (explicit `ssh://` scheme with an explicit port).
+ * The component charsets mirror USER_RE / HOST_RE / REPO_ROOT_RE above,
+ * so a URL this function accepts is also one whose pieces are safe to
+ * interpolate into ssh argv (with the standing `--` guard at the call
+ * site as the second layer).
+ */
+export function parseBareRepoSshUrl(url: string): ParsedBareRepoSshUrl | null {
+  const m =
+    /^ssh:\/\/([A-Za-z0-9_][A-Za-z0-9._-]*)@([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?):(\d{1,5})((?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+)\.git\/?$/.exec(
+      url.trim(),
+    );
+  if (!m) return null;
+  const [, user, host, portStr, path] = m as unknown as [
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
+  const port = Number(portStr);
+  if (port < 1 || port > 65535) return null;
+  const repoName = path.slice(path.lastIndexOf("/") + 1);
+  return { user, host, port, repoName };
+}
