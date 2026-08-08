@@ -835,9 +835,12 @@ export function reviewersVerify(opts: ReviewersVerifyOptions): void {
     ? new Map<string, { promptPath: string; hits: DotstampExclusionHit[] }>()
     : lintPersonas(repoRoot, names, config);
 
+  // Summary line mirrors the drift branch above: a short stdout mark per
+  // reviewer, with the full report on stderr below. `✗` because this is an
+  // exit-3 finding — the status-mark set here is ✓ / ✗ / ⟳ and nothing else.
   for (const [name] of lintHits) {
     console.log(
-      `  ! ${name.padEnd(16)} persona excludes .stamp/ but enforce_reads_on_dotstamp is on`,
+      `  ✗ ${name.padEnd(16)} persona excludes .stamp/ but enforce_reads_on_dotstamp is on`,
     );
   }
 
