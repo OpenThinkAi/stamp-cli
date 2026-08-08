@@ -1,0 +1,44 @@
+#!/bin/sh
+#
+# list-stamp-repos — enumerate the live bare repos under /srv/git/.
+# One bare-repo directory name per line (i.e. with the `.git` suffix):
+#
+#   myproject.git
+#   another.git
+#
+# Run via:
+#   ssh git@<host> list-stamp-repos
+#
+# Exists because the git user's shell is git-shell, which only accepts
+# whitelisted verbs from git-shell-commands — the client used to send a
+# raw `ls -1 /srv/git/` string and got `fatal: unrecognized command`
+# (issue #67). Trivial as the work is, it has to be a verb to be callable
+# at all.
+#
+# On-volume metadata (`.trash`, `.ssh-host-keys`) and filesystem
+# artifacts (`lost+found`) are excluded here as well as client-side —
+# the `*.git` glob does that for free.
+#
+set -e
+
+GIT_ROOT=/srv/git
+
+if [ ! -d "$GIT_ROOT" ]; then
+  # Distinguish "ran fine, nothing to show" from "command failed" — same
+  # contract as list-trash.
+  echo "(no repos — $GIT_ROOT does not exist)"
+  exit 0
+fi
+
+# Glob-loop form matches delete-stamp-repo / restore-stamp-repo /
+# list-trash. `[ -d ]` filters the unmatched-glob literal so an empty
+# server exits cleanly rather than printing `*.git`.
+found=0
+for entry in "$GIT_ROOT"/*.git; do
+  [ -d "$entry" ] || continue
+  found=1
+  basename "$entry"
+done
+if [ $found -eq 0 ]; then
+  echo "(no live bare repos)"
+fi

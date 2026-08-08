@@ -253,9 +253,12 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
     }
     return;
   }
-  // Live repos: reuse plain ls and filter out the on-volume metadata
-  // directories that aren't bare repos. Cheap enough that a server-side
-  // script for this trivial case isn't worth the round-trip.
+  // Live repos: invoke the server-side `list-stamp-repos` verb. This used
+  // to send a raw `ls -1 /srv/git/` string, but the git user's shell is
+  // git-shell, which only accepts whitelisted verbs from
+  // git-shell-commands — so it failed with `fatal: unrecognized command`
+  // on every git-shell server (issue #67). Trivial as the work is, it has
+  // to be a verb to be callable at all.
   const result = spawnSync(
     "ssh",
     [
@@ -263,14 +266,16 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
       String(server.port),
       "--",
       `${server.user}@${server.host}`,
-      "ls",
-      "-1",
-      "/srv/git/",
+      "list-stamp-repos",
     ],
     { stdio: ["ignore", "pipe", "inherit"], encoding: "utf8" },
   );
   if (result.status !== 0) {
-    throw new Error(`list failed (exit ${result.status}).`);
+    throw new Error(
+      `list failed (exit ${result.status}). If you see "unrecognized command" or ` +
+        `"command not found", the server image predates the list-stamp-repos verb ` +
+        `(issue #67) — redeploy it first.`,
+    );
   }
   const entries = filterLiveBareRepoNames(result.stdout);
   if (entries.length === 0) {
@@ -326,7 +331,7 @@ export function normalizeRepoName(name: string): string {
 }
 
 /**
- * Filter `ls -1 /srv/git/` output to the live bare repos and display them
+ * Filter `list-stamp-repos` output to the live bare repos and display them
  * without the `.git` suffix. Drops on-volume metadata (`.trash`,
  * `.ssh-host-keys`) and filesystem artifacts (`lost+found` on ext4
  * volumes). Displaying without `.git` matches the form operators pass

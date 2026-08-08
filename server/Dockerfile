@@ -224,6 +224,7 @@ COPY server/new-stamp-repo /usr/local/bin/new-stamp-repo
 COPY server/delete-stamp-repo /usr/local/bin/delete-stamp-repo
 COPY server/restore-stamp-repo /usr/local/bin/restore-stamp-repo
 COPY server/list-trash /usr/local/bin/list-trash
+COPY server/list-stamp-repos /usr/local/bin/list-stamp-repos
 COPY server/stamp-server-pubkey /usr/local/bin/stamp-server-pubkey
 COPY server/resync-mirror /usr/local/bin/resync-mirror
 COPY server/stamp-ensure-repo-key /usr/local/sbin/stamp-ensure-repo-key
@@ -276,6 +277,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/delete-stamp-repo \
              /usr/local/bin/restore-stamp-repo \
              /usr/local/bin/list-trash \
+             /usr/local/bin/list-stamp-repos \
              /usr/local/bin/stamp-server-pubkey \
              /usr/local/bin/resync-mirror \
              /usr/local/bin/stamp-mint-invite \
@@ -311,6 +313,7 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/delete-stamp-repo /home/git/git-shell-commands/delete-stamp-repo \
  && ln -s /usr/local/bin/restore-stamp-repo /home/git/git-shell-commands/restore-stamp-repo \
  && ln -s /usr/local/bin/list-trash /home/git/git-shell-commands/list-trash \
+ && ln -s /usr/local/bin/list-stamp-repos /home/git/git-shell-commands/list-stamp-repos \
  && ln -s /usr/local/bin/stamp-server-pubkey /home/git/git-shell-commands/stamp-server-pubkey \
  && ln -s /usr/local/bin/resync-mirror /home/git/git-shell-commands/resync-mirror \
  && ln -s /usr/local/bin/stamp-mint-invite /home/git/git-shell-commands/stamp-mint-invite \
