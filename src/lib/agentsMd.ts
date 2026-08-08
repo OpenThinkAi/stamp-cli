@@ -409,6 +409,7 @@ A new contributor needs:
 stamp --help                              # full command list
 stamp reviewers list                      # configured reviewers + prompt file status
 stamp review --diff main..feature         # request reviews (server-signed)
+stamp verify-pr feature --base main --into main   # re-run the PR check's verification locally
 stamp verify <sha>                        # re-verify a specific merge commit's attestation against the trusted pubkey
 \`\`\`
 
@@ -562,8 +563,13 @@ stamp reviewers list                      # configured reviewers + prompt file s
 stamp keys list                           # your local key + the repo's trusted keys
 stamp review --diff main..feature         # run the reviewers
 stamp attest feature --into main          # sign the PR attestation
-stamp verify-pr <head-sha>                # re-verify a PR attestation locally
+stamp verify-pr feature --base main --into main   # re-run the PR check's verification locally
 \`\`\`
+
+\`stamp verify-pr\` is the PR-mode verifier — it checks the attestation
+ref for a diff, which is what the Actions check does. \`stamp verify
+<sha>\` is its server-gated counterpart and inspects a merge commit's
+trailer; there are no such trailers in this mode.
 
 ### When the gate blocks you
 

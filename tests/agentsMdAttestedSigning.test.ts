@@ -269,6 +269,61 @@ describe("AC2: every file path the doc names exists in the scaffold", () => {
   });
 });
 
+/**
+ * The AC2 path check deliberately only looks at file paths, so a doc can
+ * still name a `stamp <subcommand>` that doesn't exist — the same class of
+ * dangling reference. Pin the command names against the CLI's own
+ * definitions in src/index.ts.
+ */
+function declaredCliCommands(): Set<string> {
+  const src = readFileSync(
+    join(import.meta.dirname, "..", "src", "index.ts"),
+    "utf8",
+  );
+  const names = new Set<string>();
+  for (const m of src.matchAll(/\.command\("([a-z][a-z-]*)/g)) names.add(m[1]!);
+  return names;
+}
+
+/**
+ * Top-level `stamp <cmd>` invocations named in a doc body. Only code
+ * contexts count — inline code spans and lines inside fenced blocks —
+ * because prose legitimately says things like "a server-side stamp
+ * instance" and "the stamp flow", which are not command references.
+ */
+function namedStampCommands(doc: string): string[] {
+  const found = new Set<string>();
+  // Inline code spans: `stamp attest feature --into main`
+  for (const m of doc.matchAll(/`stamp ([a-z][a-z-]*)/g)) found.add(m[1]!);
+  // Fenced-block lines that begin an invocation: "stamp review --diff ..."
+  for (const m of doc.matchAll(/^stamp ([a-z][a-z-]*)/gm)) found.add(m[1]!);
+  return [...found];
+}
+
+describe("no dangling command references in either body", () => {
+  const declared = declaredCliCommands();
+
+  it("the CLI command extractor works (guards a vacuous pass)", () => {
+    for (const expected of ["review", "attest", "verify", "verify-pr", "merge"]) {
+      assert.ok(declared.has(expected), `expected '${expected}' to be declared`);
+    }
+  });
+
+  it("every stamp command in the local-signing body exists", () => {
+    const unknown = namedStampCommands(
+      STAMP_AGENTS_SECTION_ATTESTED_PR_LOCAL_SIGNING,
+    ).filter((c) => !declared.has(c));
+    assert.deepEqual(unknown, [], `unknown stamp commands: ${unknown}`);
+  });
+
+  it("every stamp command in the server-attested body exists", () => {
+    const unknown = namedStampCommands(STAMP_AGENTS_SECTION_ATTESTED_PR).filter(
+      (c) => !declared.has(c),
+    );
+    assert.deepEqual(unknown, [], `unknown stamp commands: ${unknown}`);
+  });
+});
+
 describe("drift-checker invariants still hold for both bodies", () => {
   it("both attested-pr bodies carry the sniffable phrase", () => {
     assert.ok(STAMP_AGENTS_SECTION_ATTESTED_PR.includes(SNIFF_PHRASE_ATTESTED_PR));
