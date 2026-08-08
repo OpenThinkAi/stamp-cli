@@ -410,7 +410,7 @@ function deployKeysDisabledHint(
 ): string | null {
   if (!/deploy keys are disabled/i.test(detail)) return null;
   return (
-    `\n  hint: deploy keys are turned off for this repository. ` +
+    `\n  note: deploy keys are turned off for this repository. ` +
     `Enable them at https://github.com/${owner}/${repo}/settings/keys ` +
     `(org-owned repos may also need Settings → Member privileges → ` +
     `"Allow members to create deploy keys" at the org level), then re-run.`

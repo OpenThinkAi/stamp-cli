@@ -140,7 +140,6 @@ exit 1
     );
 
     assert.equal(res.status, "failed");
-    assert.equal(res.status === "failed" && typeof res.error, "string");
     const error = res.status === "failed" ? res.error : "";
     // The cause, not just "Validation Failed".
     assert.match(error, /Deploy keys are disabled for this repository/);
@@ -148,7 +147,7 @@ exit 1
     assert.match(error, /MicroMediaSites\/fx-tracker/);
     assert.match(error, /stamp-mirror/);
     // The hint points at the setting that actually fixes it.
-    assert.match(error, /hint: deploy keys are turned off/);
+    assert.match(error, /note: deploy keys are turned off/);
     assert.match(
       error,
       /github\.com\/MicroMediaSites\/fx-tracker\/settings\/keys/,
@@ -174,7 +173,7 @@ exit 1
     assert.equal(res.status, "failed");
     const error = res.status === "failed" ? res.error : "";
     assert.match(error, /key is already in use/);
-    assert.doesNotMatch(error, /hint: deploy keys are turned off/);
+    assert.doesNotMatch(error, /note: deploy keys are turned off/);
   });
 
   it("keeps the stub self-consistent: gh is the one we installed", () => {
