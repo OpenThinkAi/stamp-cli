@@ -270,11 +270,9 @@ export function applyStampRuleset(
     },
   );
   if (r.status !== 0) {
-    const stderr = (r.stderr ?? "").trim();
-    const stdout = (r.stdout ?? "").trim();
     return {
       status: "failed",
-      error: stderr || stdout || `gh api exited ${r.status}`,
+      error: formatGhApiFailure(r.stdout ?? "", r.stderr ?? "", r.status),
     };
   }
   try {
@@ -321,6 +319,102 @@ export function findDeployKey(
   if (!trimmed) return null;
   const id = Number(trimmed);
   return Number.isFinite(id) ? id : null;
+}
+
+/**
+ * Build a human-usable failure detail from a failed `gh api` invocation.
+ *
+ * `gh api` writes a terse one-liner to stderr ("gh: Validation Failed
+ * (HTTP 422)") but streams the *response body* — which carries the actual
+ * cause in `message` / `errors[].message` — to stdout. Preferring stderr
+ * and dropping stdout therefore throws away the only useful diagnostic:
+ * a repo with deploy keys disabled at the org level reported nothing but
+ * "Validation Failed", sending a debugging session after key-collision
+ * theories when the answer was a dashboard toggle (issue #54).
+ *
+ * So: parse whatever JSON stdout holds, surface every `errors[].message`
+ * (falling back to the top-level `message`), and keep stderr alongside it
+ * rather than instead of it. Non-JSON stdout is passed through verbatim.
+ */
+export function formatGhApiFailure(
+  stdout: string,
+  stderr: string,
+  exitStatus: number | null,
+): string {
+  const err = stderr.trim();
+  const out = stdout.trim();
+
+  const bodyDetail = extractGhErrorBody(out);
+  const parts = [err, bodyDetail ?? out].filter((p): p is string =>
+    Boolean(p),
+  );
+  // De-dupe: gh sometimes echoes the same text on both streams.
+  const detail = [...new Set(parts)].join(" — ");
+  return detail || `gh api exited ${exitStatus}`;
+}
+
+/**
+ * Pull the human-readable part out of a GitHub API JSON error body.
+ * Returns null when `body` isn't JSON (caller falls back to raw text).
+ */
+function extractGhErrorBody(body: string): string | null {
+  if (!body) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const obj = parsed as { message?: unknown; errors?: unknown };
+
+  const messages: string[] = [];
+  if (Array.isArray(obj.errors)) {
+    for (const e of obj.errors) {
+      if (typeof e === "string") {
+        messages.push(e);
+      } else if (typeof e === "object" && e !== null) {
+        const m = (e as { message?: unknown }).message;
+        if (typeof m === "string" && m.trim()) messages.push(m.trim());
+      }
+    }
+  }
+  if (messages.length === 0 && typeof obj.message === "string") {
+    const m = obj.message.trim();
+    if (m) messages.push(m);
+  }
+  if (messages.length === 0) return null;
+
+  // Keep the top-level summary ("Validation Failed") as a prefix when it
+  // adds context beyond the specific errors.
+  const summary =
+    typeof obj.message === "string" && obj.message.trim()
+      ? obj.message.trim()
+      : null;
+  const detail = [...new Set(messages)].join("; ");
+  return summary && !messages.includes(summary)
+    ? `${summary}: ${detail}`
+    : detail;
+}
+
+/**
+ * GitHub orgs (and individual repos) can switch deploy keys off entirely.
+ * When they do, key registration fails with a 422 whose only signal is
+ * this message — and the fix is a settings toggle, not anything stamp or
+ * the operator's key material can influence. Worth an explicit pointer.
+ */
+function deployKeysDisabledHint(
+  detail: string,
+  owner: string,
+  repo: string,
+): string | null {
+  if (!/deploy keys are disabled/i.test(detail)) return null;
+  return (
+    `\n  note: deploy keys are turned off for this repository. ` +
+    `Enable them at https://github.com/${owner}/${repo}/settings/keys ` +
+    `(org-owned repos may also need Settings → Member privileges → ` +
+    `"Allow members to create deploy keys" at the org level), then re-run.`
+  );
 }
 
 export type RegisterDeployKeyResult =
@@ -378,12 +472,15 @@ export function registerDeployKey(
     },
   );
   if (r.status !== 0) {
-    const stderr = (r.stderr ?? "").trim();
-    const stdout = (r.stdout ?? "").trim();
-    const detail = stderr || stdout || `gh api exited ${r.status}`;
+    const detail = formatGhApiFailure(
+      r.stdout ?? "",
+      r.stderr ?? "",
+      r.status,
+    );
+    const hint = deployKeysDisabledHint(detail, owner, repo);
     return {
       status: "failed",
-      error: `${ctx}: ${detail}`,
+      error: `${ctx}: ${detail}${hint ?? ""}`,
     };
   }
   let parsed: { id?: unknown };
@@ -594,11 +691,10 @@ export function replaceBypassActors(
     },
   );
   if (r.status !== 0) {
-    const stderr = (r.stderr ?? "").trim();
-    const stdout = (r.stdout ?? "").trim();
+    const detail = formatGhApiFailure(r.stdout ?? "", r.stderr ?? "", r.status);
     return {
       status: "failed",
-      error: `${owner}/${repo} ruleset ${rulesetId}: ${stderr || stdout || `gh api exited ${r.status}`}`,
+      error: `${owner}/${repo} ruleset ${rulesetId}: ${detail}`,
     };
   }
   return { status: "updated" };
