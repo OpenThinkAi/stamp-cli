@@ -15,6 +15,9 @@ protected branches defined in each repo's committed `.stamp/config.yml`.
 - `/usr/local/bin/resync-mirror <name> [<branch>...]` — re-run the GitHub
   mirror leg for a repo's current branch tip(s) (recovery after a failed
   mirror push; see "GitHub mirror" below)
+- `/usr/local/bin/list-stamp-repos` — enumerate the live bare repos under
+  `/srv/git/`, one `<name>.git` per line (backs `stamp server-repos list`;
+  a verb rather than a raw `ls` because the git user's shell is `git-shell`)
 - `/entrypoint.sh` — sets up `authorized_keys` + operator pub key from env,
   then boots sshd
 
@@ -658,6 +661,7 @@ Authenticated pushers can:
 - `ssh git@<host> delete-stamp-repo <name> [--purge]`
 - `ssh git@<host> restore-stamp-repo <name> [--from <trash-entry>] [--as <new-name>]`
 - `ssh git@<host> list-trash`
+- `ssh git@<host> list-stamp-repos`
 - `ssh git@<host> resync-mirror <name> [<branch>...]`
 
 …but cannot get an interactive shell, run arbitrary commands, or read
