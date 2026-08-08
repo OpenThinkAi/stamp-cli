@@ -740,6 +740,15 @@ appear in its `Read` trace; otherwise the verdict is overridden to
 files. Defends against a prompt-injected reviewer waving through
 its own trust anchors. Audit-H1 defense-in-depth.
 
+Keep the reviewer's persona consistent with the flag: a prompt that
+puts `.stamp/` out of scope steers the model away from the very Reads
+the flag requires. `stamp reviewers verify` lints for that
+contradiction and exits 3 (the lock-drift convention) when it finds
+one; `--no-persona-lint` skips the check if the heuristic misfires.
+The runtime enforcement is unaffected by the lint either way — stamp
+also injects an up-front Read directive that supersedes persona scope
+exclusions, so a compliant reviewer can pass in one round.
+
 **Exit-code cheat sheet:**
 
 | Command | 0 | non-zero (check stderr to disambiguate) |
