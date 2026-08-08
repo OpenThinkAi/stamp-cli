@@ -24,6 +24,11 @@ import {
   type ReviewerStats,
 } from "../lib/db.js";
 import { resolveDiff } from "../lib/git.js";
+import {
+  findDotstampExclusions,
+  formatDotstampExclusionReport,
+  type DotstampExclusionHit,
+} from "../lib/personaLint.js";
 import { invokeReviewer } from "../lib/reviewer.js";
 import {
   findRepoRoot,
@@ -722,6 +727,48 @@ export async function reviewersFetch(
 export interface ReviewersVerifyOptions {
   /** Optional reviewer name to restrict the check to. */
   only?: string;
+  /**
+   * Skip the persona/config consistency lint (issue #53). The lint is a text
+   * heuristic over persona prompts; this is the escape hatch for a false
+   * positive so a bad match can't wedge someone's CI. It only suppresses
+   * *reporting* — `enforce_reads_on_dotstamp` enforcement at review time is
+   * unaffected either way.
+   */
+  noPersonaLint?: boolean;
+}
+
+/**
+ * Run the `.stamp/`-exclusion persona lint over every reviewer that has
+ * `enforce_reads_on_dotstamp: true` and a locally-authored prompt.
+ *
+ * Reviewers with no `prompt:` (Shape 4, server-bundled) have no local text to
+ * lint, and a prompt path that doesn't exist is a different error that the
+ * drift check and `stamp review` already report — both are skipped here
+ * rather than double-reported.
+ */
+function lintPersonas(
+  repoRoot: string,
+  names: readonly string[],
+  config: ReturnType<typeof loadConfig>,
+): Map<string, { promptPath: string; hits: DotstampExclusionHit[] }> {
+  const found = new Map<
+    string,
+    { promptPath: string; hits: DotstampExclusionHit[] }
+  >();
+
+  for (const name of names) {
+    const def = config.reviewers[name];
+    if (!def || def.enforce_reads_on_dotstamp !== true) continue;
+    if (def.prompt === undefined) continue;
+
+    const promptPath = join(repoRoot, def.prompt);
+    if (!existsSync(promptPath)) continue;
+
+    const hits = findDotstampExclusions(readFileSync(promptPath, "utf8"));
+    if (hits.length > 0) found.set(name, { promptPath: def.prompt, hits });
+  }
+
+  return found;
 }
 
 export function reviewersVerify(opts: ReviewersVerifyOptions): void {
@@ -779,20 +826,39 @@ export function reviewersVerify(opts: ReviewersVerifyOptions): void {
     }
   }
 
-  if (!anyLocked) {
+  // Issue #53: persona/config consistency. This is independent of lock files
+  // — an unpinned reviewer can hold the contradiction just as easily as a
+  // pinned one — so it runs before the `!anyLocked` early return, and its
+  // findings share the drift exit code (both mean "reviewer config needs a
+  // human", as distinct from exit 1 "review rejected").
+  const lintHits = opts.noPersonaLint
+    ? new Map<string, { promptPath: string; hits: DotstampExclusionHit[] }>()
+    : lintPersonas(repoRoot, names, config);
+
+  for (const [name] of lintHits) {
+    console.log(
+      `  ! ${name.padEnd(16)} persona excludes .stamp/ but enforce_reads_on_dotstamp is on`,
+    );
+  }
+
+  if (!anyLocked && lintHits.size === 0) {
     console.log(
       "\nNo lock files present. Run `stamp reviewers fetch <name> --from <source>@<ref>` to pin a reviewer.",
     );
     return;
   }
 
-  if (anyDrift) {
+  if (anyDrift || lintHits.size > 0) {
     console.error();
     for (const [name, result] of results) {
       if (result.hasLock && result.mismatches.length > 0) {
         console.error(formatDriftReport(name, result));
         console.error();
       }
+    }
+    for (const [name, { promptPath, hits }] of lintHits) {
+      console.error(formatDotstampExclusionReport(name, promptPath, hits));
+      console.error();
     }
     process.exit(LOCK_DRIFT_EXIT);
   }

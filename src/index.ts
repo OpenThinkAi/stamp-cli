@@ -1646,10 +1646,17 @@ reviewers
 reviewers
   .command("verify [name]")
   .description(
-    "check reviewer prompt/tool/mcp config against lock files; exit 3 on drift",
+    "check reviewer prompt/tool/mcp config against lock files and lint persona/config contradictions; exit 3 on either",
   )
-  .action((name: string | undefined) =>
-    wrap(() => reviewersVerify({ only: name })),
+  .option(
+    "--no-persona-lint",
+    "skip the persona/config consistency lint (enforce_reads_on_dotstamp vs a persona that excludes .stamp/)",
+  )
+  .action((name: string | undefined, opts: { personaLint?: boolean }) =>
+    // commander --no-persona-lint sets opts.personaLint = false
+    wrap(() =>
+      reviewersVerify({ only: name, noPersonaLint: opts.personaLint === false }),
+    ),
   );
 
 // --------------------------------------------------------------------------
