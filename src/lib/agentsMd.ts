@@ -273,12 +273,38 @@ ${REVIEW_LOOP_HEURISTIC}
 `;
 
 /**
+ * Which signing model an attested-pr (Shape 4) repo actually uses.
+ *
+ * Shape 4 says "origin is GitHub and a PR check verifies an attestation";
+ * it does NOT say who signed that attestation. Both are real:
+ *
+ * - `server-attested` — a review server signs, and the repo carries
+ *   `review_server` + `manifest.yml` + the server's pubkey.
+ * - `local-signing`   — an operator's own stamp key signs (`stamp attest`),
+ *   and the trust anchors are the pubkeys committed under
+ *   `.stamp/trusted-keys/`. This is what plain `stamp init --mode
+ *   attested-pr` scaffolds; the server artifacts arrive only via
+ *   `--migrate-to-server-attested`.
+ *
+ * The distinction exists because emitting the server narrative over a
+ * local-signing scaffold sent contributors hunting for a
+ * `review-server-prod.pub` that was never created, and told them no
+ * local signing key was needed when the gate hinges on exactly that key
+ * (issue #55).
+ */
+export type AttestedPrSigning = "server-attested" | "local-signing";
+
+/**
  * Attested-PR section body — Shape 4 (server-attested mirror). Origin is
  * GitHub (the canonical mirror-as-source-of-truth), and the stamp server
  * never sees a git push from the operator. Enforcement happens in two
  * places: GitHub branch protection rejects direct pushes to \`main\`, and
  * the \`stamp-verify\` Actions PR check rejects PRs whose merge commit
  * lacks a valid server-attested envelope.
+ *
+ * Emitted ONLY when the server artifacts actually exist — see
+ * `detectAttestedPrSigning`. Every file path named below is part of the
+ * `--migrate-to-server-attested` scaffold.
  *
  * The body is deliberately honest about the two-part contract: branch
  * protection has to be configured on GitHub or the PR check can be
@@ -383,6 +409,7 @@ A new contributor needs:
 stamp --help                              # full command list
 stamp reviewers list                      # configured reviewers + prompt file status
 stamp review --diff main..feature         # request reviews (server-signed)
+stamp verify-pr feature --base main --into main   # re-run the PR check's verification locally
 stamp verify <sha>                        # re-verify a specific merge commit's attestation against the trusted pubkey
 \`\`\`
 
@@ -399,6 +426,163 @@ stamp verify <sha>                        # re-verify a specific merge commit's 
 - The server-side review request failed — see
   \`docs/troubleshooting.md\` (server unreachable, reviewer prompt
   mismatch, etc.).
+
+${REVIEW_LOOP_HEURISTIC}
+`;
+
+/**
+ * Attested-PR section body — Shape 4 with LOCAL-key signing. This is what
+ * plain `stamp init --mode attested-pr` produces: local reviewer prompts,
+ * the operator's own signing key deposited into `.stamp/trusted-keys/`,
+ * and no review server anywhere.
+ *
+ * The enforcement story is identical to the server-attested variant (branch
+ * protection + the `stamp verify` Actions check); only the *signer* and the
+ * *trust anchor* differ, so the two-part-contract warning is repeated
+ * verbatim in spirit. What must NOT be repeated is the server narrative:
+ * no `review_server`, no `manifest.yml`, no `review-server-prod.pub`, and
+ * emphatically not "no client-side signing key is needed" — the local key
+ * is the entire trust root here.
+ *
+ * Every path named below is created by the `--mode attested-pr` scaffold.
+ * Keep it that way: a doc that names a file `init` didn't write is the bug
+ * this body exists to fix (issue #55).
+ *
+ * Carries the same sniffable first line as the server-attested body — both
+ * are attested-pr mode as far as the drift checker is concerned, and the
+ * checker's job is mode drift, not signing-model drift.
+ */
+export const STAMP_AGENTS_SECTION_ATTESTED_PR_LOCAL_SIGNING = `## Stamp-protected repository — Shape 4 — attested-pr mode (GitHub-primary)
+
+This repository is gated by [stamp-cli](https://github.com/OpenThinkAi/stamp-cli)
+in **attested-pr mode with local-key signing**: origin is GitHub (the
+canonical source of truth), reviews run **locally** against the prompts
+committed under \`.stamp/reviewers/\`, and the resulting attestation is
+signed by an operator's **own stamp key**. There is no review server in
+this picture. A GitHub Actions \`stamp verify\` PR check validates that
+attestation against the public keys committed under
+\`.stamp/trusted-keys/\` before a maintainer can merge.
+
+### The two-part enforcement model (read this carefully)
+
+Enforcement is not in any single hook. It is the **conjunction** of:
+
+1. **GitHub branch protection on \`main\`** — must be configured to require
+   the \`stamp verify\` check AND block direct pushes. If branch protection
+   is missing or misconfigured, the PR check still runs but a maintainer
+   can merge a PR that failed it. The operator who set this repo up is
+   responsible for the protection rules; verify with
+   \`gh api repos/<owner>/<repo>/branches/main/protection\`.
+2. **\`.github/workflows/stamp-verify.yml\`** — the Action that verifies
+   the attestation. Its job name (\`stamp verify\`) is what appears in the
+   branch-protection \`required_status_checks\` list.
+
+If either is absent, the gate is **partially open**. Do not assume the
+mode name "attested-pr" means rejection is automatic — confirm both
+pieces are live before treating a green PR check as authoritative.
+
+### The canonical workflow
+
+\`\`\`sh
+git checkout -b feature
+# ...edit, commit, repeat on the feature branch...
+
+stamp review --diff main..feature       # reviewers run locally
+stamp status --diff main..feature       # exit 0 if every required reviewer approved
+
+stamp attest feature --into main        # signs with YOUR key; writes
+                                        # refs/stamp/attestations/<patch-id>
+# \`stamp attest\` prints the exact push command for the attestation ref —
+# the ref must reach origin or the PR check has nothing to verify.
+
+# Open the PR (GitHub UI or \`gh pr create\`). The \`stamp verify\` Actions
+# check fetches the attestation ref and validates its signature against
+# \`.stamp/trusted-keys/\` as of the BASE ref. A maintainer merges via
+# GitHub once the check is green.
+\`\`\`
+
+\`stamp merge\` and \`stamp push\` are NOT the merge path here — they're the
+server-gated (Shape 1) flow. In attested-pr mode the merge happens through
+GitHub's UI/API, and the attestation lives in its own git ref rather than
+a merge-commit trailer (so it survives squash and rebase).
+
+### What NOT to do
+
+- **Do not** \`git push origin main\` directly — branch protection rejects.
+- **Do not** merge a PR whose \`stamp verify\` check is failing or skipped.
+  A skipped check on a PR that touches code is a signal the workflow
+  didn't run; investigate before merging.
+- **Do not** disable or weaken the branch-protection rules without
+  understanding that doing so unilaterally opens the gate.
+- **Do not** edit \`.stamp/config.yml\` or \`.stamp/trusted-keys/*.pub\`
+  casually — those changes go through the same review + attestation gate
+  as any other code change. They are security-sensitive edits.
+- **Do not** delete the \`.pub\` files in \`.stamp/trusted-keys/\`. In this
+  deployment they are the *only* trust anchors the PR check has; removing
+  the key that signs attestations locks the repo out of all future merges
+  until it is restored. (Server-attested deployments anchor on a server
+  key instead — this repo does not have one.)
+
+### Contributor onboarding
+
+A new contributor needs:
+
+1. Read access to the repo (no special stamp setup for plain reviewers).
+2. To attest their own PR: a local stamp signing key whose **public** key
+   is committed to \`.stamp/trusted-keys/\`. Generate with
+   \`stamp keys generate\`, print it with \`stamp keys export\`, and land it
+   via \`stamp keys trust <pub-file>\` in a PR of its own — adding a trust
+   anchor is itself a reviewed change. Until that key is trusted, their
+   attestations will not verify.
+3. Reviews run locally, so they also need whatever the reviewer runner
+   requires (see \`stamp reviewers list\` for the configured personas and
+   their prompt files).
+4. The \`stamp verify\` workflow is already in the repo; PRs run it
+   automatically.
+
+### Where things live
+
+- \`.stamp/config.yml\` — branch rules (required reviewers) + the reviewer roster with local \`prompt:\` paths
+- \`.stamp/reviewers/*.md\` — the reviewer prompt files this repo reviews against
+- \`.stamp/trusted-keys/*.pub\` — the trust anchors; \`sha256_<fingerprint>.pub\` is the signing key \`stamp init\` deposited
+- \`.github/workflows/stamp-verify.yml\` — the Actions PR check that enforces the attestation
+- \`~/.stamp/keys/ed25519{,.pub}\` — your local signing keypair (private half never leaves your machine)
+
+There is no review server in this deployment: the config declares no
+\`review_server\`, and there is no trusted-keys manifest and no server
+review-signing pubkey — those artifacts belong to server-attested
+deployments only. To move to one, run
+\`stamp init --migrate-to-server-attested\`; it provisions them and
+rewrites this section to match.
+
+### Useful commands
+
+\`\`\`sh
+stamp --help                              # full command list
+stamp reviewers list                      # configured reviewers + prompt file status
+stamp keys list                           # your local key + the repo's trusted keys
+stamp review --diff main..feature         # run the reviewers
+stamp attest feature --into main          # sign the PR attestation
+stamp verify-pr feature --base main --into main   # re-run the PR check's verification locally
+\`\`\`
+
+\`stamp verify-pr\` is the PR-mode verifier — it checks the attestation
+ref for a diff, which is what the Actions check does. \`stamp verify
+<sha>\` is its server-gated counterpart and inspects a merge commit's
+trailer; there are no such trailers in this mode.
+
+### When the gate blocks you
+
+- \`stamp verify\` PR check failed — read the Actions log. Common causes:
+  the attestation ref was never pushed (\`stamp attest\` prints the push
+  command — it is a separate step from pushing the branch), the signing
+  key isn't in \`.stamp/trusted-keys/\` on the BASE ref, or the diff
+  changed after attesting (the attestation is keyed on patch-id, so new
+  commits need a fresh \`stamp attest\`).
+- \`stamp status\` exits non-zero — a required reviewer hasn't approved the
+  current diff. Re-run \`stamp review\` after addressing the feedback.
+- Branch protection blocked a direct push — that's working as intended.
+  Open a PR instead.
 
 ${REVIEW_LOOP_HEURISTIC}
 `;
@@ -457,8 +641,9 @@ function findManagedBlock(
 export function injectStampSection(
   existing: string | undefined,
   mode: AgentsMdMode = "server-gated",
+  signing: AttestedPrSigning = "server-attested",
 ): string {
-  const body = bodyForMode(mode);
+  const body = bodyForMode(mode, signing);
   const stampBlock = `${STAMP_BEGIN}\n\n${body.trimEnd()}\n\n${STAMP_END}`;
 
   if (existing === undefined || existing.trim() === "") {
@@ -500,12 +685,18 @@ export function ensureAgentsMd(
   mode: AgentsMdMode = "server-gated",
 ): "created" | "replaced" | "appended" | "unchanged" {
   const path = join(repoRoot, "AGENTS.md");
+  // Which attested-pr narrative is truthful depends on what's actually on
+  // disk, not on the mode flag — see detectAttestedPrSigning. Callers that
+  // provision the server artifacts (the --migrate-to-server-attested path)
+  // write them BEFORE calling here, so detection sees them.
+  const signing =
+    mode === "attested-pr" ? detectAttestedPrSigning(repoRoot) : "server-attested";
   if (!existsSync(path)) {
-    writeFileSync(path, injectStampSection(undefined, mode));
+    writeFileSync(path, injectStampSection(undefined, mode, signing));
     return "created";
   }
   const existing = readFileSync(path, "utf8");
-  const updated = injectStampSection(existing, mode);
+  const updated = injectStampSection(existing, mode, signing);
   if (updated === existing) return "unchanged";
   // "replaced" if either the new or legacy marker was already present.
   const action =
@@ -627,15 +818,58 @@ export function ensureClaudeMd(
  * so injectStampSection and the drift sniffer don't drift apart — both
  * route through the same lookup.
  */
-function bodyForMode(mode: AgentsMdMode): string {
+function bodyForMode(
+  mode: AgentsMdMode,
+  signing: AttestedPrSigning = "server-attested",
+): string {
   switch (mode) {
     case "server-gated":
       return STAMP_AGENTS_SECTION_SERVER_GATED;
     case "local-only":
       return STAMP_AGENTS_SECTION_LOCAL_ONLY;
     case "attested-pr":
-      return STAMP_AGENTS_SECTION_ATTESTED_PR;
+      return signing === "local-signing"
+        ? STAMP_AGENTS_SECTION_ATTESTED_PR_LOCAL_SIGNING
+        : STAMP_AGENTS_SECTION_ATTESTED_PR;
   }
+}
+
+/**
+ * Decide which attested-pr signing narrative a repo's scaffold actually
+ * supports, by looking at what is on disk rather than at what flag the
+ * operator typed.
+ *
+ * `server-attested` requires the full set the migration writes together:
+ * a trusted-keys manifest, the server's review-signing pubkey, and a
+ * `review_server` entry in the config. Anything short of that — including
+ * the plain `--mode attested-pr` scaffold, which writes none of them — is
+ * `local-signing`, because the only key that can sign an attestation is
+ * the local one deposited under `.stamp/trusted-keys/`.
+ *
+ * Deliberately conservative: the server body names all three artifacts,
+ * so claiming server-attested without them reintroduces exactly the
+ * dangling-file-reference bug this guards (issue #55). Reads config.yml
+ * as raw text rather than through the parser — this runs against
+ * half-scaffolded repos where a strict parse could throw, and a
+ * substring check for the key is enough to tell "was it wired up".
+ */
+export function detectAttestedPrSigning(repoRoot: string): AttestedPrSigning {
+  const trustedKeys = join(repoRoot, ".stamp", "trusted-keys");
+  const hasManifest = existsSync(join(trustedKeys, "manifest.yml"));
+  const hasServerKey = existsSync(join(trustedKeys, "review-server-prod.pub"));
+  if (!hasManifest || !hasServerKey) return "local-signing";
+
+  let config: string;
+  try {
+    config = readFileSync(join(repoRoot, ".stamp", "config.yml"), "utf8");
+  } catch {
+    return "local-signing";
+  }
+  // A commented-out `# review_server:` must not count as wired up.
+  const declaresReviewServer = config
+    .split("\n")
+    .some((line) => /^\s*review_server\s*:\s*\S/.test(line));
+  return declaresReviewServer ? "server-attested" : "local-signing";
 }
 
 /**
