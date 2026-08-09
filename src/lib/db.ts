@@ -67,6 +67,18 @@ export interface ReviewRow {
    *  LLM input and must not share a cached verdict. Message-only amends and
    *  squashes keep the tree, so the anti-treadmill reuse survives those. */
   tree_sha: string | null;
+  /** Short branch name the review was run against (`feature-x`), or null when
+   *  the review ran on a detached HEAD / an unresolvable revspec, or for rows
+   *  recorded before this column shipped (AGT-881, issue #65).
+   *
+   *  Load-bearing for two anti-contamination properties, both of which matter
+   *  because every worktree of one clone shares a single `state.db` (it lives
+   *  under the git *common* dir — see `stampStateDbPath`):
+   *    1. prior-review resolution for delta-narrowing (a sibling branch's head
+   *       must never be treated as "what I reviewed last time"), and
+   *    2. the verdict cache key (a verdict minted on branch A must never be
+   *       served to branch B). */
+  branch: string | null;
   /** JSON-stringified `ApprovalV4` (see `lib/attestationV4.ts`) as returned
    *  by stamp-server's `stamp-review` SSH verb. Null for rows produced by
    *  pre-2.x clients OR by a 2.x client running in local-only mode (no
@@ -116,6 +128,13 @@ export interface RecordReviewInput {
    *  (issue #59). Optional so pre-existing call sites/tests that never
    *  serve from cache don't have to thread it. */
   tree_sha?: string | null;
+  /** Short branch name the review ran against, or null for a detached HEAD /
+   *  unresolvable revspec (AGT-881). Optional so existing call sites and
+   *  tests that never consult the cache or the ratchet don't have to thread
+   *  it — but `commands/review.ts` always passes it, because a NULL here
+   *  makes the row cache-ineligible for any *named* branch and ineligible as
+   *  a same-branch amend ancestor. Fails toward "review fresh". */
+  branch?: string | null;
   /** Server-attested approval persisted as a unit. Either provide all
    *  three fields (server-attested 2.x row) or omit `serverAttestation`
    *  entirely (local / 1.x-style row). Half-populated input is a writer
@@ -254,6 +273,15 @@ function initSchema(db: DatabaseSync): void {
   if (!have.has("mcp_servers_at_init")) {
     db.exec("ALTER TABLE reviews ADD COLUMN mcp_servers_at_init TEXT");
   }
+  // AGT-881 (issue #65): the branch the review ran against. Additive, no
+  // NOT NULL, no DEFAULT — legacy rows read out NULL, which every consumer
+  // treats as "branch unknown" and therefore as cache-ineligible for a named
+  // branch and unusable as a same-branch amend predecessor. Strictly
+  // tightening: a NULL-branch row can only ever be reused for the exact
+  // (head_sha) it was minted against.
+  if (!have.has("branch")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN branch TEXT");
+  }
   // Cache index created here (after the migration ALTERs above) so it works
   // on both fresh installs and upgrades. Repeat-safe.
   db.exec(`
@@ -340,10 +368,10 @@ export function recordReview(
   const stmt = db.prepare(
     `INSERT INTO reviews
        (reviewer, base_sha, head_sha, verdict, issues, tool_calls,
-        diff_hash, prompt_hash, tree_sha,
+        diff_hash, prompt_hash, tree_sha, branch,
         server_approval_json, server_signature_b64, server_key_id,
         schema_version, mcp_servers_at_init)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
     input.reviewer,
@@ -355,6 +383,7 @@ export function recordReview(
     input.diff_hash ?? null,
     input.prompt_hash ?? null,
     input.tree_sha ?? null,
+    input.branch ?? null,
     sa?.approval_json ?? null,
     sa?.signature_b64 ?? null,
     sa?.server_key_id ?? null,
@@ -478,6 +507,22 @@ export interface CachedVerdict {
  * row DELETE. The watermark filter lives ONLY here — `stamp log`,
  * `latestVerdicts`, and the audit/history readers deliberately ignore it and
  * continue to see every surviving row.
+ *
+ * AGT-881 (issue #65): `head_sha` and `branch` are also part of the key, so a
+ * cached verdict is only ever served back to the exact (branch, head) it was
+ * minted against. Every worktree of one clone shares this DB, so without the
+ * branch conjunct a verdict minted on a sibling branch could be replayed for
+ * a branch it never described. `branch` is compared with SQLite `IS` (NULL-
+ * safe): a detached-HEAD review (branch NULL) can still reuse its own row for
+ * the identical head, while a *named* branch can never match a legacy/NULL
+ * row. Both additions are strictly conjunctive — they can only turn hits into
+ * misses, and a miss just costs a fresh review.
+ *
+ * The cost of the `head_sha` conjunct is that a message-only `git commit
+ * --amend` (which preserves the tree and the diff bytes) now re-runs the
+ * reviewer instead of replaying. That is the deliberate trade: the
+ * anti-treadmill property that matters is "re-running review on the same head
+ * doesn't coin-flip", and that survives intact.
  */
 export function findCachedVerdict(
   db: DatabaseSync,
@@ -485,6 +530,8 @@ export function findCachedVerdict(
   diff_hash: string,
   prompt_hash: string,
   tree_sha: string,
+  head_sha: string,
+  branch: string | null,
 ): CachedVerdict | null {
   // `created_at > watermark` (strict) is intentional: a fresh review written
   // in the same whole second as the prune shares the watermark's second-
@@ -497,13 +544,21 @@ export function findCachedVerdict(
     SELECT verdict, issues, base_sha, head_sha, created_at
     FROM reviews
     WHERE reviewer = ? AND diff_hash = ? AND prompt_hash = ? AND tree_sha = ?
+      AND head_sha = ? AND branch IS ?
       AND (? IS NULL OR created_at > ?)
     ORDER BY created_at DESC, id DESC
     LIMIT 1
   `);
-  const row = stmt.get(reviewer, diff_hash, prompt_hash, tree_sha, watermark, watermark) as
-    | CachedVerdict
-    | undefined;
+  const row = stmt.get(
+    reviewer,
+    diff_hash,
+    prompt_hash,
+    tree_sha,
+    head_sha,
+    branch,
+    watermark,
+    watermark,
+  ) as CachedVerdict | undefined;
   return row ?? null;
 }
 
@@ -577,15 +632,70 @@ export interface PriorReviewRow {
   /** Prose body the reviewer submitted on the prior run; may be null on
    *  pre-prose rows. */
   issues: string | null;
+  /** Branch the prior review ran against, or null when unknown (detached
+   *  HEAD, or a row written before the column shipped). AGT-881: callers use
+   *  this to reject a *sibling* branch's head as a delta-narrowing
+   *  predecessor. */
+  branch: string | null;
   /** ISO datetime when this row was inserted; surfaced so callers can show
    *  age in operator-visible messaging if useful. */
   created_at: string;
 }
 
 /**
+ * Prior review rows by `reviewer` against the same `base_sha`, most recent
+ * first, excluding any row whose `head_sha` equals `excludeHeadSha`.
+ *
+ * AGT-881 (issue #65): this returns a *list* where `priorReviewByReviewer`
+ * returned only the newest row. With N branches of one clone reviewed against
+ * the same base — worktrees share one `state.db` — the newest same-base row
+ * is frequently a *sibling* branch's. Taking only that row meant a branch's
+ * own genuine predecessor was masked by whichever sibling reviewed last, and
+ * (worse) the sibling's head became the delta-narrowing predecessor, so the
+ * sibling's additions were presented to the reviewer as this branch's
+ * deletions. Callers now walk the list and pick the first row that is
+ * provably related to the current head (see `selectPriorReview` in
+ * `lib/reviewScope.ts`).
+ *
+ * Same ordering as latestVerdicts (created_at DESC, id DESC) so same-second
+ * inserts tiebreak on insertion order. `limit` bounds the ancestry probing
+ * the caller does per candidate; the default is generous enough to see past
+ * a wave of sibling rows without turning into an unbounded git-exec loop.
+ */
+export function priorReviewCandidates(
+  db: DatabaseSync,
+  reviewer: string,
+  base_sha: string,
+  excludeHeadSha?: string,
+  limit = 25,
+): PriorReviewRow[] {
+  const stmt = db.prepare(`
+    SELECT reviewer, head_sha, verdict, issues, branch, created_at
+    FROM reviews
+    WHERE reviewer = ?
+      AND base_sha = ?
+      AND (? IS NULL OR head_sha != ?)
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `);
+  return stmt.all(
+    reviewer,
+    base_sha,
+    excludeHeadSha ?? null,
+    excludeHeadSha ?? null,
+    limit,
+  ) as unknown as PriorReviewRow[];
+}
+
+/**
  * Find the most recent prior review row by `reviewer` against the same
  * `base_sha`, excluding any row whose `head_sha` equals `excludeHeadSha`.
  * Returns null if no prior review exists.
+ *
+ * NOTE (AGT-881): "most recent against the same base" is NOT sufficient to
+ * identify *this branch's* prior review — see `priorReviewCandidates`.
+ * `stamp review` uses that instead; this single-row helper is retained for
+ * callers that genuinely want "the newest same-base row, whoever wrote it".
  *
  * Used by `stamp review` to surface a reviewer's earlier verdict + prose
  * back into the prompt on subsequent runs of the same branch, so iterations
@@ -603,22 +713,7 @@ export function priorReviewByReviewer(
   base_sha: string,
   excludeHeadSha?: string,
 ): PriorReviewRow | null {
-  const stmt = db.prepare(`
-    SELECT reviewer, head_sha, verdict, issues, created_at
-    FROM reviews
-    WHERE reviewer = ?
-      AND base_sha = ?
-      AND (? IS NULL OR head_sha != ?)
-    ORDER BY created_at DESC, id DESC
-    LIMIT 1
-  `);
-  const row = stmt.get(
-    reviewer,
-    base_sha,
-    excludeHeadSha ?? null,
-    excludeHeadSha ?? null,
-  ) as PriorReviewRow | undefined;
-  return row ?? null;
+  return priorReviewCandidates(db, reviewer, base_sha, excludeHeadSha, 1)[0] ?? null;
 }
 
 export function reviewHistory(
@@ -638,7 +733,7 @@ export function reviewHistory(
   // this command's call sites.
   const stmt = db.prepare(`
     SELECT id, reviewer, base_sha, head_sha, verdict, issues,
-           tool_calls, diff_hash, prompt_hash, tree_sha,
+           tool_calls, diff_hash, prompt_hash, tree_sha, branch,
            server_approval_json, server_signature_b64, server_key_id,
            schema_version, mcp_servers_at_init, created_at
     FROM reviews
@@ -701,7 +796,7 @@ export function recentReviewsByReviewer(
   // shape rather than a subset.
   const stmt = db.prepare(`
     SELECT id, reviewer, base_sha, head_sha, verdict, issues,
-           tool_calls, diff_hash, prompt_hash, tree_sha,
+           tool_calls, diff_hash, prompt_hash, tree_sha, branch,
            server_approval_json, server_signature_b64, server_key_id,
            schema_version, created_at
     FROM reviews

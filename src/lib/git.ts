@@ -271,10 +271,51 @@ export function deltaDiff(
   cwd: string,
   contextLines = 20,
 ): string {
+  // `--no-ext-diff` + explicit prefixes pin the output shape against user
+  // config (`diff.external`, `diff.noprefix`, `diff.mnemonicPrefix`). The
+  // narrowing guard in `lib/reviewScope.ts` parses the `diff --git a/… b/…`
+  // headers out of this text to check the narrowed file set, and it fails
+  // *closed* (full review) when it can't parse — so a user's global diff
+  // config must not be able to silently switch delta review off.
   return git(
-    ["diff", `-U${contextLines}`, `${priorHead}..${currentHead}`],
+    [
+      "diff",
+      "--no-ext-diff",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      `-U${contextLines}`,
+      `${priorHead}..${currentHead}`,
+    ],
     cwd,
   );
+}
+
+/**
+ * Paths touched between two commits, as git reports them (repo-relative,
+ * unquoted). Used by `stamp review`'s narrowing guard (AGT-881, issue #65) to
+ * answer "is every file in the narrowed diff actually part of this branch's
+ * change?".
+ *
+ * Two flags are load-bearing:
+ *  - `-z` returns NUL-separated raw paths, so nothing has to un-quote git's
+ *    C-style escaping for paths with spaces/UTF-8/quotes. Path comparison has
+ *    to be exact for the guard to mean anything.
+ *  - `--no-renames` decomposes a rename into a delete + an add, so the
+ *    returned set is a *superset* of what rename-detecting diffs elsewhere
+ *    will name. The guard asks "⊆ this set?", so a superset is the safe
+ *    direction — it prevents a rename from tripping a false contamination
+ *    alarm.
+ */
+export function changedPaths(
+  base: string,
+  head: string,
+  cwd: string,
+): Set<string> {
+  const out = git(
+    ["diff", "--name-only", "--no-renames", "-z", `${base}..${head}`],
+    cwd,
+  );
+  return new Set(out.split("\0").filter((p) => p.length > 0));
 }
 
 /**

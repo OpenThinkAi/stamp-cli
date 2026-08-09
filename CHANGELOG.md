@@ -5,6 +5,39 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Reviews of parallel branches no longer contaminate each other** (#65).
+  Every worktree of one clone shares `.git/stamp/state.db`, and
+  delta-narrowing resolved "my prior review" as "the newest review row
+  against this `base_sha`" — which, in a parallel wave, is routinely a
+  *sibling* branch's row. The narrowed diff then rendered the sibling's
+  additions as this branch's deletions, and reviewers correctly blocked
+  on an apparent mass reversion of files the branch never touched (four
+  of nine branches in one wave; one cited a file that existed at neither
+  end of its own range). Three changes, all strictly tightening:
+  - A prior review now has to be *provably* this branch's: an ancestor of
+    the current head, or a same-branch amend (same branch name, shared
+    parent). Review rows carry the branch they were run against for that
+    second test; legacy rows read NULL and can only match by ancestry.
+    The lookup also walks past unrelated rows instead of stopping at the
+    newest one, so a sibling's review no longer masks — and costs you —
+    your own branch's ratchet.
+  - If a narrowed diff names any path outside `git diff <base>..<head>`,
+    it is discarded and the reviewer sees the full diff, with a warning
+    naming the offending paths. This also catches a legitimate case worth
+    reviewing in full: a change that reverts a file back to its base
+    content.
+  - The verdict cache key gains `(head_sha, branch)`, so a verdict is only
+    ever replayed for the exact branch and head it was minted against.
+    A message-only `--amend` now re-runs the reviewer instead of replaying;
+    re-running review on an unchanged head still hits the cache, which is
+    the anti-treadmill property that matters.
+
+---
+
 ## 3.2.3 — 2026-07-16
 
 ### Fixed

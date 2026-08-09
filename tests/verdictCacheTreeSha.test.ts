@@ -37,6 +37,10 @@ const DIFF_HASH = "d".repeat(64);
 const PROMPT_HASH = "p".repeat(64);
 const TREE_A = "a".repeat(40);
 const TREE_B = "b".repeat(40);
+// AGT-881: (head_sha, branch) are part of the cache key too. These tests are
+// about the *tree* conjunct, so they hold head + branch constant.
+const HEAD_SHA = "2".repeat(40);
+const BRANCH = "feature-x";
 
 describe("issue #59: verdict cache is tree-scoped", () => {
   let tmp: string;
@@ -57,14 +61,15 @@ describe("issue #59: verdict cache is tree-scoped", () => {
       recordReview(db, {
         reviewer: REVIEWER,
         base_sha: "1".repeat(40),
-        head_sha: "2".repeat(40),
+        head_sha: HEAD_SHA,
+        branch: BRANCH,
         verdict: "approved",
         diff_hash: DIFF_HASH,
         prompt_hash: PROMPT_HASH,
         tree_sha: TREE_A,
       });
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A)
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, BRANCH)
           ?.verdict,
         "approved",
         "identical input incl. tree must reuse the stored verdict",
@@ -81,7 +86,8 @@ describe("issue #59: verdict cache is tree-scoped", () => {
       recordReview(db, {
         reviewer: REVIEWER,
         base_sha: "1".repeat(40),
-        head_sha: "2".repeat(40),
+        head_sha: HEAD_SHA,
+        branch: BRANCH,
         verdict: "changes_requested",
         issues: "stale finding about code the branch never touched",
         diff_hash: DIFF_HASH,
@@ -92,7 +98,7 @@ describe("issue #59: verdict cache is tree-scoped", () => {
       // the rebase byte-identical), same prompt, but the head tree now
       // includes the moved base's content. Must run fresh, not replay.
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_B),
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_B, HEAD_SHA, BRANCH),
         null,
         "a different head tree is a different review input — no cache hit",
       );
@@ -109,13 +115,14 @@ describe("issue #59: verdict cache is tree-scoped", () => {
       recordReview(db, {
         reviewer: REVIEWER,
         base_sha: "1".repeat(40),
-        head_sha: "2".repeat(40),
+        head_sha: HEAD_SHA,
+        branch: BRANCH,
         verdict: "approved",
         diff_hash: DIFF_HASH,
         prompt_hash: PROMPT_HASH,
       });
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A),
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, BRANCH),
         null,
         "NULL-tree legacy rows are cache-ineligible (fail toward fresh)",
       );
@@ -176,7 +183,7 @@ describe("issue #59: verdict cache is tree-scoped", () => {
       assert.equal(row.tree_sha, null, "pre-existing rows read NULL tree_sha");
       // And, per the #59 fix, that surviving row must not cache-serve.
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A),
+        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, null),
         null,
       );
     } finally {
