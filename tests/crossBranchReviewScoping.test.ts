@@ -231,6 +231,20 @@ describe("cross-branch review scoping (AGT-881 / issue #65)", () => {
     );
   });
 
+  it("AC2: a non-ASCII filename does not look like contamination", () => {
+    // git C-quotes `café.ts` in the patch header as two octal BYTE escapes.
+    // Decode them as code points and the parsed path is mojibake that can
+    // never match `changedPaths` — every narrowing in a repo with non-ASCII
+    // filenames would fall back to a full review. Fail-safe, but wrong.
+    const headB2 = commitFile(wtB, "café.ts", "accented\n", "B: add café.ts");
+    const narrowed = deltaDiff(headB, headB2, wtB);
+    assert.deepEqual([...patchPaths(narrowed)!], ["café.ts"]);
+    assert.deepEqual(
+      narrowingContamination(narrowed, changedPaths(baseSha, headB2, wtB)),
+      [],
+    );
+  });
+
   it("AC2: resolveReviewScope falls back to the full diff on a contaminated narrowing", () => {
     // Force the bad state the guard exists for: hand it a prior row that IS
     // an ancestor-shaped predecessor by construction but whose delta escapes
@@ -498,11 +512,14 @@ describe("patchPaths (narrowing-guard parser)", () => {
     assert.deepEqual([...patchPaths(patch)!], ["dir/my file.ts"]);
   });
 
-  it("handles git's C-quoted paths", () => {
+  it("handles git's C-quoted paths (octal escapes are BYTES, not code points)", () => {
     const patch = 'diff --git "a/dir/caf\\303\\251.ts" "b/dir/caf\\303\\251.ts"\n';
-    const paths = patchPaths(patch);
-    assert.equal(paths?.size, 1);
-    assert.ok([...paths!][0]!.includes("dir/caf"));
+    assert.deepEqual([...patchPaths(patch)!], ["dir/caf\u00e9.ts"]);
+  });
+
+  it("unescapes a quoted path containing a literal quote", () => {
+    const patch = 'diff --git "a/we\\"ird.ts" "b/we\\"ird.ts"\n';
+    assert.deepEqual([...patchPaths(patch)!], ['we"ird.ts']);
   });
 
   it("returns null (→ full review) on an unparseable header", () => {

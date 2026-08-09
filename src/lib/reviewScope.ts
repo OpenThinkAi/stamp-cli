@@ -221,20 +221,34 @@ function stripPrefixes(a: string, b: string): [string, string] | null {
   return [a.slice(2), b.slice(2)];
 }
 
-/** Read one git C-style quoted string starting at `start`; end is the index
- *  just past the closing quote. */
+/**
+ * Read one git C-style quoted string starting at `start`; `end` is the index
+ * just past the closing quote.
+ *
+ * Decoding runs at the BYTE level and UTF-8-decodes once at the end. Git's
+ * octal escapes are bytes, not code points: `café.ts` is quoted as
+ * `"caf\303\251.ts"`, two escapes for one character. Assembling those with
+ * `String.fromCharCode` would yield the Latin-1 mojibake `cafÃ©.ts`, which
+ * would never compare equal to the real path from `changedPaths` — so every
+ * narrowing touching a non-ASCII path would look contaminated and silently
+ * fall back to a full review.
+ */
 function readCQuoted(
   s: string,
   start: number,
 ): { value: string; end: number } | null {
   if (s[start] !== '"') return null;
-  let out = "";
+  const bytes: number[] = [];
   let i = start + 1;
   while (i < s.length) {
     const ch = s[i]!;
-    if (ch === '"') return { value: out, end: i + 1 };
+    if (ch === '"') {
+      return { value: Buffer.from(bytes).toString("utf8"), end: i + 1 };
+    }
     if (ch !== "\\") {
-      out += ch;
+      // Unescaped runs are plain ASCII in git's quoted output, but encode
+      // rather than assume so a stray literal multi-byte char round-trips.
+      bytes.push(...Buffer.from(ch, "utf8"));
       i++;
       continue;
     }
@@ -243,24 +257,24 @@ function readCQuoted(
     if (esc >= "0" && esc <= "7") {
       const oct = s.slice(i + 1, i + 4);
       if (!/^[0-7]{3}$/.test(oct)) return null;
-      out += String.fromCharCode(parseInt(oct, 8));
+      bytes.push(parseInt(oct, 8));
       i += 4;
       continue;
     }
-    const simple: Record<string, string> = {
-      n: "\n",
-      t: "\t",
-      r: "\r",
-      f: "\f",
-      b: "\b",
-      v: "\v",
-      a: "\x07",
-      '"': '"',
-      "\\": "\\",
+    const simple: Record<string, number> = {
+      n: 0x0a,
+      t: 0x09,
+      r: 0x0d,
+      f: 0x0c,
+      b: 0x08,
+      v: 0x0b,
+      a: 0x07,
+      '"': 0x22,
+      "\\": 0x5c,
     };
     const mapped = simple[esc];
     if (mapped === undefined) return null;
-    out += mapped;
+    bytes.push(mapped);
     i += 2;
   }
   return null;
