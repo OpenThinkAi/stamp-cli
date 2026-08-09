@@ -5,9 +5,10 @@ import {
   findCachedVerdict,
   latestVerdicts,
   openDb,
-  priorReviewByReviewer,
+  priorReviewCandidates,
   recordReview,
   type CachedVerdict,
+  type PriorReviewRow,
 } from "../lib/db.js";
 import { patchIdForSpan } from "../lib/patchId.js";
 import {
@@ -18,16 +19,17 @@ import { hasVerifyWorkflow } from "../lib/verifyWorkflow.js";
 import { mintAttestation } from "./attest.js";
 import type { BranchRule } from "../lib/config.js";
 import {
-  deltaDiff,
-  isAncestor,
   listFilesAtRef,
-  parentSha,
   repoHasAnyCommit,
   resolveDiff,
   showAtRef,
   treeSha,
   type ResolvedDiff,
 } from "../lib/git.js";
+import {
+  resolveReviewBranch,
+  resolveReviewScope,
+} from "../lib/reviewScope.js";
 import {
   invokeReviewer,
   type PriorReviewContext,
@@ -596,6 +598,12 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   // input that must not replay a stale verdict.
   const diffHash = sha256(resolved.diff);
   const headTreeSha = treeSha(resolved.head_sha, repoRoot);
+  // Branch identity for this run (AGT-881 / issue #65). Every worktree of one
+  // clone shares `state.db`, so the branch is what keeps one branch's review
+  // state — cached verdicts and delta-narrowing predecessors alike — from
+  // being handed to a sibling. Null (detached HEAD) is allowed and simply
+  // yields the strictest behaviour.
+  const reviewBranch = resolveReviewBranch(opts.diff, repoRoot);
   const promptHashes = new Map<string, string>();
   for (const name of reviewerNames) {
     promptHashes.set(name, sha256(promptBytesByReviewer.get(name)!));
@@ -604,11 +612,16 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   const db = openDb(stampStateDbPath(repoRoot));
   try {
     // Verdict-cache short-circuit: when the same (reviewer, diff_hash,
-    // prompt_hash, tree_sha) tuple already has a stored verdict, return it
-    // without calling the LLM. This is the mechanical fix for the treadmill where
-    // the model non-deterministically re-flips verdicts on identical input.
-    // Prompt-level "ratchet" guidance loses to live diff content; pulling
-    // the decision out of the model is the only reliable lever.
+    // prompt_hash, tree_sha, head_sha, branch) tuple already has a stored
+    // verdict, return it without calling the LLM. This is the mechanical fix
+    // for the treadmill where the model non-deterministically re-flips
+    // verdicts on identical input. Prompt-level "ratchet" guidance loses to
+    // live diff content; pulling the decision out of the model is the only
+    // reliable lever.
+    //
+    // (branch, head) are in the key as of AGT-881: a verdict is only ever
+    // replayed for the exact branch and head it was minted against, so a
+    // shared `state.db` can't serve one worktree's verdict to another.
     const cacheEnabled =
       !opts.noCache && process.env["STAMP_NO_REVIEW_CACHE"] !== "1";
     const cacheHits = new Map<string, CachedVerdict>();
@@ -620,6 +633,8 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           diffHash,
           promptHashes.get(name)!,
           headTreeSha,
+          resolved.head_sha,
+          reviewBranch,
         );
         if (hit) cacheHits.set(name, hit);
       }
@@ -633,95 +648,55 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       console.log();
     }
 
-    // Per-reviewer prior-review lookup: surface the most recent verdict +
-    // prose this reviewer recorded against the same base_sha, gated on the
-    // prior head being an ancestor of the current head. This is the
-    // anti-dice-roll mechanism — without it, every fresh HEAD strands all
+    // Per-reviewer prior-review lookup + delta-since-prior-review scoping.
+    //
+    // Prior review: surface the verdict + prose this reviewer recorded on an
+    // earlier round of THIS branch. Without it, every fresh HEAD strands all
     // prior approvals at the old (base, head) pair and the reviewer
     // re-evaluates from scratch with no memory of what it already approved.
     // See `PriorReviewContext` in lib/reviewer.ts for the prompt-side use.
-    // Skipped for cache-hit reviewers since they won't invoke the LLM.
-    const priorByReviewer = new Map<string, PriorReviewContext>();
+    //
+    // Delta scope: when such a prior exists, feed the LLM ONLY the diff
+    // between the prior head and the current head. The model literally
+    // cannot re-flag unchanged code because it cannot see code outside the
+    // delta — the structural fix for the cross-round zigzag that the hash
+    // cache alone couldn't reach. Escape hatch: STAMP_NO_DELTA_REVIEW=1.
+    //
+    // "THIS branch" is the whole difficulty, and is why the resolution lives
+    // in lib/reviewScope.ts: worktrees share one state.db, so same-base rows
+    // routinely belong to sibling branches (issue #65). Rows are accepted
+    // only on ancestry or a same-branch amend, and any narrowing that names
+    // files outside base..head is discarded in favour of the full diff.
+    // Cache-hit reviewers are skipped — they never invoke the LLM.
+    const deltaEnabled = process.env["STAMP_NO_DELTA_REVIEW"] !== "1";
+    const candidatesByReviewer = new Map<string, PriorReviewRow[]>();
     for (const name of reviewerNames) {
       if (cacheHits.has(name)) continue;
-      const prior = priorReviewByReviewer(
-        db,
+      candidatesByReviewer.set(
         name,
-        resolved.base_sha,
-        resolved.head_sha,
+        priorReviewCandidates(db, name, resolved.base_sha, resolved.head_sha),
       );
-      if (!prior) continue;
-      // Carry-forward gate: accept the prior verdict's scope when the
-      // current head is either (a) a descendant of the prior head (normal
-      // commit-on-top workflow) OR (b) shares a parent with the prior
-      // head (amend / squash iteration on a single-commit branch — the
-      // dominant agent workflow). Strict-ancestor-only rejected case (b)
-      // entirely, which meant agents using `git commit --amend` between
-      // rounds never got the ratchet / delta-scope they were paying for.
-      // Same-base is already enforced by the DB query, so a true parallel
-      // sibling branch would normally have a different base_sha anyway;
-      // the residual edge case (two siblings off the exact same commit,
-      // both at "first amend" stage) is low-impact since the prior verdict
-      // is shown as context to the LLM, not granted directly. Fail closed
-      // on any git error: a transient glitch should never inject the
-      // wrong branch's verdict.
-      let related = false;
-      try {
-        if (isAncestor(prior.head_sha, resolved.head_sha, repoRoot)) {
-          related = true;
-        } else {
-          const priorParent = parentSha(prior.head_sha, repoRoot);
-          const currentParent = parentSha(resolved.head_sha, repoRoot);
-          if (
-            priorParent !== null &&
-            currentParent !== null &&
-            priorParent === currentParent
-          ) {
-            related = true;
-          }
-        }
-      } catch {
-        related = false;
-      }
-      if (!related) continue;
+    }
+    const scope = resolveReviewScope({
+      reviewers: reviewerNames,
+      candidatesByReviewer,
+      baseSha: resolved.base_sha,
+      headSha: resolved.head_sha,
+      branch: reviewBranch,
+      repoRoot,
+      deltaEnabled,
+    });
+    const deltaDiffs = scope.deltaDiffs;
+    const priorByReviewer = new Map<string, PriorReviewContext>();
+    for (const [name, selected] of scope.priorByReviewer) {
       priorByReviewer.set(name, {
-        head_sha: prior.head_sha,
-        verdict: prior.verdict,
-        prose: prior.issues,
+        head_sha: selected.row.head_sha,
+        verdict: selected.row.verdict,
+        prose: selected.row.issues,
       });
     }
-
-    // Delta-since-prior-review: when a prior verdict exists, feed the LLM
-    // ONLY the diff between the prior head and the current head, not the
-    // full base..head diff. The model literally cannot re-flag unchanged
-    // code because it cannot see code outside the delta. This is the
-    // structural fix for the cross-round zigzag — 1.8.0's hash cache only
-    // helped on byte-identical re-runs; this addresses the actual
-    // treadmill where iteration moves forward and the reviewer flips on
-    // unchanged neighbors. Escape hatch: STAMP_NO_DELTA_REVIEW=1 falls
-    // back to full-diff with the 1.7.0 prompt-only ratchet.
-    const deltaEnabled = process.env["STAMP_NO_DELTA_REVIEW"] !== "1";
-    const deltaDiffs = new Map<string, string>();
-    if (deltaEnabled) {
-      for (const [name, prior] of priorByReviewer) {
-        try {
-          deltaDiffs.set(
-            name,
-            deltaDiff(prior.head_sha, resolved.head_sha, repoRoot),
-          );
-        } catch (err) {
-          // Fall back to full diff if the git command itself errors. Surface
-          // a warning so the agent's mental model of which reviewers saw a
-          // narrowed diff stays accurate — silent fallback would let the
-          // agent assume narrowing held when it didn't, producing exactly
-          // the confusion this feature exists to prevent.
-          const message = err instanceof Error ? err.message : String(err);
-          process.stderr.write(
-            `warning: delta computation failed for reviewer '${name}' — ` +
-              `falling back to full diff with prompt-only ratchet (${message})\n`,
-          );
-        }
-      }
+    for (const warning of scope.warnings) {
+      process.stderr.write(`${warning}\n`);
     }
 
     if (priorByReviewer.size > 0) {
@@ -845,6 +820,10 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           diff_hash: diffHash,
           prompt_hash: promptHashes.get(name)!,
           tree_sha: headTreeSha,
+          // AGT-881: the branch this verdict describes. Without it the row is
+          // cache-ineligible for any named branch on a later run (and can't
+          // serve as an amend predecessor) — the fail-fresh direction.
+          branch: reviewBranch,
           // AGT-246: persist MCP server runtime statuses. Null for cache hits
           // (no fresh SDK init happened) and for reviewers that declared no
           // MCP servers.
@@ -1245,14 +1224,19 @@ async function runServerAttestedReviews(input: {
           verdict: verdict.verdict,
           issues: opts.noProse ? null : verdict.prose,
           // The local LLM path's cache index uses (diff_hash, prompt_hash,
-          // tree_sha) — server-attested rows still get these populated so
-          // the cache index has a meaningful entry, even though trusted-
-          // mode doesn't short-circuit through the verdict cache.
+          // tree_sha, head_sha, branch) — server-attested rows still get
+          // these populated so the cache index has a meaningful entry, even
+          // though trusted-mode doesn't short-circuit through the verdict
+          // cache.
           diff_hash: createHash("sha256").update(resolved.diff, "utf8").digest("hex"),
           prompt_hash: createHash("sha256")
             .update(promptBytesByReviewer.get(name) ?? "", "utf8")
             .digest("hex"),
           tree_sha: treeSha(resolved.head_sha, repoRoot),
+          // AGT-881: same branch attribution as the local path, so a
+          // server-attested row can serve as a same-branch amend predecessor
+          // and can never be mistaken for a sibling's.
+          branch: resolveReviewBranch(opts.diff, repoRoot),
           // Server-attested 2.x row: AGT-333's column trio. recordReview
           // enforces all-or-nothing on these three fields so a downstream
           // verifier can rely on "non-null server_approval_json ⇒ non-null
