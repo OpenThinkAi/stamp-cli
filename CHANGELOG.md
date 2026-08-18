@@ -7,6 +7,22 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ## Unreleased
 
+### Added
+
+- **`stamp bootstrap --yes`** — declare automated-merge intent for the
+  protected-branch merge bootstrap performs in step 8, the same contract as
+  `stamp merge --yes` (audit H1). Without it, bootstrap could not run
+  unattended at all: a CI shell or a build worker with no stdin TTY hard-fails
+  at the confirmation prompt, and the only escape hatch was the process-wide
+  `STAMP_REQUIRE_HUMAN_MERGE=0`, which un-gates every *other* merge in the same
+  process. The flag scopes the declaration to the one merge whose content stamp
+  itself just generated.
+
+  The asymmetry that motivates it: a repo that cannot finish bootstrap keeps the
+  placeholder auto-approving `example` reviewer, so refusing the merge leaves it
+  **less** gated than letting it through. An operator at a terminal still gets
+  the prompt — the flag is opt-in and the default is unchanged.
+
 ### Fixed
 
 - **Reviews of parallel branches no longer contaminate each other** (#65).
