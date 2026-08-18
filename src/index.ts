@@ -290,6 +290,12 @@ program
   .option("--dry-run", "print the plan without making changes")
   .option("--force", "bypass the fresh-placeholder safety check")
   .option(
+    "-y, --yes",
+    "skip the operator-confirmation prompt on the bootstrap merge " +
+      "(equivalent to STAMP_REQUIRE_HUMAN_MERGE=0 for that one merge; see audit H1) — " +
+      "required to run bootstrap unattended, e.g. from CI or a build worker",
+  )
+  .option(
     "--no-agents-md",
     "skip creating or updating AGENTS.md at the repo root",
   )
@@ -305,6 +311,7 @@ program
       remote: string;
       dryRun?: boolean;
       force?: boolean;
+      yes?: boolean;
       agentsMd: boolean;
       claudeMd: boolean;
     }) => {
@@ -318,6 +325,7 @@ program
           remote: opts.remote,
           dryRun: opts.dryRun,
           force: opts.force,
+          yes: opts.yes,
           agentsMd: opts.agentsMd,
           claudeMd: opts.claudeMd,
         });

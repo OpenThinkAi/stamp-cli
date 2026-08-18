@@ -55,6 +55,27 @@ export interface BootstrapOptions {
    * "use stamp flow" rule to a Claude-Code agent.
    */
   claudeMd?: boolean;
+  /**
+   * Declare automated-merge intent for the bootstrap merge in step 8, the
+   * same contract as `stamp merge --yes` (audit H1; see `lib/humanMerge.ts`).
+   *
+   * Bootstrap performs its own protected-branch merge, so without this an
+   * unattended caller — a CI shell or a build worker with no stdin TTY — hard
+   * fails at the confirmation prompt, which is exactly what H1's
+   * "non-interactive without an opt-out is a hard fail" rule intends.
+   *
+   * The reason bootstrap in particular needs a per-invocation opt-out rather
+   * than leaving such callers to set `STAMP_REQUIRE_HUMAN_MERGE=0`: that env
+   * var is process-wide and would silently un-gate every *other* merge the
+   * same process makes, whereas this flag scopes the declaration to the one
+   * merge whose content stamp itself just generated. The failure mode it
+   * removes is also asymmetric — a repo that cannot complete bootstrap keeps
+   * the placeholder auto-approving `example` reviewer, so refusing to merge
+   * leaves it *less* gated than letting it through.
+   *
+   * Default false: an operator at a terminal still gets the prompt.
+   */
+  yes?: boolean;
 }
 
 const STARTER_PROMPTS: Record<string, string> = {
@@ -234,7 +255,7 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
     //    required list (which the server hook also reads from pre-push state).
     console.log(`\nMerging into "${targetBranch}"`);
     runGit(["checkout", targetBranch], repoRoot);
-    runMerge({ branch: BOOTSTRAP_BRANCH, into: targetBranch });
+    runMerge({ branch: BOOTSTRAP_BRANCH, into: targetBranch, yes: opts.yes });
 
     // 9. Push (default).
     if (!opts.noPush) {
@@ -452,6 +473,11 @@ function printPlan(plan: BootstrapPlan, opts: BootstrapOptions): void {
       opts.claudeMd === false
         ? "skip (--no-claude-md)"
         : "create or update (auto-loaded by Claude Code)"
+    }`,
+  );
+  console.log(
+    `  merge confirm:    ${
+      opts.yes ? "skipped (--yes)" : "interactive prompt before signing"
     }`,
   );
   console.log(`  push after merge: ${opts.noPush ? "no" : `yes (to ${opts.remote ?? "origin"})`}`);
