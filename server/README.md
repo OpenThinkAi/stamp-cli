@@ -342,7 +342,7 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      review with a stronger model than the implementers. One value for the
      whole server (per-reviewer choice is a `~/.stamp/config.yml` local-mode
      knob, not a server one). An id that fails the config shape check is
-     ignored with a `warn:` line and the default is used, so a typo never
+     ignored with a `warning:` line and the default is used, so a typo never
      takes reviews down. Changing it invalidates nothing — the verdict cache
      is keyed on (reviewer, diff, prompt), so a cached verdict from the old
      model is still served for an identical diff+prompt.

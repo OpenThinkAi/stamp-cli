@@ -498,7 +498,7 @@ export function resolveServerReviewerModel(): string {
   if (!raw) return SERVER_DEFAULT_MODEL;
   if (!isValidModelId(raw)) {
     process.stderr.write(
-      `warn: STAMP_REVIEWER_MODEL=${JSON.stringify(raw)} is not a valid model id; ` +
+      `warning: STAMP_REVIEWER_MODEL=${JSON.stringify(raw)} is not a valid model id; ` +
         `falling back to ${SERVER_DEFAULT_MODEL}\n`,
     );
     return SERVER_DEFAULT_MODEL;
