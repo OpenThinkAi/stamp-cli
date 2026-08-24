@@ -89,6 +89,7 @@ import {
   ReviewSigningKeyError,
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
+import { isValidModelId } from "../lib/userConfig.js";
 import type { DatabaseSync } from "node:sqlite";
 import {
   findCachedServerVerdict,
@@ -484,6 +485,27 @@ export interface ReviewPipelineDeps {
  */
 export const SERVER_DEFAULT_MODEL = HEADLESS_DEFAULT_MODEL;
 
+/**
+ * Operator override for the server-side reviewer model. Read from
+ * `STAMP_REVIEWER_MODEL`; unset/empty falls back to `SERVER_DEFAULT_MODEL`.
+ * A value that fails the same shape check `~/.stamp/config.yml` applies
+ * (`isValidModelId`) is ignored with a stderr warn rather than sent to the
+ * API — a typo'd id should degrade to the default, not fail every review.
+ * `deps.model` (tests) still wins over the env.
+ */
+export function resolveServerReviewerModel(): string {
+  const raw = process.env["STAMP_REVIEWER_MODEL"]?.trim();
+  if (!raw) return SERVER_DEFAULT_MODEL;
+  if (!isValidModelId(raw)) {
+    process.stderr.write(
+      `warn: STAMP_REVIEWER_MODEL=${JSON.stringify(raw)} is not a valid model id; ` +
+        `falling back to ${SERVER_DEFAULT_MODEL}\n`,
+    );
+    return SERVER_DEFAULT_MODEL;
+  }
+  return raw;
+}
+
 /** Max output tokens for the server-side single Messages call. Matches
  *  the trusted-mode default in `src/lib/reviewer.ts` (8192) rather than
  *  the headless 4096 cap — server-attested reviews are the load-bearing
@@ -690,7 +712,7 @@ export async function runReviewPipeline(
     // Stage 3: build the Anthropic client (or use the injected one for
     // tests). Missing-API-key fails fast with a typed error.
     const anthropic = deps.anthropic ?? buildAnthropicFromEnv();
-    const model = deps.model ?? SERVER_DEFAULT_MODEL;
+    const model = deps.model ?? resolveServerReviewerModel();
     const timeoutMs = deps.timeoutMs ?? resolveReviewTimeoutMs();
 
     // Build prompts. Random-hex fence marker is generated per-call so an

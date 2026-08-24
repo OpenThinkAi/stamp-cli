@@ -45,7 +45,7 @@ import {
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, before, describe, it } from "node:test";
+import { afterEach, before, beforeEach, describe, it } from "node:test";
 
 import {
   canonicalSerializeApproval,
@@ -59,6 +59,7 @@ import {
 import {
   PromptFetchFailedError,
   runReviewPipeline,
+  SERVER_DEFAULT_MODEL,
   ServerMissingApiKeyError,
   sha256Hex,
   SigningKeyUnavailableError,
@@ -410,6 +411,55 @@ describe("runReviewPipeline — VERDICT: last-line fallback", () => {
     } finally {
       fx.cleanup();
     }
+  });
+});
+
+describe("runReviewPipeline — reviewer model selection (STAMP_REVIEWER_MODEL)", () => {
+  const ENV = "STAMP_REVIEWER_MODEL";
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[ENV];
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[ENV];
+    else process.env[ENV] = saved;
+  });
+
+  async function modelSentFor(env: string | undefined, depsModel?: string): Promise<string> {
+    if (env === undefined) delete process.env[ENV];
+    else process.env[ENV] = env;
+    const fx = makeFixtureCache();
+    const diff = Buffer.from("diff --git a/x b/x\n+model-select\n");
+    const spy: { lastBody?: Parameters<AnthropicClientShape["messages"]["create"]>[0] } = {};
+    const client = mockClient(
+      {
+        content: [
+          { type: "tool_use", name: "submit_verdict", input: { verdict: "approved", prose: "fine" } },
+        ],
+      } as never,
+      spy as never,
+    );
+    await runReviewPipeline(
+      fixtureInput(fx, diff, depsModel ? { anthropic: client, model: depsModel } : { anthropic: client }),
+    );
+    assert.ok(spy.lastBody, "expected client.messages.create to be called");
+    return spy.lastBody!.model;
+  }
+
+  it("defaults to SERVER_DEFAULT_MODEL when the env is unset", async () => {
+    assert.equal(await modelSentFor(undefined), SERVER_DEFAULT_MODEL);
+  });
+
+  it("sends the env-selected model id to the API", async () => {
+    assert.equal(await modelSentFor("claude-opus-5"), "claude-opus-5");
+  });
+
+  it("ignores an invalid env value and falls back to the default", async () => {
+    assert.equal(await modelSentFor("not a model id"), SERVER_DEFAULT_MODEL);
+  });
+
+  it("lets deps.model win over the env", async () => {
+    assert.equal(await modelSentFor("claude-opus-5", "claude-test-injected"), "claude-test-injected");
   });
 });
 
