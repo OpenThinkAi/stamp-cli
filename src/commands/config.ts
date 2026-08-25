@@ -1,19 +1,26 @@
 /**
- * `stamp config reviewers <set|clear|show>` — manage the per-user
- * reviewer-model selections in `~/.stamp/config.yml` without making
- * the operator hand-edit YAML.
+ * `stamp config reviewers <set|clear|show|set-endpoint|clear-endpoint|
+ * set-tools|clear-tools>` — manage the per-user reviewer-model selections in
+ * `~/.stamp/config.yml` without making the operator hand-edit YAML.
  *
- * Three subcommands:
+ * Subcommands:
  *
  *   stamp config reviewers set <reviewer> <model-id>   pin a reviewer's model
  *   stamp config reviewers clear <reviewer>            remove the pin (or `--all`)
  *   stamp config reviewers show                        print resolved per-reviewer config
+ *   stamp config reviewers set-endpoint <url>           pin the openai-compatible endpoint (AGT-1139)
+ *   stamp config reviewers clear-endpoint               remove it (both spellings)
+ *   stamp config reviewers set-tools <on|off>           opt into the OpenAI `tools` field (AGT-1139)
+ *   stamp config reviewers clear-tools                  remove the opt-in (both spellings)
  *
  * `show` reports the resolved BACKEND per reviewer, not just a model id: a
  * value with the `openai-compatible:` scheme — or the legacy `local:` one,
  * or `STAMP_REVIEWER_BACKEND=openai-compatible` in the environment — routes
  * to an OpenAI-compatible endpoint rather than the Anthropic agent SDK, and
- * before AGT-1137 nothing on this surface said so.
+ * before AGT-1137 nothing on this surface said so. A reviewer on this
+ * backend runs single-shot with no repo reads (no tool loop, no MCP) and,
+ * against a hosted provider (OpenAI, DeepSeek), needs a credential — see
+ * `set-endpoint` / `provider_keys:` below and `docs/troubleshooting.md`.
  *
  * `show` also reports, per provider, WHERE a credential would come from —
  * the env var name or config key, never the value. `~/.stamp/config.yml` can
@@ -26,6 +33,12 @@
  * don't want to lag every Anthropic release with a hardcoded enum — but
  * shape-checked to reject obviously-broken inputs (whitespace, control
  * chars) at config-write rather than at API-call time.
+ *
+ * `set-endpoint` / `set-tools` (AGT-1139) write the SAME `openai_compatible_*`
+ * fields `stamp review --endpoint` / the `STAMP_OPENAI_COMPATIBLE_*` env vars
+ * already read — no new storage, no second config surface. They persist the
+ * choice for every future run; `stamp review --endpoint` overrides it for a
+ * single run without touching this file (AC2 of AGT-1139).
  *
  * `~/.stamp/config.yml` is per-user, mode 0o600 under a 0o700 ~/.stamp.
  * It's intentionally NOT committed, NOT hash-pinned by reviewer
@@ -148,6 +161,121 @@ export function runConfigReviewersClear(opts: ReviewersClearOptions): void {
   delete next.reviewers[reviewer];
   const path = writeUserConfig(next);
   console.log(`cleared reviewers.${reviewer}`);
+  console.log(`wrote ${path}`);
+}
+
+/**
+ * AGT-1139: `stamp config reviewers set-endpoint <url>` — persist the
+ * openai-compatible endpoint (`openai_compatible_endpoint:`) without hand-
+ * editing YAML. Writes the CANONICAL key only; an existing legacy
+ * `local_endpoint:` is left in place but stops being read (canonical wins in
+ * `configuredOpenAICompatibleEndpoint`), so this always changes the
+ * EFFECTIVE endpoint even on a config file written before AGT-1138's rename.
+ *
+ * Same URL shape check `parseUserConfig` applies to a hand-edited value
+ * (must be `http://` or `https://`), so a typo is caught here rather than as
+ * a confusing fetch error mid-review.
+ */
+export function runConfigReviewersSetEndpoint(url: string): void {
+  const trimmed = url.trim();
+  if (!/^https?:\/\//.test(trimmed)) {
+    throw new UsageError(
+      `endpoint '${url}' must be an http(s) URL (e.g. 'http://localhost:1234/v1' ` +
+        `for LM Studio, 'https://api.openai.com/v1' for OpenAI).`,
+    );
+  }
+  const existing = loadOrEmpty();
+  const next: UserConfig = { ...existing, openai_compatible_endpoint: trimmed };
+  const path = writeUserConfig(next);
+  console.log(`openai_compatible_endpoint = ${trimmed}`);
+  console.log(`wrote ${path}`);
+}
+
+/**
+ * AGT-1139: `stamp config reviewers clear-endpoint` — remove BOTH the
+ * canonical `openai_compatible_endpoint:` and the legacy `local_endpoint:`
+ * keys. Clearing only the canonical one would leave a stale legacy value in
+ * effect (it's the fallback in `configuredOpenAICompatibleEndpoint`), which
+ * would make "clear" a no-op for anyone still on the pre-AGT-1138 spelling —
+ * the opposite of what an operator running this command wants.
+ */
+export function runConfigReviewersClearEndpoint(): void {
+  const existing = loadOrEmpty();
+  if (
+    existing.openai_compatible_endpoint === undefined &&
+    existing.local_endpoint === undefined
+  ) {
+    console.log(`note: no endpoint is configured; nothing to clear`);
+    return;
+  }
+  const next: UserConfig = { ...existing };
+  delete next.openai_compatible_endpoint;
+  delete next.local_endpoint;
+  const path = writeUserConfig(next);
+  console.log(`cleared the openai-compatible endpoint (adapter default applies)`);
+  console.log(`wrote ${path}`);
+}
+
+/** Accepted spellings for `stamp config reviewers set-tools <value>`. */
+const TRUE_VALUES = new Set(["true", "on", "1", "yes"]);
+const FALSE_VALUES = new Set(["false", "off", "0", "no"]);
+
+/**
+ * Parse a `set-tools` argument into a strict boolean, or throw a UsageError
+ * naming the accepted spellings. Deliberately stricter than
+ * `resolveOpenAICompatibleTools`'s env-var parsing (which treats anything
+ * not "true-ish" as off) — a CLI setter that persists to disk should refuse
+ * a typo rather than silently write the opposite of what the operator meant.
+ */
+function parseToolsArg(raw: string): boolean {
+  const v = raw.trim().toLowerCase();
+  if (TRUE_VALUES.has(v)) return true;
+  if (FALSE_VALUES.has(v)) return false;
+  throw new UsageError(
+    `'${raw}' is not a valid value for set-tools — expected one of: ` +
+      `true, false, on, off, 1, 0.`,
+  );
+}
+
+/**
+ * AGT-1139: `stamp config reviewers set-tools <on|off>` — persist the
+ * OpenAI `tools` field opt-in (`openai_compatible_tools:`) for the
+ * openai-compatible backend. Off is the safe default (`mlx_lm.server`
+ * crashes server-side when `tools` are present) — this setter exists for
+ * operators who have verified their server handles OpenAI function-calling
+ * correctly and want the structured `submit_verdict` path persistently
+ * rather than per-run via `STAMP_OPENAI_COMPATIBLE_TOOLS=1`.
+ */
+export function runConfigReviewersSetTools(value: string): void {
+  const enabled = parseToolsArg(value);
+  const existing = loadOrEmpty();
+  const next: UserConfig = { ...existing, openai_compatible_tools: enabled };
+  const path = writeUserConfig(next);
+  console.log(`openai_compatible_tools = ${enabled}`);
+  console.log(`wrote ${path}`);
+}
+
+/**
+ * AGT-1139: `stamp config reviewers clear-tools` — remove BOTH the
+ * canonical `openai_compatible_tools:` and the legacy `local_tools:` keys,
+ * same reasoning as `clear-endpoint`: clearing only one spelling would leave
+ * a stale legacy value in effect via `resolveOpenAICompatibleTools`'s `??`
+ * fallback.
+ */
+export function runConfigReviewersClearTools(): void {
+  const existing = loadOrEmpty();
+  if (
+    existing.openai_compatible_tools === undefined &&
+    existing.local_tools === undefined
+  ) {
+    console.log(`note: tools opt-in is not configured; nothing to clear`);
+    return;
+  }
+  const next: UserConfig = { ...existing };
+  delete next.openai_compatible_tools;
+  delete next.local_tools;
+  const path = writeUserConfig(next);
+  console.log(`cleared the tools opt-in (tools off — the safe default)`);
   console.log(`wrote ${path}`);
 }
 

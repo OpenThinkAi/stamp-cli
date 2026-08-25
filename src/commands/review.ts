@@ -65,7 +65,9 @@ import {
   loadOrCreateUserConfig,
   resolveReviewerBackend,
   resolveReviewerModel,
+  REVIEWER_BACKEND_FLAG_VALUES,
   type ReviewerBackend,
+  type ReviewerBackendOverride,
 } from "../lib/userConfig.js";
 import { invokeLocalReviewer } from "../lib/localReviewer.js";
 import { LOCAL_DEFAULT_BASE_URL } from "../lib/localReviewClient.js";
@@ -89,6 +91,40 @@ import { printRetentionAdvisory } from "./retentionAdvisory.js";
 export interface ReviewOptions {
   diff: string;
   only?: string;
+  /**
+   * AGT-1139: force every reviewer in this run onto a backend, overriding
+   * `STAMP_REVIEWER_BACKEND` and any per-reviewer config for the run
+   * (without writing anything to `~/.stamp/config.yml`). One of
+   * `REVIEWER_BACKEND_FLAG_VALUES` (`anthropic` | `openai-compatible` |
+   * `local`, case-insensitive); any other value is a `UsageError` at the top
+   * of `runReview`, before any repo or config access. `--endpoint` combined
+   * with `--backend anthropic` is also rejected there (AC5) — the Agent SDK
+   * owns its own transport and has no configurable endpoint.
+   */
+  backend?: string;
+  /**
+   * AGT-1139: pin the model id for this run, beating
+   * `STAMP_OPENAI_COMPATIBLE_MODEL` / `STAMP_LOCAL_MODEL` and any
+   * `~/.stamp/config.yml` value — same precedence slot, one tier higher.
+   * Applies whichever kind the backend resolves to (an Anthropic model id
+   * when paired with `--backend anthropic` or no `--backend` at all with a
+   * plain-model config entry; an OpenAI-compatible model id otherwise).
+   * Threaded through `resolveReviewerBackendFrom`, not a second selection
+   * mechanism.
+   */
+  model?: string;
+  /**
+   * AGT-1139: pin the OpenAI-compatible endpoint for this run, beating
+   * `STAMP_OPENAI_COMPATIBLE_ENDPOINT` / `STAMP_LOCAL_ENDPOINT` and
+   * `openai_compatible_endpoint:` / `local_endpoint:` in
+   * `~/.stamp/config.yml`. Only meaningful for the openai-compatible
+   * backend — rejected at parse time when combined with
+   * `--backend anthropic` (AC5). Moves the AGT-415 data-flow disclosure
+   * gate exactly like an env-var-driven endpoint change would, because that
+   * gate keys on `isLoopbackEndpoint(backend.endpoint)`, and `backend.endpoint`
+   * is this value once resolved (see `backendSendsOffHost` below).
+   */
+  endpoint?: string;
   /**
    * Bypass the per-invocation diff size cap (default 200KB). Required when
    * the diff legitimately includes large generated content, vendored
@@ -213,6 +249,44 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         "cron / git hooks / scripts where stamp itself drives the API call.",
     );
   }
+
+  // AGT-1139 AC5: reject invalid --backend / --model / --endpoint
+  // combinations at parse time — purely from the flags themselves, before
+  // any repo, config, or network access — rather than failing later with a
+  // raw fetch error or (worse) silently ignoring the flag.
+  const backendFlag = opts.backend?.trim().toLowerCase();
+  if (
+    backendFlag !== undefined &&
+    !(REVIEWER_BACKEND_FLAG_VALUES as readonly string[]).includes(backendFlag)
+  ) {
+    throw new UsageError(
+      `--backend '${opts.backend}' is invalid — expected one of: ` +
+        `${REVIEWER_BACKEND_FLAG_VALUES.join(", ")} ('local' is a legacy ` +
+        `alias for 'openai-compatible').`,
+    );
+  }
+  if (opts.endpoint !== undefined && backendFlag === "anthropic") {
+    throw new UsageError(
+      `--endpoint is not applicable to --backend anthropic — the Claude ` +
+        `Agent SDK owns its own transport and has no configurable endpoint. ` +
+        `Pass --backend openai-compatible (or local) to point a reviewer at ` +
+        `${opts.endpoint}, or drop --endpoint to run on Anthropic.`,
+    );
+  }
+  // Threaded into resolveReviewerBackend below for every reviewer in this
+  // run (same as the env-var tier it sits above). Undefined when no flag was
+  // passed, which is what keeps a flagless invocation byte-identical to
+  // pre-AGT-1139 behaviour (AC1).
+  const backendOverride: ReviewerBackendOverride | undefined =
+    opts.backend !== undefined ||
+    opts.model !== undefined ||
+    opts.endpoint !== undefined
+      ? {
+          ...(backendFlag !== undefined ? { backend: backendFlag } : {}),
+          ...(opts.model !== undefined ? { model: opts.model } : {}),
+          ...(opts.endpoint !== undefined ? { endpoint: opts.endpoint } : {}),
+        }
+      : undefined;
 
   // --headless mode: sibling to --plan for cron / git hooks / scripts.
   // Same no-trust posture; stamp calls the Anthropic API directly via
@@ -454,14 +528,17 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   const branchRule = targetBranch ? findBranchRule(config.branches, targetBranch) : undefined;
   const serverMode = !!branchRule?.review_server;
 
-  // Per-reviewer backend selection from per-user ~/.stamp/config.yml. Only
+  // Per-reviewer backend selection from per-user ~/.stamp/config.yml, with
+  // AGT-1139's --backend/--model/--endpoint applied uniformly on top (same
+  // as the pre-existing STAMP_REVIEWER_BACKEND env tier it sits above). Only
   // the local-LLM path honors it; server-attested mode resolves reviewers
-  // on the server, so every reviewer's diff goes off-host there. Resolve
-  // once and reuse in the fan-out below.
+  // on the server, so every reviewer's diff goes off-host there — a flag
+  // here is silently inert in that mode, exactly like the env vars already
+  // are. Resolve once and reuse in the fan-out below.
   const backendByReviewer = new Map<string, ReviewerBackend>();
   if (!serverMode) {
     for (const name of reviewerNames) {
-      backendByReviewer.set(name, resolveReviewerBackend(name));
+      backendByReviewer.set(name, resolveReviewerBackend(name, backendOverride));
     }
   }
 

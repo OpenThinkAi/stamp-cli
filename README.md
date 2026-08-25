@@ -467,10 +467,11 @@ commands above), not by editing the YAML directly.
 
 ### Per-user reviewer-model selection
 
-`~/.stamp/config.yml` lets each operator pick which Anthropic model each
+`~/.stamp/config.yml` lets each operator pick which model — and which
+backend, Anthropic or an OpenAI-compatible endpoint (see below) — each
 reviewer runs on. Defaults are written by `stamp init` (and lazily on
-first `stamp review` after upgrade) — Sonnet across the three starter
-personas:
+first `stamp review` after upgrade) — Sonnet on the Anthropic backend
+across the three starter personas:
 
 ```yaml
 reviewers:
@@ -486,7 +487,25 @@ stamp config reviewers show
 stamp config reviewers set security claude-opus-4-7
 stamp config reviewers clear security        # remove one entry
 stamp config reviewers clear --all           # delete the whole file
+stamp config reviewers set-endpoint <url>    # pin the openai-compatible endpoint (see below)
+stamp config reviewers clear-endpoint        # remove it (both spellings)
+stamp config reviewers set-tools <on|off>    # opt into the OpenAI `tools` field
+stamp config reviewers clear-tools           # remove the opt-in (both spellings)
 ```
+
+Or override any of it for a single run, without writing to this file:
+
+```
+stamp review --diff main..feature --backend openai-compatible --model gpt-5 --endpoint https://api.openai.com/v1
+```
+
+`--backend` / `--model` / `--endpoint` resolve narrowest-wins — flag beats
+`STAMP_REVIEWER_BACKEND` / `STAMP_OPENAI_COMPATIBLE_*`, which beats this file,
+which beats the shipped defaults — through the exact same resolver, so it's
+not a second way reviewers get selected. `--endpoint` is rejected at parse
+time when combined with `--backend anthropic` (the Agent SDK has no
+configurable endpoint), and it moves the off-host disclosure below exactly
+like an env-var-selected endpoint would.
 
 Reviewers without a pinned model fall back to the agent SDK's default. The
 file is per-user (not committed) and intentionally NOT included in the

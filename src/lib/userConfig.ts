@@ -179,6 +179,48 @@ export type ReviewerBackend =
 export const BACKEND_KIND_OPENAI_COMPATIBLE = "openai-compatible";
 
 /**
+ * The accepted values for `stamp review --backend` / `STAMP_REVIEWER_BACKEND`
+ * (canonical + the legacy `local` alias). Shared by the CLI's parse-time
+ * validation (AGT-1139 AC5) and anything that needs to render the accepted
+ * set in a usage error.
+ */
+export const REVIEWER_BACKEND_FLAG_VALUES = [
+  "anthropic",
+  BACKEND_KIND_OPENAI_COMPATIBLE,
+  "local",
+] as const;
+
+/**
+ * `stamp review --backend` / `--model` / `--endpoint` (AGT-1139): a per-run,
+ * per-invocation override that sits ABOVE the env-var tier the resolver
+ * already has (`STAMP_REVIEWER_BACKEND` / `STAMP_OPENAI_COMPATIBLE_*` /
+ * `STAMP_LOCAL_*`), giving the full precedence chain flag > env > config >
+ * default. It is not a second selection mechanism — it is threaded straight
+ * into `resolveReviewerBackendFrom`, the same function every other tier
+ * already resolves through, and it applies uniformly to every reviewer in
+ * the run (the same way the env-var tier already does).
+ *
+ * Deliberately carries no credential and is never persisted: the CLI layer
+ * builds this from `process.argv`-derived flags each run and it is not
+ * written to `~/.stamp/config.yml` (AC2). `undefined` in every field is
+ * indistinguishable from "no override was passed" — every existing caller
+ * that omits the parameter sees byte-identical behaviour to before this type
+ * existed.
+ */
+export interface ReviewerBackendOverride {
+  /** `--backend`. One of `REVIEWER_BACKEND_FLAG_VALUES`, case-insensitive. */
+  backend?: string;
+  /** `--model`. Applies to whichever kind the backend resolves to. */
+  model?: string;
+  /**
+   * `--endpoint`. Only meaningful for the openai-compatible kind; the CLI
+   * layer rejects `--endpoint` combined with `--backend anthropic` at parse
+   * time (AC5) before this ever reaches the resolver.
+   */
+  endpoint?: string;
+}
+
+/**
  * Default reviewer-model assignments shipped to first-time operators.
  *
  * Sonnet across the board is the project-level default coming out of the
@@ -522,20 +564,28 @@ export function resolveReviewerModel(reviewer: string): string | null {
  * compatible endpoint; anything else is an Anthropic model id (or null when
  * unset → SDK default).
  *
+ * `override` (AGT-1139): `stamp review --backend` / `--model` / `--endpoint`,
+ * threaded straight through to `resolveReviewerBackendFrom` — see that
+ * function for the precedence this adds. Omitted by every caller that
+ * predates the flags, so behaviour is unchanged when no flag is passed.
+ *
  * Errors loading the file are swallowed and treated as "no config / SDK
  * default" — this is on the hot path of every reviewer invocation, and a
  * malformed config shouldn't break the review. The CLI surface (`stamp
  * config reviewers show`) re-loads with throw-on-malformed semantics so
  * operators see the parse error when they explicitly inspect.
  */
-export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
+export function resolveReviewerBackend(
+  reviewer: string,
+  override?: ReviewerBackendOverride,
+): ReviewerBackend {
   let cfg: UserConfig | null;
   try {
     cfg = loadUserConfig();
   } catch {
     cfg = null;
   }
-  return resolveReviewerBackendFrom(cfg, reviewer);
+  return resolveReviewerBackendFrom(cfg, reviewer, override);
 }
 
 /**
@@ -552,25 +602,40 @@ export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
  *
  * Env-var precedence (`STAMP_REVIEWER_BACKEND`, `STAMP_LOCAL_*`) is honored
  * here, not in the loader, so it applies identically on both paths.
+ *
+ * `override` (AGT-1139) adds a FOURTH tier above env, giving the full chain
+ * `--backend`/`--model`/`--endpoint` flag > env var > config > default. It is
+ * not a parallel resolution path: every branch below reads `override.model`
+ * / `override.endpoint` at the same point it already reads the env var and
+ * config equivalents, so `undefined` fields (the case for every pre-AGT-1139
+ * caller, which doesn't pass a third argument at all) fall through to
+ * exactly the logic that existed before this parameter did.
  */
 export function resolveReviewerBackendFrom(
   cfg: UserConfig | null,
   reviewer: string,
+  override?: ReviewerBackendOverride,
 ): ReviewerBackend {
   const raw = cfg?.reviewers[reviewer];
+  const modelOverride = override?.model?.trim() || undefined;
+  const endpointOverride = override?.endpoint?.trim() || undefined;
 
-  // Operator override via STAMP_REVIEWER_BACKEND — force a backend per-run
-  // regardless of config, and crucially WITHOUT mutating the shared
-  // ~/.stamp/config.yml (which would collide across concurrent runs, e.g.
-  // open-team's autonomous dispatch). Accepted values:
+  // Operator override via `--backend` (highest) or STAMP_REVIEWER_BACKEND
+  // (next) — force a backend per-run regardless of config, and crucially
+  // WITHOUT mutating the shared ~/.stamp/config.yml (which would collide
+  // across concurrent runs, e.g. open-team's autonomous dispatch). Accepted
+  // values:
   //   anthropic         — force the agent-SDK path (logged-in Claude session).
   //   openai-compatible — force the one-shot OpenAI-compatible backend.
   //   local             — legacy alias for openai-compatible; still honoured.
-  const backendOverride = process.env.STAMP_REVIEWER_BACKEND?.trim().toLowerCase();
+  const backendOverride = (
+    override?.backend?.trim() || process.env.STAMP_REVIEWER_BACKEND?.trim()
+  )?.toLowerCase();
   if (backendOverride === "anthropic") {
-    // An `openai-compatible:` / `local:` value carries a model id that isn't
-    // valid for Anthropic, so it drops to null (SDK default); a real
-    // Anthropic model id is preserved.
+    // `--model` wins outright. Otherwise: an `openai-compatible:` / `local:`
+    // config value carries a model id that isn't valid for Anthropic, so it
+    // drops to null (SDK default); a real Anthropic model id is preserved.
+    if (modelOverride) return { kind: "anthropic", model: modelOverride };
     return typeof raw === "string" &&
       raw.length > 0 &&
       stripModelPrefix(raw) === null
@@ -581,21 +646,22 @@ export function resolveReviewerBackendFrom(
     backendOverride === BACKEND_KIND_OPENAI_COMPATIBLE ||
     backendOverride === "local"
   ) {
-    // Model: STAMP_OPENAI_COMPATIBLE_MODEL (or legacy STAMP_LOCAL_MODEL)
-    // wins; else the reviewer's configured scheme value (prefix stripped).
-    // Endpoint: STAMP_OPENAI_COMPATIBLE_ENDPOINT (or legacy
-    // STAMP_LOCAL_ENDPOINT) wins; else the configured endpoint; else
-    // undefined (the adapter's own default). If no model can be resolved at
-    // all, fall back to the anthropic default rather than handing the
-    // endpoint an empty model.
+    // Model: `--model` wins; then STAMP_OPENAI_COMPATIBLE_MODEL (or legacy
+    // STAMP_LOCAL_MODEL); else the reviewer's configured scheme value
+    // (prefix stripped). Endpoint: `--endpoint` wins; then
+    // STAMP_OPENAI_COMPATIBLE_ENDPOINT (or legacy STAMP_LOCAL_ENDPOINT);
+    // else the configured endpoint; else undefined (the adapter's own
+    // default). If no model can be resolved at all, fall back to the
+    // anthropic default rather than handing the endpoint an empty model.
     const envModel = firstEnv([
       "STAMP_OPENAI_COMPATIBLE_MODEL",
       "STAMP_LOCAL_MODEL",
     ]);
     const cfgModel = typeof raw === "string" ? stripModelPrefix(raw) : null;
-    const model = envModel ?? cfgModel ?? "";
+    const model = modelOverride ?? envModel ?? cfgModel ?? "";
     if (!model) return { kind: "anthropic", model: null };
     const endpoint =
+      endpointOverride ??
       firstEnv(["STAMP_OPENAI_COMPATIBLE_ENDPOINT", "STAMP_LOCAL_ENDPOINT"]) ??
       configuredOpenAICompatibleEndpoint(cfg);
     const enableTools = resolveOpenAICompatibleTools(cfg);
@@ -608,30 +674,40 @@ export function resolveReviewerBackendFrom(
   }
 
   if (typeof raw !== "string" || raw.length === 0) {
-    return { kind: "anthropic", model: null };
+    // No config entry and no `--backend` forcing a kind. A bare `--model`
+    // pins the Anthropic model id (the default kind); a bare `--endpoint`
+    // has nothing to attach to here (the CLI already rejects `--endpoint`
+    // with `--backend anthropic` at parse time, and with no config entry
+    // there is no openai-compatible kind for it to apply to either).
+    return { kind: "anthropic", model: modelOverride ?? null };
   }
   const schemeModel = stripModelPrefix(raw);
   if (schemeModel !== null) {
     // A bare `openai-compatible:` / `local:` with no model id is a
     // misconfiguration; fall back to anthropic-default rather than handing
-    // the endpoint an empty model.
-    if (schemeModel.length === 0) return { kind: "anthropic", model: null };
+    // the endpoint an empty model. `--model` can still supply one.
+    if (schemeModel.length === 0 && !modelOverride) {
+      return { kind: "anthropic", model: null };
+    }
     const enableTools = resolveOpenAICompatibleTools(cfg);
     return {
       kind: BACKEND_KIND_OPENAI_COMPATIBLE,
-      model: schemeModel,
-      // Config-only, deliberately: this is the pre-existing config-driven
-      // branch and STAMP_LOCAL_ENDPOINT has never applied to it. Honouring
-      // it here would change which endpoint an existing setup hits whenever
+      model: modelOverride ?? schemeModel,
+      // `--endpoint` wins outright here too — an operator pointing a
+      // config-selected openai-compatible reviewer at a different endpoint
+      // for one run is exactly the flag's job. Below that: config-only,
+      // deliberately — this is the pre-existing config-driven branch and
+      // STAMP_LOCAL_ENDPOINT has never applied to it. Honouring the env var
+      // here would change which endpoint an existing setup hits whenever
       // the operator has that variable exported for something else — a
       // silent redirect of review traffic is not a back-compat-safe change
       // to smuggle into a rename ticket. (The forced-backend branch above
       // reads env because it always has.)
-      endpoint: configuredOpenAICompatibleEndpoint(cfg),
+      endpoint: endpointOverride ?? configuredOpenAICompatibleEndpoint(cfg),
       enableTools,
     };
   }
-  return { kind: "anthropic", model: raw };
+  return { kind: "anthropic", model: modelOverride ?? raw };
 }
 
 /**
