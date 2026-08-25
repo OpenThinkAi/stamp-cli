@@ -56,6 +56,10 @@ import type { ReviewPlanReviewer } from "./reviewPlan.js";
  *  the input side. */
 const ONESHOT_MAX_TOKENS = 4096;
 
+/** Cap on the error text folded into `result.error`. Wide enough that an
+ *  actionable remedy survives alongside the upstream's own explanation. */
+const ONESHOT_ERROR_MAX_CHARS = 600;
+
 /**
  * Parse a single line as a verdict declaration, tolerant of the formatting
  * real (especially local) models emit: markdown emphasis/heading markers, a
@@ -254,7 +258,14 @@ export async function runOneShotReview(
       model: opts.model,
       // Truncate to keep stderr-shipped logs tidy; the full error stays on
       // the Error object for the caller to log if it cares.
-      error: `model call failed: ${truncate(message, 240)}`,
+      //
+      // The budget was raised from 240 in AGT-1138: the OpenAI-compatible
+      // adapter's credential failures carry the fix in the message ("set
+      // STAMP_<PROVIDER>_API_KEY, or add provider_keys.<provider> to
+      // ~/.stamp/config.yml"), and at 240 chars the operator got the
+      // diagnosis with the remedy cut off — the exact failure mode AC4
+      // exists to remove.
+      error: `model call failed: ${truncate(message, ONESHOT_ERROR_MAX_CHARS)}`,
     };
   }
 

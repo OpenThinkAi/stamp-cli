@@ -242,7 +242,9 @@ describe("AGT-1137: migration preserves pre-provenance rows (AC1)", () => {
       assert.deepEqual(provenanceFromRow(withProv), LOCAL_QWEN);
       assert.equal(
         formatProvenance(provenanceFromRow(withProv)),
-        "local / qwen3-coder-30b @ http://localhost:8000/v1",
+        // AGT-1138: stored kind stays `local`; the DISPLAY label is the
+        // renamed, provider-neutral one.
+        "openai-compatible / qwen3-coder-30b @ http://localhost:8000/v1",
       );
       const without = byReviewer.get("standards")!;
       assert.equal(without.backend_kind, null);
@@ -415,12 +417,12 @@ describe("AGT-1137: backendProvenance derives the stored record", () => {
   });
 
   it("records the EFFECTIVE endpoint when none is configured", () => {
-    // The adapter falls back to LM Studio's URL when `local_endpoint` and
-    // STAMP_LOCAL_ENDPOINT are both unset. Recording the configured value
+    // The adapter falls back to LM Studio's URL when the configured endpoint
+    // and STAMP_OPENAI_COMPATIBLE_ENDPOINT / STAMP_LOCAL_ENDPOINT are all unset. Recording the configured value
     // (undefined) would leave the record unable to answer "which endpoint",
     // which is the whole point of the column.
     const p = backendProvenance({
-      kind: "local",
+      kind: "openai-compatible",
       model: "qwen3-coder-30b",
       endpoint: undefined,
       enableTools: false,
@@ -431,7 +433,7 @@ describe("AGT-1137: backendProvenance derives the stored record", () => {
 
   it("keeps an explicitly configured endpoint", () => {
     const p = backendProvenance({
-      kind: "local",
+      kind: "openai-compatible",
       model: "qwen3-coder-30b",
       endpoint: "http://localhost:8000/v1",
       enableTools: true,
@@ -453,10 +455,11 @@ describe("AGT-1137: backendProvenance derives the stored record", () => {
     );
   });
 
-  it("stores the backend kind the resolver uses today, so AGT-1138 can alias it", () => {
-    // AGT-1138 renames the concept to `openai-compatible`. Storing what the
-    // code calls it TODAY keeps these rows honest and lets that rename be a
-    // read-side alias rather than a second data migration.
+  it("stores the backend kind AGT-1137 shipped, which AGT-1138 aliases on read", () => {
+    // AGT-1138 renamed the concept to `openai-compatible` — and deliberately
+    // did NOT rewrite this value. Rows already in the field keep saying
+    // `local`; the rename lives entirely on the read side
+    // (`provenanceKindLabel`), so there is no second data migration.
     assert.equal(PROVENANCE_KIND_OPENAI_COMPATIBLE, "local");
   });
 });
@@ -618,8 +621,8 @@ describe("AGT-1137: stamp log --reviews shows the backend per verdict (AC2)", ()
     const out = captured.join("\n");
     assert.match(
       out,
-      /backend: {3}local \/ qwen3-coder-30b @ http:\/\/localhost:8000\/v1/,
-      "the local row must name its model AND its endpoint",
+      /backend: {3}openai-compatible \/ qwen3-coder-30b @ http:\/\/localhost:8000\/v1/,
+      "the openai-compatible row must name its model AND its endpoint",
     );
     assert.match(
       out,
@@ -634,7 +637,7 @@ describe("AGT-1137: stamp log --reviews shows the backend per verdict (AC2)", ()
     // The two provenance rows must be visibly different — that's AC5's
     // demonstrable-difference property at the rendering seam.
     assert.notEqual(
-      out.match(/backend: {3}local \/ [^\n]+/)?.[0],
+      out.match(/backend: {3}openai-compatible \/ [^\n]+/)?.[0],
       out.match(/backend: {3}anthropic \/ [^\n]+/)?.[0],
     );
   });

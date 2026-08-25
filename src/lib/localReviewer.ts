@@ -1,28 +1,44 @@
 /**
- * Trusted local-model reviewer.
+ * Trusted OpenAI-compatible reviewer.
  *
- * Bridges the unmetered one-shot core (`runOneShotReview` over a local
- * OpenAI-compatible client) into the `ReviewerInvocation` shape the trusted
- * review path already records and prints. From `runReview`'s perspective a
- * local reviewer is interchangeable with the agent-SDK reviewer: same return
- * type, same `recordReview` row, same gate. The only differences are that
- * the inference happens against a local model (no Anthropic metering) and
- * there is no tool-use loop.
+ * Bridges the one-shot core (`runOneShotReview` over an OpenAI-compatible
+ * client) into the `ReviewerInvocation` shape the trusted review path
+ * already records and prints. From `runReview`'s perspective this reviewer
+ * is interchangeable with the agent-SDK reviewer: same return type, same
+ * `recordReview` row, same gate. The only differences are where the
+ * inference happens and that there is no tool-use loop.
+ *
+ * The endpoint may be a model on this box (unmetered, nothing leaves the
+ * host) or a hosted provider — OpenAI, DeepSeek, anything that speaks
+ * `/chat/completions`. AGT-1138 made the hosted case reachable by resolving
+ * a per-provider credential HERE, at the invocation site, rather than
+ * carrying one on `ReviewerBackend`: the key's lifetime is a single request,
+ * and it never touches the object that gets displayed, stored in
+ * `state.db`, or signed into the attestation.
  *
  * Trust note: this path produces a verdict that gates a merge, exactly like
- * the agent-SDK local-LLM path it sits beside. The trust anchor is
- * unchanged — the operator's machine produces the verdict and the merge
- * signature + pre-receive hook are what the server verifies; stamp never
- * independently re-reviews. Moving inference from the SDK to a local model
- * doesn't touch that boundary (see DESIGN.md / docs/local-only-mode.md).
+ * the agent-SDK path it sits beside. The trust anchor is unchanged — the
+ * operator's machine produces the verdict and the merge signature +
+ * pre-receive hook are what the server verifies; stamp never independently
+ * re-reviews. Moving inference off the SDK doesn't touch that boundary (see
+ * DESIGN.md / docs/local-only-mode.md).
  */
 
 import { randomBytes } from "node:crypto";
 
 import { runGit, showAtRef } from "./git.js";
-import { createLocalReviewClient } from "./localReviewClient.js";
+import {
+  createLocalReviewClient,
+  LOCAL_DEFAULT_BASE_URL,
+  type FetchLike,
+} from "./localReviewClient.js";
 import { runOneShotReview, type ChatClientShape } from "./oneShotReview.js";
+import {
+  missingCredentialMessage,
+  resolveProviderCredentialFrom,
+} from "./providerCredentials.js";
 import type { ReviewerInvocation } from "./reviewer.js";
+import { loadUserConfig, type UserConfig } from "./userConfig.js";
 
 export interface InvokeLocalReviewerParams {
   reviewer: string;
@@ -32,9 +48,9 @@ export interface InvokeLocalReviewerParams {
   diff: string;
   base_sha: string;
   head_sha: string;
-  /** Local model id (the suffix after the `local:` scheme). */
+  /** Model id (the suffix after the `openai-compatible:` / `local:` scheme). */
   model: string;
-  /** Local endpoint base URL, or undefined to let the adapter default to
+  /** OpenAI-compatible base URL, or undefined to let the adapter default to
    *  LM Studio (http://localhost:1234/v1). */
   endpoint: string | undefined;
   /**
@@ -44,7 +60,8 @@ export interface InvokeLocalReviewerParams {
    * server you have verified handles OpenAI function-calling correctly.
    * When false the one-shot core's last-line `VERDICT:` fallback is used
    * instead, which is reliable across every backend. Sourced from the
-   * `local_tools` config field / `STAMP_LOCAL_TOOLS` env var via the
+   * `openai_compatible_tools` config field / `STAMP_OPENAI_COMPATIBLE_TOOLS`
+   * env var (or their legacy `local_*` spellings) via the
    * `ReviewerBackend.enableTools` property.
    */
   enableTools: boolean;
@@ -54,16 +71,33 @@ export interface InvokeLocalReviewerParams {
    *  decision 1a. A one-shot model can't open files itself, so we hand it
    *  the resulting trust-anchor files directly. */
   enforceReadsOnDotstamp: boolean;
-  /** Injectable client for tests; production constructs a local client. */
+  /** Injectable client for tests; production constructs one from the
+   *  endpoint + the resolved per-provider credential. */
   client?: ChatClientShape;
+  /**
+   * Injectable fetch for tests that need the PRODUCTION client-construction
+   * path (credential resolution, redaction, the 401 message) without a
+   * network. Ignored when `client` is supplied — an injected client owns its
+   * own transport.
+   */
+  fetchImpl?: FetchLike;
+  /**
+   * Per-user config to resolve credentials against. Tests pass one
+   * explicitly; production omits it and the resolver reads
+   * `~/.stamp/config.yml`. `null` means "no config", not "load it".
+   */
+  userConfig?: UserConfig | null;
+  /** Env to resolve credentials from. Defaults to `process.env`. */
+  env?: Record<string, string | undefined>;
 }
 
 /**
- * Run one reviewer against the local model and adapt the result to a
- * `ReviewerInvocation`. Throws (so the caller's `Promise.allSettled` marks
- * it failed) when the model produced no parseable verdict — mirroring the
- * agent-SDK reviewer's throw-on-failure contract so the gate stays closed
- * on an unusable response rather than recording a null verdict.
+ * Run one reviewer against the OpenAI-compatible endpoint and adapt the
+ * result to a `ReviewerInvocation`. Throws (so the caller's
+ * `Promise.allSettled` marks it failed) when no parseable verdict came back —
+ * mirroring the agent-SDK reviewer's throw-on-failure contract so the gate
+ * stays closed on an unusable response rather than recording a null verdict.
+ * A missing or rejected credential throws here too, for the same reason.
  */
 export async function invokeLocalReviewer(
   params: InvokeLocalReviewerParams,
@@ -83,16 +117,7 @@ export async function invokeLocalReviewer(
     if (extra) diff = `${params.diff}\n\n${extra}`;
   }
 
-  const client =
-    params.client ??
-    createLocalReviewClient({
-      // Tool-calling is off by default: mlx_lm.server (the most common
-      // Apple-Silicon backend) crashes server-side when `tools` are present.
-      // The operator can opt in via STAMP_LOCAL_TOOLS=1 or `local_tools: true`
-      // in ~/.stamp/config.yml for a server known to handle it correctly.
-      disableTools: !params.enableTools,
-      ...(params.endpoint !== undefined ? { baseURL: params.endpoint } : {}),
-    });
+  const client = params.client ?? buildClient(params);
 
   const result = await runOneShotReview({
     reviewer: {
@@ -108,12 +133,20 @@ export async function invokeLocalReviewer(
   });
 
   if (result.verdict === null) {
+    const detail = result.error ?? "unknown error";
+    // The tool-calling hint is right for "the model answered, we couldn't
+    // parse a verdict out of it" and actively misleading for "the endpoint
+    // refused the request". A 401 is not fixed by rewording the prompt, and
+    // telling an operator it might be is how AC4's "actionable message"
+    // becomes an actionable message about the wrong thing.
+    const hint = isTransportFailure(detail)
+      ? ""
+      : ` The model may not support tool-calling — ensure the reviewer ` +
+        `prompt ends with a "VERDICT: <choice>" line, or point the reviewer ` +
+        `at a tool-capable model.`;
     throw new Error(
-      `local reviewer "${params.reviewer}" (model ${params.model}) produced ` +
-        `no verdict: ${result.error ?? "unknown error"}. The local model may ` +
-        `not support tool-calling — ensure the reviewer prompt ends with a ` +
-        `"VERDICT: <choice>" line, or point the reviewer at a tool-capable ` +
-        `model.`,
+      `openai-compatible reviewer "${params.reviewer}" (model ${params.model}) produced ` +
+        `no verdict: ${detail}.${hint}`,
     );
   }
 
@@ -127,6 +160,84 @@ export async function invokeLocalReviewer(
     retros: [],
     mcp_servers_at_init: [],
   };
+}
+
+/**
+ * Did this failure happen at the transport, rather than in the model's
+ * answer? Matched on the prefixes `lib/localReviewClient.ts` and
+ * `lib/providerCredentials.ts` build their messages with — both are stamp's
+ * own strings, produced a few frames below this one, not text from a
+ * provider. A false negative only restores the old (harmless, if
+ * unhelpful) hint, so the match is deliberately narrow.
+ */
+function isTransportFailure(detail: string): boolean {
+  return (
+    detail.includes("openai-compatible endpoint ") ||
+    detail.includes("no API credential")
+  );
+}
+
+/**
+ * Construct the production OpenAI-compatible client for this invocation:
+ * resolve the endpoint, resolve the credential that endpoint's provider
+ * needs, and refuse to send anything when a required one is missing.
+ *
+ * The refusal is the point of the `required` check. Without it, a reviewer
+ * pointed at OpenAI with no key sends the `"lm-studio"` placeholder, gets a
+ * 401, and the operator reads a raw HTTP status — the failure mode AC4
+ * exists to remove. With it, nothing is sent at all and the message names
+ * the endpoint, the provider, and every place a key could come from.
+ *
+ * A LOOPBACK or unrecognised endpoint is never "required": that is what
+ * keeps `STAMP_REVIEWER_BACKEND=local` against localhost — and against a LAN
+ * box or a corporate gateway — working with no credential, exactly as before.
+ */
+function buildClient(params: InvokeLocalReviewerParams): ChatClientShape {
+  // The endpoint the request will ACTUALLY hit, with the adapter default
+  // already applied — the provider must be derived from where the bytes go,
+  // not from where the operator did or didn't configure something.
+  const endpoint = params.endpoint ?? LOCAL_DEFAULT_BASE_URL;
+  const cfg =
+    params.userConfig !== undefined ? params.userConfig : loadUserConfigSafely();
+  const credential = resolveProviderCredentialFrom(
+    cfg,
+    endpoint,
+    params.env ?? process.env,
+  );
+
+  if (credential.apiKey === null && credential.required) {
+    throw new Error(missingCredentialMessage(endpoint, credential.providerId));
+  }
+
+  return createLocalReviewClient({
+    // Tool-calling is off by default: mlx_lm.server (the most common
+    // Apple-Silicon backend) crashes server-side when `tools` are present.
+    // The operator can opt in via STAMP_OPENAI_COMPATIBLE_TOOLS=1 (or the
+    // legacy STAMP_LOCAL_TOOLS=1) / `openai_compatible_tools: true` in
+    // ~/.stamp/config.yml for a server known to handle it correctly.
+    disableTools: !params.enableTools,
+    ...(params.endpoint !== undefined ? { baseURL: params.endpoint } : {}),
+    // Absent credential → omit the field so the adapter's placeholder path
+    // is taken verbatim, rather than sending an explicit null-ish token.
+    ...(credential.apiKey !== null ? { apiKey: credential.apiKey } : {}),
+    providerId: credential.providerId,
+    credentialSource: credential.source,
+    ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
+  });
+}
+
+/**
+ * Load `~/.stamp/config.yml`, treating a malformed file as "no config".
+ * Same posture as `resolveReviewerBackend`: this sits on the hot path of
+ * every reviewer invocation, and a YAML typo should not take the review
+ * down — `stamp config reviewers show` is the surface that reports it.
+ */
+function loadUserConfigSafely(): UserConfig | null {
+  try {
+    return loadUserConfig();
+  } catch {
+    return null;
+  }
 }
 
 /**

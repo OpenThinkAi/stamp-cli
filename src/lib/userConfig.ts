@@ -1,19 +1,22 @@
 /**
  * Per-user stamp config (~/.stamp/config.yml).
  *
- * Today's only knob is reviewer-model selection — the file lets an operator
- * decide which Anthropic model each reviewer (security/standards/product/…)
- * runs on, without committing that choice to the per-repo `.stamp/config.yml`
- * (which is hash-pinned via the v3 attestation chain). The intentional split
- * is "review policy as code" lives per-repo; "cost/speed tradeoff" lives
- * per-user.
+ * The file lets an operator decide which model each reviewer
+ * (security/standards/product/…) runs on, and on which backend, without
+ * committing that choice to the per-repo `.stamp/config.yml` (which is
+ * hash-pinned via the v3 attestation chain). The intentional split is
+ * "review policy as code" lives per-repo; "cost/speed tradeoff" and machine
+ * infrastructure live per-user.
  *
  * Format:
  *
  *   reviewers:
- *     security: claude-sonnet-4-6
- *     standards: claude-sonnet-4-6
+ *     security: openai-compatible:gpt-5   # OpenAI-compatible endpoint
+ *     standards: claude-sonnet-4-6        # Anthropic agent SDK
  *     product:  claude-sonnet-4-6
+ *   openai_compatible_endpoint: https://api.openai.com/v1
+ *   provider_keys:
+ *     openai: sk-…
  *
  * Every key under `reviewers:` is optional. A reviewer not listed here
  * resolves to `null` from `resolveReviewerModel`, which the SDK call site
@@ -22,7 +25,8 @@
  * that knows about this file.
  *
  * Atomic writes (temp + rename) and 0o600 under a 0o700 ~/.stamp dir
- * mirror the posture used by ~/.stamp/server.yml and ~/.stamp/keys/.
+ * mirror the posture used by ~/.stamp/server.yml and ~/.stamp/keys/ — which
+ * matters more since AGT-1138, because `provider_keys:` can hold an API key.
  */
 
 import {
@@ -40,54 +44,139 @@ import { userConfigPath } from "./paths.js";
 export interface UserConfig {
   reviewers: Record<string, string>;
   /**
-   * Base URL of a local OpenAI-compatible model server (LM Studio,
-   * llama.cpp `llama-server`, vLLM, …) used by reviewers whose model is
-   * configured with the `local:` scheme. Optional; when omitted the local
-   * client adapter falls back to its own default (LM Studio's
+   * Base URL of the OpenAI-compatible model server a reviewer with the
+   * `openai-compatible:` scheme talks to — a local one (LM Studio,
+   * `mlx_lm.server`, vLLM) or a hosted one (OpenAI, DeepSeek). Optional;
+   * when omitted the adapter falls back to its own default (LM Studio's
    * http://localhost:1234/v1). Machine-specific, which is exactly why it
    * lives here in per-user config rather than the hash-pinned per-repo
    * `.stamp/config.yml`.
+   *
+   * Canonical key. `local_endpoint:` below is the pre-AGT-1138 spelling and
+   * still works; this one wins if both are present.
+   */
+  openai_compatible_endpoint?: string;
+  /**
+   * Legacy spelling of `openai_compatible_endpoint`. Kept working
+   * unchanged — the open-team and schnap-it flows write it today. Preserved
+   * verbatim on round-trip so `stamp config reviewers set` never silently
+   * rewrites an operator's file into the new spelling.
    */
   local_endpoint?: string;
   /**
-   * Enable OpenAI `tools` / `submit_verdict` structured-verdict path for
-   * local reviewers. Off by default because `mlx_lm.server` (the most
-   * common Apple-Silicon backend) crashes server-side when `tools` are
-   * present. Flip on only for a local server you have verified accepts
-   * OpenAI function-calling correctly (e.g. oMLX with a tools-capable
-   * model). When off, the verdict falls through to the one-shot core's
-   * last-line `VERDICT:` parser, which is reliable across every backend.
-   * Overridable per-run via `STAMP_LOCAL_TOOLS=1` (opt-in).
+   * Enable the OpenAI `tools` / `submit_verdict` structured-verdict path.
+   * Off by default because `mlx_lm.server` (the most common Apple-Silicon
+   * backend) crashes server-side when `tools` are present. Flip on only for
+   * a server you have verified accepts OpenAI function-calling correctly.
+   * When off, the verdict falls through to the one-shot core's last-line
+   * `VERDICT:` parser, which is reliable across every backend. Overridable
+   * per-run via `STAMP_OPENAI_COMPATIBLE_TOOLS=1` (or the legacy
+   * `STAMP_LOCAL_TOOLS=1`).
+   *
+   * Canonical key; `local_tools:` is the legacy alias.
    */
+  openai_compatible_tools?: boolean;
+  /** Legacy spelling of `openai_compatible_tools`. Still honoured. */
   local_tools?: boolean;
+  /**
+   * Per-provider API credentials for the openai-compatible backend
+   * (AGT-1138), keyed by the provider id derived from the endpoint host —
+   * `openai`, `deepseek`, or the host itself for anything stamp does not
+   * recognise. See `lib/providerCredentials.ts` for resolution order.
+   *
+   *   provider_keys:
+   *     openai: sk-…
+   *     deepseek: sk-…
+   *
+   * This is the one place stamp's per-user config holds a secret, so it is
+   * treated like one: never echoed by `stamp config reviewers show`, never
+   * quoted back in a validation error, and written with the same 0600-under-
+   * 0700 posture as the rest of the file. Prefer the env-var form
+   * (`STAMP_<PROVIDER>_API_KEY`) where you have one — it keeps the secret
+   * out of a file entirely.
+   */
+  provider_keys?: Record<string, string>;
 }
 
 /**
  * A reviewer's value under `reviewers:` may carry this scheme prefix to
- * route the review through the local OpenAI-compatible backend instead of
- * the Anthropic API: `security: local:qwen2.5-coder-32b`. The suffix is the
- * model id the local server expects; the endpoint comes from
- * `local_endpoint` (or the adapter default). This keeps the existing
- * `reviewers: { name: <string> }` shape — no structural config change —
- * while letting an operator move any reviewer off the metered path.
+ * route the review through the OpenAI-compatible backend instead of the
+ * Anthropic API: `security: openai-compatible:gpt-5`. The suffix is the
+ * model id the endpoint expects; the endpoint comes from
+ * `openai_compatible_endpoint` (or the adapter default). This keeps the
+ * existing `reviewers: { name: <string> }` shape — no structural config
+ * change — while letting an operator move any reviewer off the metered path.
+ */
+export const OPENAI_COMPATIBLE_MODEL_PREFIX = "openai-compatible:";
+
+/**
+ * Pre-AGT-1138 spelling of `OPENAI_COMPATIBLE_MODEL_PREFIX`. `local:` was
+ * accurate when the only reachable endpoint was a model on this box and is a
+ * misnomer for a hosted DeepSeek one — but it is written into live
+ * `~/.stamp/config.yml` files and into the open-team and schnap-it flows, so
+ * it keeps resolving identically, forever. Renaming a concept is not a
+ * licence to break the configs that used the old name.
  */
 export const LOCAL_MODEL_PREFIX = "local:";
+
+/** Both accepted `reviewers:` scheme prefixes, canonical first. */
+const MODEL_PREFIXES = [
+  OPENAI_COMPATIBLE_MODEL_PREFIX,
+  LOCAL_MODEL_PREFIX,
+] as const;
+
+/**
+ * Strip whichever backend scheme prefix a `reviewers:` value carries and
+ * return the model id, or null when the value carries neither.
+ */
+function stripModelPrefix(raw: string): string | null {
+  for (const prefix of MODEL_PREFIXES) {
+    if (raw.startsWith(prefix)) return raw.slice(prefix.length).trim();
+  }
+  return null;
+}
+
+/**
+ * The endpoint the openai-compatible backend will use, from config alone
+ * (env overrides are applied by the resolver, which sits above this).
+ * Canonical key wins; the legacy one is the fallback.
+ */
+export function configuredOpenAICompatibleEndpoint(
+  cfg: UserConfig | null,
+): string | undefined {
+  return cfg?.openai_compatible_endpoint ?? cfg?.local_endpoint;
+}
 
 /**
  * Resolved execution backend for a reviewer. The trusted review path
  * branches on `kind`: `anthropic` runs the existing agent-SDK reviewer (or
- * SDK default when `model` is null); `local` runs the one-shot core against
- * a local OpenAI-compatible endpoint (unmetered).
+ * SDK default when `model` is null); `openai-compatible` runs the one-shot
+ * core against an OpenAI-compatible `/chat/completions` endpoint — a local
+ * model (unmetered) or a hosted provider such as OpenAI or DeepSeek.
  *
- * `enableTools` (local only): when true, the local client sends the
+ * `enableTools` (openai-compatible only): when true, the client sends the
  * `tools` field and prefers the `submit_verdict` structured-verdict path;
  * when false (the default), tools are suppressed and the one-shot core's
  * `VERDICT:` text fallback is used instead — safe for backends (like
  * `mlx_lm.server`) that crash on the OpenAI tools param.
+ *
+ * **No credential lives on this type**, by design. This object is printed by
+ * `stamp config reviewers show`, mapped into `ReviewProvenance`, written to
+ * `state.db`, and signed into the attestation payload; an `apiKey` field
+ * here would reach all four for free. Credentials are resolved separately,
+ * at the invocation site — see `lib/providerCredentials.ts`.
  */
 export type ReviewerBackend =
   | { kind: "anthropic"; model: string | null }
-  | { kind: "local"; model: string; endpoint: string | undefined; enableTools: boolean };
+  | {
+      kind: "openai-compatible";
+      model: string;
+      endpoint: string | undefined;
+      enableTools: boolean;
+    };
+
+/** The `ReviewerBackend["kind"]` for the OpenAI-compatible one-shot path. */
+export const BACKEND_KIND_OPENAI_COMPATIBLE = "openai-compatible";
 
 /**
  * Default reviewer-model assignments shipped to first-time operators.
@@ -219,47 +308,122 @@ export function parseUserConfig(
     }
   }
 
-  // Optional top-level local_endpoint. Validated as an http(s) URL so a
-  // typo surfaces at config-load rather than as a confusing fetch error
-  // mid-review. Absence is fine — the local adapter has its own default.
-  let local_endpoint: string | undefined;
-  const endpointRaw = obj.local_endpoint;
-  if (endpointRaw !== undefined && endpointRaw !== null) {
-    if (typeof endpointRaw !== "string" || endpointRaw.trim() === "") {
-      throw new Error(
-        `${contextPath}: local_endpoint must be a non-empty string (an OpenAI-compatible base URL like 'http://localhost:1234/v1')`,
-      );
-    }
-    const url = endpointRaw.trim();
-    if (!/^https?:\/\//.test(url)) {
-      throw new Error(
-        `${contextPath}: local_endpoint = ${JSON.stringify(endpointRaw)} must be an http(s) URL ` +
-          `(e.g. 'http://localhost:1234/v1' for LM Studio)`,
-      );
-    }
-    local_endpoint = url;
-  }
+  // Optional endpoint, under either spelling. Validated as an http(s) URL so
+  // a typo surfaces at config-load rather than as a confusing fetch error
+  // mid-review. Absence is fine — the adapter has its own default. Both keys
+  // are parsed and preserved independently; the resolver prefers the
+  // canonical one, and round-tripping keeps an operator's chosen spelling.
+  const openai_compatible_endpoint = parseEndpointField(
+    obj.openai_compatible_endpoint,
+    "openai_compatible_endpoint",
+    contextPath,
+  );
+  const local_endpoint = parseEndpointField(
+    obj.local_endpoint,
+    "local_endpoint",
+    contextPath,
+  );
 
-  // Optional top-level local_tools. Controls whether the local reviewer
-  // sends the OpenAI `tools` field (enabling the structured submit_verdict
-  // path). Defaults to false (tools off) — safe for mlx_lm.server which
-  // crashes on the tools param. Flip on only for a verified tool-capable
-  // server. Validated as boolean; non-boolean values are a config error.
-  let local_tools: boolean | undefined;
-  const localToolsRaw = obj.local_tools;
-  if (localToolsRaw !== undefined && localToolsRaw !== null) {
-    if (typeof localToolsRaw !== "boolean") {
+  // Optional tools flag, under either spelling. Controls whether the
+  // openai-compatible reviewer sends the OpenAI `tools` field (enabling the
+  // structured submit_verdict path). Defaults to false (tools off) — safe
+  // for mlx_lm.server which crashes on the tools param. Flip on only for a
+  // verified tool-capable server.
+  const openai_compatible_tools = parseBooleanField(
+    obj.openai_compatible_tools,
+    "openai_compatible_tools",
+    contextPath,
+  );
+  const local_tools = parseBooleanField(
+    obj.local_tools,
+    "local_tools",
+    contextPath,
+  );
+
+  // Optional per-provider credentials (AGT-1138). Validation deliberately
+  // never quotes the VALUE back in an error message — every other field in
+  // this parser does (`reviewers.x = "…" is not a valid model id`), and
+  // doing it here would print an operator's API key to stderr the first time
+  // they fat-fingered the YAML.
+  let provider_keys: Record<string, string> | undefined;
+  const providerKeysRaw = obj.provider_keys;
+  if (providerKeysRaw !== undefined && providerKeysRaw !== null) {
+    if (typeof providerKeysRaw !== "object" || Array.isArray(providerKeysRaw)) {
       throw new Error(
-        `${contextPath}: local_tools must be a boolean (true or false)`,
+        `${contextPath}: 'provider_keys' must be a mapping of <provider-id> to <api-key>`,
       );
     }
-    local_tools = localToolsRaw;
+    const keys: Record<string, string> = {};
+    for (const [provider, value] of Object.entries(
+      providerKeysRaw as Record<string, unknown>,
+    )) {
+      if (!PROVIDER_ID_RE.test(provider)) {
+        throw new Error(
+          `${contextPath}: provider_keys key '${provider}' is invalid ` +
+            `(expected a provider id like 'openai', 'deepseek', or an endpoint host)`,
+        );
+      }
+      if (typeof value !== "string" || value.trim() === "") {
+        throw new Error(
+          `${contextPath}: provider_keys.${provider} must be a non-empty string ` +
+            `(an API key; its value is deliberately not echoed here)`,
+        );
+      }
+      keys[provider] = value.trim();
+    }
+    if (Object.keys(keys).length > 0) provider_keys = keys;
   }
 
   const result: UserConfig = { reviewers };
+  if (openai_compatible_endpoint !== undefined)
+    result.openai_compatible_endpoint = openai_compatible_endpoint;
   if (local_endpoint !== undefined) result.local_endpoint = local_endpoint;
+  if (openai_compatible_tools !== undefined)
+    result.openai_compatible_tools = openai_compatible_tools;
   if (local_tools !== undefined) result.local_tools = local_tools;
+  if (provider_keys !== undefined) result.provider_keys = provider_keys;
   return result;
+}
+
+// Provider ids are derived from endpoint hosts (see providerCredentials.ts),
+// so the accepted shape is "hostname or simple token" — letters, digits,
+// dots, hyphens. Deliberately excludes whitespace and control characters so
+// a malformed key can't smuggle a newline into a rendered message.
+const PROVIDER_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9.\-_]{0,127}$/;
+
+/** Shared validation for the two endpoint spellings. */
+function parseEndpointField(
+  raw: unknown,
+  key: string,
+  contextPath: string,
+): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new Error(
+      `${contextPath}: ${key} must be a non-empty string (an OpenAI-compatible base URL like 'http://localhost:1234/v1')`,
+    );
+  }
+  const url = raw.trim();
+  if (!/^https?:\/\//.test(url)) {
+    throw new Error(
+      `${contextPath}: ${key} = ${JSON.stringify(raw)} must be an http(s) URL ` +
+        `(e.g. 'http://localhost:1234/v1' for LM Studio, 'https://api.openai.com/v1' for OpenAI)`,
+    );
+  }
+  return url;
+}
+
+/** Shared validation for the two tools-flag spellings. */
+function parseBooleanField(
+  raw: unknown,
+  key: string,
+  contextPath: string,
+): boolean | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "boolean") {
+    throw new Error(`${contextPath}: ${key} must be a boolean (true or false)`);
+  }
+  return raw;
 }
 
 /**
@@ -270,8 +434,18 @@ export function parseUserConfig(
  */
 export function stringifyUserConfig(cfg: UserConfig): string {
   const out: Record<string, unknown> = { reviewers: cfg.reviewers };
+  // Every optional field is written back under the SAME key it was read
+  // from. `stamp config reviewers set` loads, mutates, and rewrites the
+  // whole file, so normalising the legacy spellings here would silently
+  // rewrite a working operator config — and `provider_keys` dropping out
+  // would silently delete their credentials.
+  if (cfg.openai_compatible_endpoint !== undefined)
+    out.openai_compatible_endpoint = cfg.openai_compatible_endpoint;
   if (cfg.local_endpoint !== undefined) out.local_endpoint = cfg.local_endpoint;
+  if (cfg.openai_compatible_tools !== undefined)
+    out.openai_compatible_tools = cfg.openai_compatible_tools;
   if (cfg.local_tools !== undefined) out.local_tools = cfg.local_tools;
+  if (cfg.provider_keys !== undefined) out.provider_keys = cfg.provider_keys;
   return stringifyYaml(out);
 }
 
@@ -336,7 +510,8 @@ export function resolveReviewerModel(reviewer: string): string | null {
   // receive a `local:` value as a model id — it would fail at API-call time.
   // Delegate to the backend resolver and surface a model only for the
   // anthropic kind; local-configured reviewers resolve to null here (SDK
-  // default), and the trusted path routes them to the local backend instead.
+  // default), and the trusted path routes them to the openai-compatible
+  // backend instead.
   const backend = resolveReviewerBackend(reviewer);
   return backend.kind === "anthropic" ? backend.model : null;
 }
@@ -387,64 +562,107 @@ export function resolveReviewerBackendFrom(
   // Operator override via STAMP_REVIEWER_BACKEND — force a backend per-run
   // regardless of config, and crucially WITHOUT mutating the shared
   // ~/.stamp/config.yml (which would collide across concurrent runs, e.g.
-  // open-team's autonomous dispatch). Two values:
-  //   anthropic — force the agent-SDK path (logged-in Claude session, metered).
-  //   local     — force the local OpenAI-compatible backend (unmetered).
+  // open-team's autonomous dispatch). Accepted values:
+  //   anthropic         — force the agent-SDK path (logged-in Claude session).
+  //   openai-compatible — force the one-shot OpenAI-compatible backend.
+  //   local             — legacy alias for openai-compatible; still honoured.
   const backendOverride = process.env.STAMP_REVIEWER_BACKEND?.trim().toLowerCase();
   if (backendOverride === "anthropic") {
-    // A `local:` value carries a local model id that isn't valid for Anthropic,
-    // so it drops to null (SDK default); a real Anthropic model id is preserved.
+    // An `openai-compatible:` / `local:` value carries a model id that isn't
+    // valid for Anthropic, so it drops to null (SDK default); a real
+    // Anthropic model id is preserved.
     return typeof raw === "string" &&
       raw.length > 0 &&
-      !raw.startsWith(LOCAL_MODEL_PREFIX)
+      stripModelPrefix(raw) === null
       ? { kind: "anthropic", model: raw }
       : { kind: "anthropic", model: null };
   }
-  if (backendOverride === "local") {
-    // Model: STAMP_LOCAL_MODEL wins; else the reviewer's configured `local:`
-    // value (prefix stripped). Endpoint: STAMP_LOCAL_ENDPOINT wins; else
-    // config.local_endpoint; else undefined (the adapter's own default). If no
-    // model can be resolved at all, fall back to the anthropic default rather
-    // than handing the local server an empty model.
-    const envModel = process.env.STAMP_LOCAL_MODEL?.trim();
-    const cfgLocalModel =
-      typeof raw === "string" && raw.startsWith(LOCAL_MODEL_PREFIX)
-        ? raw.slice(LOCAL_MODEL_PREFIX.length).trim()
-        : "";
-    const model = envModel && envModel.length > 0 ? envModel : cfgLocalModel;
+  if (
+    backendOverride === BACKEND_KIND_OPENAI_COMPATIBLE ||
+    backendOverride === "local"
+  ) {
+    // Model: STAMP_OPENAI_COMPATIBLE_MODEL (or legacy STAMP_LOCAL_MODEL)
+    // wins; else the reviewer's configured scheme value (prefix stripped).
+    // Endpoint: STAMP_OPENAI_COMPATIBLE_ENDPOINT (or legacy
+    // STAMP_LOCAL_ENDPOINT) wins; else the configured endpoint; else
+    // undefined (the adapter's own default). If no model can be resolved at
+    // all, fall back to the anthropic default rather than handing the
+    // endpoint an empty model.
+    const envModel = firstEnv([
+      "STAMP_OPENAI_COMPATIBLE_MODEL",
+      "STAMP_LOCAL_MODEL",
+    ]);
+    const cfgModel = typeof raw === "string" ? stripModelPrefix(raw) : null;
+    const model = envModel ?? cfgModel ?? "";
     if (!model) return { kind: "anthropic", model: null };
     const endpoint =
-      process.env.STAMP_LOCAL_ENDPOINT?.trim() || cfg?.local_endpoint;
-    const enableTools = resolveLocalTools(cfg);
-    return { kind: "local", model, endpoint, enableTools };
+      firstEnv(["STAMP_OPENAI_COMPATIBLE_ENDPOINT", "STAMP_LOCAL_ENDPOINT"]) ??
+      configuredOpenAICompatibleEndpoint(cfg);
+    const enableTools = resolveOpenAICompatibleTools(cfg);
+    return {
+      kind: BACKEND_KIND_OPENAI_COMPATIBLE,
+      model,
+      endpoint,
+      enableTools,
+    };
   }
 
   if (typeof raw !== "string" || raw.length === 0) {
     return { kind: "anthropic", model: null };
   }
-  if (raw.startsWith(LOCAL_MODEL_PREFIX)) {
-    const model = raw.slice(LOCAL_MODEL_PREFIX.length).trim();
-    // A bare `local:` with no model id is a misconfiguration; fall back to
-    // anthropic-default rather than handing the local server an empty model.
-    if (model.length === 0) return { kind: "anthropic", model: null };
-    const enableTools = resolveLocalTools(cfg);
-    return { kind: "local", model, endpoint: cfg?.local_endpoint, enableTools };
+  const schemeModel = stripModelPrefix(raw);
+  if (schemeModel !== null) {
+    // A bare `openai-compatible:` / `local:` with no model id is a
+    // misconfiguration; fall back to anthropic-default rather than handing
+    // the endpoint an empty model.
+    if (schemeModel.length === 0) return { kind: "anthropic", model: null };
+    const enableTools = resolveOpenAICompatibleTools(cfg);
+    return {
+      kind: BACKEND_KIND_OPENAI_COMPATIBLE,
+      model: schemeModel,
+      // Config-only, deliberately: this is the pre-existing config-driven
+      // branch and STAMP_LOCAL_ENDPOINT has never applied to it. Honouring
+      // it here would change which endpoint an existing setup hits whenever
+      // the operator has that variable exported for something else — a
+      // silent redirect of review traffic is not a back-compat-safe change
+      // to smuggle into a rename ticket. (The forced-backend branch above
+      // reads env because it always has.)
+      endpoint: configuredOpenAICompatibleEndpoint(cfg),
+      enableTools,
+    };
   }
   return { kind: "anthropic", model: raw };
 }
 
 /**
- * Resolve whether tools should be enabled for the local reviewer. The
- * default is `false` (tools off — safe for mlx_lm.server which crashes on
- * the OpenAI tools param). Opt in via:
- *   - `STAMP_LOCAL_TOOLS=1` env var (per-run, highest precedence), or
- *   - `local_tools: true` in `~/.stamp/config.yml` (per-machine persistent).
+ * First non-empty value among a list of env var names, canonical name first.
+ * Returns undefined when none is set, so callers can `??` onward to config.
+ */
+function firstEnv(names: readonly string[]): string | undefined {
+  for (const name of names) {
+    const v = process.env[name]?.trim();
+    if (v) return v;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve whether tools should be enabled for the openai-compatible
+ * reviewer. The default is `false` (tools off — safe for mlx_lm.server which
+ * crashes on the OpenAI tools param). Opt in via:
+ *   - `STAMP_OPENAI_COMPATIBLE_TOOLS=1` (or legacy `STAMP_LOCAL_TOOLS=1`)
+ *     env var (per-run, highest precedence), or
+ *   - `openai_compatible_tools: true` (or legacy `local_tools: true`) in
+ *     `~/.stamp/config.yml` (per-machine persistent).
  * Any truthy-looking value for the env var counts: "1", "true", "yes".
  */
-function resolveLocalTools(cfg: UserConfig | null): boolean {
-  const envVal = process.env.STAMP_LOCAL_TOOLS?.trim().toLowerCase();
+function resolveOpenAICompatibleTools(cfg: UserConfig | null): boolean {
+  const envVal = firstEnv([
+    "STAMP_OPENAI_COMPATIBLE_TOOLS",
+    "STAMP_LOCAL_TOOLS",
+  ])?.toLowerCase();
   if (envVal === "1" || envVal === "true" || envVal === "yes") return true;
-  return cfg?.local_tools === true;
+  return (cfg?.openai_compatible_tools ?? cfg?.local_tools) === true;
 }
 
 /**

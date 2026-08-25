@@ -198,14 +198,21 @@ describe("runHeadlessReview — API failure path", () => {
   });
 
   it("truncates very long API error messages so stderr stays tidy", async () => {
-    const longErr = new Error("rate_limit_error: " + "x".repeat(500));
+    // The cap moved from 240 to 600 chars in AGT-1138: the OpenAI-compatible
+    // adapter's credential failures carry their own remedy in the message
+    // ("set STAMP_<PROVIDER>_API_KEY, or add provider_keys.<provider> …"),
+    // and at 240 the operator got the diagnosis with the fix cut off. What
+    // this test actually protects is that SOME cap exists — an unbounded
+    // upstream body must not land on stderr whole.
+    const longErr = new Error("rate_limit_error: " + "x".repeat(5000));
     const client = rejectingClient(longErr);
     const r = await runHeadlessReview(baseOpts(client));
     assert.ok(r.error);
     assert.ok(
-      r.error!.length < 300,
+      r.error!.length < 700,
       `error message should be truncated, got ${r.error!.length} chars`,
     );
+    assert.match(r.error!, /rate_limit_error/, "the head of the error survives");
   });
 });
 

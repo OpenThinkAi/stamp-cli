@@ -9,6 +9,50 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ### Added
 
+- **OpenAI and DeepSeek are reachable as reviewer backends.** The
+  non-Anthropic reviewer path already spoke OpenAI-compatible
+  `/chat/completions` with a bearer token — the only production caller never
+  passed one, so the key always fell back to a `"lm-studio"` placeholder.
+  That works for localhost and fails for every hosted provider. It now
+  resolves a real credential, so one adapter covers a local model, OpenAI,
+  and DeepSeek with no new dependency and no per-provider SDK.
+
+  **Credentials are per provider, derived from the endpoint** — pointing a
+  reviewer at DeepSeek can never send an OpenAI key, and an ambient
+  `OPENAI_API_KEY` is never forwarded to an endpoint that isn't
+  `api.openai.com`. Resolution order: `STAMP_<PROVIDER>_API_KEY`, then the
+  vendor's own variable for that vendor's host, then `provider_keys:` in
+  `~/.stamp/config.yml`. **A localhost endpoint still needs no credential at
+  all.** A key never reaches `state.db`, `stamp log`, `stamp config reviewers
+  show`, a config validation error, or a failure trace — and a provider that
+  echoes the bearer token back in an error body has it redacted before the
+  message is surfaced.
+
+  A missing credential now fails *before* anything goes on the wire, naming
+  the endpoint, the provider, and every place a key could come from; a 401
+  names which source supplied the rejected key.
+
+  Two consequences worth knowing:
+  - **A hosted endpoint is off-host.** `stamp review`'s data-flow disclosure
+    now asks the ENDPOINT, not the backend kind, so a reviewer pointed at
+    OpenAI no longer prints "the diff stays on this host" while shipping it
+    to OpenAI, and no longer bypasses `data_flow.require_confirmation`.
+  - **Providers are separable in the record.** An OpenAI verdict and a
+    DeepSeek verdict differ by `backend_endpoint` in `stamp log --reviews`,
+    on top of AGT-1137's provenance.
+
+- **The `local` backend is now `openai-compatible`** — accurate for a hosted
+  DeepSeek endpoint, which `local` was not. **Every old name still works,
+  indefinitely**: the `local:` reviewers prefix, `local_endpoint:`,
+  `local_tools:`, `STAMP_REVIEWER_BACKEND=local`, `STAMP_LOCAL_MODEL`,
+  `STAMP_LOCAL_ENDPOINT`, and `STAMP_LOCAL_TOOLS` all resolve exactly as
+  before, and a config file is round-tripped under whichever spelling you
+  wrote. The canonical spelling wins when both are set.
+
+  Stored review rows are **not** migrated — `backend_kind` stays the literal
+  `local` on rows already in the field; the rename is a read-side label, so
+  `stamp log --reviews` displays `openai-compatible / <model> @ <endpoint>`.
+
 - **Reviewer provenance on every verdict.** A review record said which
   reviewer approved a diff but not what did the reviewing — a verdict from a
   3B model on localhost and one from a frontier model were byte-identical in
