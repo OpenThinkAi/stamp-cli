@@ -61,7 +61,11 @@ import { runReview } from "./commands/review.js";
 import { runServerConfig, runServerPubkey } from "./commands/server.js";
 import {
   runConfigReviewersClear,
+  runConfigReviewersClearEndpoint,
+  runConfigReviewersClearTools,
   runConfigReviewersSet,
+  runConfigReviewersSetEndpoint,
+  runConfigReviewersSetTools,
   runConfigReviewersShow,
 } from "./commands/config.js";
 import {
@@ -496,7 +500,7 @@ const config = program
 const configReviewers = config
   .command("reviewers")
   .description(
-    "pin which model each reviewer (security/standards/product/…) runs on. Defaults to claude-sonnet-4-6 on the Anthropic backend for the three starter personas; opt into Opus on security with `set security claude-opus-4-7`, or move a reviewer onto an OpenAI-compatible endpoint (a local model, OpenAI, or DeepSeek) with an `openai-compatible:<model>` value (the older `local:<model>` spelling still works). `show` reports the backend, endpoint, and credential source each reviewer will actually use — never the credential itself.",
+    "pin which model AND BACKEND each reviewer (security/standards/product/…) runs on — not just Anthropic. Defaults to claude-sonnet-4-6 on the Claude Agent SDK backend for the three starter personas (full agentic loop: tool reads, MCP); opt into Opus on security with `set security claude-opus-4-7`, or move a reviewer onto an OpenAI-compatible endpoint (a model on this box, OpenAI, or DeepSeek) with an `openai-compatible:<model>` value (the older `local:<model>` spelling still works). That backend is single-shot with NO repo reads and, against a hosted provider, needs a credential (`set-endpoint` below, or `provider_keys:` — see `show`). `show` reports the backend, endpoint, and credential source each reviewer will actually use — never the credential itself. `stamp review --backend/--model/--endpoint` overrides any of this for a single run without touching this file.",
   );
 configReviewers
   .command("set <reviewer> <model-id>")
@@ -534,6 +538,54 @@ configReviewers
   .action(() => {
     try {
       runConfigReviewersShow();
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+configReviewers
+  .command("set-endpoint <url>")
+  .description(
+    "pin the OpenAI-compatible endpoint (`openai_compatible_endpoint:`) persistently, e.g. `set-endpoint https://api.openai.com/v1` or a model on this box. `stamp review --endpoint` overrides this for a single run without writing here.",
+  )
+  .action((url: string) => {
+    try {
+      runConfigReviewersSetEndpoint(url);
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+configReviewers
+  .command("clear-endpoint")
+  .description(
+    "remove the configured OpenAI-compatible endpoint (both the canonical `openai_compatible_endpoint:` and the legacy `local_endpoint:` keys) — the adapter's own default applies afterwards.",
+  )
+  .action(() => {
+    try {
+      runConfigReviewersClearEndpoint();
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+configReviewers
+  .command("set-tools <on-or-off>")
+  .description(
+    "opt the OpenAI-compatible backend into the `tools` field / structured `submit_verdict` path persistently (`openai_compatible_tools:`). Accepts true/false/on/off/1/0. Off is the safe default — some local servers (mlx_lm.server) crash when `tools` is present; flip on only for a server you've verified handles OpenAI function-calling.",
+  )
+  .action((onOrOff: string) => {
+    try {
+      runConfigReviewersSetTools(onOrOff);
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+configReviewers
+  .command("clear-tools")
+  .description(
+    "remove the tools opt-in (both the canonical `openai_compatible_tools:` and the legacy `local_tools:` keys) — reverts to tools off, the safe default.",
+  )
+  .action(() => {
+    try {
+      runConfigReviewersClearTools();
     } catch (err) {
       handleCliError(err);
     }
@@ -636,13 +688,25 @@ serverRepo
 program
   .command("review")
   .description(
-    "run configured reviewer(s) against a diff. Reviewer config + prompts are sourced from the merge-base tree (security: prevents feature-branch self-review). For lock-file drift checks, use `stamp reviewers verify` (which exits 3 on drift). Reviewer execution budgets resolve narrowest-wins: `.stamp/config.yml` per-reviewer fields (`reviewers.<name>.max_turns` / `timeout_ms`, committed, sourced from the merge-base tree), then env overrides (`STAMP_REVIEWER_MAX_TURNS` default 8, `STAMP_REVIEWER_TIMEOUT_MS` default 300000), then defaults. Re-reviews on the same branch are narrowed to delta-since-prior-review so the LLM cannot re-flag unchanged code (set STAMP_NO_DELTA_REVIEW=1 to fall back to full-diff with prompt-only ratchet). On failure a structured turn trace is written to `.git/stamp/failed-runs/` — see docs/troubleshooting.md.",
+    "run configured reviewer(s) against a diff. Reviewer config + prompts are sourced from the merge-base tree (security: prevents feature-branch self-review). Each reviewer runs on the Claude Agent SDK (full agentic loop, tool reads, MCP) UNLESS it — or this invocation via --backend/--model/--endpoint — selects an OpenAI-compatible endpoint (a model on this box, OpenAI, or DeepSeek), which is single-shot with no repo reads and requires a per-provider credential for a hosted endpoint (see --endpoint below and `stamp config reviewers show`). For lock-file drift checks, use `stamp reviewers verify` (which exits 3 on drift). Reviewer execution budgets resolve narrowest-wins: `.stamp/config.yml` per-reviewer fields (`reviewers.<name>.max_turns` / `timeout_ms`, committed, sourced from the merge-base tree), then env overrides (`STAMP_REVIEWER_MAX_TURNS` default 8, `STAMP_REVIEWER_TIMEOUT_MS` default 300000), then defaults. Re-reviews on the same branch are narrowed to delta-since-prior-review so the LLM cannot re-flag unchanged code (set STAMP_NO_DELTA_REVIEW=1 to fall back to full-diff with prompt-only ratchet). On failure a structured turn trace is written to `.git/stamp/failed-runs/` — see docs/troubleshooting.md.",
   )
   .requiredOption("--diff <revspec>", "git revspec to review, e.g. main..HEAD")
   .option("--only <reviewer>", "run a single reviewer by name")
   .option(
     "--into <target>",
     "target branch whose rule to evaluate (default: inferred from the diff's left side). Determines which branch rule's `review_server` is consulted in trusted mode — pass when the revspec base differs from the merge target.",
+  )
+  .option(
+    "--backend <kind>",
+    "force every reviewer in this run onto a backend: `anthropic` (Claude Agent SDK) or `openai-compatible` (a model on this box, OpenAI, or DeepSeek; `local` is a legacy alias). Beats `STAMP_REVIEWER_BACKEND` and any per-reviewer ~/.stamp/config.yml entry for the run WITHOUT writing anything to that file — resolves through the same `resolveReviewerBackend` every other tier uses (AGT-1139). Combined with --endpoint, `anthropic` is rejected at parse time: the Agent SDK has no configurable endpoint.",
+  )
+  .option(
+    "--model <model-id>",
+    "pin the model id for this run, beating STAMP_OPENAI_COMPATIBLE_MODEL/STAMP_LOCAL_MODEL and any ~/.stamp/config.yml value. Applies to whichever backend this run resolves to (an Anthropic model id, or an OpenAI-compatible one alongside --backend openai-compatible / a configured `openai-compatible:` reviewer).",
+  )
+  .option(
+    "--endpoint <url>",
+    "point the openai-compatible backend at this base URL for this run (e.g. https://api.openai.com/v1, https://api.deepseek.com/v1, or a model on this box), beating STAMP_OPENAI_COMPATIBLE_ENDPOINT/STAMP_LOCAL_ENDPOINT and openai_compatible_endpoint:/local_endpoint: in ~/.stamp/config.yml. A hosted endpoint needs a credential — STAMP_<PROVIDER>_API_KEY, the vendor's own env var, or provider_keys.<provider> in ~/.stamp/config.yml — and flips the AGT-415 data-flow disclosure exactly like an env-var-driven endpoint would (loopback stays silent; anything else discloses that the diff leaves this host). Rejected at parse time when combined with --backend anthropic.",
   )
   .option(
     "--allow-large",
@@ -669,6 +733,9 @@ program
       diff: string;
       only?: string;
       into?: string;
+      backend?: string;
+      model?: string;
+      endpoint?: string;
       allowLarge?: boolean;
       cache?: boolean;
       plan?: boolean;
@@ -683,6 +750,9 @@ program
           diff: opts.diff,
           only: opts.only,
           into: opts.into,
+          backend: opts.backend,
+          model: opts.model,
+          endpoint: opts.endpoint,
           allowLarge: opts.allowLarge,
           noCache: opts.cache === false,
           noProse: opts.prose === false,
