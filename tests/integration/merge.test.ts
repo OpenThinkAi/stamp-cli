@@ -40,6 +40,7 @@ import { describe, it } from "node:test";
 
 import { runMerge } from "../../src/commands/merge.ts";
 import { runVerify } from "../../src/commands/verify.ts";
+import { parseCommitAttestation } from "../../src/lib/attestation.ts";
 import { openDb, recordReview } from "../../src/lib/db.ts";
 import { ensureUserKeypair } from "../../src/lib/keys.ts";
 import { stampStateDbPath } from "../../src/lib/paths.ts";
@@ -536,6 +537,95 @@ describe("stamp merge rollback safety (AGT-232)", () => {
             runVerify(mergeSha);
           }),
         "runVerify must not throw for a clean stamp merge",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+describe("AGT-1137: reviewer provenance reaches the signed attestation", () => {
+  /**
+   * AC4: a verifier must be able to answer "what reviewed this commit?"
+   * from the signed payload alone — without the local `state.db` that
+   * recorded the review, which lives per-machine and is not distributed.
+   *
+   * Both halves of the compatibility contract are exercised: a row WITH
+   * provenance puts the field in the trailer, and a row without it (the
+   * shape every pre-AGT-1137 row has) produces an approval with no
+   * provenance field that still verifies clean.
+   */
+  it("folds a row's provenance into the merge trailer, and omits it for a pre-provenance row", () => {
+    const h = setupHarness();
+    try {
+      const baseSha = shaOf(h.repo, "main");
+      const headSha = shaOf(h.repo, "feature");
+
+      const db = openDb(stampStateDbPath(h.repo));
+      try {
+        recordReview(db, {
+          reviewer: "security",
+          base_sha: baseSha,
+          head_sha: headSha,
+          verdict: "approved",
+          issues: "security approved",
+          provenance: {
+            backend_kind: "local",
+            backend_model: "qwen3-coder-30b",
+            backend_endpoint: "http://localhost:8000/v1",
+          },
+        });
+      } finally {
+        db.close();
+      }
+
+      runFromRepo(h.repo, () =>
+        runMerge({ branch: "feature", into: "main", yes: true }),
+      );
+
+      const mergeMsg = git(h.repo, ["log", "-1", "--pretty=%B", shaOf(h.repo, "main")]);
+      const parsed = parseCommitAttestation(mergeMsg);
+      assert.ok(parsed, "merge commit must carry a parseable attestation");
+      assert.deepEqual(parsed.payload.approvals[0]?.provenance, {
+        backend: "local",
+        model: "qwen3-coder-30b",
+        endpoint: "http://localhost:8000/v1",
+      });
+      assert.doesNotThrow(
+        () => runFromRepo(h.repo, () => runVerify(shaOf(h.repo, "main"))),
+        "a provenance-carrying attestation must still verify",
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("omits the field entirely for a pre-provenance row and still verifies", () => {
+    const h = setupHarness();
+    try {
+      const baseSha = shaOf(h.repo, "main");
+      const headSha = shaOf(h.repo, "feature");
+      // seedApproval writes no provenance — the exact shape of every row
+      // recorded before AGT-1137 shipped.
+      seedApproval(h.repo, baseSha, headSha, "security");
+
+      runFromRepo(h.repo, () =>
+        runMerge({ branch: "feature", into: "main", yes: true }),
+      );
+
+      const mergeSha = shaOf(h.repo, "main");
+      const parsed = parseCommitAttestation(
+        git(h.repo, ["log", "-1", "--pretty=%B", mergeSha]),
+      );
+      assert.ok(parsed);
+      assert.equal(
+        parsed.payload.approvals[0]?.provenance,
+        undefined,
+        "no provenance recorded means no field — never a guessed value",
+      );
+      assert.doesNotThrow(
+        () => runFromRepo(h.repo, () => runVerify(mergeSha)),
+        "absent provenance must not make an attestation invalid",
       );
     } finally {
       h.cleanup();

@@ -496,7 +496,7 @@ const config = program
 const configReviewers = config
   .command("reviewers")
   .description(
-    "pin which Anthropic model each reviewer (security/standards/product/…) runs on. Defaults to claude-sonnet-4-6 for the three starter personas; opt into Opus on security with `set security claude-opus-4-7`.",
+    "pin which model each reviewer (security/standards/product/…) runs on. Defaults to claude-sonnet-4-6 on the Anthropic backend for the three starter personas; opt into Opus on security with `set security claude-opus-4-7`, or move a reviewer onto an OpenAI-compatible endpoint with a `local:<model>` value. `show` reports the backend + endpoint each reviewer will actually use.",
   );
 configReviewers
   .command("set <reviewer> <model-id>")
@@ -529,7 +529,7 @@ configReviewers
 configReviewers
   .command("show")
   .description(
-    "print the resolved per-reviewer model config (or note that no config is set and which defaults will apply).",
+    "print the resolved per-reviewer model AND backend (agent SDK vs OpenAI-compatible endpoint) that each reviewer will actually run on — or note that no config is set and which defaults will apply.",
   )
   .action(() => {
     try {

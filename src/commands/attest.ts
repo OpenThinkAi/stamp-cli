@@ -98,6 +98,10 @@ import {
   parseToolCalls,
   redactToolCallsForAttestation,
 } from "../lib/toolCalls.js";
+import {
+  provenanceForAttestation,
+  provenanceFromRow,
+} from "../lib/provenance.js";
 import { signBytes, verifyBytes } from "../lib/signing.js";
 import { buildPubkeyMap } from "../lib/sshReviewClient.js";
 import {
@@ -809,12 +813,16 @@ function buildV2Envelope(input: V2BuildInput): EnvelopeBuildResult {
         parseToolCalls(rev.tool_calls),
       );
       const mcpAtInit = parseMcpServersAtInitAttest(rev.mcp_servers_at_init);
+      // AGT-1137: same additive provenance field the v3 merge envelope
+      // carries. Absent when the row predates provenance — never a guess.
+      const provenance = provenanceForAttestation(provenanceFromRow(rev));
       return {
         reviewer: rev.reviewer,
         verdict: rev.verdict,
         review_sha: hashHex(rev.issues ?? ""),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         ...(mcpAtInit.length > 0 ? { mcp_servers_at_init: mcpAtInit } : {}),
+        ...(provenance ? { provenance } : {}),
       };
     });
   } finally {

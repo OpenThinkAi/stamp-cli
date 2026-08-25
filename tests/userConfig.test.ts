@@ -806,6 +806,92 @@ describe("stamp config reviewers — CLI handlers", () => {
     assert.match(out, /unpinned/);
     assert.match(out, /standards.*claude-sonnet-4-6.*default/);
   });
+
+  // AGT-1137 AC3: `show` has to report the backend that will ACTUALLY run,
+  // not just a model id under a description that says "Anthropic". Before
+  // this, a reviewer configured with the `local:` scheme printed
+  // `security  local:qwen3-coder-30b` and nothing indicated that the verdict
+  // gating `stamp merge` would come from an OpenAI-compatible endpoint with
+  // no tool loop.
+  it("show reports the resolved backend per reviewer, with the endpoint", () => {
+    writeUserConfig({
+      reviewers: {
+        security: "local:qwen3-coder-30b",
+        standards: "claude-opus-4-7",
+      },
+      local_endpoint: "http://localhost:8000/v1",
+    });
+    const logs = captureLogs();
+    try {
+      runConfigReviewersShow();
+    } finally {
+      logs.restore();
+    }
+    const out = logs.text();
+    assert.match(
+      out,
+      /security.*\[local model=qwen3-coder-30b @ http:\/\/localhost:8000\/v1\]/,
+      "a local: reviewer must show its backend, model and endpoint",
+    );
+    assert.match(
+      out,
+      /standards.*claude-opus-4-7.*\[anthropic\]/,
+      "an Anthropic reviewer must be labelled as such",
+    );
+    assert.match(
+      out,
+      /no tool loop, no repo reads/,
+      "the local path's quality asymmetry must be stated, not implied away",
+    );
+  });
+
+  it("show falls back to the adapter's default endpoint when none is configured", () => {
+    // No `local_endpoint:` — the adapter will hit LM Studio's default. `show`
+    // must print the URL that will actually be used rather than a blank.
+    writeUserConfig({ reviewers: { security: "local:qwen3-coder-30b" } });
+    const logs = captureLogs();
+    try {
+      runConfigReviewersShow();
+    } finally {
+      logs.restore();
+    }
+    assert.match(logs.text(), /\[local model=qwen3-coder-30b @ http:\/\/localhost:1234\/v1\]/);
+  });
+
+  it("show surfaces a STAMP_REVIEWER_BACKEND override that outranks the file", () => {
+    writeUserConfig({ reviewers: { security: "claude-opus-4-7" } });
+    const saved = process.env.STAMP_REVIEWER_BACKEND;
+    process.env.STAMP_REVIEWER_BACKEND = "local";
+    process.env.STAMP_LOCAL_MODEL = "qwen3-coder-30b";
+    const logs = captureLogs();
+    try {
+      runConfigReviewersShow();
+    } finally {
+      logs.restore();
+      if (saved === undefined) delete process.env.STAMP_REVIEWER_BACKEND;
+      else process.env.STAMP_REVIEWER_BACKEND = saved;
+      delete process.env.STAMP_LOCAL_MODEL;
+    }
+    const out = logs.text();
+    assert.match(out, /STAMP_REVIEWER_BACKEND=local is set/);
+    assert.match(
+      out,
+      /security.*\[local model=qwen3-coder-30b/,
+      "the env override must be reflected per reviewer, not just noted",
+    );
+  });
+
+  it("show with no config still reports the backend the defaults will run on", () => {
+    const logs = captureLogs();
+    try {
+      runConfigReviewersShow();
+    } finally {
+      logs.restore();
+    }
+    const out = logs.text();
+    assert.match(out, /no per-user stamp config/);
+    assert.match(out, /security: claude-sonnet-4-6.*\[anthropic\]/);
+  });
 });
 
 // ---------- helpers ----------

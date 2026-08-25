@@ -63,6 +63,40 @@ export interface Approval {
     declared: boolean;
     error?: string;
   }>;
+  /**
+   * AGT-1137: which backend/model/endpoint produced this verdict, so a
+   * verifier can answer "what reviewed this commit?" from the signed payload
+   * alone — without trusting (or even having) the local `state.db` that
+   * recorded the review.
+   *
+   * Optional/additive, exactly like `mcp_servers_at_init` above and for the
+   * same reason: NO schema bump. `CURRENT_PAYLOAD_VERSION` stays 3 and every
+   * attestation minted before this field remains valid. The compatibility
+   * contract runs both ways:
+   *   - A verifier on the current line reading an OLDER attestation sees the
+   *     field absent. Absent ≠ invalid — it means "provenance unrecorded",
+   *     rendered as `unknown`. Nothing in `commands/verify.ts` or the
+   *     pre-receive hook's structural check requires it.
+   *   - An older verifier reading a NEWER attestation is unaffected: the
+   *     Ed25519 signature is computed over the serialized payload bytes and
+   *     both sides round-trip the same base64 trailer, so an unread extra
+   *     field cannot break verification.
+   *
+   * `backend` is the sentinel and is always present when the object is.
+   * `model` is omitted when nothing pinned one (the Agent SDK chose) or when
+   * a stamp-server chose it and did not report back; `endpoint` is omitted
+   * for the Agent SDK path, which has no operator-visible endpoint.
+   *
+   * NOT independently verifiable: stamp records what the client resolved,
+   * the same trust posture as `tool_calls`. It catches drift and misconfig
+   * and gives auditors a concrete signal; it is not proof against an
+   * operator who forges their own local record.
+   */
+  provenance?: {
+    backend: string;
+    model?: string;
+    endpoint?: string;
+  };
 }
 
 export interface CheckAttestation {

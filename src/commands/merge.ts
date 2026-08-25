@@ -55,6 +55,10 @@ import {
   readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { parseToolCalls, redactToolCallsForAttestation } from "../lib/toolCalls.js";
+import {
+  provenanceForAttestation,
+  provenanceFromRow,
+} from "../lib/provenance.js";
 import { signBytes, verifyBytes } from "../lib/signing.js";
 import { requireHumanMerge } from "../lib/humanMerge.js";
 import { maybePrintDeprecationNotice } from "../lib/deprecationNotice.js";
@@ -237,12 +241,19 @@ function runMergeLocked(
       const rev = byReviewer.get(name)!;
       const toolCalls = redactToolCallsForAttestation(parseToolCalls(rev.tool_calls));
       const mcpAtInit = parseMcpServersAtInit(rev.mcp_servers_at_init);
+      // AGT-1137: fold the recorded provenance into the signed approval, so
+      // "what reviewed this commit?" is answerable from the attestation
+      // rather than only from the local state.db. Omitted entirely when the
+      // row predates provenance — an absent field means `unknown`, and
+      // emitting a placeholder would put a guess into a signed record.
+      const provenance = provenanceForAttestation(provenanceFromRow(rev));
       return {
         reviewer: rev.reviewer,
         verdict: rev.verdict,
         review_sha: hashPart(rev.issues ?? ""),
         ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         ...(mcpAtInit.length > 0 ? { mcp_servers_at_init: mcpAtInit } : {}),
+        ...(provenance ? { provenance } : {}),
       };
     });
   } finally {

@@ -44,6 +44,7 @@ import {
   recordReview,
 } from "../src/lib/db.ts";
 import { parseRetentionDuration } from "../src/lib/duration.ts";
+import type { ReviewProvenance } from "../src/lib/provenance.ts";
 import { stampStateDbPath } from "../src/lib/paths.ts";
 
 function git(args: string[], cwd: string): void {
@@ -552,6 +553,13 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
   // `seedStaleVerdict` uses for its head tags.
   const BRANCH = "feature-x";
   const headOf = (tag: string): string => tag.padEnd(40, "0");
+  // AGT-1137: provenance joined the key too. These tests are about the
+  // watermark, so one backend is held constant across seed and lookup.
+  const PROVENANCE: ReviewProvenance = {
+    backend_kind: "anthropic",
+    backend_model: "claude-sonnet-4-6",
+    backend_endpoint: null,
+  };
 
   beforeEach(() => {
     prevCwd = process.cwd();
@@ -588,6 +596,7 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
         prompt_hash: PROMPT_HASH,
         tree_sha: TREE_SHA,
         branch: BRANCH,
+        provenance: PROVENANCE,
       });
       db.exec(
         `UPDATE reviews SET created_at = datetime('now', '${ageModifier}') WHERE id = ${id}`,
@@ -603,13 +612,19 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
     try {
       // Pre-watermark: the stale verdict is a live cache hit.
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-old"), BRANCH)?.verdict,
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-old"), BRANCH,
+          PROVENANCE,
+        )?.verdict,
         "changes_requested",
       );
       // Bump the watermark to now → the -1h row is now cache-ineligible.
       bumpVerdictCacheWatermark(db);
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-old"), BRANCH),
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-old"), BRANCH,
+          PROVENANCE,
+        ),
         null,
         "row created before the watermark must not serve from cache",
       );
@@ -623,12 +638,16 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
         prompt_hash: PROMPT_HASH,
         tree_sha: TREE_SHA,
         branch: BRANCH,
+        provenance: PROVENANCE,
       });
       db.exec(
         `UPDATE reviews SET created_at = datetime('now','+5 seconds') WHERE id = ${freshId}`,
       );
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-fresh"), BRANCH)?.verdict,
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-fresh"), BRANCH,
+          PROVENANCE,
+        )?.verdict,
         "approved",
         "a post-watermark review must be cacheable again",
       );
@@ -649,7 +668,10 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
     let db = openDb(dbPath);
     try {
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-recent"), BRANCH)?.verdict,
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-recent"), BRANCH,
+          PROVENANCE,
+        )?.verdict,
         "changes_requested",
       );
     } finally {
@@ -664,7 +686,10 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
     try {
       // AC #1 / #3: the re-review cache lookup now MISSES → fresh review.
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-recent"), BRANCH),
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-recent"), BRANCH,
+          PROVENANCE,
+        ),
         null,
         "post-prune cache lookup must miss so the review runs fresh",
       );
@@ -698,7 +723,10 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
       );
       // And the recent verdict still cache-hits (cache genuinely untouched).
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-recent"), BRANCH)?.verdict,
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-recent"), BRANCH,
+          PROVENANCE,
+        )?.verdict,
         "changes_requested",
       );
     } finally {
@@ -726,7 +754,10 @@ describe("verdict-cache invalidation on prune (AGT-697 / issue #58)", () => {
       );
       // Row untouched and still a cache hit (dry-run changed nothing).
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-old"), BRANCH)?.verdict,
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_SHA, headOf("h-old"), BRANCH,
+          PROVENANCE,
+        )?.verdict,
         "changes_requested",
       );
     } finally {

@@ -553,6 +553,22 @@ a config write — it's safe to use from automation that runs concurrently
 (e.g. open-team dispatch), where mutating the shared `~/.stamp/config.yml`
 would race.
 
+**Which backend actually ran?** Every verdict records the backend kind, model
+id, and endpoint that produced it, so you never have to reconstruct it from
+config files:
+
+```
+stamp config reviewers show     # what WILL run, per reviewer, incl. endpoint
+stamp log --reviews             # what DID run, on a `backend:` line per row
+stamp log <merge-sha>           # the same, read out of the signed attestation
+```
+
+`stamp review` also names the backend per reviewer before it runs them. Rows
+recorded by a stamp older than this feature report `backend: unknown` — they
+are never back-filled with a guess. Provenance is part of the verdict-cache
+key too, so switching backends re-runs the review instead of replaying the
+other model's verdict.
+
 **Trust posture is identical to the Anthropic local-LLM path.** A local
 reviewer produces a verdict that gates `stamp merge` exactly like the SDK
 reviewer; the trust anchor is unchanged — your machine produces the verdict,

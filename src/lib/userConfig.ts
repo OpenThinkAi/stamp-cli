@@ -360,6 +360,28 @@ export function resolveReviewerBackend(reviewer: string): ReviewerBackend {
   } catch {
     cfg = null;
   }
+  return resolveReviewerBackendFrom(cfg, reviewer);
+}
+
+/**
+ * The pure half of `resolveReviewerBackend`: resolve against an already-loaded
+ * config instead of reading `~/.stamp/config.yml`.
+ *
+ * Split out for `stamp config reviewers show` (AGT-1137), which has to report
+ * the backend that will ACTUALLY run for each reviewer — including on a
+ * machine with no config file yet, where the next `stamp review` will write
+ * `DEFAULT_REVIEWER_MODELS` before resolving. Reporting against the defaults
+ * it is about to write is the only way `show` answers "what will happen"
+ * rather than "what have I typed". Also makes the resolution rules testable
+ * without touching the filesystem.
+ *
+ * Env-var precedence (`STAMP_REVIEWER_BACKEND`, `STAMP_LOCAL_*`) is honored
+ * here, not in the loader, so it applies identically on both paths.
+ */
+export function resolveReviewerBackendFrom(
+  cfg: UserConfig | null,
+  reviewer: string,
+): ReviewerBackend {
   const raw = cfg?.reviewers[reviewer];
 
   // Operator override via STAMP_REVIEWER_BACKEND — force a backend per-run
