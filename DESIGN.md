@@ -446,7 +446,8 @@ the stamp 2.x server-attested envelope (`schema_version: 4`), see the
       "tool_calls": [
         { "tool": "Read", "input_sha256": "..." },
         { "tool": "mcp__linear__get_issue", "input_sha256": "..." }
-      ]
+      ],
+      "provenance": { "backend": "anthropic", "model": "claude-opus-5" }
     }
   ],
   "checks": [
@@ -474,6 +475,10 @@ Per-approval fields beyond `{ reviewer, verdict, review_sha }`:
 - `tool_calls` (optional) — audit trace of tool invocations the reviewer's Claude agent made during the review. Each entry is `{ tool, input_sha256 }` where `tool` is the SDK's name (`Read`, `Grep`, `mcp__<server>__<tool>`) and `input_sha256` hashes the canonical JSON of the input. **Not cryptographic evidence that the tools ran** — the operator runs the SDK locally and could forge the trace. This is audit metadata: an auditor who expects "a diff mentioning LIN-123 should produce a `mcp__linear__get_issue` call with input hashing to X" can verify that expectation. Catches lazy tampering, not determined forgery.
 
   **Mirror-privacy note (`STAMP_HASH_MCP_NAMES`).** Tool *inputs* are SHA-256 hashed; for MCP-hosted tools the *names* are also hashed by default (v4 audit M-PR1, shipped in v1.2). The verbatim name `mcp__<server>__<tool>` would otherwise disclose internal-service existence to anyone with read access to the public mirror — e.g. `mcp__acme-billing__lookup_invoice` reveals that an `acme-billing` MCP exists with an `lookup_invoice` tool. The hashed form `mcp__sha256:<hex8>__sha256:<hex8>` preserves the audit invariant ("did the right number of MCP calls happen, with consistent server/tool identities?") while keeping the names out of the mirror. Built-in SDK tool names (`Read`, `Grep`, `Bash`, …) have no `mcp__` prefix and pass through unchanged either way. The local DB rows used by `stamp reviewers show` always carry verbatim names regardless of the flag — operators retain full local visibility into what their reviewers did; only the mirrored attestation is redacted. Operators with all-public MCP servers, or wanting verbatim names while debugging an attestation by eye, opt out via `STAMP_HASH_MCP_NAMES=0` on the machine that runs `stamp merge`. Verifier-side parsing is unchanged because the `tool` field is opaque audit data, not cryptographically verified; existing attestations on already-merged commits stay valid regardless of the flag.
+
+- `provenance` (optional) — `{ backend, model?, endpoint? }`: which execution backend produced this verdict. `backend` is `anthropic` (Claude Agent SDK; no operator-visible endpoint, so `endpoint` is omitted), `local` (the one-shot OpenAI-compatible path — LM Studio, `mlx_lm.server`, or any `/chat/completions` host), or `server` (a `review_server` ran the reviewer; the model is the server's choice and is not reported back, so `model` is omitted). `model` is also omitted when nothing pinned one and the agent SDK chose its own default. **Additive and optional — no schema bump.** An attestation minted before this field existed is still valid; absent means "provenance unrecorded", which readers render as `unknown` rather than guessing. Like `tool_calls`, this is audit metadata rather than cryptographic evidence: stamp records what the client resolved, and an operator who forges their own local record can forge this too. It catches drift and misconfiguration — e.g. a build loop documenting "Opus reviewers" whose merges were in fact gated by Sonnet — not determined forgery.
+
+  The same three facts are stored per row in `.git/stamp/state.db` (`backend_kind` / `backend_model` / `backend_endpoint`) and are part of the verdict-cache key, so a cached verdict is never replayed for a review requested against a different backend, model, or endpoint. Rows that predate the columns read NULL, render as `unknown`, and are cache-ineligible.
 
 These hash fields pin the reviewer config the reviewer was invoked against. See `docs/plans/verified-reviewer-configs.md` for the motivating threat model and the remaining steps (server-side manifest allowlists, tool-invocation traces).
 

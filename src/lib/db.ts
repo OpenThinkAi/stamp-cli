@@ -2,6 +2,10 @@ import { chmodSync, existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dirname } from "node:path";
 import { ensureDir } from "./paths.js";
+// Type-only: keeps db.ts a runtime leaf (the import is erased at compile
+// time) while the provenance shape stays defined next to the code that
+// derives and renders it.
+import type { ReviewProvenance } from "./provenance.js";
 
 export type Verdict = "approved" | "changes_requested" | "denied";
 
@@ -79,6 +83,22 @@ export interface ReviewRow {
    *    2. the verdict cache key (a verdict minted on branch A must never be
    *       served to branch B). */
   branch: string | null;
+  /** AGT-1137: which execution backend produced this verdict — one of the
+   *  `PROVENANCE_KIND_*` values in `lib/provenance.ts`. Null for rows
+   *  recorded before provenance shipped; read sites render that as
+   *  `unknown` and never back-fill a guess. This column is the sentinel for
+   *  "row has provenance" — the other two may legitimately be null on a row
+   *  that does. */
+  backend_kind: string | null;
+  /** AGT-1137: model id the backend was asked for. Null when the operator
+   *  pinned none (Agent SDK picks its own default), when the stamp-server
+   *  chose it and didn't report back, or on a pre-provenance row. */
+  backend_model: string | null;
+  /** AGT-1137: base URL the inference request went to. Null for the Agent
+   *  SDK path (no operator-visible endpoint) and on pre-provenance rows.
+   *  For the OpenAI-compatible path this is the EFFECTIVE endpoint, with
+   *  the adapter default already resolved. */
+  backend_endpoint: string | null;
   /** JSON-stringified `ApprovalV4` (see `lib/attestationV4.ts`) as returned
    *  by stamp-server's `stamp-review` SSH verb. Null for rows produced by
    *  pre-2.x clients OR by a 2.x client running in local-only mode (no
@@ -135,6 +155,14 @@ export interface RecordReviewInput {
    *  makes the row cache-ineligible for any *named* branch and ineligible as
    *  a same-branch amend ancestor. Fails toward "review fresh". */
   branch?: string | null;
+  /** AGT-1137: which backend/model/endpoint produced this verdict. Both
+   *  production call sites in `commands/review.ts` always pass it. Optional
+   *  here for the same reason the hash fields are — tests and any future
+   *  caller that doesn't consult the verdict cache shouldn't have to thread
+   *  it — and omitting it is the safe direction: the row stores NULLs, reads
+   *  back as `unknown`, and can never satisfy `findCachedVerdict`'s strict
+   *  provenance conjunct, so it is simply cache-ineligible. */
+  provenance?: ReviewProvenance | null;
   /** Server-attested approval persisted as a unit. Either provide all
    *  three fields (server-attested 2.x row) or omit `serverAttestation`
    *  entirely (local / 1.x-style row). Half-populated input is a writer
@@ -282,8 +310,37 @@ function initSchema(db: DatabaseSync): void {
   if (!have.has("branch")) {
     db.exec("ALTER TABLE reviews ADD COLUMN branch TEXT");
   }
+  // AGT-1137: reviewer provenance — which backend kind, which model, which
+  // endpoint produced the verdict. Additive on the same terms as every
+  // migration above: TEXT, no NOT NULL, no DEFAULT, so ALTER fills existing
+  // rows with NULL and a pre-provenance row keeps all of its original data
+  // and reads out as `unknown`. Deliberately NOT back-filled with a guessed
+  // value — a row written before this shipped genuinely does not record what
+  // reviewed it, and inventing "probably anthropic" would put a false claim
+  // into an audit record.
+  if (!have.has("backend_kind")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN backend_kind TEXT");
+  }
+  if (!have.has("backend_model")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN backend_model TEXT");
+  }
+  if (!have.has("backend_endpoint")) {
+    db.exec("ALTER TABLE reviews ADD COLUMN backend_endpoint TEXT");
+  }
   // Cache index created here (after the migration ALTERs above) so it works
   // on both fresh installs and upgrades. Repeat-safe.
+  //
+  // Deliberately NOT widened as the cache key grew (tree_sha + head_sha +
+  // branch in earlier tickets, the three provenance columns in AGT-1137).
+  // Two reasons, both load-bearing:
+  //   1. Correctness lives in `findCachedVerdict`'s WHERE clause, never in
+  //      the index. This is a prefix accelerator over the three highest-
+  //      selectivity conjuncts; SQLite filters the rest from the row.
+  //   2. `CREATE INDEX IF NOT EXISTS` matches on NAME, not definition — a
+  //      changed column list here would silently no-op on every DB already
+  //      in the field and only take effect on fresh installs, which is the
+  //      worst of both worlds. Redefining it would need an explicit DROP +
+  //      CREATE, and there is no query cost that justifies one.
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_reviews_cache
       ON reviews(reviewer, diff_hash, prompt_hash, created_at)
@@ -365,13 +422,19 @@ export function recordReview(
   // at the boundary.
   const sa = input.serverAttestation ?? null;
   const schemaVersion = sa === null ? null : REVIEW_ROW_SCHEMA_V4;
+  // AGT-1137: provenance rides as a unit for the same reason the server
+  // trio does — `backend_kind` is the "has provenance" sentinel every read
+  // site dispatches on, so a row must never end up with a model or an
+  // endpoint but no kind.
+  const prov = input.provenance ?? null;
   const stmt = db.prepare(
     `INSERT INTO reviews
        (reviewer, base_sha, head_sha, verdict, issues, tool_calls,
         diff_hash, prompt_hash, tree_sha, branch,
+        backend_kind, backend_model, backend_endpoint,
         server_approval_json, server_signature_b64, server_key_id,
         schema_version, mcp_servers_at_init)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
     input.reviewer,
@@ -384,6 +447,9 @@ export function recordReview(
     input.prompt_hash ?? null,
     input.tree_sha ?? null,
     input.branch ?? null,
+    prov?.backend_kind ?? null,
+    prov?.backend_model ?? null,
+    prov?.backend_endpoint ?? null,
     sa?.approval_json ?? null,
     sa?.signature_b64 ?? null,
     sa?.server_key_id ?? null,
@@ -523,6 +589,25 @@ export interface CachedVerdict {
  * reviewer instead of replaying. That is the deliberate trade: the
  * anti-treadmill property that matters is "re-running review on the same head
  * doesn't coin-flip", and that survives intact.
+ *
+ * AGT-1137: `provenance` (backend kind + model + endpoint) is the final
+ * conjunct, and it is the one that makes the cache honest once switching
+ * backends is a one-token flag. The prior key had no model component at all,
+ * so a verdict a 3B model on localhost minted would be replayed verbatim for
+ * a review requested against a frontier model — the merge gate would open on
+ * a claim no frontier model ever made. All three parts are compared with
+ * SQLite `IS` (NULL-safe), which has two consequences worth naming:
+ *   - A pre-AGT-1137 row (all three NULL) can never match a caller that
+ *     passes real provenance, so every legacy cache row becomes
+ *     cache-ineligible. Same fail-fresh direction as the `tree_sha` rollout;
+ *     the cache re-warms from the next fresh review.
+ *   - An unpinned Anthropic reviewer stores `backend_model = NULL` (the SDK
+ *     chose) and matches only another unpinned Anthropic run. If the SDK's
+ *     own default model changes underneath us, that shift is invisible to
+ *     this key — the honest limit of recording what we were asked for rather
+ *     than what answered. Pin a model to close it.
+ * Strictly conjunctive, like every conjunct before it: it can only turn hits
+ * into misses, and a miss costs one fresh review.
  */
 export function findCachedVerdict(
   db: DatabaseSync,
@@ -532,6 +617,7 @@ export function findCachedVerdict(
   tree_sha: string,
   head_sha: string,
   branch: string | null,
+  provenance: ReviewProvenance,
 ): CachedVerdict | null {
   // `created_at > watermark` (strict) is intentional: a fresh review written
   // in the same whole second as the prune shares the watermark's second-
@@ -545,6 +631,7 @@ export function findCachedVerdict(
     FROM reviews
     WHERE reviewer = ? AND diff_hash = ? AND prompt_hash = ? AND tree_sha = ?
       AND head_sha = ? AND branch IS ?
+      AND backend_kind IS ? AND backend_model IS ? AND backend_endpoint IS ?
       AND (? IS NULL OR created_at > ?)
     ORDER BY created_at DESC, id DESC
     LIMIT 1
@@ -556,6 +643,9 @@ export function findCachedVerdict(
     tree_sha,
     head_sha,
     branch,
+    provenance.backend_kind,
+    provenance.backend_model,
+    provenance.backend_endpoint,
     watermark,
     watermark,
   ) as CachedVerdict | undefined;
@@ -574,10 +664,17 @@ export interface LatestReview {
   issues: string | null;
   tool_calls: string | null;
   mcp_servers_at_init: string | null;
+  /** AGT-1137 provenance columns. Null on rows recorded before provenance
+   *  shipped; `stamp merge` / `stamp attest` fold them into the signed
+   *  approval when present and omit the field entirely when not. */
+  backend_kind: string | null;
+  backend_model: string | null;
+  backend_endpoint: string | null;
 }
 
 const LATEST_VERDICTS_SQL = `
-  SELECT id, reviewer, verdict, issues, tool_calls, mcp_servers_at_init
+  SELECT id, reviewer, verdict, issues, tool_calls, mcp_servers_at_init,
+         backend_kind, backend_model, backend_endpoint
   FROM (
     SELECT
       id,
@@ -586,6 +683,9 @@ const LATEST_VERDICTS_SQL = `
       issues,
       tool_calls,
       mcp_servers_at_init,
+      backend_kind,
+      backend_model,
+      backend_endpoint,
       ROW_NUMBER() OVER (
         PARTITION BY reviewer
         ORDER BY created_at DESC, id DESC
@@ -734,6 +834,7 @@ export function reviewHistory(
   const stmt = db.prepare(`
     SELECT id, reviewer, base_sha, head_sha, verdict, issues,
            tool_calls, diff_hash, prompt_hash, tree_sha, branch,
+           backend_kind, backend_model, backend_endpoint,
            server_approval_json, server_signature_b64, server_key_id,
            schema_version, mcp_servers_at_init, created_at
     FROM reviews
@@ -797,6 +898,7 @@ export function recentReviewsByReviewer(
   const stmt = db.prepare(`
     SELECT id, reviewer, base_sha, head_sha, verdict, issues,
            tool_calls, diff_hash, prompt_hash, tree_sha, branch,
+           backend_kind, backend_model, backend_endpoint,
            server_approval_json, server_signature_b64, server_key_id,
            schema_version, created_at
     FROM reviews

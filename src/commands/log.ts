@@ -23,6 +23,11 @@ import {
   stampConfigFile,
   stampStateDbPath,
 } from "../lib/paths.js";
+import {
+  formatAttestedProvenance,
+  formatProvenance,
+  provenanceFromRow,
+} from "../lib/provenance.js";
 import { verifyBytes } from "../lib/signing.js";
 
 export interface LogOptions {
@@ -163,6 +168,13 @@ function printCommitDetail(sha: string, repoRoot: string): void {
   for (const a of payload.approvals) {
     const mark = a.verdict === "approved" ? "✓" : "✗";
     console.log(`  ${mark} ${a.reviewer.padEnd(16)} ${a.verdict}`);
+    // AGT-1137: read provenance from the SIGNED payload, not the local DB.
+    // That's the point of putting it in the attestation — this line is
+    // correct on a clone that never had the state.db which recorded the
+    // review. `unknown` for attestations minted before the field existed.
+    console.log(
+      `    ${" ".repeat(16)} backend: ${formatAttestedProvenance(a.provenance)}`,
+    );
   }
 
   if (payload.checks && payload.checks.length > 0) {
@@ -299,6 +311,11 @@ function printReviewHistory(
     } else {
       console.log(`     signed-by: (unsigned — no server attestation)`);
     }
+    // AGT-1137 provenance marker, on its own aligned line beside signed-by
+    // for the same reason: the header line is already at its width budget.
+    // `unknown` is the honest render for a row written before provenance
+    // shipped — it is NOT back-filled with a guess about what reviewed it.
+    console.log(`     backend:   ${formatProvenance(provenanceFromRow(row))}`);
     if (row.issues) {
       console.log(bar);
       console.log(row.issues);

@@ -48,10 +48,19 @@ import {
   resolveReviewScope,
   selectPriorReview,
 } from "../src/lib/reviewScope.ts";
+import type { ReviewProvenance } from "../src/lib/provenance.ts";
 
 const REVIEWER = "security";
 const DIFF_HASH = "d".repeat(64);
 const PROMPT_HASH = "p".repeat(64);
+// AGT-1137: provenance is a cache-key conjunct too. These tests are about the
+// branch/head conjuncts, so they hold one backend constant throughout — the
+// row is recorded with it and every lookup asks for it.
+const PROVENANCE: ReviewProvenance = {
+  backend_kind: "anthropic",
+  backend_model: "claude-sonnet-4-6",
+  backend_endpoint: null,
+};
 
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" });
@@ -310,6 +319,7 @@ describe("cross-branch review scoping (AGT-881 / issue #65)", () => {
         prompt_hash: PROMPT_HASH,
         tree_sha: treeSha,
         branch: "branchA",
+        provenance: PROVENANCE,
       });
 
       // Same (reviewer, diff, prompt, tree) — i.e. every pre-#65 key part
@@ -317,6 +327,7 @@ describe("cross-branch review scoping (AGT-881 / issue #65)", () => {
       assert.equal(
         findCachedVerdict(
           db, REVIEWER, DIFF_HASH, PROMPT_HASH, treeSha, headA, "branchB",
+          PROVENANCE,
         ),
         null,
         "branch B must not receive branch A's verdict",
@@ -324,6 +335,7 @@ describe("cross-branch review scoping (AGT-881 / issue #65)", () => {
       assert.equal(
         findCachedVerdict(
           db, REVIEWER, DIFF_HASH, PROMPT_HASH, treeSha, headB, "branchA",
+          PROVENANCE,
         ),
         null,
         "and a different head on the same branch must not either",
@@ -331,6 +343,7 @@ describe("cross-branch review scoping (AGT-881 / issue #65)", () => {
       assert.equal(
         findCachedVerdict(
           db, REVIEWER, DIFF_HASH, PROMPT_HASH, treeSha, headA, null,
+          PROVENANCE,
         ),
         null,
         "an unidentifiable (detached-HEAD) review must not claim it either",
@@ -340,6 +353,7 @@ describe("cross-branch review scoping (AGT-881 / issue #65)", () => {
       assert.equal(
         findCachedVerdict(
           db, REVIEWER, DIFF_HASH, PROMPT_HASH, treeSha, headA, "branchA",
+          PROVENANCE,
         )?.verdict,
         "approved",
       );

@@ -31,6 +31,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { findCachedVerdict, openDb, recordReview } from "../src/lib/db.ts";
+import type { ReviewProvenance } from "../src/lib/provenance.ts";
 
 const REVIEWER = "security";
 const DIFF_HASH = "d".repeat(64);
@@ -41,6 +42,14 @@ const TREE_B = "b".repeat(40);
 // about the *tree* conjunct, so they hold head + branch constant.
 const HEAD_SHA = "2".repeat(40);
 const BRANCH = "feature-x";
+// AGT-1137: provenance joined the key as well. Held constant here so these
+// tests stay about the *tree* conjunct — rows are recorded with it and every
+// lookup asks for it.
+const PROVENANCE: ReviewProvenance = {
+  backend_kind: "anthropic",
+  backend_model: "claude-sonnet-4-6",
+  backend_endpoint: null,
+};
 
 describe("issue #59: verdict cache is tree-scoped", () => {
   let tmp: string;
@@ -67,10 +76,13 @@ describe("issue #59: verdict cache is tree-scoped", () => {
         diff_hash: DIFF_HASH,
         prompt_hash: PROMPT_HASH,
         tree_sha: TREE_A,
+        provenance: PROVENANCE,
       });
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, BRANCH)
-          ?.verdict,
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, BRANCH,
+          PROVENANCE,
+        )?.verdict,
         "approved",
         "identical input incl. tree must reuse the stored verdict",
       );
@@ -93,12 +105,16 @@ describe("issue #59: verdict cache is tree-scoped", () => {
         diff_hash: DIFF_HASH,
         prompt_hash: PROMPT_HASH,
         tree_sha: TREE_A,
+        provenance: PROVENANCE,
       });
       // Post-rebase lookup: same diff bytes (merge-base-scoped diff survived
       // the rebase byte-identical), same prompt, but the head tree now
       // includes the moved base's content. Must run fresh, not replay.
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_B, HEAD_SHA, BRANCH),
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_B, HEAD_SHA, BRANCH,
+          PROVENANCE,
+        ),
         null,
         "a different head tree is a different review input — no cache hit",
       );
@@ -120,9 +136,13 @@ describe("issue #59: verdict cache is tree-scoped", () => {
         verdict: "approved",
         diff_hash: DIFF_HASH,
         prompt_hash: PROMPT_HASH,
+        provenance: PROVENANCE,
       });
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, BRANCH),
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, BRANCH,
+          PROVENANCE,
+        ),
         null,
         "NULL-tree legacy rows are cache-ineligible (fail toward fresh)",
       );
@@ -183,7 +203,10 @@ describe("issue #59: verdict cache is tree-scoped", () => {
       assert.equal(row.tree_sha, null, "pre-existing rows read NULL tree_sha");
       // And, per the #59 fix, that surviving row must not cache-serve.
       assert.equal(
-        findCachedVerdict(db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, null),
+        findCachedVerdict(
+          db, REVIEWER, DIFF_HASH, PROMPT_HASH, TREE_A, HEAD_SHA, null,
+          PROVENANCE,
+        ),
         null,
       );
     } finally {

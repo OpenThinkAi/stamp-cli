@@ -68,6 +68,12 @@ import {
   type ReviewerBackend,
 } from "../lib/userConfig.js";
 import { invokeLocalReviewer } from "../lib/localReviewer.js";
+import {
+  backendProvenance,
+  formatProvenance,
+  serverReviewProvenance,
+  type ReviewProvenance,
+} from "../lib/provenance.js";
 import { UsageError } from "./serverRepo.js";
 import {
   findRepoRoot,
@@ -576,6 +582,23 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     );
   }
 
+  // AGT-1137: per-reviewer provenance — the backend kind, model, and
+  // endpoint that will actually produce each verdict. Resolved here rather
+  // than at invocation time because it is BOTH a cache-key part (a verdict
+  // minted on one backend must never be replayed for a review requested
+  // against another) and the value persisted on the row. Same fallback as
+  // the invocation site below: a reviewer with no resolved backend runs on
+  // the agent SDK with the SDK's own default model.
+  const provenanceByReviewer = new Map<string, ReviewProvenance>();
+  for (const name of reviewerNames) {
+    provenanceByReviewer.set(
+      name,
+      backendProvenance(
+        backendByReviewer.get(name) ?? { kind: "anthropic", model: null },
+      ),
+    );
+  }
+
   console.log(
     `running ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} in parallel: ${reviewerNames.join(", ")}`,
   );
@@ -585,6 +608,14 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   console.log(
     `  reviewer config + prompts sourced from base ${resolved.base_sha.slice(0, 8)} (security: prevents feature-branch self-review)`,
   );
+  // Say what is about to do the reviewing, before it does it. The question
+  // this ticket exists to answer ("is this running on qwen or Anthropic?")
+  // should not require reading the DB after the fact.
+  for (const name of reviewerNames) {
+    console.log(
+      `  backend[${name}]: ${formatProvenance(provenanceByReviewer.get(name)!)}`,
+    );
+  }
   console.log();
 
   // Cache keys: identical (reviewer, diff bytes, prompt bytes, head tree) →
@@ -635,6 +666,11 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           headTreeSha,
           resolved.head_sha,
           reviewBranch,
+          // AGT-1137: a cached verdict is only replayed to the same
+          // backend/model/endpoint that minted it. Flipping
+          // STAMP_REVIEWER_BACKEND is now a cache miss, not a silent replay
+          // of another model's opinion.
+          provenanceByReviewer.get(name)!,
         );
         if (hit) cacheHits.set(name, hit);
       }
@@ -824,6 +860,11 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
           // cache-ineligible for any named branch on a later run (and can't
           // serve as an amend predecessor) — the fail-fresh direction.
           branch: reviewBranch,
+          // AGT-1137: what produced this verdict. On a cache hit this is the
+          // provenance of the CURRENT run, which is by construction identical
+          // to the source row's — the cache key now includes it, so a hit
+          // could not have come from a different backend.
+          provenance: provenanceByReviewer.get(name)!,
           // AGT-246: persist MCP server runtime statuses. Null for cache hits
           // (no fresh SDK init happened) and for reviewers that declared no
           // MCP servers.
@@ -1237,6 +1278,13 @@ async function runServerAttestedReviews(input: {
           // server-attested row can serve as a same-branch amend predecessor
           // and can never be mistaken for a sibling's.
           branch: resolveReviewBranch(opts.diff, repoRoot),
+          // AGT-1137: the reviewer ran on the stamp-server, so the endpoint
+          // is what we asked and the model is genuinely unknown here — the
+          // server resolves it (STAMP_REVIEWER_MODEL) and does not report it
+          // back over the wire. Recording the kind anyway is what keeps a
+          // server-attested row distinguishable from a pre-provenance row;
+          // both would otherwise read as `unknown`.
+          provenance: serverReviewProvenance(reviewServerUrl),
           // Server-attested 2.x row: AGT-333's column trio. recordReview
           // enforces all-or-nothing on these three fields so a downstream
           // verifier can rely on "non-null server_approval_json ⇒ non-null

@@ -9,6 +9,34 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ### Added
 
+- **Reviewer provenance on every verdict.** A review record said which
+  reviewer approved a diff but not what did the reviewing — a verdict from a
+  3B model on localhost and one from a frontier model were byte-identical in
+  the record that unlocks `stamp merge`. Answering "is my review running on
+  Qwen or Anthropic?" meant reading three source files and a server env var.
+
+  The `reviews` table now carries the backend kind, model id, and endpoint
+  behind each verdict; `stamp log --reviews` prints them on a `backend:` line
+  beside `signed-by:`, `stamp log <sha>` reads them out of the signed
+  attestation (so it works on a clone that never had the recording machine's
+  `state.db`), and `stamp config reviewers show` reports the backend and
+  endpoint each reviewer will *actually* run on rather than a bare model id.
+  `stamp review` also names the backend per reviewer before it runs them.
+
+  Two consequences worth knowing:
+  - **The verdict cache no longer serves cross-backend hits.** Its key gained
+    the backend/model/endpoint, so flipping `STAMP_REVIEWER_BACKEND` re-runs
+    the review instead of replaying another model's opinion. That was a
+    latent correctness bug the moment switching backends became easy.
+  - **Rows recorded before this report `unknown`.** The migration is additive
+    (three nullable columns, no defaults); pre-existing rows keep their data
+    and are never back-filled with a guess. They are also cache-ineligible,
+    which fails toward a fresh review.
+
+  The attestation field is additive and optional — `CURRENT_PAYLOAD_VERSION`
+  stays at 3, and a verifier on the current line still accepts attestations
+  minted before it.
+
 - **`stamp bootstrap --yes`** — declare automated-merge intent for the
   protected-branch merge bootstrap performs in step 8, the same contract as
   `stamp merge --yes` (audit H1). Without it, bootstrap could not run
