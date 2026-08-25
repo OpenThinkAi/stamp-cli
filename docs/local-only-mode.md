@@ -4,7 +4,7 @@ Local-only mode is the no-server, no-trust iteration sibling to stamp's trusted-
 
 Use it when you want quick reviewer feedback while iterating on a feature branch and either (a) haven't deployed a stamp server yet, or (b) don't need a verifiable verdict for this particular cycle.
 
-> **Not to be confused with the local-model reviewer _backend_.** This page is about the no-trust `--plan` / `--headless` iteration modes. A *separate* feature lets a normal **trusted** reviewer run against a local model (the `local:` model scheme + `local_endpoint`) so its merge-gating verdict is produced unmetered — see [Local-model reviewer backend](../README.md#local-model-reviewer-backend-unmetered). That backend *does* gate a merge; local-only mode (this page) does not.
+> **Not to be confused with the openai-compatible reviewer _backend_.** This page is about the no-trust `--plan` / `--headless` iteration modes. A *separate* feature lets a normal **trusted** reviewer run against an OpenAI-compatible endpoint (the `openai-compatible:` model scheme + `openai_compatible_endpoint`) — a model on your own box, so its merge-gating verdict is produced unmetered, or a hosted provider such as OpenAI or DeepSeek — see [OpenAI-compatible reviewer backend](../README.md#openai-compatible-reviewer-backend-local-openai-or-deepseek). That backend *does* gate a merge; local-only mode (this page) does not.
 
 If you need a signed, verifiable verdict that can gate a merge, you need [trusted mode](../README.md#concepts) instead: configure a `review_server` in `.stamp/config.yml` and run `stamp review` (without `--plan`).
 

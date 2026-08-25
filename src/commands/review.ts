@@ -68,6 +68,8 @@ import {
   type ReviewerBackend,
 } from "../lib/userConfig.js";
 import { invokeLocalReviewer } from "../lib/localReviewer.js";
+import { LOCAL_DEFAULT_BASE_URL } from "../lib/localReviewClient.js";
+import { isLoopbackEndpoint } from "../lib/providerCredentials.js";
 import {
   backendProvenance,
   formatProvenance,
@@ -464,14 +466,19 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   }
 
   // Reviewers whose diff content actually leaves this host: all of them in
-  // server-attested mode, or just the non-local (Anthropic) reviewers in
-  // local-LLM mode. A `local:` reviewer sends the diff only to a localhost
-  // model endpoint.
+  // server-attested mode; otherwise the Anthropic ones, PLUS any
+  // openai-compatible reviewer whose endpoint is not on this box.
+  //
+  // That second clause is AGT-1138's doing. Before it, an openai-compatible
+  // reviewer could only reach a model on localhost, so "kind !== anthropic"
+  // was a sound proxy for "stays on this host". The same backend now reaches
+  // api.openai.com and api.deepseek.com, and asking the KIND would silently
+  // exempt a hosted provider from the AGT-415 data-flow gate and print "the
+  // diff stays on this host" while shipping it to OpenAI. Ask the endpoint.
   const offHostCount = serverMode
     ? reviewerNames.length
-    : reviewerNames.filter(
-        (n) => backendByReviewer.get(n)!.kind !== "local",
-      ).length;
+    : reviewerNames.filter((n) => backendSendsOffHost(backendByReviewer.get(n)!))
+        .length;
 
   // AGT-415 data-flow disclosure + consent — fires only when diff content
   // leaves the host (Anthropic directly, or via `review_server`):
@@ -483,7 +490,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   //   3. per-invocation marker — counts only the off-host reviewers.
   //   4. disclosure echo — operator-authored data_flow.disclosure block.
   // An all-local run sends nothing off-box, so the gate doesn't apply — this
-  // is what makes local backends usable in regulated / air-gapped setups
+  // is what makes an on-host model usable in regulated / air-gapped setups
   // that arm data_flow.require_confirmation.
   if (offHostCount > 0) {
     assertDataFlowConfirmed(config.data_flow);
@@ -492,7 +499,7 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     printDataFlowDisclosure(config.data_flow);
   } else {
     console.log(
-      `note: all ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} use a local model; ` +
+      `note: all ${reviewerNames.length} reviewer${reviewerNames.length === 1 ? "" : "s"} use a model on this host; ` +
         `the diff stays on this host (no Anthropic sub-processor involved).`,
     );
     console.log();
@@ -783,15 +790,17 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
       // the prompt builders gate their narrowing language.
       const isDeltaScope = deltaDiffs.has(name);
       const diffForReviewer = deltaDiffs.get(name) ?? resolved.diff;
-      // Per-reviewer backend (per-user ~/.stamp/config.yml). `local:` →
-      // unmetered one-shot local path; otherwise the agent-SDK reviewer. The
-      // prior-review ratchet prose is agent-SDK-only for now — the local path
-      // still gets the narrowed delta diff but not the prior-verdict context.
+      // Per-reviewer backend (per-user ~/.stamp/config.yml).
+      // `openai-compatible:` (or the legacy `local:`) → one-shot
+      // OpenAI-compatible path; otherwise the agent-SDK reviewer. The
+      // prior-review ratchet prose is agent-SDK-only for now — the one-shot
+      // path still gets the narrowed delta diff but not the prior-verdict
+      // context.
       const backend = backendByReviewer.get(name) ?? {
         kind: "anthropic",
         model: null,
       };
-      if (backend.kind === "local") {
+      if (backend.kind === "openai-compatible") {
         return invokeLocalReviewer({
           reviewer: name,
           systemPrompt: promptBytesByReviewer.get(name)!,
@@ -821,13 +830,20 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     // A single local model server holds one model on the GPU and OOMs under
     // concurrent large-context requests (observed: 3 reviewers × ~28K-token
     // diff crashed mlx_lm.server with a Metal out-of-memory). So when any
-    // reviewer uses a local backend, run reviewers SEQUENTIALLY. All-Anthropic
-    // runs keep the parallel fan-out — the API handles concurrency fine.
-    const anyLocal = reviewerNames.some(
-      (n) => (backendByReviewer.get(n)?.kind ?? "anthropic") === "local",
+    // reviewer uses the openai-compatible backend, run reviewers
+    // SEQUENTIALLY. All-Anthropic runs keep the parallel fan-out — the API
+    // handles concurrency fine.
+    //
+    // Deliberately keyed on the KIND, not on whether the endpoint is
+    // loopback: a self-hosted model on the LAN has exactly the same single-
+    // GPU contention as one on localhost, and going parallel for hosted
+    // providers would buy latency at the cost of re-introducing that crash
+    // for anyone pointing at a box down the hall.
+    const anyOneShot = reviewerNames.some(
+      (n) => backendByReviewer.get(n)?.kind === "openai-compatible",
     );
     let results: PromiseSettledResult<ReviewerInvocation>[];
-    if (anyLocal) {
+    if (anyOneShot) {
       results = [];
       for (const name of reviewerNames) {
         results.push(await settleResult(runReviewerTask(name)));
@@ -1025,6 +1041,21 @@ export function maybeMintPrAttestation(args: {
         `  Recover with: stamp attest --into ${targetBranch}`,
     );
   }
+}
+
+/**
+ * Does running this reviewer put the diff on someone else's machine?
+ *
+ * The AGT-415 data-flow gate turns on this answer, so it is asked of the
+ * ENDPOINT rather than of the backend kind: `anthropic` always leaves the
+ * host, and `openai-compatible` leaves it exactly when its endpoint isn't
+ * loopback — which since AGT-1138 it very often isn't. The endpoint is
+ * resolved through the adapter default first, so an unset endpoint is
+ * judged by the URL that will actually be hit.
+ */
+function backendSendsOffHost(backend: ReviewerBackend): boolean {
+  if (backend.kind === "anthropic") return true;
+  return !isLoopbackEndpoint(backend.endpoint ?? LOCAL_DEFAULT_BASE_URL);
 }
 
 function sha256(s: string): string {

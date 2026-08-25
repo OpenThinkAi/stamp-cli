@@ -1,13 +1,18 @@
 /**
- * Local-model review client — a `ChatClientShape` backed by an
- * OpenAI-compatible `/v1/chat/completions` endpoint (LM Studio, llama.cpp's
- * `llama-server`, vLLM, LM Studio, etc.).
+ * OpenAI-compatible review client — a `ChatClientShape` backed by an
+ * OpenAI-compatible `/v1/chat/completions` endpoint.
  *
- * This is the unmetered backend for trusted model-1 reviews: the operator
- * runs a local model (e.g. qwen via LM Studio on http://localhost:1234/v1)
- * and stamp drives it through the same one-shot core the Anthropic path
- * uses. No Anthropic API, no Agent SDK, no `claude -p` — nothing crosses
- * the June-15 metered boundary.
+ * One adapter, every non-Anthropic provider. A local model server (LM
+ * Studio, `mlx_lm.server`, llama.cpp's `llama-server`, vLLM) and a hosted
+ * one (OpenAI, DeepSeek) differ only in base URL and bearer token, so
+ * AGT-1138 added the token rather than a second transport or a per-provider
+ * SDK.
+ *
+ * Pointed at a local model this is the unmetered backend for trusted
+ * model-1 reviews: the operator runs a model on their own box (e.g. qwen on
+ * http://localhost:1234/v1) and stamp drives it through the same one-shot
+ * core the Anthropic path uses — no Anthropic API, no Agent SDK, no
+ * `claude -p`, nothing crossing the June-15 metered boundary.
  *
  * The adapter's whole job is shape translation:
  *   - Anthropic Messages request  → OpenAI Chat Completions request
@@ -19,6 +24,11 @@
  */
 
 import type { ChatClientShape } from "./oneShotReview.js";
+import {
+  redactSecrets,
+  unauthorizedMessage,
+  UNKNOWN_PROVIDER_ID,
+} from "./providerCredentials.js";
 
 /** Default base URL for LM Studio's OpenAI-compatible server. */
 export const LOCAL_DEFAULT_BASE_URL = "http://localhost:1234/v1";
@@ -28,6 +38,10 @@ export const LOCAL_DEFAULT_BASE_URL = "http://localhost:1234/v1";
  * convention) require a non-empty `Authorization` header. Send a harmless
  * placeholder by default; operators can override for servers that gate on
  * a real key.
+ *
+ * This placeholder is also the whole reason `STAMP_REVIEWER_BACKEND=local`
+ * against localhost keeps working with no credential configured at all — the
+ * pre-AGT-1138 behaviour, unchanged.
  */
 const PLACEHOLDER_API_KEY = "lm-studio";
 
@@ -61,11 +75,24 @@ export interface LocalReviewClientOptions {
    * when `tools` are present and the model emits non-JSON tool text. With
    * tools omitted, the verdict comes back through the one-shot core's
    * last-line `VERDICT:` fallback, which is reliable across every backend.
-   * The trusted local reviewer sets this; flip it off only for a server you
+   * The trusted openai-compatible reviewer sets this; flip it off only for a server you
    * know does OpenAI tool-calling correctly. Defaults to false here so the
    * client itself stays faithful to what it's told.
    */
   disableTools?: boolean;
+  /**
+   * Provider id the endpoint resolved to (`openai`, `deepseek`, `local`, or
+   * the host). Used only to make a 401 actionable — it names which
+   * provider's credential was rejected. Never a secret.
+   */
+  providerId?: string;
+  /**
+   * Where `apiKey` came from — an env var NAME or a config key, never the
+   * value. Printed in the 401 message so the operator knows which of several
+   * possible sources to go fix. Null means "nothing was configured; the
+   * placeholder went out".
+   */
+  credentialSource?: string | null;
   /** Injectable fetch for testing. Production leaves unset → global fetch. */
   fetchImpl?: FetchLike;
 }
@@ -102,7 +129,19 @@ export function createLocalReviewClient(
   const baseURL = (opts.baseURL ?? LOCAL_DEFAULT_BASE_URL).replace(/\/+$/, "");
   const apiKey = opts.apiKey ?? PLACEHOLDER_API_KEY;
   const disableTools = opts.disableTools ?? false;
+  const providerId = opts.providerId ?? UNKNOWN_PROVIDER_ID;
+  const credentialSource = opts.credentialSource ?? null;
   const doFetch: FetchLike = opts.fetchImpl ?? (globalThis.fetch as FetchLike);
+
+  /**
+   * Scrub the credential out of anything derived from the wire before it
+   * becomes an Error message. Several OpenAI-compatible gateways echo the
+   * presented bearer token in a 401 body, and that body is precisely what we
+   * truncate into the error the operator sees (and that `stamp review` prints
+   * to stderr). Applied at the one place every error string is built, so a
+   * future error path cannot forget it.
+   */
+  const scrub = (s: string): string => redactSecrets(s, [apiKey]);
 
   return {
     messages: {
@@ -141,22 +180,48 @@ export function createLocalReviewClient(
           }));
         }
 
-        const res = await doFetch(`${baseURL}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify(body),
-          signal: options?.signal ?? null,
-        });
+        let res: Awaited<ReturnType<FetchLike>>;
+        try {
+          res = await doFetch(`${baseURL}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify(body),
+            signal: options?.signal ?? null,
+          });
+        } catch (err) {
+          // A transport failure (DNS, refused connection, TLS) names the
+          // endpoint rather than surfacing a bare `fetch failed` with no clue
+          // which of several configured endpoints was unreachable (AC4).
+          throw new Error(
+            scrub(
+              `openai-compatible endpoint ${baseURL} is unreachable: ` +
+                (err instanceof Error ? err.message : String(err)),
+            ),
+          );
+        }
 
         if (!res.ok) {
           // Surface status + a short body snippet; the one-shot core's catch
           // folds this into result.error so the reviewer fan-out survives.
-          const snippet = truncate((await safeText(res)).trim(), 200);
+          const snippet = truncate(scrub((await safeText(res)).trim()), 200);
+          // 401/403 has exactly one cause and one fix worth naming, so it
+          // gets its own message instead of a raw status the operator has to
+          // interpret (AC4).
+          if (res.status === 401 || res.status === 403) {
+            throw new Error(
+              unauthorizedMessage({
+                endpoint: baseURL,
+                providerId,
+                status: res.status,
+                source: credentialSource,
+              }) + (snippet ? ` Response: ${snippet}` : ""),
+            );
+          }
           throw new Error(
-            `local model endpoint ${baseURL} returned HTTP ${res.status}` +
+            `openai-compatible endpoint ${baseURL} returned HTTP ${res.status}` +
               (snippet ? `: ${snippet}` : ""),
           );
         }
@@ -166,8 +231,10 @@ export function createLocalReviewClient(
           parsed = JSON.parse(await res.text()) as OpenAIChatResponse;
         } catch (err) {
           throw new Error(
-            `local model endpoint ${baseURL} returned unparseable JSON: ` +
-              (err instanceof Error ? err.message : String(err)),
+            scrub(
+              `openai-compatible endpoint ${baseURL} returned unparseable JSON: ` +
+                (err instanceof Error ? err.message : String(err)),
+            ),
           );
         }
 

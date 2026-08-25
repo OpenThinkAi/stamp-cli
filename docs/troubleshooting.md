@@ -429,14 +429,14 @@ The advisory is silenced by `STAMP_SUPPRESS_LLM_NOTICE=1`; auto-prune is not (it
 
 ---
 
-## Local reviewer: no verdict / "produced no verdict"
+## OpenAI-compatible reviewer: no verdict / "produced no verdict"
 
 ```
-error: local reviewer "security" (model qwen3-coder-30b) produced no verdict:
-  unknown error. The local model may not support tool-calling …
+error: openai-compatible reviewer "security" (model qwen3-coder-30b) produced no
+  verdict: unknown error. The model may not support tool-calling …
 ```
 
-The local reviewer runs in one-shot mode: if the model doesn't emit a `VERDICT:` line as
+The openai-compatible reviewer runs in one-shot mode: if the model doesn't emit a `VERDICT:` line as
 the last non-empty line of its response, stamp has no verdict to record and fails the
 reviewer (keeping the gate closed). Common causes and fixes:
 
@@ -450,21 +450,78 @@ reviewer (keeping the gate closed). Common causes and fixes:
    raw response with a `curl` test against your endpoint and report unrecognised tokens as
    a bug.
 
-3. **Tools crash caused the server to return an error.** If `STAMP_LOCAL_TOOLS=1` is set
-   (or `local_tools: true` in `~/.stamp/config.yml`), the adapter sends the OpenAI `tools`
-   field. Several backends — notably `mlx_lm.server` — crash or return HTTP errors when
-   `tools` are present. Either unset `STAMP_LOCAL_TOOLS`, remove `local_tools` from
-   `~/.stamp/config.yml`, or switch to a server that handles OpenAI tool-calling correctly.
+3. **Tools crash caused the server to return an error.** If
+   `STAMP_OPENAI_COMPATIBLE_TOOLS=1` is set (or the legacy `STAMP_LOCAL_TOOLS=1`, or
+   `openai_compatible_tools: true` / `local_tools: true` in `~/.stamp/config.yml`), the
+   adapter sends the OpenAI `tools` field. Several backends — notably `mlx_lm.server` —
+   crash or return HTTP errors when `tools` are present. Either unset the variable, remove
+   the config field, or switch to a server that handles OpenAI tool-calling correctly.
+
+Note the message does NOT suggest tool-calling when the failure was at the transport
+(a 401, an unreachable endpoint) — that case has its own section below.
 
 ---
 
-## Local reviewer: when to use local vs Anthropic
+## OpenAI-compatible reviewer: missing or rejected API credential
 
-The local backend is the right choice for the **small/iterative inner loop**: delta
+Two distinct failures, both naming the endpoint and the fix.
+
+**No credential configured for a provider that requires one:**
+
+```
+error: no API credential for the openai-compatible reviewer endpoint
+  https://api.openai.com/v1 — it resolves to provider "openai" (OpenAI), which rejects
+  unauthenticated requests. Supply a key with STAMP_OPENAI_API_KEY=<key> (or
+  OPENAI_API_KEY) in the environment, or add a `provider_keys:` entry for "openai" to
+  ~/.stamp/config.yml — keys: https://platform.openai.com/api-keys. Nothing is sent
+  until a credential is available.
+```
+
+Nothing was sent: stamp refuses the request rather than shipping a placeholder token and
+letting you interpret a bare 401.
+
+**A credential was sent and rejected:**
+
+```
+error: openai-compatible endpoint https://api.deepseek.com/v1 returned HTTP 401
+  (unauthorized) — the credential from STAMP_DEEPSEEK_API_KEY was rejected.
+  Provider "deepseek": check that the key in STAMP_DEEPSEEK_API_KEY is valid for
+  https://api.deepseek.com/v1 and has not expired or been revoked.
+```
+
+The message names the SOURCE the key came from (an env var name or a config key), never
+the key itself. To see what stamp will resolve without running a review:
+
+```sh
+stamp config reviewers show
+#   security  openai-compatible:gpt-5  [openai-compatible provider=openai model=gpt-5 @ https://api.openai.com/v1]
+#   https://api.openai.com/v1  provider=openai  credential from STAMP_OPENAI_API_KEY
+```
+
+Credentials are resolved **per provider, from the endpoint host** — an OpenAI key is
+never sent to DeepSeek, and an ambient `OPENAI_API_KEY` is never forwarded to an endpoint
+that isn't `api.openai.com`. If you point a reviewer at your own gateway, set
+`STAMP_<HOST>_API_KEY` (e.g. `STAMP_LLM_CORP_TEST_API_KEY`) or a `provider_keys:` entry
+keyed by the hostname.
+
+A **loopback** endpoint (`localhost`, `127.0.0.1`, `::1`) never requires a credential —
+a placeholder token goes out, exactly as it always has.
+
+---
+
+## OpenAI-compatible reviewer: when to use it vs Anthropic
+
+A model on your own box is the right choice for the **small/iterative inner loop**: delta
 reviews between rounds, focused one-file changes, or any diff you want to stay fully
 on-host without consuming a metered Anthropic review.
 
-**Use `STAMP_REVIEWER_BACKEND=anthropic` (or omit `local:` from config) for:**
+Whichever endpoint you use, this path is **one shot, with no repo reads and tools off by
+default**, and a reviewer with `enforce_reads_on_dotstamp` is honoured by inlining the
+changed `.stamp/` files into the diff rather than by letting the model read them. The
+verdict gates `stamp merge` all the same — the review is not equivalent to an Agent-SDK
+one at the same model tier.
+
+**Use `STAMP_REVIEWER_BACKEND=anthropic` (or omit the scheme from config) for:**
 - Large or cross-cutting diffs (many files, large context window) where a small model
   is likely to hallucinate or miss findings.
 - Cold reviews of a new branch where no delta is available.
@@ -475,6 +532,9 @@ and OS. A single large-context review sits near the rail; three concurrent revie
 on a ~28K-token diff have been observed to OOM. If you see Metal GPU OOM errors:
 - Switch that review to `STAMP_REVIEWER_BACKEND=anthropic`, or
 - Reduce the diff size (commit smaller; use delta reviews after round 1).
+
+(All reviewers run **sequentially** whenever any of them uses this backend, precisely to
+avoid that contention — including when the endpoint is hosted.)
 
 The `STAMP_LOCAL_REVIEW_MAX_BYTES` env var (used by the pipeline skill's
 auto-routing logic) lets you set a byte threshold above which reviews automatically

@@ -499,68 +499,168 @@ models pinned, each operator records their own verdict in their own
 state.db (same as today's reviewer-prompt model). Stamp does not assume
 verdicts are model-portable.
 
-#### Local-model reviewer backend (unmetered)
+#### OpenAI-compatible reviewer backend (local, OpenAI, or DeepSeek)
 
-A reviewer can run against a **local** OpenAI-compatible model server (LM
-Studio, llama.cpp's `llama-server`, vLLM, …) instead of the Anthropic API.
-Pin the reviewer's model with the `local:` scheme and the review runs
-entirely on your own machine — no Anthropic Agent SDK, no `claude -p`, no
-API call, nothing metered:
+A reviewer can run against any server that speaks the OpenAI
+`/chat/completions` API instead of the Anthropic Agent SDK — a model on your
+own machine (LM Studio, `mlx_lm.server`, llama.cpp's `llama-server`, vLLM), or
+a hosted provider such as **OpenAI** or **DeepSeek**. One adapter covers all
+of them; they differ only in base URL and API key.
+
+Pin the reviewer's model with the `openai-compatible:` scheme:
 
 ```yaml
 reviewers:
-  security: local:lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-4bit  # local
-  standards: claude-sonnet-4-6                                              # Anthropic
-local_endpoint: http://localhost:8080/v1   # e.g. mlx_lm.server; LM Studio uses :1234
+  security: openai-compatible:lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-4bit
+  standards: claude-sonnet-4-6                                  # Anthropic
+openai_compatible_endpoint: http://localhost:8080/v1   # mlx_lm.server; LM Studio uses :1234
 ```
 
-The id after `local:` is whatever the server reports at `GET <endpoint>/models`.
+Pointed at a model on this box, nothing is metered and nothing leaves the
+host. Pointed at OpenAI or DeepSeek, the diff goes to that provider (and the
+data-flow disclosure in `stamp review` says so).
 
-`stamp config reviewers set security local:<model-id>` works through the
-same CLI; `local_endpoint` is hand-edited (it's machine-specific). Mix and
-match — some reviewers local, some Anthropic — per reviewer.
+The id after `openai-compatible:` is whatever the server reports at
+`GET <endpoint>/models` — or the provider's model id (`gpt-5`,
+`deepseek-chat`).
+
+`stamp config reviewers set security openai-compatible:<model-id>` works
+through the same CLI; the endpoint is hand-edited (it's machine-specific).
+Mix and match — some reviewers openai-compatible, some Anthropic — per
+reviewer.
+
+##### API credentials (per provider)
+
+A hosted provider needs a key. Credentials are resolved **from the endpoint**,
+never from one shared "the API key" — so pointing a reviewer at DeepSeek can
+never send an OpenAI key, and an endpoint stamp doesn't recognise never
+receives a vendor key at all.
+
+The endpoint's host determines a **provider id**: `api.openai.com` → `openai`,
+`api.deepseek.com` → `deepseek`, any loopback address → `local`, anything else
+→ the hostname itself. Resolution then goes, highest precedence first:
+
+1. `STAMP_<PROVIDER>_API_KEY` — e.g. `STAMP_OPENAI_API_KEY`,
+   `STAMP_DEEPSEEK_API_KEY`, `STAMP_MY_LLM_CORP_TEST_API_KEY`.
+2. the vendor's conventional variable — `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`,
+   consulted **only** when the endpoint is that vendor's own host.
+3. `provider_keys:` in `~/.stamp/config.yml`.
+
+```sh
+STAMP_OPENAI_API_KEY=sk-… \
+  STAMP_REVIEWER_BACKEND=openai-compatible \
+  STAMP_OPENAI_COMPATIBLE_MODEL=gpt-5 \
+  STAMP_OPENAI_COMPATIBLE_ENDPOINT=https://api.openai.com/v1 \
+  stamp review --diff main..feature
+```
+
+```yaml
+# ~/.stamp/config.yml — persistent form (0600, under a 0700 ~/.stamp)
+provider_keys:
+  openai: sk-…
+  deepseek: sk-…
+```
+
+Prefer the env-var form where you have one: it keeps the secret out of a file.
+A key is **never** written to `.git/stamp/state.db`, printed by
+`stamp config reviewers show` or `stamp log`, echoed in a config validation
+error, or included in a spooled failure trace — and if a provider echoes the
+bearer token back in an error body, the adapter redacts it before the message
+is surfaced.
+
+**A localhost endpoint needs no credential at all** — a placeholder token is
+sent, exactly as before. Only providers stamp knows are authenticated
+(currently OpenAI and DeepSeek) treat a missing key as a hard failure; every
+other endpoint keeps the pre-existing behaviour.
+
+**When it's misconfigured**, you get the endpoint, the provider, and the fix
+rather than a raw fetch error:
+
+```
+error: no API credential for the openai-compatible reviewer endpoint
+  https://api.openai.com/v1 — it resolves to provider "openai" (OpenAI), which
+  rejects unauthenticated requests. Supply a key with STAMP_OPENAI_API_KEY=<key>
+  (or OPENAI_API_KEY) in the environment, or add a `provider_keys:` entry for
+  "openai" to ~/.stamp/config.yml … Nothing is sent until a credential is available.
+
+error: openai-compatible endpoint https://api.deepseek.com/v1 returned HTTP 401
+  (unauthorized) — the credential from STAMP_DEEPSEEK_API_KEY was rejected.
+  Provider "deepseek": check that the key in STAMP_DEEPSEEK_API_KEY is valid …
+```
 
 **Per-run override.** Set `STAMP_REVIEWER_BACKEND=anthropic` to force every
 reviewer onto the Anthropic agent-SDK path for a single run, ignoring any
-`local:` config — for someone who normally runs local but wants to review on
-Claude this time:
+`openai-compatible:` config — for someone who normally runs local but wants to
+review on Claude this time:
 
 ```
 STAMP_REVIEWER_BACKEND=anthropic stamp review --diff main..feature
 ```
 
 It uses your logged-in Claude session (no `ANTHROPIC_API_KEY` needed) and
-accepts the post-June-15 metering. A `local:` reviewer's model id isn't valid
-for Anthropic, so it falls back to the SDK default model; reviewers pinned to
-a real Anthropic model keep it.
+accepts the post-June-15 metering. An `openai-compatible:` reviewer's model id
+isn't valid for Anthropic, so it falls back to the SDK default model;
+reviewers pinned to a real Anthropic model keep it.
 
-The symmetric `STAMP_REVIEWER_BACKEND=local` forces every reviewer onto the
-local backend for a single run, without editing `~/.stamp/config.yml`:
+The symmetric `STAMP_REVIEWER_BACKEND=openai-compatible` forces every reviewer
+onto the one-shot backend for a single run, without editing
+`~/.stamp/config.yml`:
 
 ```
-STAMP_REVIEWER_BACKEND=local \
-  STAMP_LOCAL_MODEL=qwen3-coder-30b \
-  STAMP_LOCAL_ENDPOINT=http://localhost:8000/v1 \
+STAMP_REVIEWER_BACKEND=openai-compatible \
+  STAMP_OPENAI_COMPATIBLE_MODEL=qwen3-coder-30b \
+  STAMP_OPENAI_COMPATIBLE_ENDPOINT=http://localhost:8000/v1 \
   stamp review --diff main..feature
 ```
 
-The model comes from `STAMP_LOCAL_MODEL` (falling back to the reviewer's
-configured `local:` value), and the endpoint from `STAMP_LOCAL_ENDPOINT`
-(falling back to `local_endpoint`, then the adapter default). If no local
-model can be resolved, it falls back to the Anthropic default rather than
-calling the local server with an empty model. Because it's per-run env — not
-a config write — it's safe to use from automation that runs concurrently
-(e.g. open-team dispatch), where mutating the shared `~/.stamp/config.yml`
-would race.
+The model comes from `STAMP_OPENAI_COMPATIBLE_MODEL` (falling back to the
+reviewer's configured scheme value), and the endpoint from
+`STAMP_OPENAI_COMPATIBLE_ENDPOINT` (falling back to
+`openai_compatible_endpoint`, then the adapter default). If no model can be
+resolved, it falls back to the Anthropic default rather than calling the
+endpoint with an empty model. Because it's per-run env — not a config write —
+it's safe to use from automation that runs concurrently (e.g. open-team
+dispatch), where mutating the shared `~/.stamp/config.yml` would race.
+
+##### Legacy `local` names (still supported, indefinitely)
+
+This backend was called `local` before it could reach a hosted provider. Every
+old name still works and resolves identically — nothing needs migrating:
+
+| Legacy (still works) | Canonical |
+|---|---|
+| `reviewers: { security: local:<model> }` | `openai-compatible:<model>` |
+| `local_endpoint:` | `openai_compatible_endpoint:` |
+| `local_tools:` | `openai_compatible_tools:` |
+| `STAMP_REVIEWER_BACKEND=local` | `STAMP_REVIEWER_BACKEND=openai-compatible` |
+| `STAMP_LOCAL_MODEL` | `STAMP_OPENAI_COMPATIBLE_MODEL` |
+| `STAMP_LOCAL_ENDPOINT` | `STAMP_OPENAI_COMPATIBLE_ENDPOINT` |
+| `STAMP_LOCAL_TOOLS` | `STAMP_OPENAI_COMPATIBLE_TOOLS` |
+
+If both spellings are set, the canonical one wins. Config files are
+round-tripped under whichever key you wrote, so `stamp config reviewers set`
+never rewrites your file into the new spelling behind your back.
+
+Stored review rows keep the literal backend kind `local` (they are never
+rewritten); `stamp log --reviews` displays it as `openai-compatible`.
 
 **Which backend actually ran?** Every verdict records the backend kind, model
 id, and endpoint that produced it, so you never have to reconstruct it from
 config files:
 
 ```
-stamp config reviewers show     # what WILL run, per reviewer, incl. endpoint
+stamp config reviewers show     # what WILL run, per reviewer, incl. endpoint + credential source
 stamp log --reviews             # what DID run, on a `backend:` line per row
 stamp log <merge-sha>           # the same, read out of the signed attestation
+```
+
+Because the endpoint is recorded, an OpenAI review and a DeepSeek review are
+distinguishable in the record:
+
+```
+backend:   openai-compatible / gpt-5 @ https://api.openai.com/v1
+backend:   openai-compatible / deepseek-chat @ https://api.deepseek.com/v1
+backend:   openai-compatible / qwen3-coder-30b @ http://localhost:8000/v1
 ```
 
 `stamp review` also names the backend per reviewer before it runs them. Rows
@@ -569,23 +669,27 @@ are never back-filled with a guess. Provenance is part of the verdict-cache
 key too, so switching backends re-runs the review instead of replaying the
 other model's verdict.
 
-**Trust posture is identical to the Anthropic local-LLM path.** A local
+**Trust posture is identical to the Anthropic path.** An openai-compatible
 reviewer produces a verdict that gates `stamp merge` exactly like the SDK
 reviewer; the trust anchor is unchanged — your machine produces the verdict,
 the signed merge + the server's pre-receive hook are what get verified.
-Moving inference to a local model doesn't touch that boundary, it just takes
-the review off the metered path. (And because an all-local run sends nothing
-off-host, it skips the Anthropic data-flow consent gate — useful for
-regulated / air-gapped repos.)
+Moving inference off the SDK doesn't touch that boundary. (And because a run
+against a model on this host sends nothing off-box, it skips the Anthropic
+data-flow consent gate — useful for regulated / air-gapped repos. A run
+against OpenAI or DeepSeek does *not* skip it: the diff leaves the host, and
+stamp says so.)
 
 **Setup.** Any OpenAI-compatible server works. Two common ones:
 
 - **`mlx_lm.server`** (Apple Silicon): `mlx_lm.server --model <hf-repo-id> --port 8080` → endpoint `http://localhost:8080/v1`.
 - **LM Studio**: load the model → **Developer** → **Start Server** → endpoint `http://localhost:1234/v1`.
 
-Then `curl <endpoint>/models` for the exact model id, put it after `local:`, and set `local_endpoint` to match.
+Then `curl <endpoint>/models` for the exact model id, put it after
+`openai-compatible:`, and set `openai_compatible_endpoint` to match. For a
+hosted provider use `https://api.openai.com/v1` or `https://api.deepseek.com/v1`
+and the provider's own model id.
 
-**Supported envelope.** The local backend is the right tool for the **small/iterative
+**Supported envelope.** A model on your own box is the right tool for the **small/iterative
 inner loop** — a delta review between rounds, a focused one-file change, or any diff
 you want to stay fully on-host without consuming a metered Anthropic review. Large or
 cross-cutting diffs (many files, large context) are better served by the Anthropic
@@ -603,23 +707,34 @@ a test request first), you can opt into the structured `submit_verdict` path:
 
 ```sh
 # Per-run opt-in (highest precedence):
-STAMP_LOCAL_TOOLS=1 stamp review --diff main..feature
+STAMP_OPENAI_COMPATIBLE_TOOLS=1 stamp review --diff main..feature
 
 # Or persist it in ~/.stamp/config.yml:
-local_tools: true
+openai_compatible_tools: true
 ```
 
 With tools enabled the reviewer receives the `submit_verdict` schema and the structured
 verdict path is preferred; the `VERDICT:` line parser stays as a fallback.
 
-**v1 limitations.** The local reviewer is one-shot (a single model turn, no
-agentic file-reading tools): it sees the diff, not the surrounding tree. For
-a reviewer with `enforce_reads_on_dotstamp` (the `security` default), stamp
-auto-includes the full content of changed `.stamp/*` files in the prompt so
-trust-anchor changes are still inspected. By default it does **not** use
-tool-calling (see above for the opt-in). The prior-review "ratchet" prose is
-Anthropic-path-only for now — the local path still gets the narrowed delta
-diff across rounds.
+**Known limitations — this path is deliberately second-class.** State them
+plainly, because a verdict from it gates `stamp merge` exactly like an
+Agent-SDK one:
+
+- **Single-shot.** One model turn per reviewer. No agentic loop, no retries,
+  no MCP.
+- **No repo reads.** The reviewer sees the diff, not the surrounding tree. It
+  cannot open a file, grep, or follow a symbol.
+- **Tools off by default.** The OpenAI `tools` field is suppressed unless you
+  opt in (see above), because `mlx_lm.server` crashes server-side when it is
+  present. The verdict then comes through the one-shot core's last-line
+  `VERDICT:` parser.
+- **`enforce_reads_on_dotstamp` is honoured by inlining, not by reading.** A
+  reviewer with that flag set (the `security` default) cannot open the changed
+  trust-anchor files itself, so stamp appends the full head content of every
+  changed `.stamp/*` file into the diff it sends (`collectDotstampContext`).
+  The model still inspects the change; it just never performs a tool read.
+- **No prior-review ratchet prose.** Anthropic-path-only for now — this path
+  still gets the narrowed delta diff across rounds.
 
 ### Reviewer execution budgets
 

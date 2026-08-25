@@ -10,9 +10,15 @@
  *   stamp config reviewers show                        print resolved per-reviewer config
  *
  * `show` reports the resolved BACKEND per reviewer, not just a model id: a
- * value with the `local:` scheme (or `STAMP_REVIEWER_BACKEND=local` in the
- * environment) routes to an OpenAI-compatible endpoint rather than the
- * Anthropic agent SDK, and before AGT-1137 nothing on this surface said so.
+ * value with the `openai-compatible:` scheme — or the legacy `local:` one,
+ * or `STAMP_REVIEWER_BACKEND=openai-compatible` in the environment — routes
+ * to an OpenAI-compatible endpoint rather than the Anthropic agent SDK, and
+ * before AGT-1137 nothing on this surface said so.
+ *
+ * `show` also reports, per provider, WHERE a credential would come from —
+ * the env var name or config key, never the value. `~/.stamp/config.yml` can
+ * hold `provider_keys:` since AGT-1138, and a surface that printed the file
+ * back verbatim would print an API key to the terminal.
  *
  * Reviewer names are validated against the same regex `stamp reviewers add`
  * uses (alphanumerics + _ -; max 64 chars; no leading hyphen). Model IDs
@@ -42,6 +48,11 @@ import {
   type UserConfig,
 } from "../lib/userConfig.js";
 import { LOCAL_DEFAULT_BASE_URL } from "../lib/localReviewClient.js";
+import {
+  providerEnvVar,
+  providerIdForEndpoint,
+  resolveProviderCredentialFrom,
+} from "../lib/providerCredentials.js";
 import { userConfigPath } from "../lib/paths.js";
 import { UsageError } from "./serverRepo.js";
 
@@ -236,7 +247,11 @@ export function runConfigReviewersShow(): void {
 function backendTag(backend: ReviewerBackend): string {
   if (backend.kind === "anthropic") return "[anthropic]";
   const endpoint = backend.endpoint ?? LOCAL_DEFAULT_BASE_URL;
-  return `[local model=${backend.model} @ ${endpoint}]`;
+  // Provider id, not just the URL: `openai-compatible @ https://…/v1` is
+  // what two different hosted providers have in common, and the point of
+  // AGT-1138 is that they stop looking alike on this surface.
+  const provider = providerIdForEndpoint(endpoint);
+  return `[openai-compatible provider=${provider} model=${backend.model} @ ${endpoint}]`;
 }
 
 /**
@@ -244,11 +259,11 @@ function backendTag(backend: ReviewerBackend): string {
  * armed) and the quality asymmetry of the non-Anthropic path.
  *
  * The asymmetry note fires only when at least one reviewer actually resolves
- * to the local backend. It is deliberately printed rather than left implicit:
- * the one-shot path has no tool loop and no repo reads, so a verdict from it
- * is not the same artifact as an Agent-SDK verdict even at an identical
- * model tier, and a provenance UI that implied equivalence would be worse
- * than none.
+ * to the openai-compatible backend. It is deliberately printed rather than
+ * left implicit: the one-shot path has no tool loop and no repo reads, so a
+ * verdict from it is not the same artifact as an Agent-SDK verdict even at an
+ * identical model tier, and a provenance UI that implied equivalence would be
+ * worse than none.
  */
 function printBackendFooter(cfg: UserConfig): void {
   const override = process.env.STAMP_REVIEWER_BACKEND?.trim();
@@ -258,15 +273,51 @@ function printBackendFooter(cfg: UserConfig): void {
         `it overrides the per-reviewer choice above for every run from this shell.`,
     );
   }
-  const anyLocal = Object.keys(cfg.reviewers).some(
-    (name) => resolveReviewerBackendFrom(cfg, name).kind === "local",
-  );
-  if (anyLocal) {
+  const oneShotBackends = Object.keys(cfg.reviewers)
+    .map((name) => resolveReviewerBackendFrom(cfg, name))
+    .filter((b) => b.kind === "openai-compatible");
+  if (oneShotBackends.length > 0) {
     console.log(
-      `note: [local ...] reviewers run one shot against an OpenAI-compatible ` +
-        `endpoint — no tool loop, no repo reads, no MCP. Their verdicts gate ` +
-        `\`stamp merge\` exactly like Anthropic ones; the review is not equivalent.`,
+      `note: [openai-compatible ...] reviewers run ONE SHOT against a ` +
+        `/chat/completions endpoint — no tool loop, no repo reads, no MCP, ` +
+        `and tools off by default. A reviewer with ` +
+        `\`enforce_reads_on_dotstamp\` is honoured by inlining the changed ` +
+        `.stamp/ files into the diff, not by letting the model read them. ` +
+        `Their verdicts gate \`stamp merge\` exactly like Anthropic ones; the ` +
+        `review is not equivalent.`,
     );
+    printCredentialLines(cfg, oneShotBackends);
+  }
+}
+
+/**
+ * One line per distinct endpoint: which provider it resolves to and where
+ * its credential comes from.
+ *
+ * Prints the credential's SOURCE — an env var name or a config key — and
+ * never its value. `show` is the command an operator runs when a review
+ * fails to authenticate, so "which of the three places did the key actually
+ * come from" is the answer it owes them; the key itself is the one thing it
+ * must never put on a terminal that may be shared or recorded.
+ */
+function printCredentialLines(
+  cfg: UserConfig,
+  backends: ReviewerBackend[],
+): void {
+  const endpoints = new Set<string>();
+  for (const b of backends) {
+    if (b.kind !== "openai-compatible") continue;
+    endpoints.add(b.endpoint ?? LOCAL_DEFAULT_BASE_URL);
+  }
+  for (const endpoint of [...endpoints].sort()) {
+    const cred = resolveProviderCredentialFrom(cfg, endpoint);
+    const state =
+      cred.apiKey !== null
+        ? `credential from ${cred.source}`
+        : cred.required
+          ? `NO CREDENTIAL — set ${providerEnvVar(cred.providerId)} or provider_keys.${cred.providerId}; reviews against this endpoint will fail`
+          : `no credential configured (a placeholder token is sent; fine for a server that ignores it)`;
+    console.log(`      ${endpoint}  provider=${cred.providerId}  ${state}`);
   }
 }
 

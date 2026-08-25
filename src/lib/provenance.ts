@@ -62,6 +62,31 @@ export const PROVENANCE_KIND_ANTHROPIC = "anthropic";
 export const PROVENANCE_KIND_OPENAI_COMPATIBLE = "local";
 
 /**
+ * How the stored `"local"` kind is DISPLAYED after AGT-1138 renamed the
+ * concept. The stored value stays `"local"` forever — rewriting rows already
+ * in the field would be a data migration in service of a label — so the
+ * rename lives entirely on the read side, here.
+ *
+ * Two rows both reading `local` told an operator nothing about whether a
+ * verdict came from OpenAI, DeepSeek, or a model on their desk. They are now
+ * `openai-compatible @ <endpoint>`, and the endpoint is what separates the
+ * providers (AC6).
+ */
+export const PROVENANCE_LABEL_OPENAI_COMPATIBLE = "openai-compatible";
+
+/**
+ * Map a STORED `backend_kind` to its display label. Only the
+ * openai-compatible kind differs; every other kind is shown as stored, so an
+ * unrecognised value from a future writer renders as itself rather than
+ * being swallowed.
+ */
+export function provenanceKindLabel(storedKind: string): string {
+  return storedKind === PROVENANCE_KIND_OPENAI_COMPATIBLE
+    ? PROVENANCE_LABEL_OPENAI_COMPATIBLE
+    : storedKind;
+}
+
+/**
  * Server-attested transport (`review_server` on the branch rule). The
  * reviewer ran on the stamp-server, so the client knows the endpoint it
  * asked but NOT which model the server chose — `backend_model` is null and
@@ -85,6 +110,9 @@ export const PROVENANCE_UNKNOWN_LABEL = "unknown";
  * verdict" must not answer "whatever the default was at the time".
  */
 export function backendProvenance(backend: ReviewerBackend): ReviewProvenance {
+  // AGT-1138: the resolver's kind is now `openai-compatible`, but the STORED
+  // value stays `PROVENANCE_KIND_OPENAI_COMPATIBLE` (the literal `"local"`).
+  // This function is the seam that keeps the rename off the data.
   if (backend.kind === "anthropic") {
     return {
       backend_kind: PROVENANCE_KIND_ANTHROPIC,
@@ -141,9 +169,15 @@ export function provenanceFromRow(row: {
  *
  *   anthropic / claude-sonnet-4-6
  *   anthropic / (sdk default)
- *   local / qwen3-coder-30b @ http://localhost:8000/v1
+ *   openai-compatible / qwen3-coder-30b @ http://localhost:8000/v1
+ *   openai-compatible / gpt-5 @ https://api.openai.com/v1
+ *   openai-compatible / deepseek-chat @ https://api.deepseek.com/v1
  *   server / (model unknown) @ ssh://stamp@host/org/repo
  *   unknown
+ *
+ * The endpoint is what makes an OpenAI review and a DeepSeek review
+ * separable in `stamp log --reviews` — the kind alone cannot, since both ride
+ * the one adapter (AGT-1138 AC6).
  *
  * Null input renders `unknown` rather than an empty string so the operator
  * sees the gap instead of a blank they might read as "nothing special".
@@ -156,7 +190,7 @@ export function formatProvenance(p: ReviewProvenance | null): string {
       ? "(sdk default)"
       : "(model unknown)");
   const endpoint = p.backend_endpoint ? ` @ ${p.backend_endpoint}` : "";
-  return `${p.backend_kind} / ${model}${endpoint}`;
+  return `${provenanceKindLabel(p.backend_kind)} / ${model}${endpoint}`;
 }
 
 /**

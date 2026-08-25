@@ -265,7 +265,7 @@ describe("resolveReviewerBackend + local: scheme", () => {
       local_endpoint: "http://localhost:1234/v1",
     });
     assert.deepEqual(resolveReviewerBackend("security"), {
-      kind: "local",
+      kind: "openai-compatible",
       model: "qwen2.5-coder-32b",
       endpoint: "http://localhost:1234/v1",
       enableTools: false,
@@ -275,7 +275,7 @@ describe("resolveReviewerBackend + local: scheme", () => {
   it("local backend endpoint is undefined when local_endpoint is unset (adapter defaults)", () => {
     writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
     assert.deepEqual(resolveReviewerBackend("security"), {
-      kind: "local",
+      kind: "openai-compatible",
       model: "qwen",
       endpoint: undefined,
       enableTools: false,
@@ -327,7 +327,7 @@ describe("resolveReviewerBackend + local: scheme", () => {
     const saved = process.env.STAMP_REVIEWER_BACKEND;
     process.env.STAMP_REVIEWER_BACKEND = "banana";
     try {
-      assert.equal(resolveReviewerBackend("security").kind, "local");
+      assert.equal(resolveReviewerBackend("security").kind, "openai-compatible");
     } finally {
       if (saved === undefined) delete process.env.STAMP_REVIEWER_BACKEND;
       else process.env.STAMP_REVIEWER_BACKEND = saved;
@@ -384,7 +384,7 @@ describe("STAMP_REVIEWER_BACKEND=local override", () => {
       },
       () => {
         assert.deepEqual(resolveReviewerBackend("security"), {
-          kind: "local",
+          kind: "openai-compatible",
           model: "qwen3-coder-30b",
           endpoint: "http://127.0.0.1:8000/v1",
           enableTools: false,
@@ -400,7 +400,7 @@ describe("STAMP_REVIEWER_BACKEND=local override", () => {
     });
     withEnv({ STAMP_REVIEWER_BACKEND: "local" }, () => {
       assert.deepEqual(resolveReviewerBackend("security"), {
-        kind: "local",
+        kind: "openai-compatible",
         model: "cfg-model",
         endpoint: "http://localhost:1234/v1",
         enableTools: false,
@@ -431,7 +431,7 @@ describe("STAMP_REVIEWER_BACKEND=local override", () => {
     writeUserConfig({ reviewers: { security: "claude-opus-4-7" } });
     withEnv({ STAMP_REVIEWER_BACKEND: "local", STAMP_LOCAL_MODEL: "m" }, () => {
       assert.deepEqual(resolveReviewerBackend("security"), {
-        kind: "local",
+        kind: "openai-compatible",
         model: "m",
         endpoint: undefined,
         enableTools: false,
@@ -481,7 +481,7 @@ describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", ()
     writeUserConfig({ reviewers: { security: `${LOCAL_MODEL_PREFIX}qwen` } });
     withEnvTools({}, () => {
       const b = resolveReviewerBackend("security");
-      assert.equal(b.kind, "local");
+      assert.equal(b.kind, "openai-compatible");
       assert.equal((b as { enableTools: boolean }).enableTools, false);
     });
   });
@@ -493,7 +493,7 @@ describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", ()
     });
     withEnvTools({}, () => {
       const b = resolveReviewerBackend("security");
-      assert.equal(b.kind, "local");
+      assert.equal(b.kind, "openai-compatible");
       assert.equal((b as { enableTools: boolean }).enableTools, true);
     });
   });
@@ -505,7 +505,7 @@ describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", ()
     });
     withEnvTools({}, () => {
       const b = resolveReviewerBackend("security");
-      assert.equal(b.kind, "local");
+      assert.equal(b.kind, "openai-compatible");
       assert.equal((b as { enableTools: boolean }).enableTools, false);
     });
   });
@@ -518,7 +518,7 @@ describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", ()
     });
     withEnvTools({ STAMP_LOCAL_TOOLS: "1" }, () => {
       const b = resolveReviewerBackend("security");
-      assert.equal(b.kind, "local");
+      assert.equal(b.kind, "openai-compatible");
       assert.equal((b as { enableTools: boolean }).enableTools, true);
     });
   });
@@ -528,7 +528,7 @@ describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", ()
     for (const val of ["true", "yes"]) {
       withEnvTools({ STAMP_LOCAL_TOOLS: val }, () => {
         const b = resolveReviewerBackend("security");
-        assert.equal(b.kind, "local");
+        assert.equal(b.kind, "openai-compatible");
         assert.equal(
           (b as { enableTools: boolean }).enableTools,
           true,
@@ -547,7 +547,7 @@ describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", ()
     withEnvTools({ STAMP_LOCAL_TOOLS: "0" }, () => {
       // local_tools: true in config still wins when env doesn't actively enable
       const b = resolveReviewerBackend("security");
-      assert.equal(b.kind, "local");
+      assert.equal(b.kind, "openai-compatible");
       assert.equal((b as { enableTools: boolean }).enableTools, true);
     });
   });
@@ -565,7 +565,7 @@ describe("local_tools config field + STAMP_LOCAL_TOOLS env — tools opt-in", ()
       },
       () => {
         const b = resolveReviewerBackend("security");
-        assert.equal(b.kind, "local");
+        assert.equal(b.kind, "openai-compatible");
         assert.equal((b as { enableTools: boolean }).enableTools, true);
       },
     );
@@ -830,7 +830,7 @@ describe("stamp config reviewers — CLI handlers", () => {
     const out = logs.text();
     assert.match(
       out,
-      /security.*\[local model=qwen3-coder-30b @ http:\/\/localhost:8000\/v1\]/,
+      /security.*\[openai-compatible provider=local model=qwen3-coder-30b @ http:\/\/localhost:8000\/v1\]/,
       "a local: reviewer must show its backend, model and endpoint",
     );
     assert.match(
@@ -855,7 +855,7 @@ describe("stamp config reviewers — CLI handlers", () => {
     } finally {
       logs.restore();
     }
-    assert.match(logs.text(), /\[local model=qwen3-coder-30b @ http:\/\/localhost:1234\/v1\]/);
+    assert.match(logs.text(), /\[openai-compatible provider=local model=qwen3-coder-30b @ http:\/\/localhost:1234\/v1\]/);
   });
 
   it("show surfaces a STAMP_REVIEWER_BACKEND override that outranks the file", () => {
@@ -876,7 +876,7 @@ describe("stamp config reviewers — CLI handlers", () => {
     assert.match(out, /STAMP_REVIEWER_BACKEND=local is set/);
     assert.match(
       out,
-      /security.*\[local model=qwen3-coder-30b/,
+      /security.*\[openai-compatible provider=local model=qwen3-coder-30b/,
       "the env override must be reflected per reviewer, not just noted",
     );
   });
