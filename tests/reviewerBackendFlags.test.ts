@@ -75,7 +75,21 @@ const MANAGED_ENV_KEYS = [
   "STAMP_OPENAI_COMPATIBLE_MODEL",
   "STAMP_OPENAI_COMPATIBLE_ENDPOINT",
   "STAMP_OPENAI_API_KEY",
+  "STAMP_DEEPSEEK_API_KEY",
   "OPENAI_API_KEY",
+  "DEEPSEEK_API_KEY",
+  // Ambient-shell hazards for the runReview() integration tests below
+  // (section 3): none of these gate CREDENTIAL resolution, but several gate
+  // whether disclosure/notice TEXT is printed at all, which is exactly what
+  // those tests assert on. A shell that happens to export one of these
+  // (e.g. from an earlier manual `STAMP_SUPPRESS_LLM_NOTICE=1 stamp review`)
+  // must not change whether these tests pass — that was the actual AGT-1139
+  // hermeticity bug: STAMP_SUPPRESS_LLM_NOTICE ambient in the merge
+  // environment silenced the disclosure this suite asserts on, which had
+  // nothing to do with credential resolution.
+  "STAMP_SUPPRESS_LLM_NOTICE",
+  "STAMP_NO_LLM",
+  "STAMP_ANTHROPIC_NO_RETAIN",
 ] as const;
 
 /** Run `fn` with exactly the given env keys set; everything else in the
@@ -402,10 +416,30 @@ describe("AGT-1139: --endpoint moves the AGT-415 data-flow disclosure", () => {
     await withEnvAsync({}, async () => {
       const cap = captureStreams();
       try {
-        // No credential is configured for api.openai.com, so the reviewer
-        // fails fast (missing-credential error, no network call) — but the
-        // disclosure decision is made and printed BEFORE that invocation,
-        // so this assertion holds regardless of the reviewer's outcome.
+        // The disclosure block (review.ts: `if (offHostCount > 0) { ... }`)
+        // runs and prints BEFORE any reviewer is invoked — it does not
+        // depend on, wait on, or get gated by credential resolution, which
+        // only happens later, inside invokeLocalReviewer's buildClient(),
+        // at actual invocation time. So this assertion is unconditionally
+        // true for ANY outcome of the reviewer call that follows.
+        //
+        // What the reviewer call itself does here is a SEPARATE, also-
+        // deterministic concern with no relevance to the assertions below:
+        // with every credential env var cleared by withEnvAsync (see
+        // MANAGED_ENV_KEYS) and no provider_keys in the fresh tmpHome
+        // config, credential resolution for api.openai.com finds nothing
+        // and buildClient() throws its missing-credential error BEFORE any
+        // fetch — so this test makes no network call and needs none.
+        //
+        // The ONE thing that genuinely gates whether the disclosure TEXT
+        // below gets printed at all is STAMP_SUPPRESS_LLM_NOTICE
+        // (dataFlow.ts: `noticesSuppressed()`), which is why it — along
+        // with every credential var — is in MANAGED_ENV_KEYS and cleared by
+        // withEnvAsync. A prior version of this test omitted it, which
+        // passed only in a shell with that var unset and failed identically
+        // to a real defect (missing disclosure) wherever it happened to be
+        // exported (e.g. a `stamp merge` environment inheriting it from an
+        // earlier `STAMP_SUPPRESS_LLM_NOTICE=1 stamp review` invocation).
         await runReview({
           diff: "main..feature",
           backend: "openai-compatible",
