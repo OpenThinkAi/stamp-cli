@@ -728,11 +728,16 @@ program
     "--no-prose",
     "record only the verdict + diff/prompt hashes, omitting reviewer prose from `.git/stamp/state.db` (for regulated repos that don't want quoted diff snippets persisted). The gate, cache, and attestation are unaffected. Note: a later cached hit on the same (diff, prompt, reviewer) replays empty prose unless --no-cache.",
   )
+  .option(
+    "--prview <file>",
+    "also write the review as a prview `prview-review/1` document to <file> (open it with `prview show <file>`): each reviewer's prose becomes findings — line-anchored where the prose names a file and line in the diff, otherwise placed on the file's first hunk — with source `stamp:<reviewer>`, anchored on the head commit. The gate, verdict cache, and attestation are unchanged. Not combinable with --plan or --headless.",
+  )
   .action(
     async (opts: {
       diff: string;
       only?: string;
       into?: string;
+      prview?: string;
       backend?: string;
       model?: string;
       endpoint?: string;
@@ -756,6 +761,7 @@ program
           allowLarge: opts.allowLarge,
           noCache: opts.cache === false,
           noProse: opts.prose === false,
+          prview: opts.prview,
           plan: opts.plan === true,
           headless: opts.headless === true,
         });

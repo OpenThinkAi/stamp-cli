@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/OpenThinkAi/prview/schema/prview-review-1.schema.json",
+  "title": "prview-review/1",
+  "description": "A review of one change, anchored on its head commit. Producers write it; prview reads it. Fields prview does not know are ignored; values it cannot use are dropped, not fatal.",
+  "type": "object",
+  "required": ["schema", "target"],
+  "properties": {
+    "schema": { "const": "prview-review/1" },
+    "target": {
+      "description": "The change under review. The document only opens against `head`.",
+      "type": "object",
+      "required": ["base", "head"],
+      "properties": {
+        "repo": { "type": "string", "description": "owner/name for a hosted repo, else the repo's name" },
+        "base": { "$ref": "#/$defs/sha", "description": "the commit the change is compared against (the merge base)" },
+        "head": { "$ref": "#/$defs/sha", "description": "the commit being reviewed" },
+        "url": { "type": "string", "description": "the pull request's URL, when there is one" },
+        "platform": { "type": "string", "description": "where the pull request lives, e.g. github" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "label": { "type": "string", "description": "a short name for the change, e.g. owner/name#42 or main..feature" }
+      }
+    },
+    "plan": {
+      "description": "The reading order. Optional: without chapters prview reads the change file by file.",
+      "type": "object",
+      "properties": {
+        "summary": { "type": "string", "maxLength": 400 },
+        "by": { "type": "string", "description": "who ordered the chapters; \"files\" means the file-by-file fallback" },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title", "hunks"],
+            "properties": {
+              "title": { "type": "string", "maxLength": 60 },
+              "intent": { "type": "string", "description": "one line, imperative, at most 12 words" },
+              "why": { "type": "string", "maxLength": 400 },
+              "hunks": { "type": "array", "items": { "$ref": "#/$defs/hunk" } }
+            }
+          }
+        },
+        "mechanical": {
+          "description": "Written by prview for reference; recomputed by rule on every read, so a producer's value is ignored.",
+          "type": "array",
+          "items": { "type": "object", "properties": { "id": { "$ref": "#/$defs/hunk" }, "why": { "type": "string" } } }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "hunk", "line", "claim"],
+        "properties": {
+          "id": { "type": ["string", "number"], "description": "unique within the document; prview renames a repeat" },
+          "source": { "type": "string", "maxLength": 40, "description": "the producer's name, shown beside the finding" },
+          "hunk": { "$ref": "#/$defs/hunk" },
+          "side": { "enum": ["new", "old"], "default": "new" },
+          "line": { "type": "integer", "description": "a line number on `side`; one outside the hunk moves to the hunk's first line" },
+          "severity": { "enum": ["blocking", "warn", "nit"], "default": "warn" },
+          "kind": { "type": "string", "maxLength": 30, "description": "e.g. bug, security, correctness, design, test, perf" },
+          "claim": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "evidence": { "type": "string", "maxLength": 500 },
+          "refute": { "type": "string", "maxLength": 300, "description": "what a second look concluded" },
+          "status": { "enum": ["upheld", "withdrawn", "unrefuted"], "default": "unrefuted" },
+          "votes": { "type": "integer", "minimum": 1, "maximum": 99, "description": "how many of the producer's repeated runs raised this finding; leave out if it ran once" }
+        }
+      }
+    },
+    "human": {
+      "description": "The reader's layer. A producer normally leaves it out.",
+      "type": "object",
+      "properties": {
+        "comments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text"],
+            "properties": {
+              "hunk": { "oneOf": [{ "$ref": "#/$defs/hunk" }, { "type": "null" }], "description": "null for a comment on the whole change" },
+              "side": { "enum": ["new", "old"] },
+              "line": { "type": ["integer", "null"] },
+              "text": { "type": "string" },
+              "at": { "type": "string", "description": "ISO 8601" }
+            }
+          }
+        },
+        "dismissals": { "type": "array", "items": { "type": "string" }, "description": "finding ids" },
+        "visited": { "type": "array", "items": { "$ref": "#/$defs/hunk" } },
+        "verdict": { "enum": ["approve", "request_changes", "comment"] }
+      }
+    },
+    "on_submit": {
+      "description": "Reserved. A command the producer wants run after the review is submitted; prview drops it on import until submission can show it and ask the human first.",
+      "type": "object",
+      "required": ["run"],
+      "properties": { "run": { "type": "array", "minItems": 1, "items": { "type": "string" } } }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" },
+    "hunk": {
+      "type": "string",
+      "description": "path@oldStart:newStart from `git diff -M base head` (the numbers in the @@ header), or path@file for a file with no hunks",
+      "pattern": "^.+@(\\d+:\\d+|file)$"
+    }
+  }
+}
