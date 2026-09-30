@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { findBranchRule, parseConfigFromYaml, type StampConfig } from "../lib/config.js";
 import {
   findCachedVerdict,
@@ -87,6 +87,12 @@ import {
 import { formatRetroBlock } from "../lib/retro.js";
 import { serializeToolCalls } from "../lib/toolCalls.js";
 import { printRetentionAdvisory } from "./retentionAdvisory.js";
+import {
+  buildPrviewDocument,
+  prviewDiff,
+  resolvePrviewTarget,
+  type PrviewReviewerInput,
+} from "../lib/prviewDocument.js";
 
 export interface ReviewOptions {
   diff: string;
@@ -150,6 +156,16 @@ export interface ReviewOptions {
    * reviewer) tuple will cache-hit and replay empty prose unless --no-cache.
    */
   noProse?: boolean;
+  /**
+   * AGT-1426: after the review, also write a prview `prview-review/1`
+   * document to this path — each reviewer's prose folded into findings
+   * (line-anchored where the prose names a file and line in the diff, else
+   * on the file/hunk), `source: stamp:<reviewer>`, anchored on the head
+   * commit. Read-only with respect to the review: the gate, verdict cache,
+   * and attestation are unchanged. Trusted (local and server-attested)
+   * modes only; rejected with `--plan` / `--headless`.
+   */
+  prview?: string;
   /**
    * Local-only mode (design.md "Local-only mode (Option E)"). When true,
    * emit a structured JSON plan on stdout instead of calling the LLM. The
@@ -247,6 +263,14 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         "review variants). Pick `--plan` when there's a parent Claude Code " +
         "agent in the loop to dispatch subagents, or `--headless` for " +
         "cron / git hooks / scripts where stamp itself drives the API call.",
+    );
+  }
+
+  if (opts.prview !== undefined && (opts.plan || opts.headless)) {
+    throw new UsageError(
+      "--prview writes a prview document from a trusted-mode review; it " +
+        "cannot be combined with --plan or --headless (which emit their own " +
+        "JSON on stdout and produce no gate verdict).",
     );
   }
 
@@ -930,10 +954,16 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
     }
 
     let anyFailed = false;
+    const prviewReviewers: PrviewReviewerInput[] = [];
     for (let i = 0; i < reviewerNames.length; i++) {
       const name = reviewerNames[i]!;
       const outcome = results[i]!;
       if (outcome.status === "fulfilled") {
+        prviewReviewers.push({
+          reviewer: name,
+          verdict: outcome.value.verdict,
+          prose: outcome.value.prose,
+        });
         const cached = cacheHits.get(name);
         recordReview(db, {
           reviewer: name,
@@ -977,6 +1007,10 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         anyFailed = true;
         printError(name, outcome.reason);
       }
+    }
+
+    if (opts.prview !== undefined) {
+      writePrviewFile(opts.prview, resolved, repoRoot, prviewReviewers);
     }
 
     if (anyFailed) {
@@ -1133,6 +1167,33 @@ export function maybeMintPrAttestation(args: {
 function backendSendsOffHost(backend: ReviewerBackend): boolean {
   if (backend.kind === "anthropic") return true;
   return !isLoopbackEndpoint(backend.endpoint ?? LOCAL_DEFAULT_BASE_URL);
+}
+
+/**
+ * AGT-1426: write the prview document for a finished review. The review is
+ * already recorded by now; a write failure throws so the operator is not
+ * left believing a document exists.
+ */
+function writePrviewFile(
+  file: string,
+  resolved: ResolvedDiff,
+  repoRoot: string,
+  reviewers: PrviewReviewerInput[],
+): void {
+  const doc = buildPrviewDocument({
+    target: resolvePrviewTarget({
+      repoRoot,
+      revspec: resolved.revspec,
+      baseSha: resolved.base_sha,
+      headSha: resolved.head_sha,
+    }),
+    diff: prviewDiff(resolved.base_sha, resolved.head_sha, repoRoot),
+    reviewers,
+  });
+  writeFileSync(file, JSON.stringify(doc, null, 2) + "\n");
+  console.log(
+    `note: prview document written to ${file} (${doc.findings.length} finding${doc.findings.length === 1 ? "" : "s"}); open with \`prview show ${file}\``,
+  );
 }
 
 function sha256(s: string): string {
@@ -1360,12 +1421,18 @@ async function runServerAttestedReviews(input: {
 
   const db = openDb(stampStateDbPath(repoRoot));
   let anyFailed = false;
+  const prviewReviewers: PrviewReviewerInput[] = [];
   try {
     for (let i = 0; i < reviewerNames.length; i++) {
       const name = reviewerNames[i]!;
       const outcome = results[i]!;
       if (outcome.status === "fulfilled") {
         const verdict: ServerReviewResult = outcome.value;
+        prviewReviewers.push({
+          reviewer: name,
+          verdict: verdict.verdict,
+          prose: verdict.prose,
+        });
         recordReview(db, {
           reviewer: name,
           base_sha: resolved.base_sha,
@@ -1418,6 +1485,10 @@ async function runServerAttestedReviews(input: {
     // provider. Same shared tail helper as the local-LLM path to avoid drift.
     printRetentionAdvisory(db, repoRoot, config.retention);
     db.close();
+  }
+
+  if (opts.prview !== undefined) {
+    writePrviewFile(opts.prview, resolved, repoRoot, prviewReviewers);
   }
 
   if (anyFailed) {

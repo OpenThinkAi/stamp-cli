@@ -5,6 +5,17 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## Unreleased
+
+- `stamp review --prview <file>` also writes the review as a prview
+  `prview-review/1` document (open it with `prview show <file>`): reviewer prose
+  becomes findings with `source: stamp:<reviewer>`, line-anchored where the
+  prose names a file and line in the diff, otherwise placed on the file's first
+  hunk; anchored on the head commit, `on_submit` declares `stamp attest --from
+  {file}`. The gate, verdict cache, and attestation are unchanged.
+
+---
+
 ## 3.3.0 — 2026-09-29
 
 Reviewer providers become a first-class choice: OpenAI and DeepSeek join the
