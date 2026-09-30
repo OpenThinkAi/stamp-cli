@@ -267,7 +267,9 @@ stamp init [--mode <mode>]                 # scaffold .stamp/ + keypair; idempot
                                            #   origins default to local-only with a loud warning).
 stamp bootstrap                            # one-shot: replace placeholder example reviewer
                                            #   with real reviewers on a fresh server-provisioned
-                                           #   repo. See `stamp bootstrap --help`.
+                                           #   repo. Its merge prompts y/N like `stamp merge`;
+                                           #   pass --yes to run unattended (CI, build worker).
+                                           #   See `stamp bootstrap --help`.
 stamp review --diff <revspec>              # run all configured reviewers in parallel
 stamp review --diff <revspec> --only <name> # run a single reviewer
 stamp status --diff <revspec>              # gate check; exit 0 if open, 1 if closed
@@ -277,6 +279,9 @@ stamp merge <branch> --into <target>       # operator confirmation → merge →
                                            #   or branches.<name>.require_human_merge: false in config.
                                            #   audit H1.
 stamp push <target>                        # plain git push; hook stderr forwarded
+stamp push <target> --resync-mirror        # also ask the server to re-feed branch tips through
+                                           #   the post-receive hook, so a repaired GitHub mirror
+                                           #   catches up without waiting for the next real push
 stamp verify <sha>                         # verify a merge commit's attestation locally
 ```
 
@@ -340,6 +345,20 @@ stamp reviewers fetch <name> --from <source@ref>  # install + pin from canonical
                                                    #   add --expect-prompt-sha <hex> (or --expect-tools-sha / --expect-mcp-sha)
                                                    #   to anchor first-fetch trust against an out-of-band published manifest
 stamp reviewers verify [<name>]                   # check prompt/tool/mcp against lock; exit 3 on drift
+```
+
+**Reviewer backend & model selection** (per-user, `~/.stamp/config.yml`; full detail under [Configuration](#configuration)):
+
+```
+stamp config reviewers show                       # what WILL run per reviewer: backend, model, endpoint, credential source
+stamp config reviewers set <name> <model-id>      # pin a reviewer's model (anthropic, or openai-compatible:<id>)
+stamp config reviewers clear <name> | --all       # drop one pin, or the whole file
+stamp config reviewers set-endpoint <url>         # pin the openai-compatible endpoint (localhost, OpenAI, DeepSeek)
+stamp config reviewers clear-endpoint             # remove it (both spellings)
+stamp config reviewers set-tools <on|off>         # opt the openai-compatible backend into the `tools` field
+stamp config reviewers clear-tools                # remove the opt-in (both spellings)
+stamp review --diff <revspec> --backend <kind> --model <id> --endpoint <url>
+                                                  # one-run override; flag > env > config > default; never persisted
 ```
 
 **Key management:**

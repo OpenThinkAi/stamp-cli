@@ -92,7 +92,7 @@ stamp bootstrap                          # land real reviewers via the placehold
 # (manually create the GitHub mirror, write .stamp/mirror.yml, apply ruleset)
 ```
 
-`stamp bootstrap` accepts `--from /path/to/.stamp/` if you want to install a pre-prepared reviewer set instead of the three starters.
+`stamp bootstrap` accepts `--from /path/to/.stamp/` if you want to install a pre-prepared reviewer set instead of the three starters. Its final merge asks for y/N confirmation like `stamp merge` does; running it unattended (CI, a build worker, no TTY) needs `--yes`, which scopes the opt-out to that one merge.
 
 ## Step 4 — Customize the reviewer prompts
 

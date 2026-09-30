@@ -5,9 +5,46 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
-## Unreleased
+## 3.3.0 — 2026-09-29
+
+Reviewer providers become a first-class choice: OpenAI and DeepSeek join the
+local and Anthropic backends, every verdict records which backend/model/endpoint
+produced it, and `stamp review` takes `--backend/--model/--endpoint` flags.
+`stamp bootstrap --yes` finally lets bootstrap run unattended (#66). Plus the
+parallel-branch review contamination fix (#65), the half-provisioned mirror fix
+(#64), and a dependency pass.
 
 ### Added
+
+- **`stamp review --backend <kind> --model <id> --endpoint <url>`** (AGT-1139)
+  — choose a reviewer's provider for one run without env vars or hand-edited
+  YAML. Resolution is narrowest-wins: flag > env > `~/.stamp/config.yml` >
+  default, one mechanism, not a second one. An unrecognised `--backend`, or
+  `--endpoint` combined with `--backend anthropic`, is a usage error before
+  any repo, config, or network access. A flag-selected endpoint moves the
+  data-flow disclosure and the per-provider credential requirement exactly as
+  an env-var one would, and no flag ever writes to `~/.stamp/config.yml` — the
+  new `stamp config reviewers set-endpoint / clear-endpoint / set-tools /
+  clear-tools` verbs are the only persistent path.
+
+- **`STAMP_REVIEWER_MODEL` on the server** selects the model the
+  `stamp-review` SSH verb runs. It was always the server default; the only
+  model knob (`~/.stamp/config.yml`) applied to local/headless mode and never
+  reached the server. A malformed value warns and falls back to the default.
+  Documented in `server/README.md`.
+
+- **`stamp push <target> --resync-mirror`** and a server-side `resync-mirror`
+  verb re-feed branch tips through the post-receive hook, so a mirror that was
+  repaired after a failed deploy-key registration catches up without waiting
+  for the next real push (#64, see Fixed).
+
+- **`stamp reviewers verify` lints persona prompts against config** (AGT-878).
+  A reviewer with `enforce_reads_on_dotstamp: true` whose persona puts
+  `.stamp/` out of scope is a contradiction that cost two review rounds on a
+  real repo; the lint names the offending line and exits 3, the lock-drift
+  convention. `--no-persona-lint` is the escape hatch for a false positive.
+  Nothing about enforcement changes — the runtime Read directive and the
+  post-verdict backstop stay as they were.
 
 - **OpenAI and DeepSeek are reachable as reviewer backends.** The
   non-Anthropic reviewer path already spoke OpenAI-compatible
@@ -123,6 +160,50 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
     A message-only `--amend` now re-runs the reviewer instead of replaying;
     re-running review on an unchanged head still hits the cache, which is
     the anti-treadmill property that matters.
+
+- **A provisioned mirror can no longer be left without its deploy key** (#64).
+  `stamp provision` now applies the deploy key and Ruleset *before* bootstrap
+  (the step most likely to abort), verifies both exist on the mirror before
+  printing success, and exits non-zero with the repair spelled out when they
+  don't. The post-receive hook's `Permission denied (publickey)` message now
+  names the actual repair (`stamp provision --migrate-bypass` then
+  `stamp push --resync-mirror`) instead of a generic retry line.
+
+- **`stamp init --mode attested-pr` emits the AGENTS.md for the signing model
+  it actually scaffolded** (AGT-880). It deposited a local signing key and
+  local reviewer prompts, then wrote the server-attested body — pointing
+  contributors at a `manifest.yml` and server pubkey that were never created
+  and saying no client key was needed when the local key was the whole trust
+  root. The body is now chosen by inspecting the scaffold on disk, so the
+  `--migrate-to-server-attested` path keeps its server text.
+
+- **`stamp server-repos list` works against a git-shell server** (AGT-882).
+  It sent a raw `ls -1 /srv/git/`, which git-shell rejects; the client now
+  invokes a `list-stamp-repos` verb that the server image ships, and on
+  failure points at a stale image rather than a bare exit code. Rebuild the
+  server image to pick the verb up.
+
+- **`stamp provision` surfaces the GitHub error body on `gh api` failures**
+  (AGT-879, #54). `gh api` puts the cause on stdout and a terse headline on
+  stderr; the failure paths kept only stderr, so "deploy keys disabled at the
+  org level" reported nothing actionable. That specific 422 now also carries
+  a hint pointing at the repo and org settings that fix it.
+
+- **Delta review no longer switches itself off for non-ASCII filenames.**
+  git's C-quoted paths were decoded as code points, so `café.ts` parsed as
+  mojibake, never matched the real path, and every delta touching such a file
+  fell back (safely, silently) to a full review. Bytes are now decoded once,
+  as UTF-8.
+
+### Dependencies
+
+- `@anthropic-ai/claude-agent-sdk` 0.2 → 0.3, `commander` 13 → 14,
+  `typescript` 5 → 7, `tsx`, and the transitive `hono`, `fast-uri`,
+  `ip-address`, `express-rate-limit`, `body-parser`, `qs`, `yaml` bumps. The
+  server runtime image moves from Alpine 3.21 to 3.24 (3.21 is near EOL); the
+  builder stays on Node 24 LTS. `--help` output and usage errors are
+  byte-identical across the commander major. `@types/node` stays on 22.x to
+  match the `engines` floor.
 
 ---
 
