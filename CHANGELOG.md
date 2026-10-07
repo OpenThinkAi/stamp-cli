@@ -14,6 +14,16 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
   hunk; anchored on the head commit, `on_submit` declares `stamp attest --from
   {file}`. The gate, verdict cache, and attestation are unchanged.
 
+### Dependencies
+
+- Security dependency pass (AGT-1431): transitive `proxy-addr` 2.0.8
+  (GHSA-jqcg-44mw-7w3h, critical), `@modelcontextprotocol/sdk` 1.32.1
+  (GHSA-6qxp-vccf-f47h, high), `@hono/node-server` 2.1.3 via the MCP SDK's own
+  range (GHSA-frvp-7c67-39w9, moderate), and a flat `esbuild` `^0.28.1`
+  override (GHSA-g7r4-m6w7-qqqr, low) — `tsup` 8.5.1 still pins
+  `esbuild ^0.27`, which has no patched release. No direct dependency
+  changes; `npm audit` reports 0 vulnerabilities.
+
 ---
 
 ## 3.3.0 — 2026-09-29
