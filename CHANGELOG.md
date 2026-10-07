@@ -7,6 +7,16 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ## Unreleased
 
+---
+
+## 3.3.1 — 2026-10-06
+
+A security dependency pass (four transitive advisories, one critical and one
+high) plus an opt-in `stamp review --prview <file>` output. The gate,
+verdict cache and attestation format are unchanged.
+
+### Added
+
 - `stamp review --prview <file>` also writes the review as a prview
   `prview-review/1` document (open it with `prview show <file>`): reviewer prose
   becomes findings with `source: stamp:<reviewer>`, line-anchored where the
