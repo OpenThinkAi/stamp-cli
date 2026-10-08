@@ -9,6 +9,27 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.3.2 — 2026-10-07
+
+A non-security dependency pass (dependabot #71–#75). No CLI, gate, verdict
+cache or attestation changes.
+The dependency changes landed on main before this release cut, in commit
+b3a7721 (merged as 9aa1dfa); this release only versions them.
+`npm audit --package-lock-only` at the release head reports 0 vulnerabilities.
+
+### Dependencies
+
+- Version bumps (AGT-1646): `zod` ^4.6.5 (#73), `react` ^19.3.0 and
+  `@types/react` ^19.3.0 (#72), `@anthropic-ai/sdk` ^0.128.0 (#75; the
+  Messages call shape stamp uses is unchanged, no call-site changes), and
+  `@types/node` ^22.20.5. The `esbuild` ^0.28.1 override stays.
+- Declined: `@types/node` 26 (#71) — the types track the engines floor
+  (Node >=22.5), so they stay on 22.x. The PR will stay open.
+- Held: `commander` 15 (#74) is ESM-only and requires Node >=22.12, above
+  stamp's Node >=22.5 floor. It waits for a deliberate engines bump.
+
+---
+
 ## 3.3.1 — 2026-10-06
 
 A security dependency pass (four transitive advisories, one critical and one
