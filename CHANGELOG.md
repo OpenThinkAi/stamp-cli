@@ -9,6 +9,34 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.4.0 — 2026-10-08
+
+Takes `commander` 15 and raises the Node engines floor to match. No CLI,
+gate, verdict cache or attestation changes.
+The changes landed on main before this release cut, in commit 3f3b14d
+(merged as 7f33f7e); this release only versions them.
+`npm audit --package-lock-only` at the release head reports 0 vulnerabilities.
+
+### Breaking
+
+- **Breaking: requires Node >= 22.12** (was >= 22.5). `commander` 15 is
+  ESM-only and declares Node >=22.12, so `engines.node` is now `>=22.12.0`.
+  Node 22.5–22.11 is no longer supported; upgrade to the latest Node 22.x
+  (or 24) before installing 3.4.0. Shipped as a minor, not a patch, because
+  of this. The docs that state the floor (README, CONTRIBUTING, AGENTS.md,
+  DESIGN.md, `docs/threat-model.md`, `docs/peer-review-validation.md`, and
+  the verify-attestation Action's `node-version` description) are updated.
+
+### Dependencies
+
+- `commander` ^15.0.0 (#74, AGT-1647). stamp defines no paired `--x`/`--no-x`
+  options, so commander 15's `--no-*` default change does not apply; only
+  the ESM CLI entry imports commander.
+- `@types/node` stays on 22.x and the `esbuild` ^0.28.1 override stays.
+  `@types/node` 26 (#71) remains declined.
+
+---
+
 ## 3.3.2 — 2026-10-07
 
 A non-security dependency pass (dependabot #71–#75). No CLI, gate, verdict
