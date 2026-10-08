@@ -4,7 +4,7 @@ Thanks for your interest. This doc covers local dev setup, the build + check loo
 
 ## Quick dev loop
 
-stamp-cli is a Node 22.5+ TypeScript CLI. Dev is straightforward:
+stamp-cli is a Node 22.12+ TypeScript CLI. Dev is straightforward:
 
 ```sh
 git clone https://github.com/OpenThinkAi/stamp-cli.git

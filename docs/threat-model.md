@@ -353,7 +353,8 @@ mode); until it lands, this section is the checklist.
 
 stamp-cli's correctness depends on:
 
-- **Node 22.5+** for `node:sqlite` and `node:crypto`'s Ed25519 APIs.
+- **Node 22.12+** (the engines floor; `node:sqlite` and `node:crypto`'s
+  Ed25519 APIs arrived in 22.5).
   Bugs in these are out of scope (they're upstream).
 - **The Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) for the
   reviewer loop. SDK bugs in tool gating, path resolution, or

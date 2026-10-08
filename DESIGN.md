@@ -612,7 +612,7 @@ done
 
 ## Stack
 
-- Node 22.5+, TypeScript, ESM
+- Node 22.12+, TypeScript, ESM
 - `tsup` — build
 - `commander` — CLI
 - `@anthropic-ai/claude-agent-sdk` — reviewer invocation
