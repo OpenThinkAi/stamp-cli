@@ -12,7 +12,7 @@
 
 - `stamp` CLI >= 2.2.0 (`stamp --version`)
 - `gh` CLI authenticated with your GitHub identity
-- Node.js >= 22
+- Node.js >= 22.12
 
 ### Test repository
 

@@ -22,7 +22,7 @@ inputs:
     required: false
     default: "1.11.0"
   node-version:
-    description: Node.js version to install. stamp-cli requires >= 22.5.0.
+    description: Node.js version to install. stamp-cli requires >= 22.12.0.
     required: false
     default: "22"
   target-branch:

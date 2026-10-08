@@ -53,7 +53,7 @@ The user's decision hinges on the tradeoffs. Be honest about both sides:
 - No web UI. No rich inline comments. No discussion threads. If a human wants to leave notes, they do it in commit messages or separate docs.
 - GitHub (or whatever forge) sees only merged commits, not the reviewer back-and-forth. The review prose lives in the local DB.
 - Reviewers are **not infallible**. Their quality is the prompt's quality. Running stamp without calibrating the shipped prompts is running a code-review policy you haven't actually written.
-- Installing the tool needs Node 22.5+ and an Anthropic API or Claude Code login for the reviewer calls.
+- Installing the tool needs Node 22.12+ and an Anthropic API or Claude Code login for the reviewer calls.
 
 ---
 

@@ -32,8 +32,9 @@ Part of the [OpenThink](https://openthink.dev) suite.
 npm install -g @openthink/stamp
 ```
 
-Node 22.5+ required (we use `node:sqlite` and `node:crypto`'s Ed25519 APIs,
-both of which are built-in but gated on 22.5+).
+Node 22.12+ required. We use `node:sqlite` and `node:crypto`'s Ed25519 APIs
+(built-in from 22.5), and the CLI parser, commander 15, is ESM-only and
+declares Node >=22.12.
 
 Published tarballs carry an SLSA build attestation via npm's Trusted
 Publishing, so you can verify chain-of-custody against the GitHub Actions
@@ -137,7 +138,7 @@ Attested-PRs, you need to be enrolled on its review server before
 your `stamp review` calls are accepted:
 
 ```sh
-npm install -g @openthink/stamp        # Node 22.5+
+npm install -g @openthink/stamp        # Node 22.12+
 stamp keys generate                    # ~/.stamp/keys/ed25519{,.pub}
 # Ask a maintainer to mint you an invite:
 #   stamp invites mint <you> --role member
@@ -837,7 +838,7 @@ even with working credentials.
 Easiest path: deploy `server/Dockerfile` to Railway, Fly, or any
 container host — see [`server/README.md`](./server/README.md) for the
 Railway walkthrough. Minimalist alternative: any Linux host with `git +
-sshd + Node 22.5+` — create a bare repo, drop
+sshd + Node 22.12+` — create a bare repo, drop
 `dist/hooks/pre-receive.cjs` into `hooks/pre-receive` (chmod +x), done.
 The hook is self-contained.
 
