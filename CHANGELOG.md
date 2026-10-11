@@ -7,6 +7,21 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ## Unreleased
 
+### Added
+
+- Opt-in AI-attribution commit-message policy (AGT-1724, #81). With
+  `STAMP_FORBID_AI_ATTRIBUTION=1`, `stamp merge` refuses (before writing the
+  merge commit, naming the offending SHAs and the fix) and the server
+  `pre-receive` hook rejects pushes whose newly introduced commits carry
+  `Claude-Session:` trailers, `Co-Authored-By: Claude`/`anthropic`,
+  "Generated with Claude Code", or `claude.ai/code/session_` links. Messages
+  only, never diffs; existing history never blocks. Off by default. Per-repo
+  override via `commit_policy.forbid_ai_attribution` in `.stamp/config.yml`
+  (`enabled`, `extra_patterns`, `disable_patterns`). The server entrypoint
+  persists the toggle to `/etc/stamp/env` so it reaches the hook; enabling it
+  on a deployment needs a server image with this change plus a restart. See
+  the README and `server/README.md`.
+
 ### Changed
 
 - Dependency pass (AGT-1664): `ink` 7 -> 8 (`stamp ui` now reads terminal height via `useWindowSize`, since `useStdout().stdout.rows` is no longer typed), `@anthropic-ai/claude-agent-sdk` -> ^0.3.292, `@anthropic-ai/sdk` -> ^0.131.0, `actions/setup-node` v7.0.0 -> v7.1.0 (SHA-pinned in ci.yml and publish.yml).

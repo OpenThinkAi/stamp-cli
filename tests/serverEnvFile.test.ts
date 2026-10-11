@@ -170,7 +170,9 @@ describe("entrypoint.sh ↔ loadServerEnvFile contract for SSH-verb env vars", (
       const m = line.match(/^\s*write_env_var\s+([A-Z_][A-Z0-9_]*)/);
       if (m) written.add(m[1]!);
     }
-    for (const v of ["GITHUB_BOT_TOKEN", "ANTHROPIC_API_KEY"]) {
+    // STAMP_FORBID_AI_ATTRIBUTION: pre-receive's AI-attribution policy
+    // toggle (AGT-1724) — without it the server-wide switch is a no-op.
+    for (const v of ["GITHUB_BOT_TOKEN", "ANTHROPIC_API_KEY", "STAMP_FORBID_AI_ATTRIBUTION"]) {
       assert.ok(
         written.has(v),
         `entrypoint.sh must persist ${v} to /etc/stamp/env (load-bearing for the SSH-invoked hook path).`,

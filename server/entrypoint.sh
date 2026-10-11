@@ -467,6 +467,15 @@ write_env_var STAMP_TRASH_TTL_DAYS
 # resolver only enables on an exact "1", anything else stays disabled.
 write_env_var STAMP_PEER_REVIEWS_ENABLED
 
+# AGT-1724 — AI-attribution commit-message policy toggle. Read by the
+# pre-receive hook (via loadServerEnvFile) to reject pushes whose newly
+# introduced commits carry Claude-Session / Co-Authored-By Claude /
+# "Generated with Claude Code" attribution. Hooks run inside the SSH
+# push session, which sshd strips of container env, so without this line
+# setting the var on the container would silently do nothing. Off unless
+# set to 1/true/yes/on; a per-repo commit_policy block can still override.
+write_env_var STAMP_FORBID_AI_ATTRIBUTION
+
 # AGT-411: production refusal guard for STAMP_PROMPTS_DIR override.
 # Must run before write_env_var STAMP_PROMPTS_DIR so a misconfigured prod
 # deployment is rejected before the var is persisted to /etc/stamp/env.

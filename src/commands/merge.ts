@@ -1,4 +1,14 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
+import {
+  COMMIT_MESSAGE_LOG_ARGS,
+  formatViolations,
+  parseAttributionConfig,
+  parseCommitMessageLog,
+  resolveAttributionPolicy,
+  scanCommitMessages,
+} from "../lib/attributionPolicy.js";
 import {
   allPassed,
   detectVitestForkPoolFlake,
@@ -200,6 +210,19 @@ function runMergeLocked(
           `Run \`stamp status --diff ${revspec}\` to inspect, then \`stamp review --diff ${revspec}\` to review.`,
       );
     }
+
+    // AI-attribution commit-message policy (AGT-1724). After the gate (no
+    // point flagging messages on a branch we'd refuse anyway) and before
+    // the confirmation prompt / any ref movement, so a refusal leaves the
+    // target branch untouched with nothing to roll back.
+    enforceAttributionPolicy({
+      repoRoot,
+      baseSha: resolved.base_sha,
+      headSha: resolved.head_sha,
+      branch: opts.branch,
+      into: opts.into,
+      mergeMessage: `Merge branch '${opts.branch}' into ${opts.into}`,
+    });
 
     // Audit H1 — operator confirmation gate. Runs *after* the reviewer gate
     // and the dirty-tree pre-flight (no point asking if we'd refuse anyway)
@@ -501,6 +524,70 @@ function runMergeLocked(
   console.log(bar);
   console.log(`\nVerify locally:    stamp verify ${mergeSha.slice(0, 12)}`);
   console.log(`Push to origin:    stamp push ${opts.into}`);
+}
+
+/**
+ * Refuse the merge when any commit in base..head — or the merge message
+ * itself — carries AI-agent attribution and the policy is on (env
+ * `STAMP_FORBID_AI_ATTRIBUTION=1` or `commit_policy.forbid_ai_attribution`
+ * in the target branch's .stamp/config.yml). Same patterns + parser as
+ * the server pre-receive hook (src/lib/attributionPolicy.ts). Messages
+ * only — the diff is never scanned. Exported for tests.
+ */
+export function enforceAttributionPolicy(input: {
+  repoRoot: string;
+  baseSha: string;
+  headSha: string;
+  branch: string;
+  into: string;
+  mergeMessage: string;
+}): void {
+  // Read the commit_policy block from the working-tree config — the same
+  // source (and, since merge requires a clean tree on the target branch,
+  // the same content) as the branch rule above, and the same tree the
+  // server hook reads at the pre-push tip.
+  let rawConfig: unknown;
+  try {
+    rawConfig = parseYaml(
+      readFileSync(stampConfigFile(input.repoRoot), "utf8"),
+    );
+  } catch {
+    rawConfig = undefined;
+  }
+  const parsed = parseAttributionConfig(rawConfig);
+  if (parsed.errors.length > 0) {
+    throw new Error(
+      `invalid commit_policy in .stamp/config.yml:\n  ${parsed.errors.join("\n  ")}\n` +
+        `Fix the commit_policy block (see README "Forbidding AI-agent attribution") and re-run stamp merge.`,
+    );
+  }
+  const policy = resolveAttributionPolicy(parsed.config);
+  if (!policy.enabled) return;
+
+  const commits = parseCommitMessageLog(
+    runGit(
+      [...COMMIT_MESSAGE_LOG_ARGS, `${input.baseSha}..${input.headSha}`],
+      input.repoRoot,
+    ),
+  );
+  const violations = scanCommitMessages(
+    [...commits, { sha: "(merge message)", message: input.mergeMessage }],
+    policy.patterns,
+  );
+  if (violations.length === 0) return;
+  throw new Error(
+    `commit message policy: AI-agent attribution is not allowed in commit messages ` +
+      `(STAMP_FORBID_AI_ATTRIBUTION / commit_policy.forbid_ai_attribution). ` +
+      `${input.into} was not touched.\n` +
+      `Offending commit(s) in ${input.into}..${input.branch}:\n` +
+      formatViolations(violations)
+        .split("\n")
+        .map((l) => `  ${l}`)
+        .join("\n") +
+      `\nFix: on ${input.branch}, reword those commits to drop the attribution lines ` +
+      `(\`git commit --amend\` for the tip, \`git rebase -i ${input.baseSha.slice(0, 12)}\` ` +
+      `and mark them "reword" for older ones), then re-run \`stamp review\` and \`stamp merge\`.`,
+  );
 }
 
 function hashPart(s: string): string {

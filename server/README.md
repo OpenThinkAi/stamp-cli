@@ -632,6 +632,41 @@ The entire state is in the Railway volume at `/srv/git/`. Back it up by
 copying that directory periodically; a freshly-provisioned container
 pointed at the same volume will pick up exactly where it left off.
 
+## AI-attribution policy
+
+Opt-in (off by default): the `pre-receive` hook can reject pushes whose
+newly introduced commits carry AI-agent attribution in their **messages**
+(`Claude-Session:` trailers, `Co-Authored-By: Claude …`, "Generated with
+Claude Code", `claude.ai/code/session_…` links). Diffs are never scanned,
+and commits already on the server never block a push. Patterns, the
+per-repo `commit_policy` override, and the matching `stamp merge` check
+are documented in the main
+[README](../README.md#forbidding-ai-agent-attribution-in-commit-messages-opt-in).
+
+To enable it server-wide:
+
+1. Run a server image built from a stamp-cli version that includes the
+   policy (the hook code and the entrypoint line that persists the toggle
+   both ship in the image).
+2. Set `STAMP_FORBID_AI_ATTRIBUTION=1` as a container env var (Railway:
+   service → Variables).
+3. Redeploy / restart the container. The toggle must reach the hook
+   through `/etc/stamp/env`: sshd strips container env from push
+   sessions, so `entrypoint.sh` persists the var there at boot
+   (`write_env_var STAMP_FORBID_AI_ATTRIBUTION`) and the hook reads it
+   back. Changing the variable therefore always needs a restart.
+
+To check it's live, push a throwaway commit with a `Claude-Session: x`
+trailer to an existing branch; the push should be refused with
+`commit message policy: AI-agent attribution is not allowed`. A repo can
+opt out (or extend the patterns) by committing
+`commit_policy.forbid_ai_attribution` to its `.stamp/config.yml`; the hook
+reads that block from the branch's pre-push tip.
+
+Agents merging locally see the same refusal earlier if their shell also
+exports `STAMP_FORBID_AI_ATTRIBUTION=1`; without it, `stamp merge`
+succeeds and the server rejects the push instead.
+
 ## Updating the hooks
 
 When stamp-cli releases new hook code, redeploy the container — the builder

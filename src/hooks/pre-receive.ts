@@ -40,7 +40,16 @@ import {
   MIN_ACCEPTED_V4_SCHEMA_VERSION,
   type AttestationPayloadV4,
 } from "../lib/attestationV4.js";
+import {
+  COMMIT_MESSAGE_LOG_ARGS,
+  formatViolations,
+  parseAttributionConfig,
+  parseCommitMessageLog,
+  resolveAttributionPolicy,
+  scanCommitMessages,
+} from "../lib/attributionPolicy.js";
 import { fingerprintFromPem } from "../lib/keys.js";
+import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { globToRegex, isGlobPattern } from "../lib/refPatterns.js";
 import {
   hashMcpServers,
@@ -103,6 +112,10 @@ interface StampConfigAtRef {
    *  behavior. AGT-336 added this. Map shape (glob → rule) chosen to
    *  match the spec doc and to mirror `branches:`'s map keying. */
   path_rules?: PathRule[];
+  /** Raw parsed YAML, kept so the AI-attribution policy (AGT-1724) can
+   *  read its `commit_policy` block via the shared parser in
+   *  src/lib/attributionPolicy.ts rather than a hook-local copy. */
+  raw: Record<string, unknown>;
 }
 
 // ---------- per-commit verification pipeline ----------
@@ -122,6 +135,11 @@ interface PhaseInput {
 type Phase = (input: PhaseInput) => PhaseResult;
 
 function main(): void {
+  // sshd strips the container env from push sessions; the entrypoint
+  // persists the vars hooks need (GITHUB_BOT_TOKEN, and the
+  // STAMP_FORBID_AI_ATTRIBUTION toggle for AGT-1724) to /etc/stamp/env.
+  // Merge them in before anything reads process.env. No-op off-server.
+  loadServerEnvFile();
   const stdin = readAllStdin();
   const lines = stdin.split("\n").filter((l) => l.trim().length > 0);
   if (lines.length === 0) process.exit(0);
@@ -176,6 +194,14 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
       `no readable .stamp/config.yml at ${oldSha.slice(0, 8)}. Repo is not bootstrapped.`,
     );
   }
+
+  // AI-attribution commit-message policy (AGT-1724). Runs for every
+  // branch update, protected or not, and before the stamp-verification
+  // phases so an agent that pushed an attributed commit gets the
+  // actionable "reword the message" error rather than a signature one.
+  // Policy config comes from the PRE-push tree (oldSha), same trust
+  // boundary as every other rule — a push can't disable its own check.
+  verifyAttributionPolicy(newSha, refname, config.raw);
 
   const rule = resolveBranchRule(config.branches, branch);
   if (!rule) {
@@ -871,6 +897,7 @@ function readConfigAt(sha: string): StampConfigAtRef | null {
     return {
       branches,
       ...(parsedPathRules.rules.length > 0 ? { path_rules: parsedPathRules.rules } : {}),
+      raw: obj,
     };
   } catch {
     return null;
@@ -943,6 +970,53 @@ function listNewCommits(oldSha: string, newSha: string): string[] {
   ]).trim();
   if (!out) return [];
   return out.split("\n");
+}
+
+/**
+ * Commits this push introduces to the repo: reachable from `newSha` but
+ * from NO ref that exists yet. pre-receive runs before any ref moves, so
+ * `--not --all` excludes everything already on the server — on any
+ * branch or tag — and history that's already landed never re-triggers a
+ * check. Unlike `listNewCommits`, this is NOT first-parent: feature-branch
+ * commits a merge brings in are new to the repo too, and their messages
+ * are exactly where agent attribution trailers live.
+ */
+function listIntroducedCommitMessages(newSha: string) {
+  const raw = run([...COMMIT_MESSAGE_LOG_ARGS, newSha, "--not", "--all"]);
+  return parseCommitMessageLog(raw);
+}
+
+function verifyAttributionPolicy(
+  newSha: string,
+  refname: string,
+  rawConfig: Record<string, unknown>,
+): void {
+  const parsed = parseAttributionConfig(rawConfig);
+  for (const e of parsed.errors) {
+    // Advisory, like path_rules warnings: surface to the pusher, keep
+    // enforcing whatever parsed cleanly (defaults stay on).
+    process.stderr.write(`stamp-verify: ${e}\n`);
+  }
+  const policy = resolveAttributionPolicy(parsed.config);
+  if (!policy.enabled) return;
+  const violations = scanCommitMessages(
+    listIntroducedCommitMessages(newSha),
+    policy.patterns,
+  );
+  if (violations.length === 0) return;
+  reject(
+    refname,
+    `commit message policy: AI-agent attribution is not allowed in commit messages ` +
+      `(STAMP_FORBID_AI_ATTRIBUTION / commit_policy.forbid_ai_attribution).\n` +
+      `  Offending commit(s):\n` +
+      formatViolations(violations)
+        .split("\n")
+        .map((l) => `    ${l}`)
+        .join("\n") +
+      `\n  Fix: reword those commits to drop the attribution lines (git commit --amend ` +
+      `for the tip, git rebase -i for older ones), reset the local target branch to ` +
+      `the remote tip, re-run stamp review + stamp merge, then push again.`,
+  );
 }
 
 function readAllStdin(): string {
