@@ -7,6 +7,10 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ## Unreleased
 
+### Changed
+
+- Bump `@anthropic-ai/sdk` from ^0.131.0 to ^0.132.1 (AGT-1762, supersedes dependabot #80). No call-site changes.
+
 ### Added
 
 - Opt-in AI-attribution commit-message policy (AGT-1724, #81). With
