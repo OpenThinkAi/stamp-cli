@@ -446,6 +446,62 @@ matches the committed config.
 Optional: `.stamp/mirror.yml` enables GitHub mirroring via the post-receive
 hook. See [`server/README.md`](./server/README.md).
 
+### Forbidding AI-agent attribution in commit messages (opt-in)
+
+Some teams don't want agent attribution — `Claude-Session:` trailers,
+`Co-Authored-By: Claude …`, "Generated with Claude Code" footers,
+`claude.ai/code/session_…` links — in their history. Reviewers can't
+enforce that reliably (they review the diff, and they're probabilistic),
+so stamp ships a deterministic commit-**message** check. It never looks at
+diffs. It is **off by default**.
+
+Turn it on with `STAMP_FORBID_AI_ATTRIBUTION=1` (also accepts
+`true`/`yes`/`on`). It is enforced in two places:
+
+- **`stamp merge`** (when the merging shell has the env var set, or the
+  repo config enables it) refuses before writing any merge commit if a
+  commit in `<target>..<branch>` or the merge message matches. The error
+  names each offending SHA and line and says how to fix it (reword with
+  `git commit --amend` / `git rebase -i`, then re-review and re-merge). The
+  target branch is left untouched.
+- **The server `pre-receive` hook** (when the server container has the env
+  var set) rejects a push whose **newly introduced** commits match —
+  commits reachable from the pushed tip but from no ref already on the
+  server (`git rev-list <new> --not --all`), merged-in feature commits
+  included. History that's already on the server never blocks a push.
+  The rejection is printed by `stamp push` / `git push`. See
+  [`server/README.md`](./server/README.md#ai-attribution-policy) for
+  enabling it on a deployment.
+
+Default patterns (case-insensitive, matched against each line of the
+message):
+
+| id | pattern |
+| --- | --- |
+| `claude-session-trailer` | `^\s*Claude-Session:` |
+| `co-authored-by-claude` | `^\s*Co-Authored-By:.*\b(Claude\|anthropic)\b` |
+| `generated-with-claude-code` | `Generated with \[?Claude Code` |
+| `claude-ai-session-url` | `claude\.ai/code/session_` |
+
+Per-repo override in `.stamp/config.yml` (all keys optional):
+
+```yaml
+commit_policy:
+  forbid_ai_attribution:
+    enabled: true              # true/false wins over the env var either way
+    extra_patterns:            # added to the defaults (same matching rules)
+      - '^Assisted-By:'
+    disable_patterns:          # default pattern ids to drop
+      - claude-ai-session-url
+```
+
+`forbid_ai_attribution: true` / `false` is accepted as shorthand for
+`enabled:`. Both enforcement points read this block from the target
+branch's **current** config (the working tree at merge time, the pre-push
+tip on the server), so a branch can't switch the check off for its own
+commits. A malformed block makes `stamp merge` refuse with a config error;
+the server hook prints a warning and keeps enforcing whatever parsed.
+
 ### 2.x: server-attested config
 
 In 2.x server-gated mode, three additional config surfaces apply:

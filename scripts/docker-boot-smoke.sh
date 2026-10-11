@@ -81,7 +81,11 @@ echo "docker-boot-smoke: starting container; asserting it stays up for ${BOOT_WA
 # (review-key, prompts-cache) are skipped and a CLEAN entrypoint reaches the
 # sshd exec and stays up. A structural Dockerfile/entrypoint regression
 # crashes under `set -e` regardless of env — which is the signal we want.
-docker run -d --name "$CONTAINER_NAME" "$IMAGE_TAG" >/dev/null
+#
+# STAMP_FORBID_AI_ATTRIBUTION=1 is the one deliberate exception (AGT-1724):
+# it's a non-secret flag that must survive sshd's env stripping via
+# /etc/stamp/env, and the hook-env assertion below proves it does.
+docker run -d --name "$CONTAINER_NAME" -e STAMP_FORBID_AI_ATTRIBUTION=1 "$IMAGE_TAG" >/dev/null
 
 sleep "$BOOT_WAIT_SECS"
 
@@ -93,6 +97,48 @@ if [ "$running" != "true" ]; then
   docker logs "$CONTAINER_NAME" 2>&1 | tail -40 >&2 || true
   exit 1
 fi
+
+# AGT-1724: prove a container env var reaches the pre-receive hook the way
+# an SSH push session would see it — as the git user with the environment
+# wiped (sshd strips container env), so the only route is the
+# /etc/stamp/env file the entrypoint writes and the hook reloads. Seeds a
+# scratch bare repo, installs the image's hook, pushes a commit carrying a
+# Claude-Session trailer, and requires the policy rejection.
+echo "docker-boot-smoke: asserting STAMP_FORBID_AI_ATTRIBUTION reaches the pre-receive hook via /etc/stamp/env…"
+hook_env_script='set -e
+d=$(mktemp -d)
+cd "$d"
+git init -q --bare -b main s.git
+git clone -q s.git w 2>/dev/null
+cd w
+git config user.email smoke@example.invalid
+git config user.name smoke
+git checkout -q -b main
+mkdir -p .stamp
+printf "branches:\n  main:\n    required: [security]\nreviewers:\n  security:\n    prompt: x\n" > .stamp/config.yml
+git add -A
+git commit -qm seed
+git push -q origin main
+git checkout -q -b scratch
+git push -q origin scratch
+cp /etc/stamp/pre-receive.cjs ../s.git/hooks/pre-receive
+chmod 0755 ../s.git/hooks/pre-receive
+echo x > x
+git add -A
+git commit -qm "smoke
+
+Claude-Session: smoke"
+if git push origin scratch 2>push.err; then
+  echo "pushed: hook did NOT see STAMP_FORBID_AI_ATTRIBUTION" >&2
+  exit 1
+fi
+grep -q "AI-agent attribution is not allowed" push.err || { cat push.err >&2; exit 1; }
+'
+if ! docker exec "$CONTAINER_NAME" su -s /bin/sh git -c "env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp sh -c '$hook_env_script'"; then
+  echo "error: STAMP_FORBID_AI_ATTRIBUTION set on the container did not reach the pre-receive hook (expected via /etc/stamp/env)." >&2
+  exit 1
+fi
+echo "docker-boot-smoke: hook sees STAMP_FORBID_AI_ATTRIBUTION via /etc/stamp/env ✓"
 
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"
