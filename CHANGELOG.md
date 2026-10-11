@@ -5,7 +5,11 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
-## Unreleased
+## 3.5.0 — 2026-10-11
+
+Adds the opt-in AI-attribution commit-message policy and a dependency pass
+(`ink` 8, `@anthropic-ai/sdk` ^0.132.1, `claude-agent-sdk`, `actions/setup-node`).
+No breaking changes; the policy is off by default.
 
 ### Changed
 
