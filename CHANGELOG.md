@@ -7,6 +7,10 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ## Unreleased
 
+### Changed
+
+- Dependency pass (AGT-1664): `ink` 7 -> 8 (`stamp ui` now reads terminal height via `useWindowSize`, since `useStdout().stdout.rows` is no longer typed), `@anthropic-ai/claude-agent-sdk` -> ^0.3.292, `@anthropic-ai/sdk` -> ^0.131.0, `actions/setup-node` v7.0.0 -> v7.1.0 (SHA-pinned in ci.yml and publish.yml).
+
 ---
 
 ## 3.4.0 — 2026-10-08

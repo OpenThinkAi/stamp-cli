@@ -1,4 +1,4 @@
-import { Box, render, Text, useApp, useInput, useStdout } from "ink";
+import { Box, render, Text, useApp, useInput, useWindowSize } from "ink";
 import { existsSync } from "node:fs";
 import { useMemo, useState } from "react";
 import {
@@ -321,14 +321,14 @@ function App({
   rows: Row[];
 }) {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { rows: termRows } = useWindowSize();
   const [selected, setSelected] = useState(0);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
 
   // Leave room for the header/footer chrome — ~12 rows of non-prose per screen
   // (title, verdict line, scroll indicators above & below, key-hint line,
   // padding).
-  const proseViewportHeight = Math.max(5, (stdout?.rows ?? 30) - 12);
+  const proseViewportHeight = Math.max(5, (termRows || 30) - 12);
 
   // Detail data + the matching review-prose rows are both keyed on the
   // commit SHA. Memoize them together so SQLite is opened once per commit
