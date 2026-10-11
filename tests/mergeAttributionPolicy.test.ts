@@ -251,7 +251,7 @@ describe("stamp merge: AI-attribution policy (AGT-1724)", () => {
     const h = setupHarness({
       featureMessage: "add feature\n",
       extraConfig:
-        "commit_policy:\n  forbid_ai_attribution:\n    extra_patterns:\n      - '(unclosed'",
+        "commit_policy:\n  forbid_ai_attribution:\n    enabled: 'yes'",
     });
     try {
       assert.throws(() => merge(h.repo), /invalid commit_policy/);

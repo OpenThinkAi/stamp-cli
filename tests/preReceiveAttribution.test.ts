@@ -17,7 +17,7 @@
 
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,7 +87,7 @@ describe("pre-receive: AI-attribution policy end-to-end (AGT-1724)", () => {
     git(work, ["config", "commit.gpgsign", "false"]);
     git(work, ["checkout", "-q", "-b", "main"]);
 
-    execFileSync("mkdir", ["-p", path.join(work, ".stamp", "reviewers")]);
+    mkdirSync(path.join(work, ".stamp", "reviewers"), { recursive: true });
     writeFileSync(path.join(work, ".stamp", "config.yml"), BASE_CONFIG);
     writeFileSync(path.join(work, ".stamp", "reviewers", "security.md"), "prompt\n");
     git(work, ["add", "-A"]);

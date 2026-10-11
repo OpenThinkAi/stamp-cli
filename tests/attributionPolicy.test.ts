@@ -195,19 +195,44 @@ describe("per-repo config override", () => {
     ]);
   });
 
+  it("extra_patterns are literal (no regex semantics, so no ReDoS)", () => {
+    const parsed = parseAttributionConfig({
+      commit_policy: {
+        forbid_ai_attribution: { extra_patterns: ["(a+)+b", "agent.run"] },
+      },
+    });
+    assert.deepEqual(parsed.errors, []);
+    const p = resolveAttributionPolicy(parsed.config, ON);
+    // A pathological regex source is just a literal: fast, and only
+    // matches its exact text.
+    const t0 = Date.now();
+    assert.deepEqual(ids("x\n\n" + "a".repeat(50_000) + "!", p.patterns), []);
+    assert.ok(Date.now() - t0 < 1000);
+    assert.deepEqual(ids("x\n\nsee (A+)+B here", p.patterns), ["extra_patterns[0]"]);
+    // `.` is literal, not a wildcard.
+    assert.deepEqual(ids("x\n\nagentXrun", p.patterns), []);
+    assert.deepEqual(ids("x\n\nvia agent.run", p.patterns), ["extra_patterns[1]"]);
+  });
+
+  it("a leading ^ anchors an extra pattern to the start of the line", () => {
+    const p = resolveAttributionPolicy({ extra_patterns: ["^Assisted-By:"] }, ON);
+    assert.deepEqual(ids("x\n\n  Assisted-By: bot", p.patterns), ["extra_patterns[0]"]);
+    assert.deepEqual(ids("x\n\nnot Assisted-By: bot", p.patterns), []);
+  });
+
   it("reports invalid config without throwing, keeping what parsed", () => {
     const parsed = parseAttributionConfig({
       commit_policy: {
         forbid_ai_attribution: {
           enabled: "yes",
-          extra_patterns: ["(unclosed", "^Ok:"],
+          extra_patterns: ["", "^Ok:"],
           disable_patterns: ["no-such-pattern"],
         },
       },
     });
     assert.equal(parsed.errors.length, 3);
     assert.match(parsed.errors.join("\n"), /enabled must be a boolean/);
-    assert.match(parsed.errors.join("\n"), /extra_patterns\[0\] is not a valid regex/);
+    assert.match(parsed.errors.join("\n"), /extra_patterns\[0\] must be a non-empty string/);
     assert.match(parsed.errors.join("\n"), /unknown pattern id "no-such-pattern"/);
     assert.deepEqual(parsed.config.extra_patterns, ["^Ok:"]);
     assert.equal(parsed.config.enabled, undefined);

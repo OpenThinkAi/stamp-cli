@@ -557,7 +557,8 @@ export function enforceAttributionPolicy(input: {
   const parsed = parseAttributionConfig(rawConfig);
   if (parsed.errors.length > 0) {
     throw new Error(
-      `invalid commit_policy in .stamp/config.yml:\n  ${parsed.errors.join("\n  ")}`,
+      `invalid commit_policy in .stamp/config.yml:\n  ${parsed.errors.join("\n  ")}\n` +
+        `Fix the commit_policy block (see README "Forbidding AI-agent attribution") and re-run stamp merge.`,
     );
   }
   const policy = resolveAttributionPolicy(parsed.config);

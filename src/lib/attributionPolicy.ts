@@ -23,13 +23,20 @@
  *       commit_policy:
  *         forbid_ai_attribution:
  *           enabled: true            # optional; overrides the env var either way
- *           extra_patterns:          # optional; added to the defaults
- *             - '^Assisted-By:'
+ *           extra_patterns:          # optional; literal strings added to the defaults
+ *             - '^Assisted-By:'      #   (leading ^ = start of line)
  *           disable_patterns:        # optional; default pattern ids to drop
  *             - claude-ai-session-url
  *
  * Every pattern is applied case-insensitively to each LINE of the
  * message independently, so `^` anchors to the start of a line.
+ *
+ * `extra_patterns` are deliberately LITERAL strings, not regexes: they
+ * run in the server hook against attacker-controllable message text, and
+ * a user-authored regex there is a ReDoS vector (catastrophic
+ * backtracking would hang every push). A literal case-insensitive
+ * substring test is linear-time. Only the built-in defaults, which are
+ * fixed and reviewed, are regexes.
  *
  * This module is imported by the CJS-bundled pre-receive hook, so it must
  * stay dependency-free (node built-ins only, no yaml — callers hand it
@@ -41,13 +48,32 @@ export const ATTRIBUTION_ENV_VAR = "STAMP_FORBID_AI_ATTRIBUTION";
 export interface AttributionPattern {
   /** Stable id — the handle `disable_patterns` refers to. */
   id: string;
-  /** Source of the regex (shown in error output). */
+  /** Pattern source as written (regex for defaults, literal for extras). */
   source: string;
-  regex: RegExp;
+  test: (line: string) => boolean;
 }
 
 function pattern(id: string, source: string): AttributionPattern {
-  return { id, source, regex: new RegExp(source, "i") };
+  const regex = new RegExp(source, "i");
+  return { id, source, test: (line) => regex.test(line) };
+}
+
+/**
+ * Literal, case-insensitive substring match. A leading `^` anchors it to
+ * the start of the line (leading whitespace ignored). Linear-time by
+ * construction — see the module comment on why extras aren't regexes.
+ */
+function literalPattern(id: string, source: string): AttributionPattern {
+  const anchored = source.startsWith("^");
+  const needle = (anchored ? source.slice(1) : source).toLowerCase();
+  return {
+    id,
+    source,
+    test: (line) => {
+      const hay = line.toLowerCase();
+      return anchored ? hay.trimStart().startsWith(needle) : hay.includes(needle);
+    },
+  };
 }
 
 export const DEFAULT_ATTRIBUTION_PATTERNS: readonly AttributionPattern[] = [
@@ -116,22 +142,12 @@ export function parseAttributionConfig(
 
   if (b.extra_patterns !== undefined) {
     if (!Array.isArray(b.extra_patterns)) {
-      errors.push(`${CONFIG_PATH}.extra_patterns must be a list of regex strings`);
+      errors.push(`${CONFIG_PATH}.extra_patterns must be a list of strings`);
     } else {
       const extra: string[] = [];
       b.extra_patterns.forEach((p, i) => {
-        if (typeof p !== "string" || p.length === 0) {
+        if (typeof p !== "string" || p.length === 0 || p === "^") {
           errors.push(`${CONFIG_PATH}.extra_patterns[${i}] must be a non-empty string`);
-          return;
-        }
-        try {
-          new RegExp(p, "i");
-        } catch (err) {
-          errors.push(
-            `${CONFIG_PATH}.extra_patterns[${i}] is not a valid regex (${
-              err instanceof Error ? err.message : String(err)
-            })`,
-          );
           return;
         }
         extra.push(p);
@@ -192,7 +208,7 @@ export function resolveAttributionPolicy(
     (p) => !disabled.has(p.id),
   );
   (config.extra_patterns ?? []).forEach((src, i) => {
-    patterns.push(pattern(`extra_patterns[${i}]`, src));
+    patterns.push(literalPattern(`extra_patterns[${i}]`, src));
   });
   return { enabled, patterns };
 }
@@ -210,7 +226,7 @@ export function findAttributionMatches(
   const matches: AttributionMatch[] = [];
   for (const line of message.split(/\r?\n/)) {
     for (const p of patterns) {
-      if (p.regex.test(line)) {
+      if (p.test(line)) {
         matches.push({ patternId: p.id, line: line.trim() });
       }
     }

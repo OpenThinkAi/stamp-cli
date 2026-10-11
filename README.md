@@ -489,11 +489,16 @@ Per-repo override in `.stamp/config.yml` (all keys optional):
 commit_policy:
   forbid_ai_attribution:
     enabled: true              # true/false wins over the env var either way
-    extra_patterns:            # added to the defaults (same matching rules)
-      - '^Assisted-By:'
+    extra_patterns:            # literal strings added to the defaults
+      - '^Assisted-By:'        # (leading ^ = start of line)
     disable_patterns:          # default pattern ids to drop
       - claude-ai-session-url
 ```
+
+`extra_patterns` are **literal**, case-insensitive substrings, not
+regexes (a leading `^` anchors to the start of the line). They run in the
+server hook against pushed message text, and a user-written regex there
+would be a catastrophic-backtracking (ReDoS) risk.
 
 `forbid_ai_attribution: true` / `false` is accepted as shorthand for
 `enabled:`. Both enforcement points read this block from the target
