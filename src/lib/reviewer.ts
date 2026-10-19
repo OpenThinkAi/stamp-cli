@@ -632,6 +632,15 @@ export async function invokeReviewer(params: {
    * the bug where the prompt claims a narrowed scope that doesn't exist.
    */
   deltaScope?: boolean;
+  /**
+   * The model the caller already resolved for this reviewer (`runReview`
+   * resolves it once, with the `--backend`/`--model` flags applied, and
+   * records it as the review's provenance). When given, it is what the SDK
+   * runs, so the recorded provenance and the model that actually reviewed
+   * can't diverge. `null` means "SDK default". Omitted (e.g. `stamp
+   * reviewers test`), the model is resolved here from ~/.stamp/config.yml.
+   */
+  model?: string | null;
 }): Promise<ReviewerInvocation> {
   // Operator-declared LLM-disabled mode. Refuse to start any reviewer
   // invocation that would ship a diff to Anthropic. Lets a regulated
@@ -895,7 +904,10 @@ export async function invokeReviewer(params: {
   // about per-user config. Each reviewer is resolved independently so the
   // operator can opt one (e.g. security) into Opus while the rest stay
   // on Sonnet without ceremony.
-  const modelOverride = resolveReviewerModel(params.reviewer);
+  const modelOverride =
+    params.model !== undefined
+      ? params.model
+      : resolveReviewerModel(params.reviewer);
   const abortController = new AbortController();
   const timeoutHandle = setTimeout(() => {
     // Bare reason — formatAbortMessage assembles the full remediation

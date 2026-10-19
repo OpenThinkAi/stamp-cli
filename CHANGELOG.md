@@ -42,6 +42,14 @@ off. No CLI, gate, verdict-cache or attestation changes.
   `CLAUDE_CODE_EXTRA_BODY` is kept; stamp adds `thinking` only when it is
   absent.
 
+### Fixed
+
+- `stamp review --model <id>` (and `--backend anthropic --model <id>`) now
+  runs the Agent SDK reviewer on `<id>`. Before, the flag reached the
+  backend banner and the recorded provenance, but the SDK call re-read
+  `~/.stamp/config.yml`, so the review ran on the pinned model while its
+  provenance named the flag's.
+
 ### Added
 
 - `STAMP_REVIEWER_THINKING=1` restores the model's default thinking for
