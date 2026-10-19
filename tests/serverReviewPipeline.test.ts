@@ -463,6 +463,56 @@ describe("runReviewPipeline — reviewer model selection (STAMP_REVIEWER_MODEL)"
   });
 });
 
+describe("runReviewPipeline — extended thinking off by default", () => {
+  const ENV = "STAMP_REVIEWER_THINKING";
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[ENV];
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[ENV];
+    else process.env[ENV] = saved;
+  });
+
+  async function bodySentFor(
+    model: string,
+    env: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    if (env === undefined) delete process.env[ENV];
+    else process.env[ENV] = env;
+    const fx = makeFixtureCache();
+    const diff = Buffer.from(`diff --git a/x b/x\n+thinking-${model}-${env ?? "unset"}\n`);
+    const spy: { lastBody?: Parameters<AnthropicClientShape["messages"]["create"]>[0] } = {};
+    const client = mockClient(
+      {
+        content: [
+          { type: "tool_use", name: "submit_verdict", input: { verdict: "approved", prose: "fine" } },
+        ],
+      } as never,
+      spy as never,
+    );
+    await runReviewPipeline(fixtureInput(fx, diff, { anthropic: client, model }));
+    assert.ok(spy.lastBody, "expected client.messages.create to be called");
+    return spy.lastBody as unknown as Record<string, unknown>;
+  }
+
+  it("sends between_tools for the default claude-sonnet-5-5", async () => {
+    assert.equal(SERVER_DEFAULT_MODEL, "claude-sonnet-5-5");
+    const body = await bodySentFor(SERVER_DEFAULT_MODEL, undefined);
+    assert.deepEqual(body.thinking, { type: "between_tools" });
+  });
+
+  it("sends no thinking field for an adaptive-only model", async () => {
+    const body = await bodySentFor("claude-opus-5-5", undefined);
+    assert.equal("thinking" in body, false);
+  });
+
+  it("sends no thinking field when STAMP_REVIEWER_THINKING=1", async () => {
+    const body = await bodySentFor("claude-sonnet-5-5", "1");
+    assert.equal("thinking" in body, false);
+  });
+});
+
 describe("runReviewPipeline — model-confused fallback", () => {
   it("returns changes_requested with diagnostic prose when neither channel produces a verdict", async () => {
     const fx = makeFixtureCache();

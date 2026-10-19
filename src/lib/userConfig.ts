@@ -12,8 +12,10 @@
  *
  *   reviewers:
  *     security: openai-compatible:gpt-5   # OpenAI-compatible endpoint
- *     standards: claude-sonnet-4-6        # Anthropic agent SDK
- *     product:  claude-sonnet-4-6
+ *     standards: claude-sonnet-5-5        # Anthropic agent SDK
+ *     product:  claude-sonnet-5-5
+ *   reviewer_thinking:                    # optional; thinking is off by default
+ *     security: true
  *   openai_compatible_endpoint: https://api.openai.com/v1
  *   provider_keys:
  *     openai: sk-…
@@ -96,6 +98,18 @@ export interface UserConfig {
    * out of a file entirely.
    */
   provider_keys?: Record<string, string>;
+  /**
+   * Per-reviewer extended-thinking opt-in for Anthropic reviewers, keyed by
+   * reviewer name. Since 3.6.0 every Anthropic reviewer call turns thinking
+   * OFF (see `lib/reviewerThinking.ts` for why and how). `true` here
+   * restores the model's own default for that reviewer; `false`, or leaving
+   * the reviewer out, keeps thinking off. `STAMP_REVIEWER_THINKING` (env)
+   * overrides this map for a whole run.
+   *
+   *   reviewer_thinking:
+   *     security: true
+   */
+  reviewer_thinking?: Record<string, boolean>;
 }
 
 /**
@@ -230,6 +244,11 @@ export interface ReviewerBackendOverride {
  * Operators who want a sharper security reviewer can opt into Opus with
  * one command: `stamp config reviewers set security claude-opus-4-7`.
  *
+ * Sonnet 5.5 since 3.6.0 (was Sonnet 4.6). Reviewers run it with extended
+ * thinking off (`between_tools`, see `lib/reviewerThinking.ts`), which keeps
+ * a review about as fast as it was on 4.6. Keep `HEADLESS_DEFAULT_MODEL`
+ * in headlessReviewer.ts in lockstep.
+ *
  * Reviewer names that don't exist in the per-repo .stamp/config.yml here
  * are harmless — they're just unused entries the operator can clean up
  * with `stamp config reviewers clear <name>`. Mismatched names (e.g.
@@ -237,9 +256,9 @@ export interface ReviewerBackendOverride {
  * for the actual reviewer name, falling back to the SDK default.
  */
 export const DEFAULT_REVIEWER_MODELS: Readonly<Record<string, string>> = {
-  security: "claude-sonnet-4-6",
-  standards: "claude-sonnet-4-6",
-  product: "claude-sonnet-4-6",
+  security: "claude-sonnet-5-5",
+  standards: "claude-sonnet-5-5",
+  product: "claude-sonnet-5-5",
 };
 
 // Reviewer name shape, kept in sync with VALID_REVIEWER_NAME in
@@ -254,7 +273,7 @@ const REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 // stamp-cli — but a minimal shape check catches obvious typos (empty, with
 // embedded whitespace) at config-load rather than at API-call time. The
 // regex permits the documented Anthropic ID shape (`claude-opus-4-7`,
-// `claude-sonnet-4-6`, dated variants like `claude-haiku-4-5-20251001`)
+// `claude-sonnet-5-5`, dated variants like `claude-haiku-4-5-20251001`)
 // and equivalent forms; it is intentionally not anchored on the literal
 // "claude-" prefix so that a future provider/proxy override would still
 // land cleanly.
@@ -342,7 +361,7 @@ export function parseUserConfig(
       if (!isValidModelId(id)) {
         throw new Error(
           `${contextPath}: reviewers.${name} = ${JSON.stringify(value)} is not a valid model id ` +
-            `(expected a token like 'claude-sonnet-4-6'; the SDK accepts opaque strings, ` +
+            `(expected a token like 'claude-sonnet-5-5'; the SDK accepts opaque strings, ` +
             `but stamp rejects shapes with whitespace or control chars)`,
         );
       }
@@ -416,6 +435,37 @@ export function parseUserConfig(
     if (Object.keys(keys).length > 0) provider_keys = keys;
   }
 
+  // Optional per-reviewer thinking opt-in. Same name validation as
+  // `reviewers:`; values must be real booleans so a quoted "false" can't
+  // read as truthy.
+  let reviewer_thinking: Record<string, boolean> | undefined;
+  const thinkingRaw = obj.reviewer_thinking;
+  if (thinkingRaw !== undefined && thinkingRaw !== null) {
+    if (typeof thinkingRaw !== "object" || Array.isArray(thinkingRaw)) {
+      throw new Error(
+        `${contextPath}: 'reviewer_thinking' must be a mapping of <reviewer-name> to true/false`,
+      );
+    }
+    const map: Record<string, boolean> = {};
+    for (const [name, value] of Object.entries(
+      thinkingRaw as Record<string, unknown>,
+    )) {
+      if (!isValidReviewerName(name)) {
+        throw new Error(
+          `${contextPath}: reviewer name '${name}' under 'reviewer_thinking' is invalid ` +
+            `(letters, digits, underscores, hyphens; max 64 chars; no leading hyphen)`,
+        );
+      }
+      if (typeof value !== "boolean") {
+        throw new Error(
+          `${contextPath}: reviewer_thinking.${name} must be a boolean (true or false)`,
+        );
+      }
+      map[name] = value;
+    }
+    if (Object.keys(map).length > 0) reviewer_thinking = map;
+  }
+
   const result: UserConfig = { reviewers };
   if (openai_compatible_endpoint !== undefined)
     result.openai_compatible_endpoint = openai_compatible_endpoint;
@@ -424,6 +474,8 @@ export function parseUserConfig(
     result.openai_compatible_tools = openai_compatible_tools;
   if (local_tools !== undefined) result.local_tools = local_tools;
   if (provider_keys !== undefined) result.provider_keys = provider_keys;
+  if (reviewer_thinking !== undefined)
+    result.reviewer_thinking = reviewer_thinking;
   return result;
 }
 
@@ -488,6 +540,8 @@ export function stringifyUserConfig(cfg: UserConfig): string {
     out.openai_compatible_tools = cfg.openai_compatible_tools;
   if (cfg.local_tools !== undefined) out.local_tools = cfg.local_tools;
   if (cfg.provider_keys !== undefined) out.provider_keys = cfg.provider_keys;
+  if (cfg.reviewer_thinking !== undefined)
+    out.reviewer_thinking = cfg.reviewer_thinking;
   return stringifyYaml(out);
 }
 

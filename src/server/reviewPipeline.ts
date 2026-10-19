@@ -90,6 +90,10 @@ import {
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
 import { isValidModelId } from "../lib/userConfig.js";
+import {
+  anthropicThinkingParam,
+  reviewerThinkingEnabled,
+} from "../lib/reviewerThinking.js";
 import type { DatabaseSync } from "node:sqlite";
 import {
   findCachedServerVerdict,
@@ -740,6 +744,10 @@ export async function runReviewPipeline(
           system: systemPrompt,
           messages: [{ role: "user" as const, content: userPrompt }],
           tools: [SUBMIT_VERDICT_TOOL],
+          // Thinking off unless STAMP_REVIEWER_THINKING=1 on the server; see
+          // lib/reviewerThinking.ts. Env only: the server has no per-user
+          // reviewer config to consult.
+          ...thinkingField(model),
         },
         { signal: AbortSignal.timeout(timeoutMs) },
       );
@@ -859,6 +867,18 @@ function loadSigningMaterialFromEnv(): ReviewSigningMaterial {
  * the verb's top-level handler and surfaced as exit 1 + operator-of-
  * server-flavored prose.
  */
+/**
+ * The `thinking` request field for a server-side review: the model's
+ * thinking-off value unless `STAMP_REVIEWER_THINKING=1` is set on the
+ * server. Spread into the request so "send nothing" leaves no key behind.
+ */
+function thinkingField(
+  model: string,
+): { thinking?: { type: "disabled" } | { type: "between_tools" } } {
+  const thinking = anthropicThinkingParam(model, reviewerThinkingEnabled(undefined));
+  return thinking !== undefined ? { thinking } : {};
+}
+
 function buildAnthropicFromEnv(): AnthropicClientShape {
   const apiKey = process.env["ANTHROPIC_API_KEY"];
   if (!apiKey) throw new ServerMissingApiKeyError();

@@ -176,9 +176,9 @@ describe("loadOrCreateUserConfig", () => {
     assert.equal(result.created, true);
     assert.equal(existsSync(result.path), true);
     // Defaults match what the project README documents.
-    assert.equal(result.config.reviewers.security, "claude-sonnet-4-6");
-    assert.equal(result.config.reviewers.standards, "claude-sonnet-4-6");
-    assert.equal(result.config.reviewers.product, "claude-sonnet-4-6");
+    assert.equal(result.config.reviewers.security, "claude-sonnet-5-5");
+    assert.equal(result.config.reviewers.standards, "claude-sonnet-5-5");
+    assert.equal(result.config.reviewers.product, "claude-sonnet-5-5");
   });
 
   it("is idempotent on second call (no overwrite, created=false)", () => {
@@ -662,9 +662,9 @@ describe("DEFAULT_REVIEWER_MODELS contract", () => {
     assert.deepEqual(
       { ...DEFAULT_REVIEWER_MODELS },
       {
-        security: "claude-sonnet-4-6",
-        standards: "claude-sonnet-4-6",
-        product: "claude-sonnet-4-6",
+        security: "claude-sonnet-5-5",
+        standards: "claude-sonnet-5-5",
+        product: "claude-sonnet-5-5",
       },
     );
   });
@@ -782,9 +782,9 @@ describe("stamp config reviewers — CLI handlers", () => {
     }
     const out = logs.text();
     assert.match(out, /no per-user stamp config/);
-    assert.match(out, /security: claude-sonnet-4-6/);
-    assert.match(out, /standards: claude-sonnet-4-6/);
-    assert.match(out, /product: claude-sonnet-4-6/);
+    assert.match(out, /security: claude-sonnet-5-5/);
+    assert.match(out, /standards: claude-sonnet-5-5/);
+    assert.match(out, /product: claude-sonnet-5-5/);
   });
 
   it("show distinguishes pinned overrides from unpinned defaults", () => {
@@ -804,7 +804,7 @@ describe("stamp config reviewers — CLI handlers", () => {
     assert.match(out, /reviewers:/);
     assert.match(out, /security.*claude-opus-4-7/);
     assert.match(out, /unpinned/);
-    assert.match(out, /standards.*claude-sonnet-4-6.*default/);
+    assert.match(out, /standards.*claude-sonnet-5-5.*default/);
   });
 
   // AGT-1137 AC3: `show` has to report the backend that will ACTUALLY run,
@@ -890,7 +890,7 @@ describe("stamp config reviewers — CLI handlers", () => {
     }
     const out = logs.text();
     assert.match(out, /no per-user stamp config/);
-    assert.match(out, /security: claude-sonnet-4-6.*\[anthropic\]/);
+    assert.match(out, /security: claude-sonnet-5-5.*\[anthropic\]/);
   });
 });
 

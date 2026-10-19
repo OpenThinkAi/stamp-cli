@@ -309,6 +309,8 @@ The defaults are tight on purpose — a misbehaving reviewer prompt with `WebFet
 - **`reviewers.<name>.timeout_ms`** in `.stamp/config.yml` — per-reviewer wall-clock budget.
 - **`STAMP_REVIEWER_MAX_TURNS`** / **`STAMP_REVIEWER_TIMEOUT_MS`** env vars (defaults `8` / `300000`) — operator-side global overrides; don't enter the attestation hash chain.
 
+If you set `STAMP_REVIEWER_THINKING=1` (or `reviewer_thinking: { <name>: true }` in `~/.stamp/config.yml`), the reviewer thinks by the model's own default, which on Claude 5 models is adaptive and can be slow. Unset it before raising the budgets. Reviewers on `claude-opus-5-5` or `claude-fable-*` always think adaptively, because those models have no thinking-off mode; the README's "Extended thinking" section has the per-model table.
+
 ### Distinguish the two failure modes before raising the budget
 
 Open the spool file and skim the `tool_calls` array:

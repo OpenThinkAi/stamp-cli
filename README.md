@@ -551,15 +551,20 @@ commands above), not by editing the YAML directly.
 `~/.stamp/config.yml` lets each operator pick which model — and which
 backend, Anthropic or an OpenAI-compatible endpoint (see below) — each
 reviewer runs on. Defaults are written by `stamp init` (and lazily on
-first `stamp review` after upgrade) — Sonnet on the Anthropic backend
-across the three starter personas:
+first `stamp review` after upgrade) — Sonnet 5.5 on the Anthropic backend
+across the three starter personas, run with extended thinking off (see
+[Extended thinking](#extended-thinking) below):
 
 ```yaml
 reviewers:
-  security: claude-sonnet-4-6
-  standards: claude-sonnet-4-6
-  product: claude-sonnet-4-6
+  security: claude-sonnet-5-5
+  standards: claude-sonnet-5-5
+  product: claude-sonnet-5-5
 ```
+
+Defaults are written only when the file does not exist yet. A file written
+by an earlier stamp (which defaulted to `claude-sonnet-4-6`) keeps its pins;
+move it with `stamp config reviewers set <name> claude-sonnet-5-5`.
 
 Tune with the CLI rather than hand-editing:
 
@@ -599,6 +604,47 @@ models pinned, each operator records their own verdict in their own
 state.db (same as today's reviewer-prompt model). Stamp does not assume
 verdicts are model-portable.
 
+#### Extended thinking
+
+Anthropic reviewers run with extended thinking **off** (since 3.6.0). Claude 5
+models think adaptively when a request doesn't say otherwise, which made
+reviews slow and could spend the whole output budget before the verdict. A
+reviewer reads a diff and returns a verdict, so stamp sends each model's
+thinking-off value instead:
+
+| Model | What stamp sends |
+|---|---|
+| `claude-sonnet-5-5` | `thinking: {type: between_tools}`: no thinking before the answer, only between tool calls. (`disabled` is rejected by this model.) |
+| `claude-sonnet-5`, `claude-opus-5`, `claude-haiku-5-5`, any `claude-*-4-*` or `claude-3*` | `thinking: {type: disabled}` |
+| `claude-opus-5-5`, `claude-fable-*` | nothing. These models are adaptive-only and reject both values. |
+| anything else | nothing. The model keeps its default. |
+
+This applies to every Anthropic reviewer call: trusted-mode reviews (Agent
+SDK), `--headless`, server-side reviews, and the `stamp pr listen` built-in
+reviewer. On the Agent SDK path stamp carries the value to the API through
+the Claude Code CLI's `CLAUDE_CODE_EXTRA_BODY` env var, because the SDK's own
+`thinking` option cannot express `between_tools`. If you already set
+`CLAUDE_CODE_EXTRA_BODY` yourself, stamp keeps it and adds `thinking` only
+when your object has no `thinking` key.
+
+To turn thinking back on (the model's own default):
+
+```sh
+STAMP_REVIEWER_THINKING=1 stamp review --diff main..feature   # every reviewer, this run
+```
+
+```yaml
+# ~/.stamp/config.yml: one reviewer, persistently
+reviewer_thinking:
+  security: true
+```
+
+`STAMP_REVIEWER_THINKING=0` forces thinking off even where
+`reviewer_thinking:` turns it on. On a stamp server, set
+`STAMP_REVIEWER_THINKING` in the server's environment. Like the model choice,
+thinking is per-user infrastructure and is not part of the attestation hash
+chain.
+
 #### OpenAI-compatible reviewer backend (local, OpenAI, or DeepSeek)
 
 A reviewer can run against any server that speaks the OpenAI
@@ -612,7 +658,7 @@ Pin the reviewer's model with the `openai-compatible:` scheme:
 ```yaml
 reviewers:
   security: openai-compatible:lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-4bit
-  standards: claude-sonnet-4-6                                  # Anthropic
+  standards: claude-sonnet-5-5                                  # Anthropic
 openai_compatible_endpoint: http://localhost:8080/v1   # mlx_lm.server; LM Studio uses :1234
 ```
 

@@ -158,6 +158,9 @@ export interface ChatClientShape {
             required: string[];
           };
         }>;
+        /** Anthropic extended-thinking control. Only the Anthropic caller
+         *  (headless) sets it; the OpenAI-compatible client never sends it. */
+        thinking?: { type: "disabled" } | { type: "between_tools" };
       },
       /** Optional request options (the real SDK supports `signal` for
        *  AbortController-based timeouts). */
@@ -216,6 +219,10 @@ export interface OneShotReviewOptions {
    *  client; that's the caller's job (env key for Anthropic, base URL for a
    *  local endpoint). */
   client: ChatClientShape;
+  /** Anthropic `thinking` field to send, or undefined to omit it. Set by the
+   *  headless (Anthropic) caller from `lib/reviewerThinking.ts`; the
+   *  OpenAI-compatible caller leaves it unset. */
+  thinking?: { type: "disabled" } | { type: "between_tools" };
 }
 
 /**
@@ -248,6 +255,7 @@ export async function runOneShotReview(
       system: systemPrompt,
       messages: [{ role: "user", content: userPrompt }],
       tools: [SUBMIT_VERDICT_TOOL],
+      ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

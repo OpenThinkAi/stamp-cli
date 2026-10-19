@@ -33,6 +33,10 @@ import {
   type ChatClientShape,
   type OneShotReviewResult,
 } from "./oneShotReview.js";
+import {
+  anthropicThinkingParam,
+  reviewerThinkingEnabled,
+} from "./reviewerThinking.js";
 
 // Re-export the shared surface under the historical headless names so
 // existing importers (commands/review.ts, src/server/reviewPipeline.ts,
@@ -48,10 +52,10 @@ export type HeadlessReviewerResult = OneShotReviewResult;
  * a pin gets a consistent model across modes, and an operator with no pin
  * gets the same Sonnet model both ways.
  *
- * Bump in lockstep with `DEFAULT_REVIEWER_MODELS` in userConfig.ts if/when
- * the project moves off Sonnet 4.6.
+ * Bump in lockstep with `DEFAULT_REVIEWER_MODELS` in userConfig.ts. Sonnet
+ * 5.5 since 3.6.0, run with thinking off (see `lib/reviewerThinking.ts`).
  */
-export const HEADLESS_DEFAULT_MODEL = "claude-sonnet-4-6";
+export const HEADLESS_DEFAULT_MODEL = "claude-sonnet-5-5";
 
 /**
  * No-trust banner for headless mode. Wording diverges from
@@ -107,6 +111,10 @@ export interface RunHeadlessReviewOptions {
   /** Inject a custom client for testing. Production callers leave unset; we
    *  construct an Anthropic client from ANTHROPIC_API_KEY (env). */
   client?: ChatClientShape;
+  /** Whether this reviewer keeps the model's default thinking. Omitted in
+   *  production, where it resolves from `STAMP_REVIEWER_THINKING` and
+   *  `reviewer_thinking:` in ~/.stamp/config.yml (default: off). */
+  thinkingEnabled?: boolean;
 }
 
 /**
@@ -132,6 +140,11 @@ export async function runHeadlessReview(
     head_sha: opts.head_sha,
     model: opts.model,
     client,
+    // Thinking off by default; see lib/reviewerThinking.ts.
+    thinking: anthropicThinkingParam(
+      opts.model,
+      opts.thinkingEnabled ?? reviewerThinkingEnabled(opts.reviewer.name),
+    ),
   });
 }
 

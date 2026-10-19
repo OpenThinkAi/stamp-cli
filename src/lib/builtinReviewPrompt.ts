@@ -14,6 +14,11 @@
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
+import {
+  agentSdkThinkingOptions,
+  reviewerThinkingEnabled,
+} from "./reviewerThinking.js";
+
 export const BUILTIN_DEFAULT_PROMPT =
   "You are a peer code reviewer. Briefly summarise the diff (2-6 sentences) focused on correctness, clarity, and obvious risks. Be substantive but concise.\n\n" +
   "At the end of your response, on its own final line, output exactly one of:\n\n" +
@@ -172,6 +177,9 @@ export async function runBuiltinReview(
         maxTurns: 1,
         persistSession: false,
         ...(input.model ? { model: input.model } : {}),
+        // Thinking off unless STAMP_REVIEWER_THINKING=1; see
+        // lib/reviewerThinking.ts. No per-reviewer config on this path.
+        ...agentSdkThinkingOptions(input.model, reviewerThinkingEnabled(undefined)),
       },
     });
 

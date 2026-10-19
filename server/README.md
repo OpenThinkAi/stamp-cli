@@ -336,7 +336,7 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
    - `GITHUB_BOT_TOKEN` — **optional**, only needed if you want to mirror
      verified commits to a GitHub repo (see "GitHub mirror" below). A
      fine-scoped GitHub PAT with `contents: write` on the target repo(s).
-   - `STAMP_REVIEWER_MODEL` — **optional** (default `claude-sonnet-4-6`, the
+   - `STAMP_REVIEWER_MODEL` — **optional** (default `claude-sonnet-5-5`, the
      same id headless mode uses). Anthropic model id the `stamp-review` verb
      sends for every reviewer on this server — e.g. `claude-opus-5` to
      review with a stronger model than the implementers. One value for the
@@ -346,6 +346,12 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      takes reviews down. Changing it invalidates nothing — the verdict cache
      is keyed on (reviewer, diff, prompt), so a cached verdict from the old
      model is still served for an identical diff+prompt.
+   - `STAMP_REVIEWER_THINKING` — **optional** (default off). Server-side
+     reviews send the model's thinking-off value (`between_tools` for
+     `claude-sonnet-5-5`, `disabled` for models that accept it, nothing for
+     adaptive-only models such as `claude-opus-5-5`). Set `1` to send
+     nothing and let the model think by its own default. See the README's
+     "Extended thinking" section.
    - `MAX_REVIEWS_PER_HOUR` — **optional** (default `30`). Per-caller
      token-bucket cap on the `stamp-review` SSH verb (AGT-420), bounding
      the Anthropic spend any one enrolled member can drive. `admin`/`owner`

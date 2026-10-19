@@ -60,7 +60,7 @@ The exit code mirrors trusted-mode behaviour: `0` if every reviewer returned `ap
 
 **Output shape parity with `--plan`.** Each entry in `reviewers[]` carries the same `name`, `prompt`, `fence_hex` keys as `--plan` mode, plus the headless additions: `verdict`, `prose`, `model`, and (on failure) `error`. The top-level plan adds `mode: "headless"` so a single consumer that wants to handle both modes can switch on that field; absent `mode` means `"plan"` (the pre-AGT-341 default).
 
-**Model selection.** Per-reviewer model pins from `~/.stamp/config.yml` (set via `stamp config reviewers set <name> <model-id>`) apply to headless mode too. With no pin, headless falls back to `claude-sonnet-4-6` — same as the trusted-mode default — so flipping between `--plan` and `--headless` doesn't silently change the model behind a reviewer.
+**Model selection.** Per-reviewer model pins from `~/.stamp/config.yml` (set via `stamp config reviewers set <name> <model-id>`) apply to headless mode too. With no pin, headless falls back to `claude-sonnet-5-5` — same as the trusted-mode default — so flipping between `--plan` and `--headless` doesn't silently change the model behind a reviewer. Headless requests also turn extended thinking off the same way trusted mode does (`between_tools` on `claude-sonnet-5-5`); `STAMP_REVIEWER_THINKING=1` or `reviewer_thinking:` in `~/.stamp/config.yml` turns it back on. See the README's "Extended thinking" section.
 
 **Missing key.** Without `ANTHROPIC_API_KEY` exported, `stamp review --headless` exits 2 with a clean error pointing back at this doc. The check happens before any API call so an unkeyed environment fails fast.
 

@@ -924,6 +924,10 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
         base_sha: resolved.base_sha,
         head_sha: resolved.head_sha,
         systemPrompt: promptBytesByReviewer.get(name)!,
+        // Run the model the provenance below records. Before 3.6.0 this
+        // re-resolved from ~/.stamp/config.yml and ignored `--model`, so a
+        // `--model` run reported one model and reviewed on another.
+        model: backend.model,
         ...(prior ? { priorReview: prior, deltaScope: isDeltaScope } : {}),
       });
     };
