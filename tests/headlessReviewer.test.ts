@@ -312,6 +312,6 @@ describe("HEADLESS_DEFAULT_MODEL — alignment with trusted-mode default", () =>
     // --headless gets two different models for the same reviewer. Pin
     // so that drift surfaces as a test failure rather than as confused
     // operator reports.
-    assert.equal(HEADLESS_DEFAULT_MODEL, "claude-sonnet-4-6");
+    assert.equal(HEADLESS_DEFAULT_MODEL, "claude-sonnet-5-5");
   });
 });

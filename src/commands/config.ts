@@ -91,13 +91,13 @@ export function runConfigReviewersSet(opts: ReviewersSetOptions): void {
   if (id === "") {
     throw new UsageError(
       `model id is required and must be a non-empty string ` +
-        `(e.g. 'claude-sonnet-4-6' or 'claude-opus-4-7')`,
+        `(e.g. 'claude-sonnet-5-5' or 'claude-opus-4-7')`,
     );
   }
   if (!isValidModelId(id)) {
     throw new UsageError(
       `model id '${opts.modelId}' has an invalid shape — expected a token like ` +
-        `'claude-sonnet-4-6' or 'claude-opus-4-7'. The agent SDK treats this as an ` +
+        `'claude-sonnet-5-5' or 'claude-opus-4-7'. The agent SDK treats this as an ` +
         `opaque string, so a typo here will fail at API-call time rather than at ` +
         `config-write — but stamp rejects shapes with whitespace or control chars.`,
     );

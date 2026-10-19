@@ -400,7 +400,7 @@ If a reviewer uses `denied` more than once in every ~20 reviews, the prompt is t
 
 ## Per-reviewer model selection (operator knob)
 
-Which Anthropic model each reviewer runs on is **operator infrastructure**, not committed review policy. It lives per-user in `~/.stamp/config.yml` (written by `stamp init` with Sonnet defaults across the three starter personas), separately from the per-repo `.stamp/config.yml` that pins the reviewer's prompt + tools.
+Which Anthropic model each reviewer runs on is **operator infrastructure**, not committed review policy. It lives per-user in `~/.stamp/config.yml` (written by `stamp init` with Sonnet 5.5 defaults across the three starter personas, run with extended thinking off), separately from the per-repo `.stamp/config.yml` that pins the reviewer's prompt + tools.
 
 Why per-user, not per-repo: cost/speed is a tradeoff each operator legitimately makes differently — one runs Opus on `security` for the lowest-frequency / highest-cost catches; another runs Sonnet across the board. Putting that choice in the per-repo config would force a merge-conflict over operator preference (and pull the model choice into the v3 attestation hash chain, where it doesn't belong). The reviewer prompt is the policy; the model is how a given operator chooses to execute it.
 

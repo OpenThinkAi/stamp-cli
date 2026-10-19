@@ -21,6 +21,10 @@ import { hashToolInput, type ToolCall } from "./toolCalls.js";
 import { gitCommonDir } from "./paths.js";
 import { runGit } from "./git.js";
 import { resolveReviewerModel } from "./userConfig.js";
+import {
+  agentSdkThinkingOptions,
+  reviewerThinkingEnabled,
+} from "./reviewerThinking.js";
 
 type McpServerResolved = {
   type: "stdio";
@@ -919,6 +923,17 @@ export async function invokeReviewer(params: {
       // pick its own default rather than landing as `model: null` (which
       // some SDK versions treat as a typed override of the default).
       ...(modelOverride !== null ? { model: modelOverride } : {}),
+      // Extended thinking OFF unless the operator opted this reviewer back
+      // in (STAMP_REVIEWER_THINKING=1 or reviewer_thinking.<name>: true).
+      // Claude 5 models think adaptively when `thinking` is omitted, which
+      // made reviews slow and could spend the whole budget before the
+      // verdict. The Agent SDK's own `thinking: disabled` is dropped by the
+      // CLI for 5.5-generation models, so this also sets
+      // CLAUDE_CODE_EXTRA_BODY on the child; see lib/reviewerThinking.ts.
+      ...agentSdkThinkingOptions(
+        modelOverride,
+        reviewerThinkingEnabled(params.reviewer),
+      ),
       // PreToolUse fires for every tool call regardless of `allowedTools`
       // membership, which is what we want for security gating: pre-approving
       // a tool name in `allowedTools` should not bypass per-call validation.

@@ -5,6 +5,52 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.6.0 — 2026-10-19
+
+Reviewers now default to `claude-sonnet-5-5` and run with extended thinking
+off. No CLI, gate, verdict-cache or attestation changes.
+
+### Upgrade note
+
+- **Existing `~/.stamp/config.yml` pins override the new default.** stamp
+  writes the defaults only when that file does not exist yet, and earlier
+  versions wrote `claude-sonnet-4-6` for `security`, `standards` and
+  `product`. So an existing install keeps reviewing on Sonnet 4.6 until you
+  change the pins: `stamp config reviewers set <name> claude-sonnet-5-5` for
+  each reviewer. stamp does not rewrite your config for you. Thinking-off
+  applies to whichever model a reviewer resolves to, pinned or default.
+
+### Changed
+
+- Default reviewer model is now `claude-sonnet-5-5` (was `claude-sonnet-4-6`)
+  for new per-user configs, `--headless`, and stamp-server
+  (`SERVER_DEFAULT_MODEL` / `STAMP_REVIEWER_MODEL` default).
+- Anthropic reviewer calls turn extended thinking **off**. Claude 5 models
+  think adaptively when a request omits `thinking`, which made reviews slow
+  and could spend the whole output budget before the verdict. stamp now
+  sends each model's thinking-off value, checked against the live API:
+  `between_tools` for `claude-sonnet-5-5` (it rejects `disabled`);
+  `disabled` for `claude-sonnet-5`, `claude-opus-5`, `claude-haiku-5-5` and
+  the 4.x/3.x models; nothing for `claude-opus-5-5` and `claude-fable-*`,
+  which are adaptive-only and reject both, or for unknown ids. Covers
+  trusted-mode (Agent SDK) reviews, `--headless`, server-side reviews and
+  the `stamp pr listen` built-in reviewer.
+- On the Agent SDK path the value travels through the Claude Code CLI's
+  `CLAUDE_CODE_EXTRA_BODY` env var. The SDK's `thinking: {type: disabled}`
+  is silently dropped by the CLI (2.1.296) for 5.5-generation models, and
+  the request then goes out adaptive. An operator's own
+  `CLAUDE_CODE_EXTRA_BODY` is kept; stamp adds `thinking` only when it is
+  absent.
+
+### Added
+
+- `STAMP_REVIEWER_THINKING=1` restores the model's default thinking for
+  every reviewer in a run (`0` forces it off). Also read by stamp-server.
+- `reviewer_thinking: { <name>: true }` in `~/.stamp/config.yml` restores it
+  for one reviewer.
+
+---
+
 ## 3.5.0 — 2026-10-11
 
 Adds the opt-in AI-attribution commit-message policy and a dependency pass
