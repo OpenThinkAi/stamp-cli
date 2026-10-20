@@ -12,7 +12,9 @@
  * Injection seam: `_sdkRunnerForTest` replaces the real SDK call in tests.
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
+
+import { REVIEWER_SESSION_ISOLATION, reviewerChildEnv } from "./reviewer.js";
 
 import {
   agentSdkThinkingOptions,
@@ -134,6 +136,45 @@ export function parseReviewVerdict(raw: string): { body: string; verdict: Review
 }
 
 /**
+ * The Agent SDK `query()` options for the builtin peer review. Exported so
+ * tests can assert the isolation without a live SDK call.
+ *
+ * #87 follow-up: the same isolation as `invokeReviewer` sessions, so the
+ * operator's MCP servers, hooks, user settings and ~/.claude/CLAUDE.md stay
+ * out of the review:
+ *   - strictMcpConfig: no MCP servers at all; this path passes none.
+ *   - settingSources []: unlike `stamp review`, the project source is
+ *     dropped too. `cwd` is wherever `stamp pr listen` was started, not a
+ *     checkout of the PR's repo, so a CLAUDE.md found there would steer the
+ *     review with some other repo's instructions.
+ *   - env: see reviewerChildEnv (tool search off), plus the thinking-off
+ *     CLAUDE_CODE_EXTRA_BODY when that applies.
+ */
+export function builtinReviewQueryOptions(
+  input: Pick<RunBuiltinReviewInput, "cwd" | "model" | "systemPrompt">,
+): Options {
+  const childEnv = reviewerChildEnv();
+  // Thinking off unless STAMP_REVIEWER_THINKING=1; see
+  // lib/reviewerThinking.ts. No per-reviewer config on this path.
+  const thinkingOptions = agentSdkThinkingOptions(
+    input.model,
+    reviewerThinkingEnabled(undefined),
+    childEnv,
+  );
+  return {
+    cwd: input.cwd,
+    systemPrompt: input.systemPrompt ?? BUILTIN_DEFAULT_PROMPT,
+    maxTurns: 1,
+    persistSession: false,
+    ...(input.model ? { model: input.model } : {}),
+    ...thinkingOptions,
+    ...REVIEWER_SESSION_ISOLATION,
+    settingSources: [],
+    env: thinkingOptions.env ?? childEnv,
+  };
+}
+
+/**
  * Run a single hard-coded peer-review query against the diff using the
  * Claude Agent SDK. Returns `{ ok: true, body }` on success.
  *
@@ -167,20 +208,10 @@ export async function runBuiltinReview(
   }
 
   // Production: call the real SDK.
-  const resolvedSystemPrompt = input.systemPrompt ?? BUILTIN_DEFAULT_PROMPT;
   try {
     const q = query({
       prompt: input.diff,
-      options: {
-        cwd: input.cwd,
-        systemPrompt: resolvedSystemPrompt,
-        maxTurns: 1,
-        persistSession: false,
-        ...(input.model ? { model: input.model } : {}),
-        // Thinking off unless STAMP_REVIEWER_THINKING=1; see
-        // lib/reviewerThinking.ts. No per-reviewer config on this path.
-        ...agentSdkThinkingOptions(input.model, reviewerThinkingEnabled(undefined)),
-      },
+      options: builtinReviewQueryOptions(input),
     });
 
     let finalText: string | null = null;

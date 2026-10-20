@@ -5,6 +5,27 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.6.2 — 2026-10-19
+
+`stamp pr listen` sessions get the reviewer isolation from 3.6.1
+(follow-up to [#87](https://github.com/OpenThinkAi/stamp-cli/issues/87)).
+
+### Fixed
+
+- The peer-watch triage call and the built-in peer review no longer load
+  the operator's MCP servers, user settings, hooks or `~/.claude/CLAUDE.md`,
+  and run with tool search off. 3.6.1 isolated only `stamp review`
+  sessions; these two `query()` calls still inherited the full Claude Code
+  setup.
+
+### Changed
+
+- Both sessions load no setting sources, not even `project`. They run in
+  the directory `stamp pr listen` was started from, not a checkout of the
+  PR's repo, so a `CLAUDE.md` there belongs to some other project.
+
+---
+
 ## 3.6.1 — 2026-10-19
 
 Reviewer sessions are isolated from the operator's Claude Code setup, so

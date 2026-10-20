@@ -9,14 +9,18 @@
  *   - parseReviewVerdict: garbage verdict value → raw body + "comment" fallback
  *   - parseReviewVerdict: multiple verdict lines → uses the LAST one
  *   - runBuiltinReview: verdict + stripped body propagate end-to-end via test seam
+ *   - builtinReviewQueryOptions: session isolation (#87 follow-up)
  */
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import {
+  BUILTIN_DEFAULT_PROMPT,
+  builtinReviewQueryOptions,
   parseReviewVerdict,
   runBuiltinReview,
 } from "../src/lib/builtinReviewPrompt.ts";
+import { CLAUDE_CODE_EXTRA_BODY_ENV } from "../src/lib/reviewerThinking.ts";
 
 // ─── parseReviewVerdict matrix ────────────────────────────────────────
 
@@ -215,5 +219,31 @@ describe("runBuiltinReview: verdict propagates via test seam", () => {
     if (!result.ok) return;
     assert.equal(result.verdict, "comment");
     assert.equal(result.body, "Just a comment with no verdict line.");
+  });
+});
+
+// ─── #87 follow-up: session isolation ────────────────────────────────
+
+describe("builtin review session isolation (#87)", () => {
+  it("loads no MCP servers and no setting sources", () => {
+    const opts = builtinReviewQueryOptions({ cwd: "/tmp" });
+    assert.equal(opts.strictMcpConfig, true);
+    assert.equal(opts.mcpServers, undefined);
+    // [] not ["project"]: cwd is the listener's, not the PR's repo.
+    assert.deepEqual(opts.settingSources, []);
+    assert.equal(opts.systemPrompt, BUILTIN_DEFAULT_PROMPT);
+  });
+
+  it("turns tool search off in the child env without a model", () => {
+    const opts = builtinReviewQueryOptions({ cwd: "/tmp" });
+    assert.equal(opts.env?.["ENABLE_TOOL_SEARCH"], "false");
+    assert.equal(opts.env?.["PATH"], process.env["PATH"]);
+  });
+
+  it("keeps tool search off alongside the thinking-off env", () => {
+    const opts = builtinReviewQueryOptions({ cwd: "/tmp", model: "claude-opus-5" });
+    assert.deepEqual(opts.thinking, { type: "disabled" });
+    assert.equal(opts.env?.["ENABLE_TOOL_SEARCH"], "false");
+    assert.match(opts.env?.[CLAUDE_CODE_EXTRA_BODY_ENV] ?? "", /"thinking"/);
   });
 });

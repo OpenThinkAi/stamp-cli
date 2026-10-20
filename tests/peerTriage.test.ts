@@ -24,6 +24,7 @@ import {
   SKIP_DECISION,
   FALLBACK_DECISION,
   TRIAGE_MODEL,
+  triageQueryOptions,
   type TriageDecision,
   type TriageResult,
 } from "../src/lib/peerTriage.ts";
@@ -470,6 +471,33 @@ describe("namedPrompt: resolveNamedPrompt", () => {
       assert.ok(result.resolvedPath.includes("personal"), "path should include personal");
       assert.ok(result.resolvedPath.includes("peers"), "path should include peers");
       assert.ok(result.resolvedPath.endsWith("myprompT.md"), "path should end with <name>.md");
+    }
+  });
+});
+
+// ─── #87 follow-up: session isolation ────────────────────────────────
+
+describe("triage session isolation (#87)", () => {
+  it("loads no MCP servers and no setting sources", () => {
+    const opts = triageQueryOptions("/tmp", "system");
+    assert.equal(opts.strictMcpConfig, true);
+    assert.equal(opts.mcpServers, undefined);
+    // [] not ["project"]: cwd is the listener's, not the PR's repo.
+    assert.deepEqual(opts.settingSources, []);
+    assert.equal(opts.model, TRIAGE_MODEL);
+    assert.equal(opts.maxTurns, 1);
+  });
+
+  it("turns tool search off in the child env and keeps the rest", () => {
+    const prev = process.env["ENABLE_TOOL_SEARCH"];
+    process.env["ENABLE_TOOL_SEARCH"] = "true";
+    try {
+      const env = triageQueryOptions("/tmp", "system").env;
+      assert.equal(env?.["ENABLE_TOOL_SEARCH"], "false");
+      assert.equal(env?.["PATH"], process.env["PATH"]);
+    } finally {
+      if (prev === undefined) delete process.env["ENABLE_TOOL_SEARCH"];
+      else process.env["ENABLE_TOOL_SEARCH"] = prev;
     }
   });
 });
