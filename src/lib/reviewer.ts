@@ -621,8 +621,9 @@ export function checkReviewerTool(args: {
     reason:
       `Tool "${toolName}" is not in the reviewer allowlist. The ` +
       `gated set is { WebFetch, Read, Grep, Glob, Bash (opt-in), ` +
-      `ToolSearch, mcp__<server>__<tool> }. If this is an MCP tool, check that ` +
-      `its name follows the \`mcp__<server>__<tool>\` shape. If this ` +
+      `ToolSearch, mcp__<server>__<tool> }. If this is an MCP tool, ` +
+      `check that its name follows the \`mcp__<server>__<tool>\` ` +
+      `shape. If this ` +
       `is a new SDK built-in, it needs an explicit branch in ` +
       `checkReviewerTool and a SAFE_TOOLS entry in toolAllowlist.ts.`,
   };
