@@ -32,6 +32,9 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import {
   checkReviewerTool,
   denyIfOutsideRepo,
+  mcpToolNameSegment,
+  REVIEWER_SESSION_ISOLATION,
+  reviewerChildEnv,
   type WebFetchHostPolicy,
 } from "../src/lib/reviewer.ts";
 
@@ -666,14 +669,101 @@ describe("checkReviewerTool — MCP pass-through (AGT-472 explicit allow)", () =
     });
     assert.equal(r.allow, true);
   });
-  it("allows operator-wired MCP tools (linear, github, etc.)", () => {
+  it("allows operator-wired MCP tools (linear, github, etc.) the reviewer declares", () => {
     const r = checkReviewerTool({
       toolName: "mcp__linear__get_issue",
       toolInput: { id: "ENG-1" },
       repoRoot,
       webFetchPolicy: noWebHosts,
+      mcpServers: new Set(["stamp-verdict", "linear"]),
     });
     assert.equal(r.allow, true);
+  });
+});
+
+// ---- #87: MCP allow scoped to stamp's own servers + ToolSearch -------
+//
+// Reviewer sessions used to inherit every user-level MCP server, and the
+// hook allowed any `mcp__*` name, so an undeclared server's tools (mail,
+// chat) were callable. The hook now allows MCP tools only on the servers
+// stamp handed the session. ToolSearch is allowed so a deferred
+// submit_verdict schema can always be loaded.
+
+describe("checkReviewerTool — MCP server scoping (#87)", () => {
+  it("denies a tool on a server the reviewer did not declare", () => {
+    const r = checkReviewerTool({
+      toolName: "mcp__mail__send_message",
+      toolInput: { to: "x@example.com" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+      mcpServers: new Set(["stamp-verdict", "linear"]),
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /not from a server this reviewer declares/);
+  });
+
+  it("defaults to stamp-verdict alone when no server set is passed", () => {
+    const verdict = checkReviewerTool({
+      toolName: "mcp__stamp-verdict__submit_verdict",
+      toolInput: {},
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(verdict.allow, true);
+    const other = checkReviewerTool({
+      toolName: "mcp__linear__get_issue",
+      toolInput: {},
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(other.allow, false);
+  });
+
+  it("does not let a declared server name match as a prefix of another", () => {
+    const r = checkReviewerTool({
+      toolName: "mcp__linear-admin__delete_project",
+      toolInput: {},
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+      mcpServers: new Set(["stamp-verdict", "linear"]),
+    });
+    assert.equal(r.allow, false);
+  });
+
+  it("matches declared names in their tool-name form (non-[A-Za-z0-9_-] become _)", () => {
+    assert.equal(mcpToolNameSegment("acme.billing tools"), "acme_billing_tools");
+    const r = checkReviewerTool({
+      toolName: "mcp__acme_billing_tools__lookup",
+      toolInput: {},
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+      mcpServers: new Set(["stamp-verdict", "acme.billing tools"]),
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("allows ToolSearch", () => {
+    const r = checkReviewerTool({
+      toolName: "ToolSearch",
+      toolInput: { query: "select:mcp__stamp-verdict__submit_verdict" },
+      repoRoot,
+      webFetchPolicy: noWebHosts,
+    });
+    assert.equal(r.allow, true);
+  });
+});
+
+describe("reviewer session isolation (#87)", () => {
+  it("only loads stamp's MCP servers and the project setting source", () => {
+    assert.equal(REVIEWER_SESSION_ISOLATION.strictMcpConfig, true);
+    // "project" stays: it is the source that loads the repo's CLAUDE.md.
+    assert.deepEqual(REVIEWER_SESSION_ISOLATION.settingSources, ["project"]);
+  });
+
+  it("turns tool search off in the child env and keeps the rest", () => {
+    const env = reviewerChildEnv({ PATH: "/bin", ENABLE_TOOL_SEARCH: "true" });
+    assert.equal(env.ENABLE_TOOL_SEARCH, "false");
+    assert.equal(env.PATH, "/bin");
   });
 });
 

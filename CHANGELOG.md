@@ -5,6 +5,36 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## 3.6.1 — 2026-10-19
+
+Reviewer sessions are isolated from the operator's Claude Code setup, so
+the structured verdict tool works again
+([#87](https://github.com/OpenThinkAi/stamp-cli/issues/87)).
+
+### Fixed
+
+- Agent SDK reviewers no longer load user-level or project MCP servers.
+  They loaded every server in the operator's Claude Code config, and with
+  those present Claude Code deferred MCP tool schemas behind `ToolSearch`,
+  which the reviewer tool hook denied. A growing share of reviews (about
+  17% in October) then fell back to the free-text `VERDICT:` line, and
+  their `submit_retro` candidates were lost. Not a 3.6.0 regression: the
+  user servers leaked in all 3.x releases.
+- Reviewer sessions now run with tool search off, so `submit_verdict` and
+  `submit_retro` are always directly callable. The hook also allows
+  `ToolSearch`, for repos whose `.claude/settings.json` turns it back on.
+
+### Changed
+
+- The reviewer tool hook allows MCP tools only from `stamp-verdict` and the
+  reviewer's declared `mcp_servers`. Before, any `mcp__*` tool was allowed,
+  which let a reviewer call tools on user-level servers it never declared.
+- Reviewer sessions load only the `project` setting source. The repo's
+  `CLAUDE.md` and `.claude/settings.json` still apply; user and local
+  settings, and `~/.claude/CLAUDE.md`, no longer reach reviewers.
+
+---
+
 ## 3.6.0 — 2026-10-19
 
 Reviewers now default to `claude-sonnet-5-5` and run with extended thinking
