@@ -388,7 +388,11 @@ new `required_checks.run` string. Conservative guidance:
    and `~/.claude/CLAUDE.md` stay out while the repo's `CLAUDE.md` is
    still read. The `hooks.PreToolUse` callback allows MCP tools only
    from those servers. Tool search is off, so `submit_verdict` is
-   always directly callable (#87).
+   always directly callable (#87). `stamp pr listen`'s Haiku triage
+   and built-in peer review sessions get the same isolation with no
+   setting sources at all: they run in the listener's working
+   directory, not a checkout of the PR's repo, so no `CLAUDE.md` is
+   read and no MCP servers are loaded.
 
 The first step toward narrowing this gap — hash-pinning the prompt,
 tools, and MCP config in the attestation — landed in

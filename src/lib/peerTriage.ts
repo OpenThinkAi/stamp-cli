@@ -24,9 +24,10 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { peerWatchPath } from "./paths.js";
+import { REVIEWER_SESSION_ISOLATION, reviewerChildEnv } from "./reviewer.js";
 
 // ─── Constants ────────────────────────────────────────────────────────
 
@@ -215,6 +216,34 @@ function extractJsonBlock(text: string): string | null {
 // ─── Core triage function ────────────────────────────────────────────
 
 /**
+ * The Agent SDK `query()` options for the triage call. Exported so tests
+ * can assert the isolation without a live SDK call.
+ *
+ * #87 follow-up: the triage session gets the same isolation as reviewer
+ * sessions (see `invokeReviewer`), so the operator's MCP servers, hooks,
+ * user settings and ~/.claude/CLAUDE.md stay out of it:
+ *   - strictMcpConfig: no MCP servers at all; triage passes none.
+ *   - settingSources []: unlike reviewers, triage drops the project source
+ *     too. Its only inputs are the operator's peer-watch.md rules and the
+ *     PR event, and `cwd` is wherever `stamp pr listen` was started, not a
+ *     checkout of the PR's repo, so a CLAUDE.md found there has nothing to
+ *     say about the decision.
+ *   - env: see reviewerChildEnv (tool search off).
+ */
+export function triageQueryOptions(cwd: string, systemPrompt: string): Options {
+  return {
+    cwd,
+    systemPrompt,
+    maxTurns: 1,
+    persistSession: false,
+    model: TRIAGE_MODEL,
+    ...REVIEWER_SESSION_ISOLATION,
+    settingSources: [],
+    env: reviewerChildEnv(),
+  };
+}
+
+/**
  * Make the Haiku triage call against the operator's rules and the event.
  *
  * Never rejects (AC #2). Every failure path returns `{ decision: SKIP_DECISION, costUsd: 0 }`
@@ -255,13 +284,7 @@ export async function runTriage(input: TriageInput): Promise<TriageResult> {
   try {
     const q = query({
       prompt: user,
-      options: {
-        cwd: input.cwd,
-        systemPrompt: system,
-        maxTurns: 1,
-        persistSession: false,
-        model: TRIAGE_MODEL,
-      },
+      options: triageQueryOptions(input.cwd, system),
     });
 
     let finalText: string | null = null;
