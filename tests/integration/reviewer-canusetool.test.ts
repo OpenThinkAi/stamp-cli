@@ -39,9 +39,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
 
-import { checkReviewerTool } from "../../src/lib/reviewer.ts";
+import {
+  checkReviewerTool,
+  REVIEWER_SESSION_ISOLATION,
+  reviewerChildEnv,
+} from "../../src/lib/reviewer.ts";
 
 const hasCreds =
   !!process.env.ANTHROPIC_API_KEY ||
@@ -374,6 +379,72 @@ describe("PreToolUse hook fires for WebFetch path_prefix (AGT-036 AC #7/#8)", ()
         `At least one WebFetch invocation should have been allowed by the hook ` +
           `(in-prefix /repos/ URL). Saw: ${JSON.stringify(fetches)}`,
       );
+    },
+  );
+});
+
+describe("reviewer session isolation (#87)", () => {
+  it(
+    "sees only stamp-verdict, inlines submit_verdict, and still loads the repo CLAUDE.md",
+    { skip: skipReason, timeout: 90_000 },
+    async () => {
+      const repoRoot = realpathSync(
+        mkdtempSync(path.join(tmpdir(), "stamp-87-")),
+      );
+      writeFileSync(path.join(repoRoot, "CLAUDE.md"), "Project codeword: ZEBRA-42\n");
+
+      let submitted: string | null = null;
+      const verdictServer = createSdkMcpServer({
+        name: "stamp-verdict",
+        version: "1.0.0",
+        tools: [
+          tool(
+            "submit_verdict",
+            "Submit the verdict.",
+            { verdict: z.enum(["approved"]), prose: z.string() },
+            async (args) => {
+              submitted = args.prose;
+              return { content: [{ type: "text", text: "verdict recorded" }] };
+            },
+          ),
+        ],
+      });
+
+      let initServers: string[] = [];
+      let initTools: string[] = [];
+      const calls: string[] = [];
+      const q = query({
+        prompt:
+          "Call submit_verdict once with verdict approved. In prose, give the " +
+          "project codeword from your context, or NONE if you have none.",
+        options: {
+          cwd: repoRoot,
+          systemPrompt: "You are a test reviewer.",
+          allowedTools: ["mcp__stamp-verdict__submit_verdict"],
+          mcpServers: { "stamp-verdict": verdictServer },
+          maxTurns: 3,
+          persistSession: false,
+          ...REVIEWER_SESSION_ISOLATION,
+          env: reviewerChildEnv(),
+        },
+      });
+      for await (const msg of q) {
+        if (msg.type === "system" && msg.subtype === "init") {
+          initServers = msg.mcp_servers.map((s) => s.name);
+          initTools = msg.tools;
+        }
+        if (msg.type === "assistant") {
+          for (const b of msg.message.content) {
+            if (b.type === "tool_use") calls.push(b.name);
+          }
+        }
+      }
+
+      assert.deepEqual(initServers, ["stamp-verdict"]);
+      assert.ok(initTools.includes("mcp__stamp-verdict__submit_verdict"));
+      assert.ok(!initTools.includes("ToolSearch"), "tool search should be off");
+      assert.deepEqual(calls, ["mcp__stamp-verdict__submit_verdict"]);
+      assert.match(submitted ?? "", /ZEBRA-42/);
     },
   );
 });

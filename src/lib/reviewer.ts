@@ -1,7 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { createSdkMcpServer, query, tool } from "@anthropic-ai/claude-agent-sdk";
+import {
+  createSdkMcpServer,
+  query,
+  tool,
+  type Options,
+} from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
   ENV_IDENTIFIER_REGEX,
@@ -263,6 +268,49 @@ export interface WebFetchHostPolicy {
  */
 const MCP_TOOL_NAME_PATTERN = /^mcp__[A-Za-z0-9_.\-]+__[A-Za-z0-9_.\-]+$/;
 
+/** The in-process MCP server that carries submit_verdict / submit_retro. */
+export const VERDICT_MCP_SERVER = "stamp-verdict";
+
+const DEFAULT_REVIEWER_MCP_SERVERS: ReadonlySet<string> = new Set([
+  VERDICT_MCP_SERVER,
+]);
+
+/**
+ * #87: Agent SDK `query()` options that keep a reviewer session isolated
+ * from the operator's Claude Code configuration (see the call site in
+ * `invokeReviewer` for why each one is set).
+ */
+export const REVIEWER_SESSION_ISOLATION: Readonly<
+  Required<Pick<Options, "strictMcpConfig" | "settingSources">>
+> = {
+  strictMcpConfig: true,
+  settingSources: ["project"],
+};
+
+/**
+ * #87: the environment for the reviewer's Claude Code child process. The
+ * operator's environment, with tool search forced off: with it on, the CLI
+ * defers MCP tool schemas behind a `ToolSearch` call, and a reviewer that
+ * fails to load the deferred schema falls back to the free-text VERDICT
+ * line instead of calling submit_verdict. Reviewer sessions only carry a
+ * handful of tools, so inlining their schemas costs nothing. An operator's
+ * own ENABLE_TOOL_SEARCH is overridden on purpose.
+ */
+export function reviewerChildEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string | undefined> {
+  return { ...baseEnv, ENABLE_TOOL_SEARCH: "false" };
+}
+
+/**
+ * The form an MCP server name takes inside a tool name
+ * (`mcp__<segment>__<tool>`): Claude Code replaces every character outside
+ * `[A-Za-z0-9_-]` with `_`.
+ */
+export function mcpToolNameSegment(serverName: string): string {
+  return serverName.replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
 /**
  * Single source of truth for reviewer-tool gating. Called from the
  * `hooks.PreToolUse` callback in `invokeReviewer` AND directly from unit
@@ -302,8 +350,18 @@ export function checkReviewerTool(args: {
   webFetchPolicy: Map<string, WebFetchHostPolicy>;
   /** AGT-472: per-reviewer Bash opt-in, threaded from `invokeReviewer`. */
   bashAllowed?: boolean;
+  /**
+   * #87: names of the MCP servers this reviewer may call tools on — the
+   * `stamp-verdict` server plus the servers declared under
+   * `reviewers.<name>.mcp_servers` in `.stamp/config.yml`. Defaults to
+   * `stamp-verdict` alone. Any other `mcp__<server>__<tool>` name is denied,
+   * so a server the session picked up from somewhere other than stamp's
+   * own `mcpServers` option can never be called.
+   */
+  mcpServers?: ReadonlySet<string>;
 }): { allow: true } | { allow: false; reason: string } {
   const { toolName, toolInput, repoRoot, webFetchPolicy, bashAllowed } = args;
+  const mcpServers = args.mcpServers ?? DEFAULT_REVIEWER_MCP_SERVERS;
   const input =
     toolInput && typeof toolInput === "object"
       ? (toolInput as Record<string, unknown>)
@@ -519,13 +577,36 @@ export function checkReviewerTool(args: {
     };
   }
 
-  // AGT-472: MCP-prefixed names pass through. The verdict-submission
-  // server (`mcp__stamp-verdict__*`) and any operator-wired MCP servers
-  // produce this shape; the `mcp_servers` config gate at invocation time
-  // already constrains which servers can launch, so the tool surface
-  // under this prefix is already operator-attested.
-  if (MCP_TOOL_NAME_PATTERN.test(toolName)) {
+  // #87: ToolSearch only loads the schemas of tools the session already
+  // has; it cannot reach anything new. Stamp turns tool search off for
+  // reviewer sessions (ENABLE_TOOL_SEARCH=false), but a repo's
+  // `.claude/settings.json` can turn it back on, and denying it then
+  // strands submit_verdict behind a deferred schema the reviewer can't
+  // load — the fallback-verdict failure mode #87 fixed.
+  if (toolName === "ToolSearch") {
     return { allow: true };
+  }
+
+  // AGT-472 / #87: MCP-prefixed names pass through only for the servers
+  // stamp itself handed the session: the verdict-submission server
+  // (`mcp__stamp-verdict__*`) and the reviewer's declared `mcp_servers`,
+  // which the config gate and the attestation hash chain already cover.
+  // A tool from any other server is denied even if the session somehow
+  // loaded it (before #87, user-level MCP servers leaked in).
+  if (MCP_TOOL_NAME_PATTERN.test(toolName)) {
+    for (const server of mcpServers) {
+      if (toolName.startsWith(`mcp__${mcpToolNameSegment(server)}__`)) {
+        return { allow: true };
+      }
+    }
+    return {
+      allow: false,
+      reason:
+        `MCP tool "${toolName}" is not from a server this reviewer ` +
+        `declares. Reviewers may call tools only on stamp-verdict and the ` +
+        `servers listed under \`reviewers.<name>.mcp_servers\` in ` +
+        `.stamp/config.yml.`,
+    };
   }
 
   // AGT-472: deny-by-default fallthrough. Previously this returned
@@ -540,7 +621,7 @@ export function checkReviewerTool(args: {
     reason:
       `Tool "${toolName}" is not in the reviewer allowlist. The ` +
       `gated set is { WebFetch, Read, Grep, Glob, Bash (opt-in), ` +
-      `mcp__<server>__<tool> }. If this is an MCP tool, check that ` +
+      `ToolSearch, mcp__<server>__<tool> }. If this is an MCP tool, check that ` +
       `its name follows the \`mcp__<server>__<tool>\` shape. If this ` +
       `is a new SDK built-in, it needs an explicit branch in ` +
       `checkReviewerTool and a SAFE_TOOLS entry in toolAllowlist.ts.`,
@@ -733,7 +814,7 @@ export async function invokeReviewer(params: {
   const submittedRetros: RetroCandidate[] = [];
 
   const verdictServer = createSdkMcpServer({
-    name: "stamp-verdict",
+    name: VERDICT_MCP_SERVER,
     version: "1.0.0",
     tools: [
       tool(
@@ -882,8 +963,10 @@ export async function invokeReviewer(params: {
   const mcpServersResolved = resolveMcpServers(def, params.reviewer);
   const mcpServers = {
     ...(mcpServersResolved ?? {}),
-    "stamp-verdict": verdictServer,
+    [VERDICT_MCP_SERVER]: verdictServer,
   };
+  // #87: the only MCP servers whose tools the PreToolUse hook lets through.
+  const hookMcpServers: ReadonlySet<string> = new Set(Object.keys(mcpServers));
 
   // Bound the agent loop two ways: maxTurns caps the model/tool round-trip
   // count (a misbehaving prompt with WebFetch + MCP can otherwise iterate
@@ -922,6 +1005,13 @@ export async function invokeReviewer(params: {
     );
   }, timeoutMs);
 
+  const childEnv = reviewerChildEnv();
+  const thinkingOptions = agentSdkThinkingOptions(
+    modelOverride,
+    reviewerThinkingEnabled(params.reviewer),
+    childEnv,
+  );
+
   const q = query({
     prompt: userPrompt,
     options: {
@@ -942,10 +1032,20 @@ export async function invokeReviewer(params: {
       // verdict. The Agent SDK's own `thinking: disabled` is dropped by the
       // CLI for 5.5-generation models, so this also sets
       // CLAUDE_CODE_EXTRA_BODY on the child; see lib/reviewerThinking.ts.
-      ...agentSdkThinkingOptions(
-        modelOverride,
-        reviewerThinkingEnabled(params.reviewer),
-      ),
+      ...thinkingOptions,
+      // #87: isolate the session from the operator's Claude Code setup.
+      // Without these the CLI loads every user-level and project MCP
+      // server (mail/chat connectors and the like) next to stamp-verdict,
+      // the user's own settings, hooks and ~/.claude/CLAUDE.md, and the
+      // extra MCP tools push submit_verdict behind deferred tool search.
+      //   - strictMcpConfig: only the servers in `mcpServers` above
+      //     (stamp-verdict + the reviewer's declared mcp_servers).
+      //   - settingSources ["project"]: drop user and local settings but
+      //     keep the project source, which is what loads the repo's
+      //     CLAUDE.md — reviewers have always read it.
+      //   - env: see reviewerChildEnv (tool search off).
+      ...REVIEWER_SESSION_ISOLATION,
+      env: thinkingOptions.env ?? childEnv,
       // PreToolUse fires for every tool call regardless of `allowedTools`
       // membership, which is what we want for security gating: pre-approving
       // a tool name in `allowedTools` should not bypass per-call validation.
@@ -963,6 +1063,7 @@ export async function invokeReviewer(params: {
                   repoRoot: params.repoRoot,
                   webFetchPolicy,
                   bashAllowed,
+                  mcpServers: hookMcpServers,
                 });
                 if (result.allow) return {};
                 return {

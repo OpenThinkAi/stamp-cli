@@ -381,6 +381,14 @@ new `required_checks.run` string. Conservative guidance:
    alternative when a single host serves multiple unrelated surfaces.
 3. Do not share MCP API keys across reviewers if a single-reviewer
    compromise shouldn't imply access to everything.
+4. The reviewer session is isolated from the operator's own Claude
+   Code setup: it loads only stamp's `stamp-verdict` server plus the
+   reviewer's declared `mcp_servers` (`strictMcpConfig`), and only the
+   project setting source, so user-level MCP servers, settings, hooks
+   and `~/.claude/CLAUDE.md` stay out while the repo's `CLAUDE.md` is
+   still read. The `hooks.PreToolUse` callback allows MCP tools only
+   from those servers. Tool search is off, so `submit_verdict` is
+   always directly callable (#87).
 
 The first step toward narrowing this gap — hash-pinning the prompt,
 tools, and MCP config in the attestation — landed in
