@@ -378,7 +378,8 @@ program
     "skip the operator-confirmation prompt on the bootstrap merge provision runs, " +
       "and nothing else (forwarded to `stamp bootstrap --yes`; see audit H1) — " +
       "required to run provision unattended, e.g. from an agent or CI with no TTY. " +
-      "Without it, a run with no TTY stops before any remote work",
+      "Without it, a run with no TTY stops before any remote work. " +
+      "No effect with --migrate-existing or --migrate-bypass (neither runs bootstrap)",
   )
   .option(
     "--remove-orgadmin",

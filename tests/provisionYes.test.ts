@@ -21,7 +21,7 @@
 
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,7 +49,7 @@ function runProvisionCli(args: string[], extraEnv: Record<string, string> = {}) 
   const work = mkdtempSync(join(tmpdir(), "stamp-provision-yes-"));
   const bin = join(work, "bin");
   const sshLog = join(work, "ssh.log");
-  spawnSync("mkdir", ["-p", bin]);
+  mkdirSync(bin, { recursive: true });
   const fakeSsh = join(bin, "ssh");
   writeFileSync(
     fakeSsh,
