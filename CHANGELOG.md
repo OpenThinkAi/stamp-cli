@@ -5,6 +5,33 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 
 ---
 
+## Unreleased
+
+Headless `stamp provision` can finish, and its clone knows about the mirror
+([#86](https://github.com/OpenThinkAi/stamp-cli/issues/86)).
+
+### Added
+
+- **`stamp provision --yes`** — forwarded to the bootstrap step and nothing
+  else: it skips the confirmation prompt on the one merge bootstrap performs,
+  the same narrow scope as `stamp bootstrap --yes`
+  ([#66](https://github.com/OpenThinkAi/stamp-cli/issues/66)).
+- **`github` remote for the mirror.** When provision creates a GitHub mirror,
+  the new clone gets a `github` remote pointing at it
+  (`git@github.com:<org>/<name>.git`), the same remote layout
+  `--migrate-existing` leaves.
+
+### Changed
+
+- **A headless provision without `--yes` now stops before any remote work.**
+  With no TTY and no opt-out (`--yes` or `STAMP_REQUIRE_HUMAN_MERGE=0`),
+  provision exits with a hint to pass `--yes` before it creates the server
+  repo, clone, mirror, deploy key or Ruleset. Previously it did all of that
+  and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
+  and its plan now says how the bootstrap merge will be confirmed.
+
+---
+
 ## 3.6.2 — 2026-10-19
 
 `stamp pr listen` sessions get the reviewer isolation from 3.6.1

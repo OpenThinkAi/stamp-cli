@@ -48,6 +48,7 @@ import {
   parseServerFlag,
   type ServerConfig,
 } from "../lib/serverConfig.js";
+import { mergeConfirmationWouldFail } from "../lib/humanMerge.js";
 import { computeMirrorProvisionProblems } from "../lib/provisionVerify.js";
 import { runBootstrap } from "./bootstrap.js";
 import { fetchServerPubkey } from "./server.js";
@@ -112,6 +113,20 @@ export interface ProvisionOptions {
    * `User` actors). No-op without `--migrate-bypass`.
    */
   removeOrgadmin?: boolean;
+  /**
+   * Forward `--yes` to the bootstrap step, and only there: it declares
+   * automated-merge intent for the one protected-branch merge bootstrap
+   * performs (audit H1; same contract and same narrow scope as
+   * `stamp bootstrap --yes`, #66). Nothing else provision does is gated by
+   * a confirmation prompt, so nothing else reads it.
+   *
+   * Without it, an unattended greenfield provision (no TTY) refuses up
+   * front, before any remote work, instead of failing at bootstrap's merge
+   * after the server repo, clone, mirror, deploy key and Ruleset already
+   * exist (issue #86). No effect under --migrate-existing or
+   * --migrate-bypass, neither of which runs bootstrap.
+   */
+  yes?: boolean;
 }
 
 export async function runProvision(opts: ProvisionOptions): Promise<void> {
@@ -200,6 +215,23 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
     return;
   }
 
+  // 3b. Refuse an unattended run that would die at bootstrap's merge
+  //     (issue #86). That merge is the last step, so without this check a
+  //     headless provision creates the server repo, clone, mirror, deploy
+  //     key and Ruleset, and only then fails on "no TTY". Checked after the
+  //     dry-run return so a headless --dry-run still previews the plan.
+  if (mergeConfirmationWouldFail({ yes: opts.yes })) {
+    throw new Error(
+      `confirmation required: provision ends with a bootstrap merge that ` +
+        `needs interactive confirmation (audit H1), but no TTY is attached. ` +
+        `Nothing has been created yet.\n\n` +
+        `Re-run with --yes to declare automated intent for that one merge:\n` +
+        `  stamp provision ${opts.name}${opts.org ? ` --org ${opts.org}` : ""} --yes\n\n` +
+        `(or set STAMP_REQUIRE_HUMAN_MERGE=0 for the shell, which also ` +
+        `un-gates every other merge it runs).`,
+    );
+  }
+
   // 4. Provision the bare repo on the server.
   console.log(`\nProvisioning bare repo on ${server.host}:${server.port}`);
   provisionBareRepoOnServer(server, opts.name);
@@ -214,6 +246,10 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
   if (opts.org && !opts.noMirror) {
     console.log(`Creating GitHub mirror repo ${opts.org}/${opts.name}`);
     mirrorRepo = createGithubMirrorRepo(opts.org, opts.name, opts.privateRepo ?? true);
+    // Give the clone a `github` remote for the mirror, matching the layout
+    // --migrate-existing leaves behind (origin = stamp server, github =
+    // mirror). Added right away so it exists even if a later step fails.
+    addGithubMirrorRemote(cloneTarget, mirrorRepo);
   }
 
   // 7. Optional: write .stamp/mirror.yml so the post-receive hook knows where to mirror.
@@ -246,7 +282,7 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
   console.log(`Bootstrapping reviewers on the clone`);
   process.chdir(cloneTarget);
   try {
-    await runBootstrap({});
+    await runBootstrap({ yes: opts.yes });
   } catch (err) {
     // Everything except the reviewer bootstrap is done by this point —
     // say so explicitly. The old behavior (bail with only bootstrap's
@@ -259,8 +295,8 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
           : "") +
         ` are all set up — only the reviewer bootstrap failed. Finish it manually:\n` +
         `  cd ${cloneTarget}\n` +
-        `  stamp bootstrap\n` +
-        `(If bootstrap aborted for lack of a TTY, re-run it from an interactive terminal.)`,
+        `  stamp bootstrap${opts.yes ? " --yes" : ""}\n` +
+        `(If bootstrap aborted for lack of a TTY, re-run it from an interactive terminal or pass --yes.)`,
     );
     throw err;
   }
@@ -323,6 +359,7 @@ function printPlan(args: {
   if (args.opts.org && !args.opts.noMirror) {
     console.log(fmt("GitHub mirror", `${args.opts.org}/${args.opts.name} (${args.opts.privateRepo === false ? "public" : "private"})`));
     console.log(fmt("mirror.yml", "written to .stamp/mirror.yml in the clone"));
+    console.log(fmt("github remote", githubMirrorRemoteUrl({ owner: args.opts.org, repo: args.opts.name })));
   } else {
     console.log(fmt("GitHub mirror", `skipped (${args.opts.noMirror ? "--no-mirror" : "no --org given"})`));
   }
@@ -341,6 +378,14 @@ function printPlan(args: {
   } else {
     console.log(fmt("GitHub Ruleset", "skipped"));
   }
+  console.log(
+    fmt(
+      "merge confirm",
+      args.opts.yes
+        ? "skipped for the bootstrap merge (--yes)"
+        : "interactive prompt before the bootstrap merge (needs a TTY; pass --yes to run unattended)",
+    ),
+  );
   console.log(bar);
 }
 
@@ -401,6 +446,41 @@ function createGithubMirrorRepo(
     );
   }
   return { owner, repo };
+}
+
+/**
+ * SSH URL for the `github` remote that points a provisioned clone at its
+ * mirror. SCP-style, the same shape the --migrate-existing docs tell
+ * operators to add and that `parseGithubOriginUrl` reads back.
+ */
+export function githubMirrorRemoteUrl(mirror: { owner: string; repo: string }): string {
+  return `git@github.com:${mirror.owner}/${mirror.repo}.git`;
+}
+
+/**
+ * Add a `github` remote for the freshly created mirror (issue #86). Before
+ * this, a greenfield clone had only `origin` (the stamp server), unlike a
+ * --migrate-existing repo, where the old origin is renamed to `github`.
+ *
+ * A failure here only warns: the remote is a local convenience, and by the
+ * time it runs the server repo and the mirror already exist, so aborting
+ * would strand them over something the operator can add with one command.
+ */
+export function addGithubMirrorRemote(
+  cloneTarget: string,
+  mirror: { owner: string; repo: string },
+): void {
+  const url = githubMirrorRemoteUrl(mirror);
+  try {
+    runGit(["remote", "add", "github", url], cloneTarget);
+    console.log(`Added remote github → ${url}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `warning: could not add the \`github\` remote (${message}). Add it by hand:\n` +
+        `  git -C ${cloneTarget} remote add github ${url}`,
+    );
+  }
 }
 
 function writeMirrorYml(
@@ -599,6 +679,7 @@ function printSuccess(args: {
   console.log(fmt("origin", bareRepoSshUrl(args.server, args.repoName)));
   if (args.mirrorRepo) {
     console.log(fmt("mirror", `https://github.com/${args.mirrorRepo.owner}/${args.mirrorRepo.repo}`));
+    console.log(fmt("github remote", githubMirrorRemoteUrl(args.mirrorRepo)));
   }
   console.log(bar);
   console.log(`\nNext: cd ${args.cloneTarget}, then work on a feature branch and go through stamp review/merge/push.`);

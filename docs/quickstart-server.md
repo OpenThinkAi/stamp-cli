@@ -68,9 +68,11 @@ This file is per-operator config, not committed to any repo — it just tells yo
 stamp provision myproject --org <github-org-or-user>
 ```
 
-This single command does everything: SSHes to your stamp server and creates the bare repo via `new-stamp-repo`, clones it locally, runs `stamp bootstrap` (which lands the three real reviewers via a signed merge), creates a private GitHub mirror repo, writes `.stamp/mirror.yml`, and applies the `stamp-mirror-only` Ruleset on the mirror so direct pushes from any other identity are rejected by GitHub.
+This single command does everything: SSHes to your stamp server and creates the bare repo via `new-stamp-repo`, clones it locally, creates a private GitHub mirror repo (added to the clone as the `github` remote), writes `.stamp/mirror.yml`, applies the `stamp-mirror-only` Ruleset on the mirror so direct pushes from any other identity are rejected by GitHub, and runs `stamp bootstrap` (which lands the three real reviewers via a signed merge).
 
-End state: `main` requires `security`, `standards`, `product` reviewers. Origin is your stamp server. GitHub holds the mirror, locked down to the bypass actor. The clone is at `./myproject` and ready to work in.
+End state: `main` requires `security`, `standards`, `product` reviewers. `origin` is your stamp server; `github` is the mirror, locked down to the bypass actor. The clone is at `./myproject` and ready to work in.
+
+Bootstrap's merge asks for y/N confirmation like `stamp merge` does. To run provision unattended (an agent session, CI, anything with no TTY), pass `--yes`; it applies to that one merge only. Without it, a run with no TTY stops before creating anything and tells you to add `--yes`.
 
 ```sh
 stamp provision myproject --dry-run                   # preview without changes
@@ -78,6 +80,7 @@ stamp provision myproject --no-mirror                 # skip GitHub mirror entir
 stamp provision myproject --org acme --public         # public mirror instead of private
 stamp provision myproject --server alt.host:2222      # one-off override of ~/.stamp/server.yml
 stamp provision myproject --into /elsewhere/myproj    # clone somewhere other than ./myproject
+stamp provision myproject --org acme --yes            # unattended (no TTY): skip bootstrap's merge prompt
 ```
 
 ### Manual fallback (rarely needed)
