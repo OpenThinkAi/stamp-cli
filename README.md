@@ -71,7 +71,11 @@ host, no on-call, no separate trust root.
 ### Server-gated path
 
 If you've deployed a stamp server (see [`docs/quickstart-server.md`](./docs/quickstart-server.md)
-for the full Railway walkthrough), the from-zero flow is three commands:
+for the full Railway walkthrough), `stamp provision myproject --org <github-org>`
+does the whole setup in one command: bare repo, clone, GitHub mirror (added to
+the clone as the `github` remote) and bootstrap. Pass `--yes` to run it with no
+TTY; it skips only bootstrap's merge prompt. By hand, the from-zero flow is
+three commands:
 
 ```sh
 ssh stamp new-stamp-repo myproject              # provision bare repo + hook
@@ -271,6 +275,12 @@ stamp bootstrap                            # one-shot: replace placeholder examp
                                            #   repo. Its merge prompts y/N like `stamp merge`;
                                            #   pass --yes to run unattended (CI, build worker).
                                            #   See `stamp bootstrap --help`.
+stamp provision <name> [--org <org>]       # server-gated setup in one command: bare repo on the
+                                           #   stamp server, clone, optional GitHub mirror (added
+                                           #   as the `github` remote), then bootstrap. --yes skips
+                                           #   only bootstrap's merge prompt; with no TTY and no
+                                           #   --yes it stops before any remote work.
+                                           #   See `stamp provision --help`.
 stamp review --diff <revspec>              # run all configured reviewers in parallel
 stamp review --diff <revspec> --only <name> # run a single reviewer
 stamp status --diff <revspec>              # gate check; exit 0 if open, 1 if closed

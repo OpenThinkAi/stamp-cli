@@ -344,7 +344,7 @@ program
 program
   .command("provision [name]")
   .description(
-    "single-command server-gated repo setup: provision a bare repo on the stamp server (~/.stamp/server.yml or --server), clone it, run bootstrap, optionally create a GitHub mirror + apply the Ruleset. With --migrate-bypass, migrate an existing server-gated repo's Ruleset bypass from OrganizationAdmin to a per-repo DeployKey actor (cwd's .stamp/mirror.yml identifies the target; <name> is ignored).",
+    "single-command server-gated repo setup: provision a bare repo on the stamp server (~/.stamp/server.yml or --server), clone it, run bootstrap, optionally create a GitHub mirror (added to the clone as the `github` remote) + apply the Ruleset. Pass --yes to run unattended. With --migrate-bypass, migrate an existing server-gated repo's Ruleset bypass from OrganizationAdmin to a per-repo DeployKey actor (cwd's .stamp/mirror.yml identifies the target; <name> is ignored).",
   )
   .option(
     "--server <host:port>",
@@ -374,6 +374,13 @@ program
     "migrate an existing server-gated repo's stamp-mirror-only Ruleset bypass actor from OrganizationAdmin to a per-repo DeployKey. Identifies the target via cwd's .stamp/mirror.yml. Additive by default (DeployKey added alongside existing actors); pair with --remove-orgadmin to also strip OrganizationAdmin from the bypass list. Also the REPAIR for a mirror provisioned without a deploy key (pushes failing with 'Permission denied (publickey)'): it fetches the server's per-repo key and registers it; follow with `stamp push <branch> --resync-mirror` to catch the mirror up",
   )
   .option(
+    "-y, --yes",
+    "skip the operator-confirmation prompt on the bootstrap merge provision runs, " +
+      "and nothing else (forwarded to `stamp bootstrap --yes`; see audit H1) — " +
+      "required to run provision unattended, e.g. from an agent or CI with no TTY. " +
+      "Without it, a run with no TTY stops before any remote work",
+  )
+  .option(
     "--remove-orgadmin",
     "under --migrate-bypass, also remove OrganizationAdmin from the ruleset's bypass list. Verify the DeployKey transport works (one stamp push) before running this — there is no automated push-verification step",
   )
@@ -391,6 +398,7 @@ program
         migrateExisting?: boolean;
         migrateBypass?: boolean;
         removeOrgadmin?: boolean;
+        yes?: boolean;
       },
     ) => {
       try {
@@ -411,6 +419,7 @@ program
           migrateExisting: opts.migrateExisting,
           migrateBypass: opts.migrateBypass,
           removeOrgadmin: opts.removeOrgadmin,
+          yes: opts.yes,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

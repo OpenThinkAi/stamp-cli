@@ -168,3 +168,37 @@ export function readLineSync(): string {
   if (out.endsWith("\r")) out = out.slice(0, -1);
   return out;
 }
+
+/**
+ * Pre-flight form of the no-TTY rule in `requireHumanMerge`, for commands
+ * that reach a merge only after doing work that is expensive or awkward to
+ * undo. `stamp provision` is the motivating caller (issue #86): its bootstrap
+ * merge is the LAST step, after a bare repo, a clone, a GitHub mirror, a
+ * deploy key and a Ruleset already exist. Discovering there that the merge
+ * cannot be confirmed strands all of that, so provision asks this up front
+ * and refuses before touching anything remote.
+ *
+ * Returns true when a later `requireHumanMerge` call would hard-fail for
+ * lack of a TTY: no per-invocation `yes`, no `STAMP_REQUIRE_HUMAN_MERGE=0`,
+ * and stdin or stdout is not a TTY. The branch-rule opt-out
+ * (`require_human_merge: false`) is deliberately not considered — callers
+ * that pre-flight have no config to read yet, so they must assume the gate
+ * applies. Keep the env/TTY checks in step with `requireHumanMerge` above.
+ *
+ * `env` and `isTTY` are injectable so the decision is unit-testable without
+ * spawning a process; production callers omit them.
+ */
+export function mergeConfirmationWouldFail(args: {
+  yes?: boolean;
+  env?: NodeJS.ProcessEnv;
+  isTTY?: { stdin: boolean; stdout: boolean };
+}): boolean {
+  if (args.yes) return false;
+  const env = args.env ?? process.env;
+  if (env.STAMP_REQUIRE_HUMAN_MERGE === "0") return false;
+  const tty = args.isTTY ?? {
+    stdin: Boolean(process.stdin.isTTY),
+    stdout: Boolean(process.stdout.isTTY),
+  };
+  return !tty.stdin || !tty.stdout;
+}
