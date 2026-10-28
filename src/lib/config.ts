@@ -1225,8 +1225,6 @@ export const RETENTION_CONFIG_SCAFFOLD = `
 #   spools: 60d        # age limit for failed-parse / failed-run spool files
 #   auto_prune: true   # delete past-limit items after each \`stamp review\`;
 #                      # omit or false = only report them, never delete.
-#                      # Each prune uses the shorter of the two limits for
-#                      # both rows and spools.
 `;
 
 /**
