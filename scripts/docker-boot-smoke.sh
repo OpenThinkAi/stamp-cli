@@ -1003,6 +1003,26 @@ fi
 docker rm -f "$PENV_BAD_CONTAINER" >/dev/null 2>&1 || true
 echo "docker-boot-smoke: reviewer settings and STAMP_PROMPTS_CACHE_ROOT reach stamp-review; boot clones with the default deploy key; a servable cache root stops the boot ✓"
 
+# AGT-2238: the membership DB path is fixed; a relocated one stops the boot
+# (only the listener, workers and seeder would have followed it).
+docker run -d --name "$PENV_BAD_CONTAINER" \
+  -e STAMP_SERVER_DB_PATH=/srv/git/.stamp-state/elsewhere.db \
+  "$IMAGE_TAG" >/dev/null
+dbp_status=""
+for _ in $(seq 1 60); do
+  dbp_status=$(docker inspect -f '{{.State.Status}}' "$PENV_BAD_CONTAINER" 2>/dev/null || echo gone)
+  [ "$dbp_status" = "exited" ] && break
+  sleep 0.25
+done
+dbp_logs=$(docker logs "$PENV_BAD_CONTAINER" 2>&1)
+if [ "$dbp_status" != "exited" ] || ! printf '%s\n' "$dbp_logs" | grep -F "error: STAMP_SERVER_DB_PATH='/srv/git/.stamp-state/elsewhere.db' is not supported" >/dev/null; then
+  echo "error: a non-default STAMP_SERVER_DB_PATH did not stop the boot (status=$dbp_status) (AGT-2238)." >&2
+  printf '%s\n' "$dbp_logs" | tail -20 >&2
+  exit 1
+fi
+docker rm -f "$PENV_BAD_CONTAINER" >/dev/null 2>&1 || true
+echo "docker-boot-smoke: a non-default STAMP_SERVER_DB_PATH stops the boot ✓"
+
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"
 exit 0

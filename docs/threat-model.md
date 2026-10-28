@@ -18,8 +18,9 @@ defender's invariant is:
 
 > Every commit on `main` is a signed merge whose attestation
 > demonstrates that the diff was reviewed (verdicts captured), checks
-> ran clean (exit codes attested), and the operator declared intent
-> (signed merge + confirmation gate).
+> ran clean (exit codes attested), and the holder of a trusted key
+> signed the merge. The attestation does not record whether anyone
+> answered the confirmation prompt; `--yes` skips it (attacker 3).
 
 Anything that lands on `main` without satisfying that chain is a
 control failure. Anything that satisfies the chain is, by stamp's
@@ -217,8 +218,22 @@ config-gated tool surface + path-scope check + symlink-aware check +
 denylist + dotstamp-Read enforcement + diff cap is intended to make
 prompt-injection-driven approvals infeasible *and* low-yield even if
 a single reviewer is fooled. The architectural residual is real
-(audit H1's INFO-level note); it's bounded by the operator-confirmation
-gate at `stamp merge` and the `enforce_reads_on_dotstamp` check.
+(audit H1's INFO-level note); it's bounded by the
+`enforce_reads_on_dotstamp` check and, only when a human runs the merge,
+by the operator-confirmation prompt at `stamp merge`.
+
+The confirmation prompt does not stop this attacker if it is the one
+running `stamp merge`. `--yes` is an ordinary command-line flag and
+`STAMP_REQUIRE_HUMAN_MERGE=0` an ordinary environment variable, so an
+agent with a shell on the operator's machine can pass either and get an
+unattended signed merge (an agent driving a terminal can also just answer
+the prompt). Both skip only the prompt: the reviewer gate, the required
+checks and (on a stamp server) the pre-receive hook still apply, and
+stamp prints `note: confirmation prompt skipped (…)` on stderr when they
+are used. If you need a person to approve every merge to a branch, don't
+let the agent run `stamp merge` with your key: run merges yourself from a
+shell the agent can't drive, or keep the key on a machine the agent can't
+reach.
 
 ### 4. Author-agent with a trusted-key compromise (key on the agent's host)
 
@@ -232,16 +247,14 @@ read from `~/.stamp/keys/ed25519` despite mode 0600).
 - *Sign a merge directly.* With the key in hand, the attacker can
   produce a valid `Stamp-Payload` trailer for any (base, head, target,
   approvals) tuple. Defenses: none cryptographically — this is the
-  documented non-repudiation boundary. What stops most attempts is
-  the operator-confirmation gate at `stamp merge`
-  (`STAMP_REQUIRE_HUMAN_MERGE` defaults on for protected branches),
-  forcing the holder to type `y` before signing. An agent that
-  reads the key but lacks an interactive terminal can't satisfy
-  that prompt.
-- *Bypass the operator-confirmation gate.* Set
-  `STAMP_REQUIRE_HUMAN_MERGE=0` or `--yes`. This requires the
-  attacker to set an env var on the operator's machine, which is
-  outside the stamp threat boundary (host compromise).
+  documented non-repudiation boundary. The operator-confirmation
+  prompt at `stamp merge` (on by default for protected branches) is
+  not a defense here: an attacker holding the key does not need
+  `stamp merge` at all.
+- *Skip the operator-confirmation prompt.* Pass `--yes` or set
+  `STAMP_REQUIRE_HUMAN_MERGE=0`. Both are chosen by whoever runs the
+  command, so any agent that can run `stamp merge` can use them (see
+  attacker 3). They skip only the prompt, never the reviewer gate.
 - *Forge approvals.* Add `Approval` entries to the payload they
   sign. Possible — the attestation just lists what the signer
   claims. The verifier checks the SIGNATURE is valid for that
@@ -249,11 +262,9 @@ read from `~/.stamp/keys/ed25519` despite mode 0600).
   is the documented "non-repudiation, not authorization" model.
 
 **Effective?** Cryptographically, no — a key compromise is a key
-compromise. Operationally, the operator-confirmation gate raises
-the bar against unattended agent loops that read the key but can't
-satisfy a TTY prompt. The threat model is explicit that this
-attacker is out of scope for stamp's primitives; the recovery path
-is rotation (revoke the key from `.stamp/trusted-keys/` via a
+compromise. The confirmation prompt doesn't change that. The threat
+model is explicit that this attacker is out of scope for stamp's
+primitives; the recovery path is rotation (revoke the key from `.stamp/trusted-keys/` via a
 stamped merge that the OTHER trusted machines accept).
 
 ### 5. Operator-as-attacker
@@ -333,8 +344,9 @@ scenarios:
 
 - All N required reviewers fooled by the same prompt injection.
 - Operator types `y` at the confirmation prompt without reading.
-- Operator runs in `STAMP_REQUIRE_HUMAN_MERGE=0` mode (deliberate
-  declared intent).
+- The merge runs with `--yes` or `STAMP_REQUIRE_HUMAN_MERGE=0`, whether
+  an operator chose that for an unattended loop or an agent passed it
+  itself (attacker 3). Nobody confirms such a merge at a prompt.
 
 For environments where these residuals matter (regulated, DPA-bound,
 high-stakes code), `STAMP_NO_LLM=1` disables the LLM-using surface
@@ -404,7 +416,10 @@ Audit your own setup against this list. If a control is absent, the
   *What fails if flipped off:* the last-mile human checkpoint
   (residual H1 in the architectural-residual section above) is
   gone — every successful reviewer pass yields an unattended
-  signed merge.
+  signed merge. The prompt is only a checkpoint when a person runs
+  `stamp merge`: the two opt-outs are per-command, so an agent that
+  runs the merge can pass them. Keeping merges in a human's hands is
+  an operator choice about who runs `stamp merge` with which key.
 
 ### External systems stamp consumes
 
@@ -443,8 +458,8 @@ stamp-cli's correctness depends on:
   hook trusts git's CAS on the ref update path (combined with
   `receive.denyNonFastForwards=true` for belt-and-suspenders).
 - **The operator's machine** for keeping the signing key off-disk-
-  for-other-users (mode 0600 enforced) and for honoring
-  `STAMP_REQUIRE_HUMAN_MERGE`. A compromised host beats stamp.
+  for-other-users (mode 0600 enforced). A compromised host beats
+  stamp.
 
 ## Reporting
 

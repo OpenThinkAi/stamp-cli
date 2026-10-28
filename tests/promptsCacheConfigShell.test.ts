@@ -42,6 +42,16 @@ describe("prompts-cache-config.sh (AGT-2277)", () => {
     }
   });
 
+  it("leaves no temporaries behind, including on the unset/empty early return", () => {
+    for (const v of ["", "/srv/git/.prompts-alt", "/srv/git/prompts.git"]) {
+      const r = sh(
+        `check_prompts_cache_root 2>/dev/null; printf '%s' "\${_pcr+x}\${_pcr_name+x}\${_pcr_ok+x}"`,
+        { STAMP_PROMPTS_CACHE_ROOT: v },
+      );
+      assert.equal(r.stdout, "", `${JSON.stringify(v)}: temporaries left set`);
+    }
+  });
+
   it("refuses anything the SSH gate could serve, the server's own dot-dirs and odd paths", () => {
     for (const v of [
       "/srv/git/prompts.git", // gate serves /srv/git/<name>.git

@@ -177,6 +177,16 @@ fi
 # marker without importing. It runs every boot but never re-imports, so a
 # user removed with `stamp users remove` is not resurrected on restart.
 STAMP_STATE_DIR=/srv/git/.stamp-state
+# AGT-2238: the membership DB lives at $STAMP_STATE_DIR/users.db, full stop.
+# STAMP_SERVER_DB_PATH (a code-level override for tests) would reach the
+# seeder, the listener and stamp-workers but not the SSH side (the
+# AuthorizedKeysCommand resolver and the verbs) or the ownership fixes
+# below, so a relocated DB would split membership. Refuse any other value
+# rather than half-honour it.
+if [ -n "${STAMP_SERVER_DB_PATH:-}" ] && [ "$STAMP_SERVER_DB_PATH" != "$STAMP_STATE_DIR/users.db" ]; then
+  echo "error: STAMP_SERVER_DB_PATH='$STAMP_SERVER_DB_PATH' is not supported; the stamp server's membership DB is fixed at $STAMP_STATE_DIR/users.db. Unset STAMP_SERVER_DB_PATH and redeploy." >&2
+  exit 1
+fi
 mkdir -p "$STAMP_STATE_DIR"
 chown root:stamp-db "$STAMP_STATE_DIR"
 chmod 3770 "$STAMP_STATE_DIR"

@@ -33,7 +33,7 @@ const NOT_PASSED: Record<string, string> = {
   SSH_USER_AUTH: "set by sshd for each session (ExposeAuthInfo)",
   STAMP_STATE_DIR: "pinned by the image (entrypoint); the code default is the same path",
   STAMP_SERVER_DB_PATH:
-    "test / relief-valve override; the SSH key resolver and every verb use the default, so persisting it for stamp-review alone would split the DB",
+    "test-only override; the entrypoint refuses any value but the default (AGT-2238), so the SSH side always uses the default",
   STAMP_SIGN_APPROVAL_ARGV: "test-only hook for the signing-helper argv",
   STAMP_REPO_ROOT: "removed in 2.1; only its presence is warned about",
   STAMP_PROMPTS_DEPLOY_KEY_PATH: "prompts refresh only (bootstrap / stamp-workers); the verb never fetches",

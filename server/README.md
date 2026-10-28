@@ -383,9 +383,12 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      "Extended thinking" section.
    - `MAX_DIFF_BYTES` — **optional** (default `5000000`). Largest diff, in
      bytes, the `stamp-review` verb accepts; a bigger one exits 4. A
-     non-positive or non-integer value falls back to the default.
+     non-positive or non-integer value falls back to the default, and
+     `stamp-review` writes a `warning:` line to its stderr saying so, as it
+     does for a bad `STAMP_REVIEWER_MODEL`.
    - `REVIEW_TIMEOUT_MS` — **optional** (default `300000`). Per-review
-     timeout on the Anthropic call. A bad value falls back to the default.
+     timeout on the Anthropic call. A bad value falls back to the default
+     with the same `warning:` line.
 
    These reviewer settings, like the API key and the rate caps, reach the
    SSH-invoked `stamp-review` through `/etc/stamp/env`, which the entrypoint
@@ -576,8 +579,10 @@ match its target branches to your `mirror.yml`) and import via
 
 ## Onboarding teammates
 
-The server tracks membership in a sqlite database (`/srv/git/.stamp-state/users.db`)
-that's populated and managed entirely through the `stamp` CLI. Three roles:
+The server tracks membership in a sqlite database
+(`/srv/git/.stamp-state/users.db`; the path is fixed, and setting
+`STAMP_SERVER_DB_PATH` to anything else stops the boot) that's populated
+and managed entirely through the `stamp` CLI. Three roles:
 
 | Role     | What it can do                                                       |
 |----------|----------------------------------------------------------------------|
@@ -840,12 +845,23 @@ This release (the October 2026 hardening) changes who can reach what on the
 server. Most of it converts itself on the first boot of the new image; the
 steps below are the parts that need you.
 
-**Order.** Redeploy the server image first, then have every operator
-upgrade their stamp CLI, then point CI's `stamp/verify-attestation`
-`stamp-version` at the new release, and only then declare `repo_id` in
-repos (see the main README, "Binding approvals to the repo"). An older CLI
-keeps working against the new server; a repo that declares `repo_id` before
-the server is upgraded cannot merge.
+**Order.** This is the one place the upgrade order is written down; the
+CHANGELOG and the main README link here.
+
+1. **Redeploy the server image**, so approvals carry `repo_id`.
+2. **Upgrade every operator's stamp CLI**, so `stamp review` sends the
+   declared id and `stamp merge` checks it. An older CLI keeps working
+   against the new server until step 4.
+3. **CI:** point `stamp/verify-attestation`'s `stamp-version` at the new
+   release (the server's hook was upgraded in step 1).
+4. **Only then declare `repo_id`** in repos that don't have it yet (see
+   the main README, "Binding approvals to the repo"): land `repo_id:` in
+   `.stamp/config.yml` as an admin-signed `.stamp/` change, and re-run
+   `stamp review` on open branches, because approvals minted before step 1
+   carry no `repo_id` and are refused once it is declared.
+
+Declaring `repo_id` before step 1 blocks every merge; before step 3, CI
+does not enforce it.
 
 **What converts itself on first boot** (check the boot log):
 
@@ -1070,7 +1086,7 @@ group. Its only supplementary group is `stamp-db`, which it shares with
 | Variable | Why |
 |---|---|
 | `STAMP_HTTP_PORT` | listening port |
-| `STAMP_SERVER_DB_PATH` | DB location override |
+| `STAMP_SERVER_DB_PATH` | passed through, but only the default `/srv/git/.stamp-state/users.db` is accepted; any other value stops the boot |
 | `STAMP_PROMPTS_WEBHOOK_SECRET` | verifies the webhook HMAC (the one secret it holds) |
 | `STAMP_PROMPTS_REFRESH_TRIGGER` | set by the entrypoint; where to hand off a verified webhook |
 | `STAMP_PEER_REVIEWS_ENABLED`, `STAMP_PEER_EVENTS_POLL_INTERVAL_SEC`, `SEAT_TTL_SECONDS`, `CLAIM_SEAT_RATE_CAP`, `REGISTER_EXTRA_RATE_CAP` | peer-review endpoints |

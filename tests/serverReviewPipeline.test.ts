@@ -843,6 +843,43 @@ describe("runReviewPipeline — env-var caps", () => {
     }
   });
 
+  it("AGT-2238: an invalid MAX_DIFF_BYTES / REVIEW_TIMEOUT_MS warns on stderr (one line per call); unset or valid is silent", async () => {
+    const { resolveMaxDiffBytes, resolveReviewTimeoutMs, DEFAULT_MAX_DIFF_BYTES, DEFAULT_REVIEW_TIMEOUT_MS } =
+      await import("../src/server/reviewPipeline.ts");
+    const savedMax = process.env.MAX_DIFF_BYTES;
+    const savedTimeout = process.env.REVIEW_TIMEOUT_MS;
+    const orig = process.stderr.write.bind(process.stderr);
+    let err = "";
+    (process.stderr as { write: unknown }).write = (c: string | Uint8Array) => {
+      err += typeof c === "string" ? c : Buffer.from(c).toString("utf8");
+      return true;
+    };
+    try {
+      delete process.env.MAX_DIFF_BYTES;
+      process.env.REVIEW_TIMEOUT_MS = "60000";
+      assert.equal(resolveMaxDiffBytes(), DEFAULT_MAX_DIFF_BYTES);
+      assert.equal(resolveReviewTimeoutMs(), 60_000);
+      assert.equal(err, "");
+
+      process.env.MAX_DIFF_BYTES = "5MB";
+      assert.equal(resolveMaxDiffBytes(), DEFAULT_MAX_DIFF_BYTES);
+      assert.equal(
+        err,
+        `warning: MAX_DIFF_BYTES="5MB" is not a positive integer; using the default ${DEFAULT_MAX_DIFF_BYTES}\n`,
+      );
+      err = "";
+      process.env.REVIEW_TIMEOUT_MS = "0";
+      assert.equal(resolveReviewTimeoutMs(), DEFAULT_REVIEW_TIMEOUT_MS);
+      assert.match(err, /^warning: REVIEW_TIMEOUT_MS="0" is not a positive integer; using the default 300000\n$/);
+    } finally {
+      (process.stderr as { write: unknown }).write = orig;
+      if (savedMax === undefined) delete process.env.MAX_DIFF_BYTES;
+      else process.env.MAX_DIFF_BYTES = savedMax;
+      if (savedTimeout === undefined) delete process.env.REVIEW_TIMEOUT_MS;
+      else process.env.REVIEW_TIMEOUT_MS = savedTimeout;
+    }
+  });
+
   it("resolvePromptCacheRoot reads STAMP_PROMPTS_DIR with a default", async () => {
     const { resolvePromptCacheRoot } = await import(
       "../src/server/reviewPipeline.ts"
@@ -892,8 +929,11 @@ describe("runReviewPipeline — env-var caps", () => {
   // (reviewer, org?, repo?)" block, where the actual file-on-disk
   // fixtures exist.
   it("AGT-373: resolvePromptCacheRoot honors STAMP_PROMPTS_REPO_URL → Phase B cache root", async () => {
-    const { resolvePromptCacheRoot, PHASE_B_CACHE_ROOT } = await import(
+    const { resolvePromptCacheRoot } = await import(
       "../src/server/reviewPipeline.ts"
+    );
+    const { DEFAULT_PROMPTS_CACHE_ROOT } = await import(
+      "../src/server/promptsCachePaths.ts"
     );
     const savedRepoUrl = process.env.STAMP_PROMPTS_REPO_URL;
     const savedDir = process.env.STAMP_PROMPTS_DIR;
@@ -905,14 +945,14 @@ describe("runReviewPipeline — env-var caps", () => {
       // override hit/miss decision happens downstream in getPromptPath.
       process.env.STAMP_PROMPTS_REPO_URL = "git@github.com:acme/stamp-prompts.git";
       delete process.env.STAMP_PROMPTS_DIR;
-      assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
-      assert.equal(PHASE_B_CACHE_ROOT, "/srv/git/.prompts-cache");
+      assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_CACHE_ROOT);
+      assert.equal(DEFAULT_PROMPTS_CACHE_ROOT, "/srv/git/.prompts-cache");
 
       // REPO_URL set takes precedence even when DIR is also set —
       // AGT-411 Phase B carve-out: non-default STAMP_PROMPTS_DIR is NOT
       // refused when STAMP_PROMPTS_REPO_URL is set (the resolver ignores it).
       process.env.STAMP_PROMPTS_DIR = "/tmp/should-be-ignored";
-      assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
+      assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_CACHE_ROOT);
 
       // AGT-2277: the verb reads the same STAMP_PROMPTS_CACHE_ROOT the
       // bootstrap and stamp-workers write (it used to hardcode the default).
@@ -921,7 +961,7 @@ describe("runReviewPipeline — env-var caps", () => {
         process.env.STAMP_PROMPTS_CACHE_ROOT = "/srv/git/.prompts-alt";
         assert.equal(resolvePromptCacheRoot(), "/srv/git/.prompts-alt");
         process.env.STAMP_PROMPTS_CACHE_ROOT = "";
-        assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
+        assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_CACHE_ROOT);
       } finally {
         if (savedCacheRoot === undefined) delete process.env.STAMP_PROMPTS_CACHE_ROOT;
         else process.env.STAMP_PROMPTS_CACHE_ROOT = savedCacheRoot;
@@ -1059,15 +1099,18 @@ describe("runReviewPipeline — env-var caps", () => {
     });
 
     it("case 5: Phase B URL set + stale non-default STAMP_PROMPTS_DIR → allowed (Phase B carve-out)", async () => {
-      const { resolvePromptCacheRoot, PHASE_B_CACHE_ROOT } = await import(
+      const { resolvePromptCacheRoot } = await import(
         "../src/server/reviewPipeline.ts"
+      );
+      const { DEFAULT_PROMPTS_CACHE_ROOT } = await import(
+        "../src/server/promptsCachePaths.ts"
       );
       delete process.env.STAMP_ENV;
       process.env.STAMP_PROMPTS_REPO_URL = "git@github.com:acme/stamp-prompts.git";
       process.env.STAMP_PROMPTS_DIR = "/tmp/stale-phase-a-value";
       delete process.env.STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY;
       // No refusal — Phase B carve-out takes effect; STAMP_PROMPTS_DIR is ignored.
-      assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
+      assert.equal(resolvePromptCacheRoot(), DEFAULT_PROMPTS_CACHE_ROOT);
     });
 
     it("case 6: non-prod + default dir + no toggle → allowed", async () => {
