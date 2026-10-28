@@ -379,6 +379,10 @@ describe("AC5: cost-cap enforcement — cap-hit triplet logged + notification fi
       // AGT-454: bypass operator gate — repo is not mapped in peer-repos.yml.
       _peerReposMapForTest: new Map([[repo, "/tmp/fake-repo"]]),
       _operatorVerifyForTest: () => ({ ok: true as const }),
+      // AGT-2248: the repo at base_sha consents to the listener's (default
+      // Anthropic) endpoint; tests of the data-flow gate override these.
+      _dataFlowAtRefForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
+      _llmEnvForTest: {},
     };
 
     // Suppress stderr during the run.

@@ -409,6 +409,25 @@ export interface DataFlowConfig {
    * disclosure.
    */
   confirmed?: boolean;
+  /**
+   * AGT-2248 — the LLM endpoints that peer listeners (`stamp pr listen`)
+   * may send this repo's PR content to. A peer listener reviews SOMEONE
+   * ELSE'S PR: it sends the PR title + changed paths to a triage call and
+   * the full diff to a review call, under the listener operator's own
+   * provider account. Because it runs unattended it cannot prompt, so it
+   * fails closed: it refuses any event whose repo does not list the
+   * listener's resolved endpoint host here, read at both the event's
+   * `base_sha` and the protected-branch tip (so withdrawing consent on the
+   * protected branch sticks even if an author cites an older base).
+   *
+   * Entries are lowercase `host` or `host:port` values (e.g.
+   * `api.anthropic.com`). Absent or empty means no peer listener may send
+   * this repo's content off-host. A listener whose model is on its own
+   * host (loopback endpoint) needs no entry. Committing this list is the
+   * repo's — and so every author's — consent to peer LLM review at those
+   * endpoints; it goes through stamp review like any other config change.
+   */
+  peer_review_endpoints?: string[];
 }
 
 /**
@@ -674,12 +693,44 @@ function parseDataFlow(input: unknown): DataFlowConfig | undefined {
     confirmed = d.confirmed;
   }
 
+  let peer_review_endpoints: string[] | undefined;
+  if (d.peer_review_endpoints !== undefined) {
+    if (
+      !Array.isArray(d.peer_review_endpoints) ||
+      !d.peer_review_endpoints.every((e) => typeof e === "string")
+    ) {
+      throw new Error(
+        "config.data_flow.peer_review_endpoints must be a list of host or host:port strings",
+      );
+    }
+    peer_review_endpoints = (d.peer_review_endpoints as string[]).map((e) => {
+      const host = e.trim().toLowerCase();
+      if (!PEER_ENDPOINT_HOST_RE.test(host)) {
+        throw new Error(
+          `config.data_flow.peer_review_endpoints entry ${JSON.stringify(e)} is not a host or host:port ` +
+            `(e.g. "api.anthropic.com") — list hosts, not URLs`,
+        );
+      }
+      return host;
+    });
+  }
+
   return {
     ...(disclosure !== undefined ? { disclosure } : {}),
     ...(require_confirmation !== undefined ? { require_confirmation } : {}),
     ...(confirmed !== undefined ? { confirmed } : {}),
+    ...(peer_review_endpoints !== undefined ? { peer_review_endpoints } : {}),
   };
 }
+
+/**
+ * A `data_flow.peer_review_endpoints` entry: a DNS hostname (or IPv4
+ * literal) with an optional port — the same shape as `URL.host` for an
+ * http(s) endpoint, so a listener can compare its resolved endpoint's host
+ * against the list exactly.
+ */
+const PEER_ENDPOINT_HOST_RE =
+  /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$/;
 
 function parseRetention(input: unknown): RetentionConfig | undefined {
   if (input === undefined || input === null) return undefined;

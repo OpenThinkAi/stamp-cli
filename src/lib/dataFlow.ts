@@ -1,4 +1,5 @@
 import type { DataFlowConfig } from "./config.js";
+import { isLoopbackEndpoint } from "./providerCredentials.js";
 
 /**
  * AGT-415 — per-invocation data-flow disclosure for `stamp review`.
@@ -134,4 +135,145 @@ export function formatNoRetainWarning(): string | null {
 export function printNoRetainWarning(): void {
   const warning = formatNoRetainWarning();
   if (warning) process.stderr.write(`${warning}\n`);
+}
+
+// ─── AGT-2248: peer listener (`stamp pr listen`) data-flow gate ─────────
+
+/** The Anthropic API origin the Agent SDK calls when nothing overrides it. */
+const DEFAULT_ANTHROPIC_ENDPOINT = "https://api.anthropic.com";
+
+/**
+ * Where the listener's Agent SDK calls (Haiku triage + Sonnet review) will
+ * actually go. `host` is the `URL.host` the call hits, compared against the
+ * target repo's `data_flow.peer_review_endpoints`; null means the endpoint
+ * cannot be pinned to a host (Bedrock / Vertex / Foundry routing, or an
+ * unparseable base URL), which the gate treats as "off-host, never
+ * consented".
+ */
+export interface PeerLlmEndpoint {
+  /** Human-readable endpoint for log lines (a URL, or the routing mode). */
+  label: string;
+  host: string | null;
+  offHost: boolean;
+}
+
+const CLOUD_ROUTING_ENVS = [
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+] as const;
+
+function envFlagOn(v: string | undefined): boolean {
+  if (v === undefined) return false;
+  const t = v.trim().toLowerCase();
+  return t !== "" && t !== "0" && t !== "false";
+}
+
+/**
+ * Resolve the listener's LLM endpoint from the env its SDK sessions inherit
+ * (`reviewerChildEnv()` spreads `process.env`, and both sessions run with
+ * `settingSources: []`, so no settings file can redirect them). Like
+ * `stamp review` since AGT-1138, the gate asks the ENDPOINT, not the
+ * backend kind: an `ANTHROPIC_BASE_URL` on loopback keeps content on this
+ * host; anything else leaves it.
+ */
+export function resolvePeerLlmEndpoint(
+  env: NodeJS.ProcessEnv = process.env,
+): PeerLlmEndpoint {
+  for (const name of CLOUD_ROUTING_ENVS) {
+    if (envFlagOn(env[name])) {
+      return { label: `${name}=1 cloud routing`, host: null, offHost: true };
+    }
+  }
+  const base = env["ANTHROPIC_BASE_URL"]?.trim() || DEFAULT_ANTHROPIC_ENDPOINT;
+  let host: string | null;
+  try {
+    host = new URL(base).host.toLowerCase() || null;
+  } catch {
+    host = null;
+  }
+  return { label: base, host, offHost: !isLoopbackEndpoint(base) };
+}
+
+/**
+ * Decide whether the listener may send a peer PR's content (title + paths
+ * to triage, the full diff to review) to `endpoint`, given the target
+ * repo's `data_flow` block. The listener calls it for the block at the
+ * event's `base_sha` and again for the block at the protected tip; both
+ * must pass.
+ *
+ * Fail-closed, because the listener is unattended and cannot prompt:
+ *   - loopback endpoint → allowed; nothing leaves this host (same carve-out
+ *     `stamp review` makes for an all-local run).
+ *   - `require_confirmation: true` without `confirmed: true` → refused,
+ *     exactly as `assertDataFlowConfirmed` refuses `stamp review`.
+ *   - endpoint host not listed in `peer_review_endpoints` (including the
+ *     list being absent) → refused. The committed list is the repo's
+ *     recorded consent for that specific endpoint.
+ */
+export function checkPeerDataFlow(
+  dataFlow: DataFlowConfig | undefined,
+  endpoint: PeerLlmEndpoint,
+): { ok: true } | { ok: false; reason: string } {
+  if (!endpoint.offHost) return { ok: true };
+  try {
+    assertDataFlowConfirmed(dataFlow);
+  } catch {
+    return {
+      ok: false,
+      reason:
+        `the repo's data_flow.require_confirmation is set but data_flow.confirmed is not true; ` +
+        `peer content is not sent off-host until an operator commits the confirmation`,
+    };
+  }
+  if (endpoint.host === null) {
+    return {
+      ok: false,
+      reason:
+        `this listener's LLM endpoint (${endpoint.label}) cannot be pinned to a host, so no ` +
+        `data_flow.peer_review_endpoints entry can consent to it; point ANTHROPIC_BASE_URL at ` +
+        `a listed endpoint or a model on this host`,
+    };
+  }
+  const allowed = dataFlow?.peer_review_endpoints ?? [];
+  if (!allowed.includes(endpoint.host)) {
+    return {
+      ok: false,
+      reason:
+        `the repo has not consented to peer LLM review at ${endpoint.host}: add ` +
+        `"${endpoint.host}" to data_flow.peer_review_endpoints in .stamp/config.yml ` +
+        `(lands through stamp review) to allow it`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Per-event marker for the listener — the peer twin of
+ * `formatDiffSentMarker`. Names what leaves (title, paths, diff), where it
+ * goes, and that it is someone else's PR.
+ */
+export function formatPeerEgressMarker(
+  prLabel: string,
+  repo: string,
+  endpoint: PeerLlmEndpoint,
+): string {
+  if (!endpoint.offHost) {
+    return `note: ${repo} ${prLabel}: peer review uses a model on this host (${endpoint.label}); content stays on this host.`;
+  }
+  return (
+    `note: ${repo} ${prLabel}: title, changed paths and diff sent off-host to ` +
+    `${endpoint.host} for peer review (allowed by data_flow.peer_review_endpoints). ` +
+    `Set ${SUPPRESS_ENV}=1 to silence.`
+  );
+}
+
+/** Write the peer marker to stderr unless notices are suppressed. */
+export function printPeerEgressMarker(
+  prLabel: string,
+  repo: string,
+  endpoint: PeerLlmEndpoint,
+): void {
+  if (noticesSuppressed()) return;
+  process.stderr.write(`${formatPeerEgressMarker(prLabel, repo, endpoint)}\n`);
 }

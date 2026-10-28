@@ -7,6 +7,12 @@
  *   1. Waits for the next `pr-opened` event parsed from the SSE stream.
  *   2. Skips events where `requested_by_fp` matches the operator's own
  *      fingerprint (author-exclusion).
+ *   2b. AGT-2248 data-flow gate: reads the target repo's `.stamp/config.yml`
+ *      at `base_sha` from the mapped local clone and refuses the event
+ *      (before ANY LLM call) unless `data_flow.peer_review_endpoints` lists
+ *      this listener's resolved LLM endpoint host, and any armed
+ *      `require_confirmation` is `confirmed`. A loopback endpoint needs no
+ *      consent. Unattended, so it fails closed rather than prompting.
  *   3. Runs the Haiku triage call against `~/.stamp/peer-watch.md` (AGT-430)
  *      using event metadata (title + paths_changed) only. If `peer-watch.md`
  *      is missing, falls back to a default claim decision. If triage returns
@@ -15,8 +21,11 @@
  *      Missing prompt → logs `✗` and skips (AC #3).
  *   5. Logs the triage triplet to `~/.stamp/peer-watch.log` (AC #6).
  *   6. Claims a reviewer seat via `claim-seat` (seatClient.ts).
- *   7. Fetches the real unified diff via `gh pr diff <pr_url>` (the per-repo
- *      GitHub authorization boundary). Failure → releases the seat and skips.
+ *   7. Fetches the unified diff at `base_sha...head_sha` via the GitHub
+ *      compare API (`gh api .../compare/<base>...<head>`, the per-repo GitHub
+ *      authorization boundary) — the exact commit the review is pinned to,
+ *      not whatever the PR head is now (AGT-2248). Failure (incl. a head_sha
+ *      GitHub cannot resolve) → releases the seat and skips.
  *   8. Starts a 60-second heartbeat interval while the review runs.
  *   9. Runs the peer review via `runBuiltinReview` over the fetched diff using
  *      the resolved named prompt as the system prompt (AC #4).
@@ -80,9 +89,23 @@ import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
 import { firePeerNotification } from "../lib/peerNotify.js";
 import { draftsDir } from "../lib/paths.js";
 import { loadPeerReposConfig, resolveLocalRepoPath } from "../lib/peerReposConfig.js";
-import { FULL_SHA_RE, verifyPeerAuthorLocal } from "../lib/peerOperatorVerify.js";
+import {
+  FULL_SHA_RE,
+  PROTECTED_TIP_REF,
+  resolveProtectedTip,
+  verifyPeerAuthorLocal,
+} from "../lib/peerOperatorVerify.js";
 import { detectClaudeSession } from "../lib/claudeSession.js";
 import { checkPrUrlBinding, type ParsedPrUrl } from "../lib/prUrlBinding.js";
+import { parseConfigFromYaml, type DataFlowConfig } from "../lib/config.js";
+import { showAtRef } from "../lib/git.js";
+import {
+  checkPeerDataFlow,
+  printDataFlowDisclosure,
+  printNoRetainWarning,
+  printPeerEgressMarker,
+  resolvePeerLlmEndpoint,
+} from "../lib/dataFlow.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -118,8 +141,31 @@ export interface PrListenOptions {
     verdictFlag: string,
     ghArgs: string[],
   ) => { status: number; stderr: string };
-  /** Test-only: inject a fake `gh pr diff` spawn result. */
-  _ghDiffForTest?: (prUrl: string) => { status: number; stdout: string; stderr: string };
+  /**
+   * Test-only: inject a fake diff-fetch spawn result. `ghArgs` is the full
+   * argv the listener would hand to `gh` (`api -H Accept:... repos/<o>/<r>/
+   * compare/<base_sha>...<head_sha>`), so tests can assert the base...head pin.
+   */
+  _ghDiffForTest?: (
+    prUrl: string,
+    ghArgs: string[],
+  ) => { status: number; stdout: string; stderr: string };
+  /**
+   * Test-only: replace reading `.stamp/config.yml` from the mapped clone
+   * (AGT-2248). Called once with `base_sha` and once with
+   * `PROTECTED_TIP_REF` (the tip is not resolved through git when this seam
+   * is set). Return the repo's `data_flow` block (or undefined for none);
+   * throw to simulate an unreadable/invalid config.
+   */
+  _dataFlowAtRefForTest?: (
+    localRepoPath: string,
+    ref: string,
+  ) => DataFlowConfig | undefined;
+  /**
+   * Test-only: env used to resolve the listener's LLM endpoint
+   * (`ANTHROPIC_BASE_URL`, cloud-routing flags) instead of `process.env`.
+   */
+  _llmEnvForTest?: NodeJS.ProcessEnv;
   /** Test-only: inject a fake SDK runner for the Sonnet review call. */
   _sdkRunnerForTest?: (diff: string) => Promise<string>;
   /** Test-only: inject a fake Haiku runner for the triage call. */
@@ -628,6 +674,27 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   }
   const serverCfg: ServerConfig = serverResult.cfg;
 
+  // ─── AGT-2248: resolve where peer content would go ───────────────
+  // Both SDK sessions (triage + review) inherit process.env with
+  // settingSources [], so ANTHROPIC_BASE_URL / cloud-routing flags decide
+  // the endpoint. Resolved once; every event is gated against its repo's
+  // committed consent for this endpoint before any LLM call.
+  const llmEndpoint = resolvePeerLlmEndpoint(opts._llmEnvForTest ?? process.env);
+  if (llmEndpoint.offHost && llmEndpoint.host === null) {
+    process.stderr.write(
+      `warning: this listener's LLM endpoint (${llmEndpoint.label}) cannot be pinned to a host, ` +
+        `so no repo can consent to it via data_flow.peer_review_endpoints — every event will be ` +
+        `skipped. Point ANTHROPIC_BASE_URL at a listed endpoint or a model on this host.\n`,
+    );
+  } else if (llmEndpoint.offHost) {
+    process.stderr.write(
+      `note: peer reviews send PR content to ${llmEndpoint.host}; ` +
+        `events are skipped unless the PR's repo lists that host in ` +
+        `data_flow.peer_review_endpoints at base_sha and at the protected tip\n`,
+    );
+    printNoRetainWarning();
+  }
+
   // ─── Transport: SSE (sole listen transport, AGT-454) ─────────────
   // Connect to the stamp-server's `GET /peer/events` SSE stream. The
   // signed-key auth (x-stamp-pubkey/timestamp/signature) is built inside
@@ -903,7 +970,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // AGT-2240: the pr_url must also be a github.com PR in the SAME
     // owner/repo as the payload's `repo` — the repo whose manifest
     // authorizes the author. Otherwise an operator trusted in repo X could
-    // aim `gh pr diff` / `gh pr review` (run under THIS reviewer's GitHub
+    // aim the diff fetch / review post (run under THIS reviewer's GitHub
     // token) at a PR in some other repo Y. Applies to pr-opened and
     // re-review-requested alike.
     const binding = checkPrUrlBinding(prUrlRaw, repo);
@@ -927,7 +994,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     const baseSha = baseShaRaw;
     const headSha = headShaRaw;
     // AGT-454: the notification payload is metadata-only — the real unified
-    // diff is fetched via `gh pr diff` AFTER a successful seat claim (the
+    // diff is fetched via the compare API AFTER a successful seat claim (the
     // per-repo GitHub authorization boundary). No diff/body fallback here.
     const requestedByFp =
       typeof payload["requested_by_fp"] === "string"
@@ -969,6 +1036,69 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         `note: skipping event for PR #${prNumber} — operator verification failed: ${opResult.reason}\n`,
       );
       continue;
+    }
+
+    // ─── AGT-2248: data-flow consent gate (before ANY LLM call) ──
+    // Triage sends the title + changed paths, review sends the full diff —
+    // another author's content, under THIS operator's provider account. The
+    // listener is unattended and cannot prompt, so fail closed: proceed only
+    // when the repo's committed data_flow lists this endpoint BOTH at
+    // base_sha (bound to the protected branch by the operator check above,
+    // so a feature branch cannot grant itself consent) AND at the protected
+    // tip. base_sha is author-chosen, so reading it alone would let an
+    // author cite a commit from before consent was withdrawn and have the
+    // base...head diff ship everything landed since — the same revocation
+    // rule the operator check applies to keys. A loopback endpoint sends
+    // nothing off-host and needs no consent.
+    if (llmEndpoint.offHost) {
+      const skip = (why: string) =>
+        process.stderr.write(
+          `note: skipping event for ${repo} PR #${prNumber} — data-flow gate: ${why}\n`,
+        );
+      const readAt = (ref: string): DataFlowConfig | undefined =>
+        opts._dataFlowAtRefForTest
+          ? opts._dataFlowAtRefForTest(localRepoPath, ref)
+          : parseConfigFromYaml(showAtRef(ref, ".stamp/config.yml", localRepoPath)).data_flow;
+
+      const tipRef = opts._dataFlowAtRefForTest
+        ? PROTECTED_TIP_REF
+        : resolveProtectedTip(localRepoPath);
+      if (tipRef === null) {
+        skip(`${PROTECTED_TIP_REF} does not resolve in ${localRepoPath}; run 'git fetch origin'`);
+        continue;
+      }
+      const refs: Array<[label: string, ref: string]> =
+        tipRef === baseSha
+          ? [["base_sha", baseSha]]
+          : [["base_sha", baseSha], ["protected tip", tipRef]];
+      let baseDataFlow: DataFlowConfig | undefined;
+      let refused = false;
+      for (const [label, ref] of refs) {
+        let dataFlow: DataFlowConfig | undefined;
+        try {
+          dataFlow = readAt(ref);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          skip(
+            `cannot read or parse .stamp/config.yml at ${label} ${ref.slice(0, 12)} (${msg}); ` +
+              `check the mapped clone is fetched and the config is valid`,
+          );
+          refused = true;
+          break;
+        }
+        const gate = checkPeerDataFlow(dataFlow, llmEndpoint);
+        if (!gate.ok) {
+          skip(`at ${label}: ${gate.reason}`);
+          refused = true;
+          break;
+        }
+        if (label === "base_sha") baseDataFlow = dataFlow;
+      }
+      if (refused) continue;
+      printPeerEgressMarker(`PR #${prNumber}`, repo, llmEndpoint);
+      printDataFlowDisclosure(baseDataFlow);
+    } else {
+      printPeerEgressMarker(`PR #${prNumber}`, repo, llmEndpoint);
     }
 
     // ─── AGT-430: Haiku triage call ──────────────────────────────
@@ -1211,18 +1341,25 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // from GitHub here, AFTER claiming the seat (or registering as extra).
     // GitHub gates this — a listener that lacks repo access cannot fetch the
     // diff. On failure: seat holders release; extras just continue.
+    //
+    // AGT-2248: fetch base_sha...head_sha via the compare API, not
+    // `gh pr diff` (the PR's CURRENT head). The review is posted pinned to
+    // head_sha (AGT-2241), so a push between the event and this fetch must
+    // not put a newer diff under the older commit's review. A head_sha (or
+    // base_sha) GitHub cannot resolve fails the fetch → refuse.
     let diff: string;
     {
       let ghDiffStatus: number;
       let ghDiffStdout = "";
       let ghDiffStderr = "";
+      const diffArgs = buildPeerDiffFetchArgs(prRef, baseSha, headSha);
       if (opts._ghDiffForTest) {
-        const r = opts._ghDiffForTest(prUrl);
+        const r = opts._ghDiffForTest(prUrl, diffArgs);
         ghDiffStatus = r.status;
         ghDiffStdout = r.stdout;
         ghDiffStderr = r.stderr;
       } else {
-        const r = spawnSync("gh", ["pr", "diff", prUrl], {
+        const r = spawnSync("gh", diffArgs, {
           stdio: ["ignore", "pipe", "pipe"],
           encoding: "utf8",
           maxBuffer: 32 * 1024 * 1024,
@@ -1236,7 +1373,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         const reason = ghDiffStderr || (ghDiffStdout.trim() === "" ? "empty diff" : `exit ${ghDiffStatus}`);
         if (reviewMode.kind === "seat") {
           process.stderr.write(
-            `✗ could not fetch diff (gh): ${reason}; releasing seat\n`,
+            `✗ could not fetch diff at base...head (gh): ${reason}; releasing seat\n`,
           );
           currentSeatPatchId = null;
           await callReleaseSeat({
@@ -1254,7 +1391,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           });
         } else {
           process.stderr.write(
-            `✗ could not fetch diff (gh): ${reason}; skipping extra\n`,
+            `✗ could not fetch diff at base...head (gh): ${reason}; skipping extra\n`,
           );
         }
         continue;
@@ -1488,6 +1625,37 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 }
 
 // ─── AGT-2241: review post pinned to head_sha ─────────────────────────
+
+/**
+ * Build the `gh` argv that fetches the unified diff for exactly the commits
+ * the event names (AGT-2248):
+ *
+ *   gh api -H "Accept: application/vnd.github.diff" \
+ *     repos/<o>/<r>/compare/<base_sha>...<head_sha>
+ *
+ * Three-dot, like `stamp review`'s base..head semantics: the changes on
+ * head_sha since its merge-base with base_sha. Both SHAs are re-checked as
+ * full lowercase hex so neither can smuggle a path segment or a flag; an
+ * unknown head_sha makes GitHub 404 and the listener refuses the event.
+ */
+export function buildPeerDiffFetchArgs(
+  pr: ParsedPrUrl,
+  baseSha: string,
+  headSha: string,
+): string[] {
+  // Defence in depth for this exported helper: runPrListen has already
+  // checked both SHAs before claiming a seat, so this cannot throw there.
+  for (const [name, sha] of [["base_sha", baseSha], ["head_sha", headSha]] as const) {
+    if (!FULL_SHA_RE.test(sha)) {
+      throw new Error(`${name} ${JSON.stringify(sha)} is not a full 40-char lowercase hex SHA`);
+    }
+  }
+  return [
+    "api",
+    "-H", "Accept: application/vnd.github.diff",
+    `repos/${pr.owner}/${pr.repo}/compare/${baseSha}...${headSha}`,
+  ];
+}
 
 /** REST `event` value for each verdict (POST /pulls/{n}/reviews). */
 const REVIEW_EVENT = {
