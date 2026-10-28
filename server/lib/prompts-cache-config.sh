@@ -47,8 +47,10 @@ check_prompts_cache_root() {
   esac
   if [ "$_pcr_ok" -ne 1 ]; then
     echo "error: STAMP_PROMPTS_CACHE_ROOT='$_pcr' is not allowed; use a dot-dir directly under /srv/git (e.g. /srv/git/.prompts-cache) that isn't one of the server's own (.ssh-host-keys, .ssh-client-keys, .stamp-state, .trash). Only dot-dirs are never served by the SSH gate." >&2
+    unset _pcr _pcr_name _pcr_ok
     return 1
   fi
+  unset _pcr _pcr_name _pcr_ok
   return 0
 }
 

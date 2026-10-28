@@ -64,17 +64,6 @@ import { resolvePromptsCacheRoot, resolvePromptsDeployKeyPath } from "./promptsC
 // ─── Constants ────────────────────────────────────────────────────────
 
 /**
- * Default cache root when `STAMP_PROMPTS_CACHE_ROOT` is unset. Matches
- * the path named in the project README:
- * `<vault>/projects/external-prompt-storage-via-webhook/README.md`.
- * The stamp-server image's persistent volume is mounted at `/srv/git`,
- * so the cache lives there for the same survival-across-redeploy
- * reason as `.ssh-host-keys` and `.stamp-state`.
- */
-// (Moved to promptsCachePaths.ts, AGT-2277 — shared with stamp-workers and
-// the stamp-review verb.)
-
-/**
  * Default ref to track when `STAMP_PROMPTS_REPO_REF` is unset. Project
  * convention; documented in the operator-setup README section.
  */

@@ -83,7 +83,6 @@ import {
   runReviewPipeline,
 } from "./reviewPipeline.js";
 
-
 // ─── Shape validators ───────────────────────────────────────────────
 //
 // Mirrors the validators in `src/server/promptFetch.ts` so a request
