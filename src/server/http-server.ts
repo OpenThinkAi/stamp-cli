@@ -2186,11 +2186,16 @@ async function handlePeerReReviewRequest(req: IncomingMessage, res: ServerRespon
     if (patch.seat_2_holder) seatMap.push({ fp: patch.seat_2_holder, seat: 2 });
 
     const now = Date.now();
+    // AGT-2241: carry the patch's base_sha / head_sha (from the author's
+    // signed pr-opened) so the listener can re-run its author check against
+    // the protected branch and pin the posted review to head_sha.
     const eventPayload = {
       patch_id: payload.patch_id,
       requested_by_fp: payload.requester_fp,
       pr_url: patch.pr_url ?? null,
       repo: patch.repo,
+      base_sha: patch.base_sha,
+      head_sha: patch.head_sha,
     };
 
     const notified = fanoutToSeatHoldersFiltered(

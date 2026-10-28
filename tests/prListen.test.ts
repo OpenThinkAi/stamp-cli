@@ -164,6 +164,7 @@ function makeEvent(opts: {
     payload: {
       patch_id: opts.patch_id ?? "a".repeat(40),
       base_sha: "b".repeat(40),
+      head_sha: "9".repeat(40),
       repo: "acme/widget",
       pr_url: "https://github.com/acme/widget/pull/42",
       requested_by_fp: "sha256:" + "c".repeat(64),
@@ -682,6 +683,8 @@ describe("AGT-2240: pr_url bound to payload repo before gh diff/review", () => {
         requested_by_fp: "sha256:" + "f".repeat(64),
         pr_url: "https://github.com/victim/secret/pull/99",
         repo: "acme/widget",
+        base_sha: "b".repeat(40),
+        head_sha: "9".repeat(40),
         seat: 1,
       },
     });
@@ -1170,6 +1173,8 @@ describe("AGT-431 AC #11: re-review-requested event triggers re-triage + review 
         requested_by_fp: "sha256:" + "f".repeat(64),
         pr_url: "https://github.com/acme/widget/pull/99",
         repo: "acme/widget",
+        base_sha: "b".repeat(40),
+        head_sha: "9".repeat(40),
         seat: 1,
       },
     };
@@ -1192,6 +1197,7 @@ describe("AGT-431 AC #11: re-review-requested event triggers re-triage + review 
         _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [reReviewEvent],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1220,6 +1226,8 @@ describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'",
         requested_by_fp: "sha256:" + "f".repeat(64),
         pr_url: "https://github.com/acme/widget/pull/99",
         repo: "acme/widget",
+        base_sha: "b".repeat(40),
+        head_sha: "9".repeat(40),
         seat: 1,
       },
     };
@@ -1236,6 +1244,7 @@ describe("AGT-431 AC #12: re-review-requested triplet tagged kind: 're-review'",
         _appendTripletForTest: (rec) => triplets.push(rec as Record<string, unknown>),
         _cwdForTest: "/tmp",
         _eventQueueForTest: [reReviewEvent],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1584,6 +1593,8 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
         requested_by_fp: "sha256:" + "f".repeat(64),
         pr_url: "https://github.com/acme/widget/pull/99",
         repo: "acme/widget",
+        base_sha: "b".repeat(40),
+        head_sha: "9".repeat(40),
         seat: 1,
       },
     };
@@ -1602,6 +1613,7 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
         _notifyForTest: () => {},
         _cwdForTest: "/tmp",
         _eventQueueForTest: [reReviewEvent],
+        ...bypassOperatorGate(),
       }),
     );
 
@@ -1640,6 +1652,8 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
         requested_by_fp: "sha256:" + "f".repeat(64),
         pr_url: "https://github.com/acme/widget/pull/99",
         repo: "acme/widget",
+        base_sha: "b".repeat(40),
+        head_sha: "9".repeat(40),
         seat: 1,
       },
     };
@@ -1659,6 +1673,7 @@ describe("AGT-432: re-review event also subject to cost-cap downgrade", () => {
         _cwdForTest: "/tmp",
         _initialDailySpendForTest: 0.002,
         _eventQueueForTest: [reReviewEvent],
+        ...bypassOperatorGate(),
       }),
     );
 
