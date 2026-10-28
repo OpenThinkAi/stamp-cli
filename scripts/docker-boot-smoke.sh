@@ -154,10 +154,13 @@ echo "docker-boot-smoke: hook sees STAMP_FORBID_AI_ATTRIBUTION via /etc/stamp/en
 echo "docker-boot-smoke: asserting the sftp subsystem is refused while git + git-shell-commands still work…"
 sftp_probe_script='set -e
 k=$(mktemp -d)
-ssh-keygen -q -t ed25519 -N "" -f "$k/id" >/dev/null
-cat "$k/id.pub" > /home/git/.ssh/authorized_keys
-chown git:git /home/git/.ssh/authorized_keys
-chmod 0600 /home/git/.ssh/authorized_keys
+ssh-keygen -q -t ed25519 -N "" -C smoke-sftp -f "$k/id" >/dev/null
+# Enroll through users.db (the AuthorizedKeysCommand path): since AGT-2265
+# every session runs the stamp-gate forced command, which refuses keys
+# that are not in the membership DB.
+AUTHORIZED_KEYS="$(cat "$k/id.pub")" /usr/local/sbin/stamp-seed-users >/dev/null
+chown root:git /srv/git/.stamp-state/users.db
+chmod 0660 /srv/git/.stamp-state/users.db
 SSH_OPTS="-i $k/id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 export GIT_SSH_COMMAND="ssh $SSH_OPTS"
 
@@ -186,7 +189,6 @@ fi
 grep -qi "subsystem request failed" "$k/ssh-s.out" || { echo "ssh -s sftp failed, but not with a subsystem refusal:" >&2; cat "$k/ssh-s.out" >&2; exit 1; }
 
 rm -rf /srv/git/sftp-smoke.git "$k"
-: > /home/git/.ssh/authorized_keys
 '
 if ! docker exec "$CONTAINER_NAME" sh -c "$sftp_probe_script"; then
   echo "error: sftp-subsystem assertion failed (AGT-2271) — see above." >&2
@@ -252,6 +254,113 @@ if ! docker exec "$CONTAINER_NAME" sh -c "$role_gate_script"; then
   exit 1
 fi
 echo "docker-boot-smoke: member refused new/delete/purge/restore; admin admitted ✓"
+
+# AGT-2265: every session runs through the stamp-gate forced command, which
+# only serves live /srv/git/<name>.git repos and applies the member grant
+# rule. Over real SSH sessions:
+#   - member (no grants): can clone a live repo and push to one, but not
+#     .trash, .prompts-cache or a traversal path; list-trash / resync-mirror
+#     are refused (exit 3); an interactive login is refused;
+#   - admin: create, clone, push, list-trash, resync-mirror all work, and
+#     dot-dirs are refused for admins too;
+#   - member with a repo grant: only the repo whose .stamp/mirror.yml maps
+#     to the grant; other repos and list-stamp-repos are refused;
+#   - a key in the legacy AuthorizedKeysFile (written by entrypoint's
+#     helper) still goes through the gate, so an unenrolled one is refused.
+echo "docker-boot-smoke: asserting the SSH gate scopes reads and keeps git + verbs working…"
+read_gate_script='set -e
+k=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N "" -C smoke-radmin -f "$k/admin" >/dev/null
+ssh-keygen -q -t ed25519 -N "" -C smoke-rmember -f "$k/member" >/dev/null
+ssh-keygen -q -t ed25519 -N "" -C smoke-legacy -f "$k/legacy" >/dev/null
+AUTHORIZED_KEYS="$(cat "$k/admin.pub" "$k/member.pub")" /usr/local/sbin/stamp-seed-users >/dev/null
+chown root:git /srv/git/.stamp-state/users.db
+chmod 0660 /srv/git/.stamp-state/users.db
+member_fp=$(ssh-keygen -lf "$k/member.pub" | awk "{print \$2}")
+node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"/srv/git/.stamp-state/users.db\");const r=db.prepare(\"UPDATE users SET role=? WHERE ssh_fp=?\").run(\"member\",process.argv[1]);if(r.changes!==1)process.exit(1)" "$member_fp"
+node -e "process.stdout.write(require(\"node:crypto\").generateKeyPairSync(\"ed25519\").publicKey.export({type:\"spki\",format:\"pem\"}))" > /etc/stamp/operator.pub
+chmod 0444 /etc/stamp/operator.pub
+OPTS="-o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+as() { who=$1; shift; ssh $OPTS -i "$k/$who" git@127.0.0.1 "$@"; }
+gitas() { who=$1; shift; GIT_SSH_COMMAND="ssh $OPTS -i $k/$who" git "$@"; }
+fail() { echo "$*" >&2; [ -f "$k/out" ] && cat "$k/out" >&2; exit 1; }
+expect_rc() { want=$1; who=$2; shift 2; set +e; as "$who" "$@" >"$k/out" 2>&1; rc=$?; set -e; [ $rc -eq $want ] || fail "$who: expected exit $want for: $* (got $rc)"; }
+expect_clone_refused() { who=$1; path=$2; pat=$3; rm -rf "$k/c"; if gitas "$who" clone -q "git@127.0.0.1:$path" "$k/c" >"$k/out" 2>&1; then fail "$who cloned $path through the gate"; fi; grep -q "$pat" "$k/out" || fail "$who clone of $path failed, but not with: $pat"; }
+
+# Fixtures: a stamp repo (admin create), a trashed copy, a prompts cache,
+# a plain bare repo for pushes, and a repo whose mirror.yml maps to acme/granted.
+as admin new-stamp-repo rg-live >/dev/null || fail "admin new-stamp-repo failed"
+as admin new-stamp-repo rg-doomed >/dev/null || fail "admin new-stamp-repo (2) failed"
+as admin delete-stamp-repo rg-doomed >/dev/null || fail "admin soft delete failed"
+trashed=$(ls /srv/git/.trash | grep -- "-rg-doomed.git\$" | head -1)
+[ -n "$trashed" ] || fail "no trash entry for rg-doomed"
+su -s /bin/sh git -c "git init -q --bare -b main /srv/git/.prompts-cache"
+su -s /bin/sh git -c "git init -q --bare -b main /srv/git/rg-plain.git"
+w="$k/w"
+git init -q -b main "$w"
+mkdir -p "$w/.stamp"
+printf "github:\n  repo: acme/granted\n" > "$w/.stamp/mirror.yml"
+git -C "$w" add -A
+git -C "$w" -c user.email=smoke@example.invalid -c user.name=smoke commit -q -m smoke
+
+# Admin: git + verbs through the gate.
+gitas admin -C "$w" push -q git@127.0.0.1:/srv/git/rg-plain.git main || fail "admin push through the gate failed"
+gitas admin clone -q git@127.0.0.1:/srv/git/rg-live.git "$k/admin-live" || fail "admin clone failed"
+gitas admin clone -q git@127.0.0.1:/srv/git/rg-plain "$k/admin-plain" || fail "admin clone without .git suffix failed"
+[ "$(git -C "$k/admin-plain" rev-parse HEAD)" = "$(git -C "$w" rev-parse HEAD)" ] || fail "admin clone HEAD mismatch"
+expect_rc 0 admin list-trash
+grep -q "rg-doomed" "$k/out" || fail "admin list-trash did not show the trash entry"
+expect_rc 0 admin list-stamp-repos
+expect_rc 0 admin resync-mirror rg-live
+expect_clone_refused admin "/srv/git/.trash/$trashed" "not allowed"
+expect_clone_refused admin "/srv/git/.prompts-cache" "not allowed"
+
+# Member with no grants: live repos only.
+gitas member clone -q git@127.0.0.1:/srv/git/rg-live.git "$k/member-live" || fail "member clone of a live repo failed"
+gitas member -C "$w" push -q git@127.0.0.1:/srv/git/rg-plain.git main:refs/heads/member || fail "member push through the gate failed"
+expect_clone_refused member "/srv/git/.trash/$trashed" "not allowed"
+expect_clone_refused member "/srv/git/.prompts-cache" "not allowed"
+expect_clone_refused member "/srv/git/../../srv/git/.trash/$trashed" "not allowed"
+expect_clone_refused member "~git/../../srv/git/.trash/$trashed" "not allowed"
+expect_rc 2 member "git-upload-pack /srv/git/.trash/$trashed"
+expect_rc 2 member "sh -c id"
+expect_rc 3 member list-trash
+grep -q "role member is not permitted" "$k/out" || fail "member list-trash: wrong refusal"
+expect_rc 3 member resync-mirror rg-live
+expect_rc 0 member list-stamp-repos
+set +e; ssh $OPTS -i "$k/member" git@127.0.0.1 </dev/null >"$k/out" 2>&1; rc=$?; set -e
+[ $rc -ne 0 ] && grep -q "interactive sessions are not available" "$k/out" || fail "interactive login was not refused (exit $rc)"
+
+# Member with a grant: only the mapped repo.
+su -s /bin/sh git -c "git init -q --bare -b main /srv/git/rg-mapped.git"
+gitas admin -C "$w" push -q git@127.0.0.1:/srv/git/rg-mapped.git main || fail "admin push to rg-mapped failed"
+member_id=$(node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"/srv/git/.stamp-state/users.db\");process.stdout.write(String(db.prepare(\"SELECT id FROM users WHERE ssh_fp=?\").get(process.argv[1]).id))" "$member_fp")
+node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"/srv/git/.stamp-state/users.db\");db.prepare(\"INSERT INTO user_repo_grants (user_id, org, repo, granted_by, created_at) VALUES (?, ?, ?, NULL, 0)\").run(Number(process.argv[1]),\"acme\",\"granted\")" "$member_id"
+gitas member clone -q git@127.0.0.1:/srv/git/rg-mapped.git "$k/member-mapped" || fail "granted member could not clone the mapped repo"
+expect_clone_refused member "/srv/git/rg-live.git" "not found or not permitted"
+expect_clone_refused member "/srv/git/rg-nope.git" "not found or not permitted"
+expect_rc 3 member list-stamp-repos
+
+# Legacy AuthorizedKeysFile: gated too, so an unenrolled key gets nothing.
+. /lib/gate-authorized-keys.sh
+_gate_authorized_keys < "$k/legacy.pub" > /home/git/.ssh/authorized_keys
+chown git:git /home/git/.ssh/authorized_keys
+chmod 0600 /home/git/.ssh/authorized_keys
+grep -q "^command=\"stamp-gate legacy\",restrict ssh-ed25519 " /home/git/.ssh/authorized_keys || fail "legacy file line is not gated"
+expect_rc 1 legacy list-stamp-repos
+grep -q "not in the membership DB" "$k/out" || fail "legacy key: wrong refusal"
+expect_clone_refused legacy "/srv/git/rg-live.git" "not in the membership DB"
+: > /home/git/.ssh/authorized_keys
+
+as admin delete-stamp-repo rg-live --purge >/dev/null
+as admin delete-stamp-repo rg-doomed --purge >/dev/null
+rm -rf /srv/git/rg-plain.git /srv/git/rg-mapped.git /srv/git/.prompts-cache "$k" /etc/stamp/operator.pub
+'
+if ! docker exec "$CONTAINER_NAME" sh -c "$read_gate_script"; then
+  echo "error: SSH-gate read-scoping assertion failed (AGT-2265) — see above." >&2
+  exit 1
+fi
+echo "docker-boot-smoke: gate refuses .trash/.prompts-cache/ungranted repos; git + verbs work ✓"
 
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"

@@ -315,3 +315,71 @@ describe("repo verbs are role-gated (AGT-2259)", () => {
     assert.doesNotMatch(dockerfile, /git-shell-commands\/stamp-require-role/);
   });
 });
+
+describe("list-trash and resync-mirror are role-gated (AGT-2265)", () => {
+  it("list-trash: denial (exit 3) prints no trash entries", () => {
+    const h = shellHarness();
+    try {
+      seedVictim(h);
+      const r = spawnSyncVerb(h, "list-trash", [], 3);
+      assert.equal(r.status, 3, r.stderr);
+      assert.doesNotMatch(r.stdout, /victim/);
+      assert.match(readFileSync(h.gateLog, "utf8"), /^admin list trashed repos$/m);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("list-trash: admitted caller sees the trash", () => {
+    const h = shellHarness();
+    try {
+      seedVictim(h);
+      const r = spawnSyncVerb(h, "list-trash", [], 0);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, new RegExp(TRASHED.replace(/\./g, "\\.")));
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("resync-mirror: denial (exit 3) never runs the post-receive hook", () => {
+    const h = shellHarness();
+    try {
+      seedVictim(h);
+      const hooks = path.join(h.gitRoot, "victim.git", "hooks");
+      mkdirSync(hooks);
+      const marker = path.join(h.gitRoot, "hook-ran");
+      writeFileSync(path.join(hooks, "post-receive"), `#!/bin/sh\ntouch "${marker}"\n`);
+      chmodSync(path.join(hooks, "post-receive"), 0o755);
+      const r = spawnSyncVerb(h, "resync-mirror", ["victim"], 3);
+      assert.equal(r.status, 3, r.stderr);
+      assert.ok(!existsSync(marker));
+      assert.match(
+        readFileSync(h.gateLog, "utf8"),
+        /^admin resync the mirror for repo 'victim'$/m,
+      );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+/** Like ShellHarness.run, but also returns stdout. */
+function spawnSyncVerb(
+  h: ShellHarness,
+  verb: string,
+  args: string[],
+  gateRc: number,
+): { status: number | null; stdout: string; stderr: string } {
+  const dir = path.dirname(h.gitRoot);
+  const stub = path.join(dir, "stub-require-role");
+  const src = readFileSync(path.join(ROOT, "server", verb), "utf8");
+  assert.ok(src.includes(GATE_PATH), `${verb} must call ${GATE_PATH}`);
+  const script = path.join(dir, verb);
+  writeFileSync(script, src.split(GATE_PATH).join(stub).split("/srv/git").join(h.gitRoot));
+  const r = spawnSync("sh", [script, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, STUB_GATE_RC: String(gateRc), STAMP_GIT_ROOT: h.gitRoot },
+  });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}

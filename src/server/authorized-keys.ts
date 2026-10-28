@@ -6,7 +6,9 @@
  *
  * where <fingerprint> is sshd's %f format specifier — "SHA256:<base64>".
  * Looks the fingerprint up in the membership sqlite (read-only) and, if
- * matched, prints the matching authorized_keys line to stdout. Exits 0
+ * matched, prints the matching authorized_keys line to stdout, prefixed
+ * with `command="stamp-gate <user-id>",restrict` so the session goes
+ * through the SSH gate (AGT-2265, see src/lib/sshGate.ts). Exits 0
  * regardless of whether a match was found — sshd treats empty stdout as
  * "no key matched, try the next auth method (AuthorizedKeysFile)", which
  * is exactly the behavior we want during the env-var → sqlite transition.
@@ -20,16 +22,16 @@
  *     fails at open time instead of corrupting authz.
  *
  * Failure handling: ANY error (DB open failure, malformed arguments, etc.)
- * is logged to stderr and the script exits 0 with empty stdout. That hands
- * the auth attempt off to sshd's AuthorizedKeysFile fallback rather than
- * locking everyone out if the DB is briefly unavailable (rebuild window,
- * volume not yet mounted, etc.). The legacy /home/git/.ssh/authorized_keys
- * path remains populated by entrypoint.sh during the transition, so a
- * DB-side failure degrades to "legacy AUTHORIZED_KEYS env var keys still
- * work" rather than "nobody can SSH in."
+ * is logged to stderr and the script exits 0 with empty stdout, handing
+ * the auth attempt to sshd's AuthorizedKeysFile. Since AGT-2265 that is no
+ * longer an escape hatch for a broken DB: entrypoint.sh writes every
+ * AuthorizedKeysFile line with the same stamp-gate forced command, and the
+ * gate resolves the caller against the DB, so with the DB unreadable every
+ * session is refused (fail closed). AGT-2260 removes the file entirely.
  */
 
 import { findUserBySshFingerprint, openServerDb } from "../lib/serverDb.js";
+import { gatedAuthorizedKeysLine } from "../lib/sshForcedCommand.js";
 
 function main(): void {
   // argv: [node, script, username, fingerprint]
@@ -71,10 +73,14 @@ function main(): void {
   try {
     const user = findUserBySshFingerprint(db, fingerprint);
     if (user) {
-      // Print the stored authorized_keys line verbatim. sshd parses this
-      // exactly as it would a line from AuthorizedKeysFile — algorithm,
-      // base64, optional comment.
-      process.stdout.write(user.ssh_pubkey + "\n");
+      const line = gatedAuthorizedKeysLine(user.id, user.ssh_pubkey);
+      if (line) {
+        process.stdout.write(line + "\n");
+      } else {
+        console.error(
+          `stamp-authorized-keys: stored key for user ${user.id} is not a plain public-key line; refusing to emit it`,
+        );
+      }
     }
   } catch (e) {
     console.error(

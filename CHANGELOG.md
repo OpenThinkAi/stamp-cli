@@ -70,6 +70,28 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   membership DB before touching `/srv/git` and refuses a `member` with
   exit 3. `stamp provision` and `stamp server-repos` keep working for the
   operator keys `AUTHORIZED_KEYS` seeds, which are admins.
+- **Every SSH session goes through a gate, so members can no longer read
+  trash, the prompts cache or (once scoped) other teams' repos.** git-shell
+  served `git-upload-pack` for any path the `git` user could read, so any
+  enrolled key, a `member` included, could clone every repo, the
+  soft-deleted repos in `/srv/git/.trash` and `/srv/git/.prompts-cache`.
+  The `AuthorizedKeysCommand` resolver now prints each key as
+  `command="stamp-gate <user-id>",restrict`, and `entrypoint.sh` writes the
+  legacy `AuthorizedKeysFile` the same way. The gate resolves the caller
+  from `SSH_USER_AUTH`, serves git only for live `/srv/git/<name>.git` repos
+  (dot-dirs, nested paths, `~` and `..` are refused for every role), and
+  re-quotes the command before handing it to git-shell. A member with no
+  repo grants can still use every live repo; a member with any
+  `stamp users grant` can use only the repos whose `.stamp/mirror.yml`
+  `github.repo` matches a grant. `list-trash` and `resync-mirror` now need
+  owner or admin, and `list-stamp-repos` is refused to members with grants.
+  **Upgrade notes:** clone and push URLs must name `/srv/git/<name>.git`
+  (or `/srv/git/<name>`); interactive `ssh git@<host>` logins and pty
+  requests are refused; to clone a trashed repo, restore it first. A key in
+  `AUTHORIZED_KEYS` that is not in users.db (seeding failed, or the user was
+  removed) is now refused instead of being let in by the legacy file, so
+  with an unreadable users.db nobody gets in. Members who ran
+  `stamp push --resync-mirror` need an admin to run it.
 - **The server pre-receive hook refuses to delete a protected branch.**
   `git push origin :main` used to pass the hook, and since a protected
   branch can't be recreated by push, the repo stayed broken until an

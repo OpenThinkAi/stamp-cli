@@ -122,14 +122,14 @@ RUN { \
         'LoginGraceTime 30' \
         'MaxStartups 10:50:50' \
         'MaxSessions 5' \
-        '# Membership resolver: consult the stamp users DB before falling' \
-        '# back to AuthorizedKeysFile. sshd passes the offered key fingerprint' \
+        '# Membership resolver: consult the stamp users DB as well as' \
+        '# AuthorizedKeysFile. sshd passes the offered key fingerprint' \
         '# as %f (SHA256:<base64>); the resolver prints the matching' \
-        '# authorized_keys line on a hit, exits empty on a miss. The legacy' \
-        '# /home/git/.ssh/authorized_keys path stays in play during the' \
-        "# env-var → sqlite transition (phase 1 of the multi-user onboarding)" \
-        "# so an operator who hasn't rolled phase-3 CLI tooling yet still has" \
-        '# the env var as an escape hatch.' \
+        '# authorized_keys line on a hit, exits empty on a miss. Every line' \
+        '# it prints (and every AuthorizedKeysFile line entrypoint.sh writes)' \
+        '# carries command="stamp-gate ...",restrict (AGT-2265), so both' \
+        '# paths run the SSH gate. The legacy /home/git/.ssh/authorized_keys' \
+        '# path stays in play until AGT-2260 removes it.' \
         'AuthorizedKeysCommand /usr/local/sbin/stamp-authorized-keys %u %f' \
         'AuthorizedKeysCommandUser git' \
         '# Expose successful auth info (pubkey wire blob) to user sessions' \
@@ -234,6 +234,18 @@ COPY --from=builder /build/dist/server/purge-trash.cjs /usr/local/bin/purge-tras
 # SSH_USER_AUTH against users.db and refuses role=member (exit 3). A
 # helper, not a verb — deliberately NOT symlinked into git-shell-commands.
 COPY --from=builder /build/dist/server/require-role.cjs /usr/local/sbin/stamp-require-role
+# SSH session gate (AGT-2265). The AuthorizedKeysCommand resolver emits
+# every key as `command="stamp-gate <user-id>",restrict`, and entrypoint.sh
+# writes AuthorizedKeysFile lines the same way, so every session runs the
+# stamp-gate verb whatever the client asked for. stamp-gate (shell, in
+# git-shell-commands so git-shell will run it as the forced command) calls
+# stamp-gate-check, which resolves the caller, parses SSH_ORIGINAL_COMMAND,
+# refuses any repo path that isn't a live /srv/git/<name>.git (so .trash,
+# .prompts-cache and every other dot-dir are never served), applies the
+# role/grant rule, and prints the re-quoted command; stamp-gate then execs
+# git-shell -c with it. stamp-gate-check is a helper, NOT a verb.
+COPY --from=builder /build/dist/server/gate-check.cjs /usr/local/sbin/stamp-gate-check
+COPY server/stamp-gate /usr/local/bin/stamp-gate
 # Peer-agentic review SSH verbs (AGT-427 / AGT-453). Only stamp-pr-opened
 # remains — the six seat-protocol verbs were migrated to HTTP POST
 # endpoints in AGT-453. The SQLite migration always runs at boot regardless
@@ -265,6 +277,9 @@ COPY server/lib/check-prompts-dir.sh /lib/check-prompts-dir.sh
 # (i.e. /lib/inject-sshd-setenv.sh). Must be copied into the image or the
 # entrypoint aborts on first boot when STAMP_SSH_PASS_ENV injection runs (AGT-469).
 COPY server/lib/inject-sshd-setenv.sh /lib/inject-sshd-setenv.sh
+# entrypoint.sh sources this helper to prepend the stamp-gate forced command
+# to every AuthorizedKeysFile line it writes (AGT-2265).
+COPY server/lib/gate-authorized-keys.sh /lib/gate-authorized-keys.sh
 
 # Sudoers fragment that grants the unprivileged git user passwordless
 # invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root
@@ -313,8 +328,10 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/purge-trash \
              /usr/local/bin/stamp-users \
              /usr/local/bin/stamp-pr-opened \
+             /usr/local/bin/stamp-gate \
              /usr/local/sbin/stamp-ensure-repo-key \
              /usr/local/sbin/stamp-require-role \
+             /usr/local/sbin/stamp-gate-check \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
              /usr/local/sbin/stamp-http-server \
@@ -350,6 +367,7 @@ RUN ln -s /usr/local/bin/new-stamp-repo /home/git/git-shell-commands/new-stamp-r
  && ln -s /usr/local/bin/purge-trash /home/git/git-shell-commands/purge-trash \
  && ln -s /usr/local/bin/stamp-users /home/git/git-shell-commands/stamp-users \
  && ln -s /usr/local/bin/stamp-pr-opened /home/git/git-shell-commands/stamp-pr-opened \
+ && ln -s /usr/local/bin/stamp-gate /home/git/git-shell-commands/stamp-gate \
  && chown -R root:git /home/git/git-shell-commands \
  && chmod 0755 /home/git/git-shell-commands
 
