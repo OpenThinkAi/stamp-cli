@@ -190,7 +190,7 @@ describe("parseGithubOriginUrl", () => {
 describe("buildRulesetPayload", () => {
   it("encodes a User actor verbatim", () => {
     const actor: BypassActor = { type: "User", id: 12345 };
-    const payload = buildRulesetPayload(actor) as {
+    const payload = buildRulesetPayload(actor, []) as {
       bypass_actors: Array<{ actor_id: number; actor_type: string }>;
     };
     assert.equal(payload.bypass_actors.length, 1);
@@ -202,7 +202,7 @@ describe("buildRulesetPayload", () => {
     // Pin the magic constant: actor_id=1 is GitHub's "any org admin"
     // sentinel. The 0.7.2 fix depends on this being the value sent.
     const actor: BypassActor = { type: "OrganizationAdmin", id: 1 };
-    const payload = buildRulesetPayload(actor) as {
+    const payload = buildRulesetPayload(actor, []) as {
       bypass_actors: Array<{ actor_id: number; actor_type: string }>;
     };
     assert.equal(payload.bypass_actors[0]!.actor_type, "OrganizationAdmin");
@@ -215,7 +215,7 @@ describe("buildRulesetPayload", () => {
     // for locked-down work orgs. id is the numeric key id from
     // GET /repos/:o/:r/keys.
     const actor: BypassActor = { type: "DeployKey", id: 9876543 };
-    const payload = buildRulesetPayload(actor) as {
+    const payload = buildRulesetPayload(actor, []) as {
       bypass_actors: Array<{ actor_id: number; actor_type: string }>;
     };
     assert.equal(payload.bypass_actors[0]!.actor_type, "DeployKey");
@@ -223,7 +223,7 @@ describe("buildRulesetPayload", () => {
   });
 
   it("does NOT include required_linear_history rule (incompatible with --no-ff merges)", () => {
-    const payload = buildRulesetPayload({ type: "User", id: 1 }) as {
+    const payload = buildRulesetPayload({ type: "User", id: 1 }, []) as {
       rules: Array<{ type: string }>;
     };
     const types = payload.rules.map((r) => r.type);

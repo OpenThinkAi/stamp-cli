@@ -172,12 +172,59 @@ export function parseGithubOriginUrl(
 }
 
 /**
+ * Translate one `.stamp/mirror.yml` `branches:` entry into a GitHub
+ * Ruleset `ref_name` include pattern.
+ *
+ * The two glob grammars differ in one load-bearing way: stamp's `*`
+ * (lib/refPatterns.ts) matches across `/`, while GitHub's fnmatch `*`
+ * stops at `/` and needs `**` to cross it. Translating every run of `*`
+ * to `**` keeps the Ruleset at least as broad as the set of branches the
+ * mirror will actually push — a mirrored `release/*` that matches
+ * `release/2026/q4` must be protected too. `?` means "one character" in
+ * both (GitHub's excludes `/`, so it can only be narrower on names with a
+ * slash in that exact position — vanishingly rare, and the coverage
+ * check below flags nothing it can't prove). Git ref names can't contain
+ * any other fnmatch metacharacter (`[`, `\`), so literal names pass
+ * through unchanged.
+ */
+export function mirrorBranchRulesetPattern(branch: string): string {
+  return `refs/heads/${branch.replace(/\*+/g, "**")}`;
+}
+
+/**
+ * The `conditions.ref_name.include` list for the stamp-mirror-only
+ * Ruleset: the repo's default branch plus every branch the mirror is
+ * configured to push (`.stamp/mirror.yml` `github.branches`). Any
+ * mirrored branch left out of this list has no deletion / update /
+ * non_fast_forward rule on GitHub, so anyone with write access could push
+ * to it directly and skip the stamp gate (AGT-2245).
+ *
+ * `~DEFAULT_BRANCH` is always kept, even when mirror.yml names the
+ * default branch literally — it keeps the protection pinned if the
+ * default is later renamed. Duplicates are dropped; order is stable.
+ */
+export function rulesetRefIncludes(mirrorBranches: readonly string[]): string[] {
+  const out = ["~DEFAULT_BRANCH"];
+  for (const b of mirrorBranches) {
+    if (b.length === 0) continue;
+    const pattern = mirrorBranchRulesetPattern(b);
+    if (!out.includes(pattern)) out.push(pattern);
+  }
+  return out;
+}
+
+/**
  * Build the ruleset JSON payload for stamp's mirror-only protection.
  * Same structure as docs/github-ruleset-template.json but with the bypass
- * actor populated. `required_linear_history` is deliberately omitted —
- * stamp's --no-ff merge commits would be rejected by it.
+ * actor populated and the branch include list derived from the mirror's
+ * branch set (see rulesetRefIncludes). `required_linear_history` is
+ * deliberately omitted — stamp's --no-ff merge commits would be rejected
+ * by it.
  */
-export function buildRulesetPayload(actor: BypassActor): unknown {
+export function buildRulesetPayload(
+  actor: BypassActor,
+  mirrorBranches: readonly string[],
+): unknown {
   return {
     name: "stamp-mirror-only",
     target: "branch",
@@ -185,7 +232,7 @@ export function buildRulesetPayload(actor: BypassActor): unknown {
     conditions: {
       ref_name: {
         exclude: [],
-        include: ["~DEFAULT_BRANCH"],
+        include: rulesetRefIncludes(mirrorBranches),
       },
     },
     rules: [
@@ -201,6 +248,136 @@ export function buildRulesetPayload(actor: BypassActor): unknown {
       },
     ],
   };
+}
+
+/** A ruleset's `conditions.ref_name`, as read back from GitHub. */
+export interface RulesetRefCondition {
+  include: string[];
+  exclude: string[];
+}
+
+/**
+ * Convert a GitHub Ruleset fnmatch pattern to an anchored regex: `**`
+ * crosses `/`, `*` and `?` do not. Everything else is literal.
+ */
+function githubRefPatternToRegex(pattern: string): RegExp {
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!;
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        re += ".*";
+        i++;
+      } else {
+        re += "[^/]*";
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/**
+ * Which mirrored branch patterns an existing Ruleset does NOT provably
+ * protect. Returns the offending mirror.yml entries verbatim; empty means
+ * every mirrored branch is covered.
+ *
+ * Coverage rules, deliberately conservative (a false "uncovered" costs a
+ * warning; a false "covered" is a silent gate bypass):
+ *   - `~ALL` or `refs/heads/**` in include covers everything.
+ *   - The exact translated pattern (mirrorBranchRulesetPattern) covers
+ *     its entry — that's what stamp itself writes.
+ *   - A literal (non-glob) branch is also covered when some include
+ *     pattern matches `refs/heads/<branch>`, or when it IS the default
+ *     branch and include has `~DEFAULT_BRANCH`.
+ *   - A literal branch matched by any exclude pattern is uncovered.
+ * A glob entry is only accepted via the first two rules — proving one
+ * glob contains another is not worth the edge cases.
+ */
+export function uncoveredMirrorBranches(
+  mirrorBranches: readonly string[],
+  condition: RulesetRefCondition,
+  defaultBranch: string | null,
+): string[] {
+  const { include, exclude } = condition;
+  const all = include.includes("~ALL") || include.includes("refs/heads/**");
+  const uncovered: string[] = [];
+  for (const b of mirrorBranches) {
+    const isGlob = b.includes("*") || b.includes("?");
+    const ref = `refs/heads/${b}`;
+    if (!isGlob) {
+      const excluded = exclude.some(
+        (p) =>
+          (p === "~DEFAULT_BRANCH" && defaultBranch === b) ||
+          githubRefPatternToRegex(p).test(ref),
+      );
+      if (excluded) {
+        uncovered.push(b);
+        continue;
+      }
+    }
+    if (all || include.includes(mirrorBranchRulesetPattern(b))) continue;
+    if (
+      !isGlob &&
+      include.some(
+        (p) =>
+          (p === "~DEFAULT_BRANCH" && defaultBranch === b) ||
+          (p.startsWith("refs/") && githubRefPatternToRegex(p).test(ref)),
+      )
+    ) {
+      continue;
+    }
+    uncovered.push(b);
+  }
+  return uncovered;
+}
+
+/**
+ * Read `conditions.ref_name` of an existing ruleset by id. Returns null on
+ * any gh / parse failure.
+ */
+export function getRulesetRefCondition(
+  owner: string,
+  repo: string,
+  rulesetId: number,
+): RulesetRefCondition | null {
+  const r = spawnSync(
+    "gh",
+    [
+      "api",
+      `/repos/${owner}/${repo}/rulesets/${rulesetId}`,
+      "--jq",
+      ".conditions.ref_name // {}",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(r.stdout) as Record<string, unknown>;
+    const strings = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+    return { include: strings(parsed["include"]), exclude: strings(parsed["exclude"]) };
+  } catch {
+    return null;
+  }
+}
+
+/** The repo's default branch name, or null on lookup failure. */
+export function lookupRepoDefaultBranch(
+  owner: string,
+  repo: string,
+): string | null {
+  const r = spawnSync(
+    "gh",
+    ["api", `/repos/${owner}/${repo}`, "--jq", ".default_branch"],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  const b = r.stdout.trim();
+  return b.length > 0 ? b : null;
 }
 
 /**
@@ -247,12 +424,13 @@ export function applyStampRuleset(
   owner: string,
   repo: string,
   actor: BypassActor,
+  mirrorBranches: readonly string[],
 ): ApplyRulesetResult {
   const existing = findExistingStampRuleset(owner, repo);
   if (existing !== null) {
     return { status: "exists", rulesetId: existing };
   }
-  const payload = buildRulesetPayload(actor);
+  const payload = buildRulesetPayload(actor, mirrorBranches);
   const r = spawnSync(
     "gh",
     [

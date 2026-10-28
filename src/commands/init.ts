@@ -684,7 +684,9 @@ function applyGitHubRulesetWithReporting(remoteUrl: string): void {
       ? "any org admin (your gh-authed user must be one to push as bypass)"
       : `${user.login}, id ${user.id}`;
 
-  const result = applyStampRuleset(parsed.owner, parsed.repo, actor);
+  // Forge-direct (no stamp server, no mirror.yml): GitHub IS the origin,
+  // so there is no mirrored branch set to cover — default branch only.
+  const result = applyStampRuleset(parsed.owner, parsed.repo, actor, []);
   switch (result.status) {
     case "created":
       console.log(
