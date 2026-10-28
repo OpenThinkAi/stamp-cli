@@ -532,6 +532,45 @@ describe("AC #4: seat-claim rejections", () => {
       `expected 'already_holds_other_seat' in: ${stderr}`,
     );
   });
+
+  it("strips terminal escapes from server-supplied text before printing (AGT-2270)", async () => {
+    const fakeKeypair = genKeypair();
+    const { stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _fetchForTest: makeSeatRejectionHttpFetch("odd\u001b]0;pwned\u0007\u001b[2Jreason"),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+    assert.match(stderr, /claim rejected: oddreason/);
+    assert.doesNotMatch(stderr, /\u001b/);
+  });
+
+  it("skips an unknown patch (409 patch_not_found) without retrying (AGT-2270)", async () => {
+    const fakeKeypair = genKeypair();
+    let claims = 0;
+    const base = makeSeatRejectionHttpFetch("patch_not_found");
+    const { stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _fetchForTest: async (url, h, b) => {
+          if (url.endsWith("/peer/claim-seat")) claims++;
+          return base(url, h, b);
+        },
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+    assert.equal(claims, 1);
+    assert.match(stderr, /no record of PR #.*'s patch \(patch_not_found\); skipping/);
+  });
 });
 
 // ─── AC #7: gh pr review failure → release-seat ──────────────────────

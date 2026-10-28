@@ -39,6 +39,7 @@
  * status codes and refuse the request on any malformed input.
  */
 
+import { escapeLogControls } from "../lib/terminalText.js";
 import {
   createHash,
   createHmac,
@@ -76,6 +77,7 @@ import {
   openServerDb,
   releaseSeat,
   resolveServerRetentionPolicy,
+  retiredShortNameHolder,
   sweepExpiredSeats,
   sweepServerRetention,
   touchHeartbeat,
@@ -152,7 +154,10 @@ export function setLogPrefix(prefix: string): void {
 function logLine(level: "info" | "warn" | "error", msg: string): void {
   const ts = new Date().toISOString();
   const stream = level === "error" ? process.stderr : process.stdout;
-  stream.write(`${logPrefix} ${ts} ${level} ${msg}\n`);
+  // AGT-2270: messages interpolate request values (reviewer names, org
+  // query params, patch ids). Escape controls so none can end this line
+  // and forge another entry.
+  stream.write(`${logPrefix} ${ts} ${level} ${escapeLogControls(msg)}\n`);
 }
 
 function sendJson(
@@ -278,6 +283,12 @@ function acceptInvite(data: ValidatedAccept): AcceptOutcome {
   // in-process chmod would be redundant even if it could succeed.
   const db = openServerDb({ skipChmod: true });
   try {
+    // AGT-2270: a name a removed or renamed member used to hold is
+    // reserved (see retired_short_names), checked before the token is
+    // consumed so the invitee can retry with another name.
+    if (retiredShortNameHolder(db, data.short_name) !== null) {
+      return { status: 409, body: { ok: false, error: "short_name_retired" } };
+    }
     const consumed = consumeInviteToken(db, data.token);
     if (!consumed.ok) {
       const statusByReason: Record<typeof consumed.reason, number> = {
@@ -2306,6 +2317,12 @@ async function handlePeerClaimSeat(req: IncomingMessage, res: ServerResponse): P
       return;
     }
   }
+  // AGT-2270: patch ids are 40-hex git patch-ids; refuse anything else
+  // before it reaches a DB lookup or a log line.
+  if (!/^[0-9a-f]{40}$/.test(p["patch_id"] as string)) {
+    sendJson(res, 400, { ok: false, error: "patch_id_invalid" });
+    return;
+  }
   if (!/^[0-9a-f]{40}$/.test(p["base_sha"] as string)) {
     sendJson(res, 400, { ok: false, error: "base_sha_invalid" });
     return;
@@ -2349,12 +2366,12 @@ async function handlePeerClaimSeat(req: IncomingMessage, res: ServerResponse): P
 
     // AGT-2253: the caller must be allowed to see the patch repo's events.
     // claimSeatTx would report patch_not_found too; refusing here keeps the
-    // repo gate ahead of any seat write. Status stays 500, the code
-    // claimSeatTx's patch_not_found has always mapped to, so clients see
-    // no change for an unknown patch.
+    // repo gate ahead of any seat write.
     const patchRow = findPatch(db, payload.patch_id);
     if (!patchRow) {
-      sendJson(res, 500, { ok: false, error: "patch_not_found" });
+      // AGT-2270: 409 like register-extra (was 500); clients skip it
+      // without retrying.
+      sendJson(res, 409, { ok: false, error: "patch_not_found" });
       return;
     }
     const access = authorizePatchAction(db, userRow, patchRow, payload.repo);
@@ -2378,7 +2395,8 @@ async function handlePeerClaimSeat(req: IncomingMessage, res: ServerResponse): P
       // Map the DB error to HTTP status codes mirroring SSH exit codes.
       const status = result.error === "seats_full" ||
         result.error === "author_cannot_claim_own_pr" ||
-        result.error === "already_holds_other_seat" ? 409 : 500;
+        result.error === "already_holds_other_seat" ||
+        result.error === "patch_not_found" ? 409 : 500;
       sendJson(res, status, { ok: false, error: result.error });
       return;
     }
@@ -2434,6 +2452,12 @@ async function handlePeerHeartbeat(req: IncomingMessage, res: ServerResponse): P
       sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
       return;
     }
+  }
+  // AGT-2270: patch ids are 40-hex git patch-ids; refuse anything else
+  // before it reaches a DB lookup or a log line.
+  if (!/^[0-9a-f]{40}$/.test(p["patch_id"] as string)) {
+    sendJson(res, 400, { ok: false, error: "patch_id_invalid" });
+    return;
   }
   const payload = p as { patch_id: string; claimant_fp: string; signature: string };
 
@@ -2508,6 +2532,12 @@ async function handlePeerReleaseSeat(req: IncomingMessage, res: ServerResponse):
       return;
     }
   }
+  // AGT-2270: patch ids are 40-hex git patch-ids; refuse anything else
+  // before it reaches a DB lookup or a log line.
+  if (!/^[0-9a-f]{40}$/.test(p["patch_id"] as string)) {
+    sendJson(res, 400, { ok: false, error: "patch_id_invalid" });
+    return;
+  }
   const payload = p as { patch_id: string; claimant_fp: string; signature: string };
 
   if (auth.fingerprint !== payload.claimant_fp) {
@@ -2575,6 +2605,12 @@ async function handlePeerReReviewRequest(req: IncomingMessage, res: ServerRespon
       sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
       return;
     }
+  }
+  // AGT-2270: patch ids are 40-hex git patch-ids; refuse anything else
+  // before it reaches a DB lookup or a log line.
+  if (!/^[0-9a-f]{40}$/.test(p["patch_id"] as string)) {
+    sendJson(res, 400, { ok: false, error: "patch_id_invalid" });
+    return;
   }
   if ("reviewer_filter" in p) {
     if (!Array.isArray(p["reviewer_filter"]) || !p["reviewer_filter"].every((x) => typeof x === "string")) {
@@ -2737,6 +2773,12 @@ async function handlePeerRegisterExtra(req: IncomingMessage, res: ServerResponse
       sendJson(res, 400, { ok: false, error: `missing_field_${k}` });
       return;
     }
+  }
+  // AGT-2270: patch ids are 40-hex git patch-ids; refuse anything else
+  // before it reaches a DB lookup or a log line.
+  if (!/^[0-9a-f]{40}$/.test(p["patch_id"] as string)) {
+    sendJson(res, 400, { ok: false, error: "patch_id_invalid" });
+    return;
   }
   if (!/^[0-9a-f]{40}$/.test(p["base_sha"] as string)) {
     sendJson(res, 400, { ok: false, error: "base_sha_invalid" });

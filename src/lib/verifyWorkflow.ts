@@ -49,6 +49,14 @@ export const DEFAULT_ACTION_SOURCE = "OpenThinkAi/stamp-cli";
 export const VERIFY_ACTION_REF =
   "795271bedebfb02354c8b17382f5c22916e1da30";
 
+/** actions/checkout pinned to a full commit SHA (AGT-2270): a mutable
+ *  `@v4` tag in a template copied into every downstream repo would let a
+ *  retagged release run in each repo's merge-gate check. The same pin this
+ *  repo's own workflows use; bump in lockstep with them (Dependabot keeps
+ *  those current). */
+export const CHECKOUT_ACTION_REF = "3d3c42e5aac5ba805825da76410c181273ba90b1";
+export const CHECKOUT_ACTION_VERSION = "v7.0.1";
+
 /** Human-readable version that `VERIFY_ACTION_REF` corresponds to.
  *  Surfaced in the rendered workflow's comment line so operators can
  *  cross-reference the SHA against release notes without resolving the
@@ -145,7 +153,7 @@ export function renderVerifyWorkflow(
     "    timeout-minutes: 5",
     "    steps:",
     "      - name: checkout",
-    "        uses: actions/checkout@v4",
+    `        uses: actions/checkout@${CHECKOUT_ACTION_REF} # ${CHECKOUT_ACTION_VERSION}`,
     "        with:",
     "          # Full history so the action can fetch the base ref's tree",
     "          # and resolve refs/stamp/attestations/*. Shallow clones",

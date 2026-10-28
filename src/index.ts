@@ -988,18 +988,14 @@ admin), and a member with no grants is refused (403).
 
   - Receives pr-opened events over the SSE transport (the sole listen transport)
   - Applies author-exclusion (skips own PRs)
-  - Data-flow gate: reads the PR repo's .stamp/config.yml from the mapped
-    clone at base_sha AND at the protected tip (origin/HEAD) and skips the
-    event, before any LLM call, unless data_flow.peer_review_endpoints lists
-    this listener's LLM endpoint host in both (api.anthropic.com, or the
-    host of ANTHROPIC_BASE_URL); an armed
-    require_confirmation must also be confirmed. A model on this host
-    (loopback ANTHROPIC_BASE_URL) needs no entry. Unattended, so it never
-    prompts: no consent, no egress.
+  - Data-flow gate: skips the event before any LLM call unless the repo's
+    .stamp/config.yml lists this listener's LLM host in
+    data_flow.peer_review_endpoints at base_sha and at origin/HEAD
+    (loopback needs no entry; never prompts)
   - Triages the title + changed paths (Haiku), claims a reviewer seat,
-    fetches the diff at base_sha...head_sha via the GitHub compare API
-    ('gh api .../compare/<base>...<head>'), runs the review via the Claude
-    Agent SDK; an unresolvable head_sha skips the event
+    fetches the diff at base_sha...head_sha via the GitHub compare API,
+    and runs the review via the Claude Agent SDK; an unresolvable head_sha
+    or a diff too large for the compare API skips the event
   - Posts the result via 'gh api .../pulls/<n>/reviews' pinned to head_sha
   - Sends a heartbeat every 60 s to keep the seat alive (seat heartbeat; the SSE stream uses TCP keepalive to keep the socket open)
 
@@ -1215,11 +1211,13 @@ drafts
   .description("delete a draft by patch-id; --all --yes to delete all")
   .option("--all", "delete all drafts")
   .option("--yes", "required with --all to confirm bulk deletion")
+  .option("--older-than <duration>", "with --all: only drafts older than <n>d / <n>h / <n>m (e.g. 30d)")
   .addHelpText(
     "after",
     `
 Delete a single draft by patch-id (or unambiguous prefix), or delete all drafts
 with --all --yes. Without --yes, --all lists files that would be deleted and exits 1.
+--all --older-than 30d --yes prunes only drafts last written more than 30 days ago.
 
 Exit codes:
   0   — success
@@ -1228,8 +1226,8 @@ Exit codes:
   3   — I/O error
 `,
   )
-  .action((patchId: string | undefined, opts: { all?: boolean; yes?: boolean }) => {
-    runDraftsDelete({ patchId, all: opts.all, yes: opts.yes });
+  .action((patchId: string | undefined, opts: { all?: boolean; yes?: boolean; olderThan?: string }) => {
+    runDraftsDelete({ patchId, all: opts.all, yes: opts.yes, olderThan: opts.olderThan });
   });
 
 program
@@ -1515,7 +1513,7 @@ invites
   .option("--server <host:port>", "server endpoint when passing a bare token (no URL)")
   .option("--ssh-pubkey <path>", "override SSH pubkey path (default ~/.ssh/id_ed25519.pub)")
   .option("--stamp-pubkey <path>", "override stamp signing pubkey path (default ~/.stamp/keys/ed25519.pub)")
-  .option("--short-name <name>", "override the short_name (default derived from user@host)")
+  .option("--short-name <name>", "override the short_name (default: user-<8 hex of your SSH key>, no username or hostname)")
   .option("--yes", "skip the confirmation prompt (required for non-TTY stdin)")
   .option(
     "--insecure-http-for-dev",

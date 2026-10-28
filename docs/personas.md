@@ -231,11 +231,13 @@ reviewers:
     mcp_servers:
       linear:
         command: npx
-        args: ["-y", "@tacticlabs/linear-mcp-server"]
+        args: ["-y", "@tacticlabs/linear-mcp-server@<x.y.z>"]   # pin an exact version
         env:
           LINEAR_API_KEY: $LINEAR_API_KEY   # resolved from caller's env at invocation
         allowed_env: [LINEAR_API_KEY]       # required: which operator env-vars this server may read
 ```
+
+**Pin `npx` packages.** `npx` fetches the package from the registry each time the reviewer runs, and `mcp_sha256` hashes only the args, so an unpinned `npx -y some-mcp` runs whatever version is newest at review time. `stamp review` warns when an `npx` package has no exact `name@x.y.z`. Better still, add the server to your `package.json` and use `command: node_modules/.bin/<name>`, which the lockfile pins.
 
 `tools:` names Claude Agent SDK built-ins (`Read`, `Grep`, `WebFetch`, etc.). `mcp_servers:` declares stdio-transport MCP servers as a map of `name → { command, args?, env?, allowed_env? }`. Env values may reference `$VAR` or `${VAR}` — resolved from `process.env` at invocation, gated by an allowlist (see below); an unset or non-allowlisted reference fails the `stamp review` run with a clear error naming the missing var.
 
@@ -312,7 +314,7 @@ tools:
 mcp_servers:
   linear:
     command: npx
-    args: ["-y", "@tacticlabs/linear-mcp-server"]
+    args: ["-y", "@tacticlabs/linear-mcp-server@<x.y.z>"]
     env:
       LINEAR_API_KEY: $LINEAR_API_KEY
     allowed_env: [LINEAR_API_KEY]

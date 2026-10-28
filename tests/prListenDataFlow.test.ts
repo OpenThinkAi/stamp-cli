@@ -501,3 +501,42 @@ describe("AGT-2248: the diff is fetched at base_sha...head_sha", () => {
     assert.match(r.stderr, /could not fetch diff at base\.\.\.head \(gh\): gh: Not Found \(HTTP 404\)/);
   });
 });
+
+// ─── AGT-2270: refuse partial compare diffs ────────────────────────────
+
+import { classifyPeerDiffFetch, COMPARE_DIFF_FILE_LIMIT } from "../src/commands/prListen.ts";
+
+describe("classifyPeerDiffFetch (AGT-2270)", () => {
+  const oneFile = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
+  it("accepts a normal diff", () => {
+    assert.deepEqual(classifyPeerDiffFetch(0, oneFile, ""), { ok: true, diff: oneFile });
+  });
+  it("refuses GitHub's too-large / 406 answers with a clear reason", () => {
+    for (const err of [
+      "gh: Sorry, this diff is taking too long to generate. (HTTP 406)",
+      "gh: Server Error: diff too_large",
+      "HTTP 406: Sorry, the diff exceeded the maximum number of files (300).",
+    ]) {
+      const r = classifyPeerDiffFetch(1, "", err);
+      assert.equal(r.ok, false, err);
+      if (!r.ok) assert.match(r.reason, /too large for GitHub's compare API.*not reviewing a partial diff/);
+    }
+  });
+  it("refuses output cut at the local buffer limit", () => {
+    const r = classifyPeerDiffFetch(1, oneFile, "", "ENOBUFS");
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /local output limit/);
+  });
+  it("refuses a diff at the compare API's file limit as possibly partial", () => {
+    const r = classifyPeerDiffFetch(0, oneFile.repeat(COMPARE_DIFF_FILE_LIMIT), "");
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /stops at 300, so it may be partial/);
+    assert.equal(classifyPeerDiffFetch(0, oneFile.repeat(COMPARE_DIFF_FILE_LIMIT - 1), "").ok, true);
+  });
+  it("keeps other failures' gh stderr and the empty-diff case", () => {
+    const r = classifyPeerDiffFetch(1, "", "gh: Not Found (HTTP 404)");
+    assert.ok(!r.ok && r.reason === "gh: Not Found (HTTP 404)");
+    const e = classifyPeerDiffFetch(0, "  \n", "");
+    assert.ok(!e.ok && e.reason === "empty diff");
+  });
+});

@@ -21,6 +21,7 @@ import type { BranchRule } from "../lib/config.js";
 import {
   listFilesAtRef,
   repoHasAnyCommit,
+  readStampConfigYamlAt,
   resolveDiff,
   showAtRef,
   treeSha,
@@ -1310,15 +1311,6 @@ function printError(reviewer: string, err: unknown): void {
   console.error();
 }
 
-/** `.stamp/config.yml` text at `ref`, or null when the ref or file is absent. */
-function readConfigYamlAtRef(ref: string, repoRoot: string): string | null {
-  try {
-    return showAtRef(ref, ".stamp/config.yml", repoRoot);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Extract the left-hand side of a `<base>..<head>` revspec — the
  * documented "target branch" convention `stamp status` already uses
@@ -1380,10 +1372,18 @@ async function runServerAttestedReviews(input: {
   // it is the canonical id the verifier will demand. Otherwise fall back
   // to the pre-AGT-2272 heuristic, the last two segments of the origin
   // URL, and say the approvals are unbound.
+  //
+  // Why the two reads differ: the base config is the one this review runs
+  // under, already parsed and validated (a malformed repo_id there failed
+  // config load), so its `repo_id` is used as is. The target tip is read
+  // leniently — an unreadable or unparsable config at the tip yields
+  // "not declared" — because it only adds a binding requirement the
+  // verifiers also check; a malformed declaration that does parse still
+  // fails closed in resolveRepoBinding.
   const repoBinding = resolveRepoBinding([
     {
       where: targetBranch,
-      raw: repoIdRawFromConfigYaml(readConfigYamlAtRef(targetBranch, repoRoot)),
+      raw: repoIdRawFromConfigYaml(readStampConfigYamlAt(targetBranch, repoRoot)),
     },
     { where: resolved.base_sha.slice(0, 8), raw: config.repo_id },
   ]);

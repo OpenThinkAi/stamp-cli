@@ -59,6 +59,7 @@
  *       client should back off and retry later
  */
 
+import { verbCrashLine } from "./verbCrash.js";
 import { createHash } from "node:crypto";
 
 import {
@@ -443,12 +444,10 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   // Unexpected error path — pipeline or stdin reader threw something
-  // we didn't explicitly fail() on. Surface verbatim so operators see
-  // the underlying cause; map to exit 1 (server-side config /
+  // we didn't explicitly fail() on. The client sees the error class and
+  // message, never the stack (AGT-2270: it leaks server paths); map to exit 1 (server-side config /
   // unexpected condition) since exit 4 is reserved for explicit
   // request-validation refusals.
-  process.stderr.write(
-    `error: stamp-review crashed: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
-  );
+  process.stderr.write(verbCrashLine("stamp-review", err));
   process.exit(1);
 });

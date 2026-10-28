@@ -142,7 +142,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # The caller workflow MUST use actions/checkout@v4 with
+        # The caller workflow MUST use actions/checkout with
         # fetch-depth: 0 (the renderVerifyWorkflow template does this
         # by default). That single-step checkout fetches base + head +
         # full ancestry, which is what `git merge-base` needs to

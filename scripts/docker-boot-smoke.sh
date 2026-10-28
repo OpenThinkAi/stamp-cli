@@ -36,13 +36,16 @@ HOOKS_TMP=""
 LISTEN_CONTAINER="stamp-smoke-listen-$$"
 BOOT_WAIT_SECS="${STAMP_SMOKE_BOOT_WAIT:-10}"
 
-# Files that affect how the image BUILDS or BOOTS. A pure `src/lib/*` change
+# Files that affect how the image BUILDS or BOOTS. AGT-2270 added
+# `scripts/` (setup-repo.sh is COPYed into the image), `src/hooks/` (the
+# pre/post-receive bundles ship in it) and `.npmrc` (changes `npm ci` in
+# the builder). A pure `src/lib/*` change
 # (the client-side surface) cannot regress container boot and is already
 # covered by build/typecheck/test, so it is intentionally NOT listed here —
 # that is what lets the conditional skip keep client-side merges fast. The
 # GitHub Actions backstop builds unconditionally, covering the rare case
 # where a lib-only change does affect boot.
-BOOT_RELEVANT_RE='^(server/|src/server/|Dockerfile|\.dockerignore|package\.json|package-lock\.json|tsup\.config\.ts|tsconfig\.json)'
+BOOT_RELEVANT_RE='^(server/|src/server/|src/hooks/|scripts/|Dockerfile|\.dockerignore|\.npmrc|package\.json|package-lock\.json|tsup\.config\.ts|tsconfig\.json)'
 
 should_skip() {
   [ "${STAMP_SMOKE_FORCE:-}" = "1" ] && return 1
@@ -59,7 +62,7 @@ should_skip() {
 
 if should_skip; then
   echo "docker-boot-smoke: no boot-relevant files changed in this merge — skipping image build+boot."
-  echo "  (boot-relevant = server/, src/server/, Dockerfile, package*.json, tsup/tsconfig; STAMP_SMOKE_FORCE=1 forces a run.)"
+  echo "  (boot-relevant = server/, src/server/, src/hooks/, scripts/, Dockerfile, .npmrc, package*.json, tsup/tsconfig; STAMP_SMOKE_FORCE=1 forces a run.)"
   exit 0
 fi
 
@@ -861,6 +864,16 @@ asl "cat /srv/git/legacy-smoke.git/HEAD" >/dev/null 2>&1 && fail "pre-upgrade re
 asl "test -w /srv/git/.stamp-state/users.db" || fail "stamp-http cannot write the converted users.db"
 [ "$(stat -c "%U:%G %a" /srv/git/.stamp-state/review-signing-key.pem)" = "root:root 600" ] || fail "review key is $(stat -c "%U:%G %a" /srv/git/.stamp-state/review-signing-key.pem) after restart"
 node -e "fetch(\"http://127.0.0.1:8080/healthz\").then(r=>process.exit(r.status===200?0:1),()=>process.exit(1))" || fail "/healthz failed after restart"
+# AGT-2270: the listener runs under a restart loop; kill it and expect a
+# new process back on the port.
+kill "$L"
+L2=""
+for _ in $(seq 1 60); do
+  if P=$(pid_of /usr/local/sbin/stamp-http-server) && [ "$P" != "$L" ] && nc -z 127.0.0.1 8080 >/dev/null 2>&1; then L2=$P; break; fi
+  sleep 0.25
+done
+[ -n "$L2" ] || fail "stamp-http-server was not restarted after it exited (AGT-2270)"
+[ "$(awk "/^Uid:/{print \$2}" /proc/$L2/status)" = "$(id -u stamp-http)" ] || fail "restarted listener uid is not stamp-http"
 '
 if ! docker exec "$LISTEN_CONTAINER" sh -c "$listen_boot2"; then
   echo "error: HTTP listener isolation assertion failed after restart (AGT-2264) — see above." >&2

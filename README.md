@@ -1220,7 +1220,8 @@ triage with the repo, PR URL, SHAs, author fingerprint and decision, and
 only hashes and lengths of the title, body and paths — never the text
 (AGT-2249). Drafts saved by `stamp pr listen` are the listener's own review
 prose about someone else's PR, kept in `~/.stamp/drafts/` (`0600`) until
-`stamp peer drafts delete` removes them.
+`stamp peer drafts delete` removes them (`--all --older-than 30d --yes`
+prunes by age).
 
 The block is read from the merge-base tree like every other policy field,
 so a feature branch cannot ship its own `confirmed: true` to wave its own

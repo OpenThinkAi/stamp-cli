@@ -81,6 +81,14 @@ export const VERB_POLICIES: Readonly<Record<string, VerbPolicy>> = {
   "stamp-pr-opened": "self",
 };
 
+/** GitHub org/repo slug shape for a `.stamp/mirror.yml` `github.repo`. */
+const MIRROR_SLUG_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
+
+/** One line naming what the gate serves, for refusals. */
+export const ALLOWED_COMMANDS_HINT =
+  `allowed: ${GIT_SERVICES.join(", ")} on ${GIT_ROOT}/<name>.git, or one of ` +
+  `${Object.keys(VERB_POLICIES).join(", ")}`;
+
 export type ParsedCommand =
   | { kind: "git"; service: GitService; name: string; repoPath: string }
   | { kind: "verb"; verb: string; args: string[] };
@@ -192,7 +200,7 @@ export function parseOriginalCommand(original: string | undefined): ParseResult 
         ok: false,
         message:
           `repository path '${args[0]!}' is not allowed: only live repos at ` +
-          `${GIT_ROOT}/<name>.git are served.`,
+          `${GIT_ROOT}/<name>.git are served (e.g. git@<host>:${GIT_ROOT}/<name>.git).`,
       };
     }
     return {
@@ -205,7 +213,7 @@ export function parseOriginalCommand(original: string | undefined): ParseResult 
   }
   // Echo a bounded, printable form of the verb only.
   const shown = head.length > 64 ? `${head.slice(0, 64)}...` : head;
-  return { ok: false, message: `unrecognized command '${shown}'.` };
+  return { ok: false, message: `unrecognized command '${shown}'; ${ALLOWED_COMMANDS_HINT}.` };
 }
 
 /** The command line the gate hands to `git-shell -c`. */
@@ -252,8 +260,7 @@ export function readServerRepoMapping(repoPath: string): { org: string; repo: st
     const parts = spec.split("/");
     if (parts.length !== 2) return null;
     const [org, repo] = parts as [string, string];
-    const SLUG = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
-    if (!SLUG.test(org) || !SLUG.test(repo)) return null;
+    if (!MIRROR_SLUG_RE.test(org) || !MIRROR_SLUG_RE.test(repo)) return null;
     return { org: org.toLowerCase(), repo: repo.toLowerCase() };
   } catch {
     return null;
@@ -269,13 +276,9 @@ export interface GateCaller {
   grants: ReadonlyArray<{ org: string; repo: string }>;
 }
 
-function isOperatorRole(role: GateCaller["role"]): boolean {
-  return role === "owner" || role === "admin";
-}
-
 /** Owner, admin, or a member with no grants (AGT-2252's "unscoped"). */
 export function isUnscoped(caller: GateCaller): boolean {
-  return isOperatorRole(caller.role) || caller.grants.length === 0;
+  return caller.role === "owner" || caller.role === "admin" || caller.grants.length === 0;
 }
 
 /**
@@ -302,6 +305,9 @@ export function decideRepoAccess(
 
 /** Apply a verb's gate policy. */
 export function decideVerbAccess(caller: GateCaller, verb: string): GateDecision {
+  if (!Object.prototype.hasOwnProperty.call(VERB_POLICIES, verb)) {
+    return { ok: false, message: `unrecognized command '${verb}'; ${ALLOWED_COMMANDS_HINT}.` };
+  }
   const policy = VERB_POLICIES[verb];
   if (policy === "self") return { ok: true };
   if (policy === "unscoped" && isUnscoped(caller)) return { ok: true };

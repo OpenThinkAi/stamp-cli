@@ -392,9 +392,12 @@ fi
 # overrides the target's login shell). -p keeps the env exactly as
 # _exec_allowlisted_env built it — busybox su then touches nothing.
 #
-# If either process dies mid-container-life, its endpoints / workers stop
-# until the operator redeploys. Phase 5 may add a supervisor (s6/tini) for
-# crash-restart; for now the simpler shape ships.
+# Each runs under a small restart loop (AGT-2270): before, a crash stopped
+# invite accept, the webhook, the prompts poll and the trash/retention
+# sweeps until the next redeploy while the healthcheck (sshd only) stayed
+# green. `_supervise` reruns the launcher in a subshell (the launcher execs,
+# so the loop itself survives) after a 5s back-off and logs each exit. The
+# Dockerfile HEALTHCHECK now probes the HTTP port as well.
 STAMP_HTTP_RUN_DIR=/run/stamp-http
 rm -rf "$STAMP_HTTP_RUN_DIR"
 mkdir -p "$STAMP_HTTP_RUN_DIR"
@@ -406,13 +409,29 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
 else
   unset STAMP_PROMPTS_REFRESH_TRIGGER
 fi
-( umask 027
+_launch_workers() {
+  umask 027
   _exec_allowlisted_env /home/git "$STAMP_WORKERS_ENV" \
-    su -s /bin/sh -p git -c 'exec /usr/local/sbin/stamp-workers' ) &
-echo "stamp-workers: launched as git user (pid $!)" >&2
-( _exec_allowlisted_env /var/empty "$STAMP_HTTP_SERVER_ENV" \
-    su -s /bin/sh -p stamp-http -c 'exec /usr/local/sbin/stamp-http-server' ) &
-echo "stamp-http-server: launched as stamp-http user with an allowlisted env (pid $!)" >&2
+    su -s /bin/sh -p git -c 'exec /usr/local/sbin/stamp-workers'
+}
+_launch_http_server() {
+  _exec_allowlisted_env /var/empty "$STAMP_HTTP_SERVER_ENV" \
+    su -s /bin/sh -p stamp-http -c 'exec /usr/local/sbin/stamp-http-server'
+}
+_supervise() {
+  _sv_name=$1
+  shift
+  while :; do
+    _sv_rc=0
+    ( "$@" ) || _sv_rc=$?
+    echo "$_sv_name: exited (status $_sv_rc); restarting in 5s" >&2
+    sleep 5
+  done
+}
+_supervise stamp-workers _launch_workers &
+echo "stamp-workers: launched as git user under a restart loop (pid $!)" >&2
+_supervise stamp-http-server _launch_http_server &
+echo "stamp-http-server: launched as stamp-http user with an allowlisted env under a restart loop (pid $!)" >&2
 
 # SSH client setup for the post-receive mirror push.
 #

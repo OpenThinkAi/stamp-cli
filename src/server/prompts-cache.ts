@@ -645,9 +645,8 @@ function verifyPromptsCommit(
  */
 export function isPromptsCacheVerified(cacheRoot: string, allowedSignersPath: string): boolean {
   try {
-    const env = { ...process.env };
-    const head = runGit(cacheRoot, ["rev-parse", "HEAD^{commit}"], env).trim();
-    verifyPromptsCommit(cacheRoot, head, allowedSignersPath, env);
+    const head = runGit(cacheRoot, ["rev-parse", "HEAD^{commit}"], process.env).trim();
+    verifyPromptsCommit(cacheRoot, head, allowedSignersPath, process.env);
     return true;
   } catch {
     return false;

@@ -295,6 +295,21 @@ describe("stamp-seed-users", () => {
     }
   });
 
+  it("warns when an env-seeded member's key was removed from AUTHORIZED_KEYS (AGT-2270)", () => {
+    const t = tmpDb();
+    try {
+      runSeeder(t.dbPath, [KEY_A, KEY_B].join("\n"));
+      const r = runSeeder(t.dbPath, KEY_A);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /1 member\(s\) seeded from AUTHORIZED_KEYS are no longer listed there but still have access/);
+      assert.match(r.stderr, /stamp users remove/);
+      const quiet = runSeeder(t.dbPath, [KEY_A, KEY_B].join("\n"));
+      assert.doesNotMatch(quiet.stderr, /no longer listed/);
+    } finally {
+      t.cleanup();
+    }
+  });
+
   it("upgrade: a populated table without a marker is marked, not re-imported", () => {
     const t = tmpDb();
     try {

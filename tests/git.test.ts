@@ -7,7 +7,7 @@
 
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -67,5 +67,30 @@ describe("pathExistsAtRef", () => {
       pathExistsAtRef("nonexistent-ref-xyz", "present.txt", repo),
       false,
     );
+  });
+});
+
+// AGT-2270: shared `.stamp/config.yml`-at-ref reader.
+import { readStampConfigYamlAt } from "../src/lib/git.ts";
+
+describe("readStampConfigYamlAt (AGT-2270)", () => {
+  it("returns the config text at a ref, or null when absent / unreadable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "stamp-cfg-at-"));
+    try {
+      const g = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
+      g("init", "-q", "-b", "main");
+      g("config", "user.email", "t@example.com");
+      g("config", "user.name", "T");
+      g("commit", "--allow-empty", "-q", "-m", "empty");
+      assert.equal(readStampConfigYamlAt("HEAD", dir), null);
+      mkdirSync(join(dir, ".stamp"));
+      writeFileSync(join(dir, ".stamp", "config.yml"), "repo_id: acme/widget\n");
+      g("add", ".");
+      g("commit", "-q", "-m", "cfg");
+      assert.equal(readStampConfigYamlAt("HEAD", dir), "repo_id: acme/widget\n");
+      assert.equal(readStampConfigYamlAt("no-such-ref", dir), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

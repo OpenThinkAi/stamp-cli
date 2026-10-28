@@ -29,6 +29,7 @@ import {
   insertPatch,
   insertUser,
   openServerDb,
+  retireShortName,
 } from "../src/lib/serverDb.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import { addRepoGrant } from "../src/lib/repoAccess.ts";
@@ -353,6 +354,26 @@ describe("HTTP server: POST /invite/accept — errors", () => {
       });
       assert.equal(r.status, 409);
       assert.equal(r.body.error, "short_name_taken");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 409 short_name_retired for a removed member's name, without consuming the token (AGT-2270)", async () => {
+    const h = await start();
+    try {
+      const db = openServerDb({ path: h.dbPath, skipChmod: true });
+      try {
+        retireShortName(db, "carol", 99);
+      } finally {
+        db.close();
+      }
+      const token = mintTokenAgainst(h.dbPath, h.adminId);
+      const r = await post(h.port, "/invite/accept", { token, ssh_pubkey: INVITEE_SSH_LINE, short_name: "carol" });
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, "short_name_retired");
+      const retry = await post(h.port, "/invite/accept", { token, ssh_pubkey: INVITEE_SSH_LINE, short_name: "carol2" });
+      assert.equal(retry.status, 200, JSON.stringify(retry.body));
     } finally {
       await h.cleanup();
     }
@@ -755,6 +776,38 @@ describe("POST /peer/claim-seat: auth + success path (AGT-453)", () => {
   });
 });
 
+describe("POST /peer/claim-seat: unknown or malformed patch (AGT-2270)", () => {
+  it("returns 409 patch_not_found for a patch the server has no row for", async () => {
+    const h = await startPeer();
+    const kp = genTestKeypair();
+    seedPeerUser(h.dbPath, kp, "reviewer-unknown");
+    try {
+      const bodyPayload = { patch_id: "d".repeat(40), claimant_fp: kp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: kp.publicKeyPem };
+      const bodyJson = JSON.stringify({ ...bodyPayload, signature: signBytes(kp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)) });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson), buildPeerPostHeaders(kp, "claim-seat", bodyJson));
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, "patch_not_found");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 400 patch_id_invalid for a patch_id that is not 40 hex", async () => {
+    const h = await startPeer();
+    const kp = genTestKeypair();
+    seedPeerUser(h.dbPath, kp, "reviewer-badid");
+    try {
+      const bodyPayload = { patch_id: "x\nforged log line", claimant_fp: kp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: kp.publicKeyPem };
+      const bodyJson = JSON.stringify({ ...bodyPayload, signature: signBytes(kp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)) });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson), buildPeerPostHeaders(kp, "claim-seat", bodyJson));
+      assert.equal(r.status, 400);
+      assert.equal(r.body.error, "patch_id_invalid");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
 // ─── POST /peer/heartbeat ─────────────────────────────────────────────
 
 describe("POST /peer/heartbeat: success + 404 no-seat (AGT-453)", () => {
@@ -860,7 +913,7 @@ describe("POST /peer/register-extra: extras path (AGT-453)", () => {
   it("returns 409 when reviewer is the PR author", async () => {
     const h = await startPeer();
     const authorKp = genTestKeypair();
-    const patchId = "g".repeat(40);
+    const patchId = "6".repeat(40);
 
     seedPeerUser(h.dbPath, authorKp, "author7");
     seedPatch(h.dbPath, patchId, authorKp.fingerprint);
@@ -914,7 +967,7 @@ describe("AGT-453 regression: ssh-fp ≠ stamp-fp identity — HTTP heartbeat us
 
     const authorKp = genTestKeypair();
     seedPeerUser(h.dbPath, authorKp, "author8");
-    const patchId = "h".repeat(40);
+    const patchId = "7".repeat(40);
     seedPatch(h.dbPath, patchId, authorKp.fingerprint);
 
     const kp: TestKeypair = { privateKeyPem, publicKeyPem, fingerprint: stampFp };

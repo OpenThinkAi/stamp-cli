@@ -16,8 +16,12 @@
  *   4. prints the canonical, re-quoted command on stdout.
  *
  * Exit codes: 0 allowed (command on stdout); 1 no/unenrolled identity or
- * config error; 2 refused command (shape, path, unknown verb); 3 denied
- * by role or grants. Installed in /usr/local/sbin, not a verb.
+ * a server-side error; 2 refused command (shape, path, unknown verb) or a
+ * malformed forced command (bad usage); 3 denied by role or grants, or the
+ * named repo does not exist. "Not found" shares 3 on purpose: a scoped
+ * member must get the same answer for a repo that is missing as for one
+ * they may not use, so the code cannot tell them which names exist.
+ * Installed in /usr/local/sbin, not a verb.
  */
 
 import { listRepoGrants } from "../lib/repoAccess.js";
@@ -42,7 +46,7 @@ function main(): void {
   const argv = process.argv.slice(2);
   const bound = argv[0];
   if (argv.length !== 1 || !bound || !/^[1-9][0-9]{0,15}$/.test(bound)) {
-    fail("usage: stamp-gate-check <user-id>", 1);
+    fail("usage: stamp-gate-check <user-id>", 2);
   }
 
   const parsed = parseOriginalCommand(process.env["SSH_ORIGINAL_COMMAND"]);

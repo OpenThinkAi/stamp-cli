@@ -22,7 +22,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 
 import { addRepoGrant } from "../src/lib/repoAccess.ts";
 import { insertUser, openServerDb, type Role } from "../src/lib/serverDb.ts";
@@ -152,7 +152,7 @@ describe("parseOriginalCommand", () => {
     assert.deepEqual(splitCmdline(canonicalCommand(q)), ["stamp-review", "--org", "a b", "--repo", "it's"]);
   });
   it("refuses unknown commands, the gate itself, and shell-ish input", () => {
-    assert.match(parseErr(`sh -c id`), /unrecognized command 'sh'/);
+    assert.match(parseErr(`sh -c id`), /unrecognized command 'sh'; allowed: .*list-stamp-repos/);
     assert.match(parseErr(`stamp-gate 1`), /unrecognized command 'stamp-gate'/);
     assert.match(parseErr(`stamp-gate-check 1`), /unrecognized/);
     assert.match(parseErr(`/usr/bin/git-upload-pack '/srv/git/foo.git'`), /unrecognized/);
@@ -166,7 +166,11 @@ describe("parseOriginalCommand", () => {
     assert.match(parseErr("   "), /interactive sessions are not available/);
   });
   it("bounds the echoed verb", () => {
-    assert.ok(parseErr("x".repeat(500)).length < 120);
+    // The echoed verb is capped at 64 chars; the rest is the fixed
+    // allowed-commands hint (AGT-2270).
+    const msg = parseErr("x".repeat(500));
+    assert.match(msg, /^unrecognized command 'x{64}\.\.\.'; allowed: /);
+    assert.ok(!msg.includes("x".repeat(65)));
   });
 });
 
@@ -208,7 +212,12 @@ describe("access rule", () => {
     assert.ok(decideVerbAccess(admin, "list-stamp-repos").ok);
     assert.ok(!decideVerbAccess(scoped, "list-stamp-repos").ok);
     assert.ok(decideVerbAccess(scoped, "stamp-review").ok);
-    assert.ok(!decideVerbAccess(admin, "not-a-verb").ok);
+    const unknown = decideVerbAccess(admin, "not-a-verb");
+    assert.ok(!unknown.ok);
+    // AGT-2270: an unknown verb gets a neutral refusal naming what is
+    // served, not a role/grant explanation.
+    assert.match(unknown.message, /unrecognized command 'not-a-verb'; allowed: git-upload-pack/);
+    assert.doesNotMatch(unknown.message, /role/);
   });
 });
 
@@ -345,73 +354,62 @@ function harness(): Harness {
 }
 
 describe("stamp-gate-check", () => {
+  // One harness (three ssh-keygen runs + a users.db) for the whole suite;
+  // the scoped-member test adds its grant last.
+  let h: Harness;
+  before(() => {
+    h = harness();
+  });
+  after(() => h.cleanup());
+
   it("prints the canonical command for an allowed verb", () => {
-    const h = harness();
-    try {
-      const r = h.run(String(h.ids.member), "member", `list-stamp-repos`);
-      assert.equal(r.status, 0, r.stderr);
-      assert.equal(r.stdout, "list-stamp-repos");
-      const a = h.run(String(h.ids.admin), "admin", `delete-stamp-repo foo --purge`);
-      assert.equal(a.status, 0, a.stderr);
-      assert.equal(a.stdout, `delete-stamp-repo 'foo' '--purge'`);
-    } finally {
-      h.cleanup();
-    }
+    const r = h.run(String(h.ids.member), "member", `list-stamp-repos`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, "list-stamp-repos");
+    const a = h.run(String(h.ids.admin), "admin", `delete-stamp-repo foo --purge`);
+    assert.equal(a.status, 0, a.stderr);
+    assert.equal(a.stdout, `delete-stamp-repo 'foo' '--purge'`);
   });
 
-  it("refuses an unenrolled key, a missing identity, and a mismatched user id (exit 1)", () => {
-    const h = harness();
-    try {
-      assert.equal(h.run(String(h.ids.admin), "stranger", "list-stamp-repos").status, 1);
-      // The pre-AGT-2260 `legacy` binding (AuthorizedKeysFile lines) is gone.
-      const legacy = h.run("legacy", "admin", "list-stamp-repos");
-      assert.equal(legacy.status, 1);
-      assert.match(legacy.stderr, /usage/);
-      const mismatch = h.run(String(h.ids.admin), "member", "list-stamp-repos");
-      assert.equal(mismatch.status, 1);
-      assert.match(mismatch.stderr, /does not match/);
-      assert.equal(h.run("abc", "admin", "list-stamp-repos").status, 1);
-    } finally {
-      h.cleanup();
-    }
+  it("refuses an unenrolled key, a missing identity, and a mismatched user id (exit 1; bad usage exit 2)", () => {
+    assert.equal(h.run(String(h.ids.admin), "stranger", "list-stamp-repos").status, 1);
+    // The pre-AGT-2260 `legacy` binding (AuthorizedKeysFile lines) is gone.
+    // A malformed forced command is a usage error (exit 2, AGT-2270).
+    const legacy = h.run("legacy", "admin", "list-stamp-repos");
+    assert.equal(legacy.status, 2);
+    assert.match(legacy.stderr, /usage/);
+    const mismatch = h.run(String(h.ids.admin), "member", "list-stamp-repos");
+    assert.equal(mismatch.status, 1);
+    assert.match(mismatch.stderr, /does not match/);
+    assert.equal(h.run("abc", "admin", "list-stamp-repos").status, 2);
   });
 
   it("refuses dot-dir paths and unknown commands for an admin too (exit 2)", () => {
-    const h = harness();
-    try {
-      for (const cmd of [
-        `git-upload-pack '/srv/git/.trash/20200101T000000Z-x.git'`,
-        `git-upload-pack '/srv/git/.prompts-cache'`,
-        `sh -c id`,
-      ]) {
-        const r = h.run(String(h.ids.admin), "admin", cmd);
-        assert.equal(r.status, 2, `${cmd}: ${r.stderr}`);
-        assert.equal(r.stdout, "");
-      }
-      assert.equal(h.run(String(h.ids.admin), "admin").status, 2);
-    } finally {
-      h.cleanup();
+    for (const cmd of [
+      `git-upload-pack '/srv/git/.trash/20200101T000000Z-x.git'`,
+      `git-upload-pack '/srv/git/.prompts-cache'`,
+      `sh -c id`,
+    ]) {
+      const r = h.run(String(h.ids.admin), "admin", cmd);
+      assert.equal(r.status, 2, `${cmd}: ${r.stderr}`);
+      assert.equal(r.stdout, "");
     }
+    assert.equal(h.run(String(h.ids.admin), "admin").status, 2);
   });
 
   it("refuses a scoped member list-stamp-repos (exit 3) and a missing repo", () => {
-    const h = harness();
+    const db = openServerDb({ path: h.dbPath, skipChmod: true });
     try {
-      const db = openServerDb({ path: h.dbPath, skipChmod: true });
-      try {
-        addRepoGrant(db, h.ids.member, "acme", "a", h.ids.admin);
-      } finally {
-        db.close();
-      }
-      const r = h.run(String(h.ids.member), "member", "list-stamp-repos");
-      assert.equal(r.status, 3, r.stderr);
-      // /srv/git/<name>.git doesn't exist on the test host: a scoped member
-      // gets the same refusal as for a repo they can't use.
-      const g = h.run(String(h.ids.member), "member", `git-upload-pack '/srv/git/stamp-gate-test-nope.git'`);
-      assert.equal(g.status, 3, g.stderr);
-      assert.match(g.stderr, /not found or not permitted/);
+      addRepoGrant(db, h.ids.member, "acme", "a", h.ids.admin);
     } finally {
-      h.cleanup();
+      db.close();
     }
+    const r = h.run(String(h.ids.member), "member", "list-stamp-repos");
+    assert.equal(r.status, 3, r.stderr);
+    // /srv/git/<name>.git doesn't exist on the test host: a scoped member
+    // gets the same refusal as for a repo they can't use.
+    const g = h.run(String(h.ids.member), "member", `git-upload-pack '/srv/git/stamp-gate-test-nope.git'`);
+    assert.equal(g.status, 3, g.stderr);
+    assert.match(g.stderr, /not found or not permitted/);
   });
 });

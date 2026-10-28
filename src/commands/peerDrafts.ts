@@ -19,6 +19,7 @@
 
 import { readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { join, basename } from "node:path";
+import { parseRetentionDuration } from "../lib/duration.js";
 import { draftsDir } from "../lib/paths.js";
 
 // ─── Types ────────────────────────────────────────────────────────────
@@ -160,6 +161,9 @@ export interface DraftsDeleteOptions {
   all?: boolean;
   /** Required with --all to prevent accidental bulk deletion. */
   yes?: boolean;
+  /** With --all: only drafts whose mtime is older than this duration
+   *  (`<n>d`, `<n>h`, `<n>m`), e.g. `30d` (AGT-2270). */
+  olderThan?: string;
   /** Test-only: override draftsDir. */
   _dirForTest?: string;
   /** Test-only: override process.exit. */
@@ -255,6 +259,12 @@ export function runDraftsDelete(opts: DraftsDeleteOptions): void {
   const stderrWrite = opts._stderrWriteForTest ?? ((s: string) => { process.stderr.write(s); });
   const dir = opts._dirForTest ?? draftsDir();
 
+  if (opts.olderThan !== undefined && !opts.all) {
+    stderrWrite(`error: --older-than only applies with --all\n`);
+    exitFn(2);
+    return;
+  }
+
   if (opts.all) {
     // --all mode.
     let metas: DraftsMeta[] | null;
@@ -272,13 +282,36 @@ export function runDraftsDelete(opts: DraftsDeleteOptions): void {
       return;
     }
 
+    // AGT-2270: age-based pruning — drafts quote another author's PR and
+    // otherwise accumulate forever.
+    if (opts.olderThan !== undefined) {
+      let durationMs: number;
+      let humanLabel: string;
+      try {
+        ({ durationMs, humanLabel } = parseRetentionDuration(opts.olderThan));
+      } catch (err) {
+        stderrWrite(`error: --older-than: ${err instanceof Error ? err.message : String(err)}\n`);
+        exitFn(2);
+        return;
+      }
+      const cutoff = Date.now() - durationMs;
+      metas = metas.filter((m) => m.mtime.getTime() < cutoff);
+      if (metas.length === 0) {
+        stdoutWrite(`note: no drafts older than ${humanLabel}\n`);
+        exitFn(0);
+        return;
+      }
+    }
+
     if (!opts.yes) {
       // Dry-run: list what would be deleted, exit 1 with re-run prompt.
       stderrWrite(`would delete ${metas.length} draft(s):\n`);
       for (const m of metas) {
         stderrWrite(`  ${m.patchId}\n`);
       }
-      stderrWrite(`note: re-run with --all --yes to confirm\n`);
+      stderrWrite(
+        `note: re-run with --all${opts.olderThan !== undefined ? ` --older-than ${opts.olderThan}` : ""} --yes to confirm\n`,
+      );
       exitFn(1);
       return;
     }

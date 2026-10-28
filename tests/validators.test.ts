@@ -2327,3 +2327,23 @@ describe("formatTofuWarning (AGT-2249)", () => {
     assert.equal(formatTofuWarning("acme/stamp-personas", "v3.2", true), null);
   });
 });
+
+// AGT-2270: unpinned npx MCP launches are warned about.
+import { npxPinWarning } from "../src/lib/toolAllowlist.ts";
+
+describe("npxPinWarning (AGT-2270)", () => {
+  it("is silent for non-npx launchers and exact pins", () => {
+    assert.equal(npxPinWarning("node", ["server.js"]), null);
+    assert.equal(npxPinWarning("npx", ["-y", "foo-mcp@1.2.3"]), null);
+    assert.equal(npxPinWarning("npx", ["-y", "@acme/foo-mcp@1.2.3-beta.1", "--flag"]), null);
+    assert.equal(npxPinWarning("npx", ["--package=@acme/foo@2.0.0", "foo"]), null);
+    assert.equal(npxPinWarning("npx", ["-p", "foo@2.0.0", "foo-bin"]), null);
+  });
+  it("warns on a bare name, a range, a tag, or no package", () => {
+    for (const args of [["-y", "foo-mcp"], ["-y", "foo-mcp@^1.2.0"], ["foo@latest"], ["@acme/foo"], ["-y"]]) {
+      const w = npxPinWarning("npx", args);
+      assert.ok(w, JSON.stringify(args));
+      assert.match(w, /without an exact version/);
+    }
+  });
+});

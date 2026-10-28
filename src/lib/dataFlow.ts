@@ -230,9 +230,9 @@ export function checkPeerDataFlow(
     return {
       ok: false,
       reason:
-        `this listener's LLM endpoint (${endpoint.label}) cannot be pinned to a host, so no ` +
-        `data_flow.peer_review_endpoints entry can consent to it; point ANTHROPIC_BASE_URL at ` +
-        `a listed endpoint or a model on this host`,
+        // Shortened (AGT-2270): `stamp pr listen` already printed the full
+        // explanation and fix once at startup; this repeats per event.
+        `listener endpoint ${endpoint.label} cannot be pinned to a host (see the startup warning)`,
     };
   }
   const allowed = dataFlow?.peer_review_endpoints ?? [];

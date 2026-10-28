@@ -486,3 +486,21 @@ describe("stamp-sign-approval is a helper, not an SSH verb", () => {
     assert.deepEqual(rules, ['git ALL=(root) NOPASSWD: /usr/local/sbin/stamp-sign-approval ""']);
   });
 });
+
+// AGT-2270: the helper's `error:` lead is dropped from every stderr line.
+import { runSignApprovalHelper } from "../src/server/reviewPipeline.ts";
+
+describe("runSignApprovalHelper stderr (AGT-2270)", () => {
+  it("strips the `error:` lead from each line of a multi-line failure", async () => {
+    await assert.rejects(
+      runSignApprovalHelper(
+        ["sh", "-c", "cat >/dev/null; echo 'error: first' >&2; echo 'error: second' >&2; exit 1"],
+        Buffer.from("{}"),
+      ),
+      (err: Error) => {
+        assert.match(err.message, /signing helper exited 1: first\nsecond$/);
+        return true;
+      },
+    );
+  });
+});

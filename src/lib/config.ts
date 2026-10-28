@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { parse, stringify } from "yaml";
+import { isMap, parse, parseDocument, stringify, type Document } from "yaml";
 import { globToRegex, isGlobPattern } from "./refPatterns.js";
 import { parseRepoIdDeclaration } from "./repoBinding.js";
 import { SAFE_TOOLS } from "./toolAllowlist.js";
@@ -1207,6 +1207,58 @@ export function stringifyConfig(config: StampConfig): string {
   return stringify(config);
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Merge `next` into the YAML node at `path`, touching only what changed:
+ * map keys are recursed into, keys missing from `next` are deleted, and a
+ * changed scalar/list is replaced. Unchanged nodes keep their comments.
+ */
+function mergeIntoDocument(doc: Document, path: string[], prev: unknown, next: unknown): void {
+  if (isPlainObject(prev) && isPlainObject(next) && isMap(doc.getIn(path, true))) {
+    for (const key of Object.keys(prev)) {
+      if (next[key] === undefined) doc.deleteIn([...path, key]);
+    }
+    for (const [key, value] of Object.entries(next)) {
+      if (value === undefined) continue;
+      mergeIntoDocument(doc, [...path, key], prev[key], value);
+    }
+    return;
+  }
+  if (!sameValue(prev, next)) doc.setIn(path, next);
+}
+
+/**
+ * Rewrite `.stamp/config.yml` text with the top-level keys in `patch`
+ * replaced, keeping every comment and key the patch doesn't change
+ * (AGT-2270). `stamp reviewers add/remove` and `stamp bootstrap` used to
+ * re-serialize the whole parsed config, which dropped comments — including
+ * the commented-out `retention:` scaffold `stamp init` writes — and any
+ * top-level key the command didn't model. Top-level keys absent from
+ * `patch` are left alone.
+ */
+export function patchConfigYaml(raw: string, patch: Partial<StampConfig>): string {
+  const doc = parseDocument(raw);
+  if (doc.errors.length > 0 || !isMap(doc.contents)) {
+    // Not a YAML map we can edit in place: fall back to a full rewrite of
+    // the parsed config plus the patch.
+    const base = (parse(raw) as Record<string, unknown> | null) ?? {};
+    return stringify({ ...base, ...patch });
+  }
+  const current = doc.toJS() as Record<string, unknown>;
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    mergeIntoDocument(doc, [key], current[key], value);
+  }
+  return doc.toString();
+}
+
 /**
  * Commented-out `retention:` block appended to the `.stamp/config.yml` that
  * `stamp init` scaffolds (AGT-2247, decision D-5). Reviewer prose is KEPT
@@ -1225,8 +1277,6 @@ export const RETENTION_CONFIG_SCAFFOLD = `
 #   spools: 60d        # age limit for failed-parse / failed-run spool files
 #   auto_prune: true   # delete past-limit items after each \`stamp review\`;
 #                      # omit or false = only report them, never delete.
-#                      # Each prune uses the shorter of the two limits for
-#                      # both rows and spools.
 `;
 
 /**

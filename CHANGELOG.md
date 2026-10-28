@@ -185,6 +185,54 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   Dependabot covers it. The npm publish job runs in the `npm-publish`
   environment so the Trusted Publisher can require it (see CONTRIBUTING).
 
+- **AGT-2270 low-severity hardening (stamp server).** `stamp-pr-opened`
+  refuses a `patch_id` that is not a 40-hex patch-id, answers a re-broadcast
+  of the same patch by its author as a no-op (`already_broadcast: true`)
+  and refuses a patch id another member already broadcast with a clean
+  error instead of crashing. The peer POST routes refuse a malformed
+  `patch_id` (400 `patch_id_invalid`), and `POST /peer/claim-seat` answers
+  an unknown patch with 409 `patch_not_found` (was 500), which
+  `stamp pr listen` skips without retrying. Listener log lines escape
+  control characters, so a request value can no longer forge a log entry.
+  `stamp-review` and `stamp-pr-opened` no longer send stack traces or
+  server paths to the SSH client: an unexpected error prints its class and
+  message, and a missing reviewer prompt prints only its category.
+- **Freed short names are reserved.** A name freed by `stamp users remove`,
+  `prune-idle` or a rename can't be claimed by a member through
+  `set-name` or at invite accept (`short_name_retired`), because
+  `stamp trust grant <name>` resolves a name to whatever key holds it.
+  Owners and admins can still assign one; the previous holder can take
+  their own name back.
+- **`stamp invites accept` defaults to a PII-free short name**
+  (`user-<8 hex of your SSH key>`, was `<username>-<hostname>`), sends the
+  key without its comment, and its confirmation says that server-side
+  reviews send diffs to the server's LLM provider.
+- **The generated `stamp-verify.yml` pins `actions/checkout` to a commit
+  SHA** (v7.0.1) instead of the mutable `@v4` tag. Only newly written
+  workflows get it; an existing `stamp-verify.yml` keeps its line until
+  edited.
+- **`stamp review` warns when an `npx` MCP server has no exact version**
+  (`name@x.y.z`); docs recommend pinning or `node_modules/.bin/<name>`.
+- **`stamp pr listen` strips terminal escape sequences** from everything it
+  prints (server responses and SSE comments, PR titles, gh and LLM output).
+- **`stamp pr listen` refuses partial diffs.** A compare diff GitHub
+  refuses as too large, output cut at the local buffer, or a diff at the
+  compare API's 300-file limit skips the event with a reason instead of
+  being reviewed.
+- **Server image.** The builder moves to `node:24-alpine3.24` (alpine3.21
+  leaves support around 2026-11) and the runtime installs `nodejs~24`, the
+  major the bundles are built for. The HTTP listener and `stamp-workers`
+  run under a restart loop, and the healthcheck probes the HTTP port as
+  well as sshd. The boot-smoke merge check now also runs for changes under
+  `scripts/`, `src/hooks/` and `.npmrc`.
+- **`delete-stamp-repo --purge` names the GitHub mirror** that still holds
+  the purged repo's history. Boot warns about members seeded from
+  `AUTHORIZED_KEYS` whose key has since been removed from it (they keep
+  access until `stamp users remove`). `server/README.md` gains a data
+  inventory (with Anthropic and GitHub as sub-processors), a server-side
+  review disclosure, backup retention guidance, and a note to gate
+  tag-triggered publish jobs on a protected environment.
+
 ### Changed
 
 - **Per-repo prompt overrides need a repo grant (security).** The `--org` /
@@ -229,6 +277,25 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   repo, clone, mirror, deploy key or Ruleset. Previously it did all of that
   and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
   and its plan now says how the bootstrap merge will be confirmed.
+
+- **`retention.auto_prune` honours each threshold separately** (AGT-2270).
+  It used to prune review rows and spools together under each duration, so
+  the shorter of `retention.reviews` / `retention.spools` applied to both.
+- **`stamp reviewers add` / `remove` and `stamp bootstrap` keep
+  `.stamp/config.yml` comments** (including the commented-out `retention:`
+  block `stamp init` writes) and the top-level keys they don't change;
+  bootstrap no longer drops keys such as `data_flow`.
+- **`stamp peer drafts delete --all --older-than <duration> --yes`** prunes
+  drafts by age.
+- **The SSH session gate:** an unknown command is refused with a list of
+  what the gate serves; a malformed forced command exits 2 (was 1); exit 3
+  is documented as "denied, or no such repo". `stamp server-repos` and
+  `stamp push --resync-mirror` explain an exit 3 as a role refusal instead
+  of a bare "failed (exit 3)".
+- **`stamp pr listen`:** the per-event reason for a cloud-routed endpoint is
+  shorter (the startup warning carries the fix), as is the data-flow bullet
+  in `--help`. The CLI help for `invites accept --short-name` describes the
+  new default.
 
 ### Security
 

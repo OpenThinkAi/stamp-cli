@@ -323,6 +323,7 @@ function exitFromSetNameDenial(reason: SetNameDenial): number {
     case "invalid_name":
       return EXIT.USAGE;
     case "name_taken":
+    case "name_retired":
       return EXIT.NAME_TAKEN;
   }
 }

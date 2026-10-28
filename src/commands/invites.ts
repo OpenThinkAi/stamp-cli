@@ -24,7 +24,7 @@ import { spawnSync } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir, hostname, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
@@ -34,7 +34,7 @@ import {
 } from "../lib/inviteUrl.js";
 import { fingerprintFromPem } from "../lib/keys.js";
 import { loadServerConfig } from "../lib/serverConfig.js";
-import { parseSshPubkey } from "../lib/sshKeys.js";
+import { contentAddressedShortName, parseSshPubkey, sshPubkeyBody } from "../lib/sshKeys.js";
 import { UsageError } from "./serverRepo.js";
 
 // ─── stamp invites mint ────────────────────────────────────────────────
@@ -205,20 +205,13 @@ function defaultStampPubkeyPath(): string {
   return join(homedir(), ".stamp", "keys", "ed25519.pub");
 }
 
-function defaultShortName(): string {
-  const u = userInfo().username || "user";
-  const h = hostname().split(".")[0] || "host";
-  return `${u}-${h}`
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 63);
-}
-
 interface DetectedSsh {
   path: string;
-  full: string;
+  /** `<algo> <base64>` only: the comment (often user@host) is not sent. */
+  body: string;
   fingerprint: string;
+  /** PII-free default short_name, `user-<8 hex>` of the key (AGT-2270). */
+  defaultShortName: string;
 }
 
 function loadSshPubkey(path: string): DetectedSsh {
@@ -230,7 +223,12 @@ function loadSshPubkey(path: string): DetectedSsh {
   }
   const raw = readFileSync(path, "utf8");
   const parsed = parseSshPubkey(raw);
-  return { path, full: parsed.full, fingerprint: parsed.fingerprint };
+  return {
+    path,
+    body: sshPubkeyBody(parsed),
+    fingerprint: parsed.fingerprint,
+    defaultShortName: contentAddressedShortName(parsed),
+  };
 }
 
 interface DetectedStamp {
@@ -301,7 +299,7 @@ async function postAccept(
  * agent-facing failure surface useful — agents react differently to a
  * collision than to an expired token.
  */
-function nextStepForError(error: string, opts: InvitesAcceptOptions): string {
+function nextStepForError(error: string, shortName: string): string {
   switch (error) {
     case "invite_not_found":
       return "the token doesn't match any pending invite. Ask the inviter to mint a fresh one.";
@@ -316,7 +314,13 @@ function nextStepForError(error: string, opts: InvitesAcceptOptions): string {
         "look up the existing account."
       );
     case "short_name_taken":
-      return `pass --short-name <other-name> (current attempt: ${JSON.stringify(opts.shortName ?? defaultShortName())}).`;
+      return `pass --short-name <other-name> (current attempt: ${JSON.stringify(shortName)}).`;
+    case "short_name_retired":
+      return (
+        "that short_name is reserved: a removed or renamed member held it, so it can't be " +
+        "claimed at enrollment. Pass --short-name <other-name>; an owner or admin can assign " +
+        "it later with `stamp users set-name` if it really is yours."
+      );
     case "short_name_malformed":
       return "pass --short-name with alphanumerics + . _ - (must start with alnum, max 63 chars).";
     case "ssh_pubkey_required":
@@ -368,7 +372,9 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
   // it later via the same path.
   const stamp = loadStampPubkey(stampPath);
 
-  const shortName = opts.shortName ?? defaultShortName();
+  // AGT-2270: the default is content-addressed (`user-<hex>`), not
+  // <username>-<hostname>: short names are readable by every member.
+  const shortName = opts.shortName ?? ssh.defaultShortName;
 
   const isInteractive = process.stdin.isTTY === true;
   let confirmed = opts.yes === true;
@@ -397,6 +403,12 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
               `                  ${stamp.fingerprint}\n`
             : `  stamp pubkey:   (none detected at ${stampPath} — okay; trust grants need it later)\n`) +
           `  short_name:     ${shortName}\n` +
+          `\n` +
+          // AGT-2270: member-facing data-flow disclosure. Server-side
+          // review (\`stamp review\` against a review_server) sends the diff
+          // to this server, which sends it to its LLM provider (Anthropic).
+          `Once enrolled, diffs you review through this server are sent to it and,\n` +
+          `if it runs server-side review, on to its LLM provider (Anthropic).\n` +
           `\n`,
       );
       const answer = (await rl.question("Send these to the server? [Y/n] "))
@@ -415,7 +427,7 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
 
   const response = await postAccept(target, useHttp, {
     token: target.token,
-    ssh_pubkey: ssh.full,
+    ssh_pubkey: ssh.body,
     stamp_pubkey: stamp?.pem ?? null,
     short_name: shortName,
   });
@@ -436,7 +448,7 @@ export async function runInvitesAccept(opts: InvitesAcceptOptions): Promise<void
     return;
   }
   const errorText = body.error ?? `http_${response.status}`;
-  const nextStep = nextStepForError(errorText, opts);
+  const nextStep = nextStepForError(errorText, shortName);
   throw new Error(
     `accept-invite failed: ${errorText} (status ${response.status}). ${nextStep}`,
   );

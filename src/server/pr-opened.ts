@@ -40,10 +40,12 @@
  *   5 — rate limited
  */
 
+import { verbCrashLine } from "./verbCrash.js";
 import {
   appendEvent,
   checkAndConsumeToken,
   findUserBySshFingerprint,
+  findPatch,
   insertPatch,
   openServerDb,
   touchLastSeen,
@@ -125,7 +127,11 @@ function parsePayload(raw: Buffer): PrOpenedPayload {
   }
 
   if (typeof p["repo"] !== "string") fail("repo must be a string", 4);
-  if (typeof p["patch_id"] !== "string") fail("patch_id must be a string", 4);
+  // AGT-2270: patch ids are `git patch-id --stable` output, 40 lowercase hex
+  // (src/lib/patchId.ts). Anything else is refused before it reaches the DB
+  // primary key, the event stream or a log line.
+  if (typeof p["patch_id"] !== "string" || !/^[0-9a-f]{40}$/.test(p["patch_id"]!))
+    fail("patch_id must be a 40-char lowercase hex git patch-id", 4);
   if (typeof p["base_sha"] !== "string" || !/^[0-9a-f]{40}$/.test(p["base_sha"]!))
     fail("base_sha must be a 40-char lowercase hex SHA", 4);
   if (typeof p["head_sha"] !== "string" || !/^[0-9a-f]{40}$/.test(p["head_sha"]!))
@@ -269,6 +275,26 @@ async function main(): Promise<void> {
       );
     }
 
+    // AGT-2270: a patch id is unique server-wide. A re-broadcast of the
+    // same patch by its author is a no-op (no second event); a patch id
+    // another member already broadcast is refused cleanly instead of
+    // crashing on the primary key.
+    const existing = findPatch(db, payload.patch_id);
+    if (existing) {
+      if (existing.requested_by_fp === payload.requested_by_fp) {
+        process.stdout.write(
+          JSON.stringify({ ok: true, patch_id: payload.patch_id, already_broadcast: true }) + "\n",
+        );
+        return;
+      }
+      fail(
+        `patch_id ${payload.patch_id} was already broadcast by another member; ` +
+          `a patch can be broadcast once. If this is your change, ask an admin to check ` +
+          `who registered it (peer_review_patches.requested_by_fp).`,
+        4,
+      );
+    }
+
     // Persist patch row + event.
     const now = Date.now();
     insertPatch(db, {
@@ -301,8 +327,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  process.stderr.write(
-    `error: pr-opened crashed: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
-  );
+  process.stderr.write(verbCrashLine("pr-opened", err));
   process.exit(1);
 });

@@ -21,7 +21,7 @@ import {
   RETRO_MAX_CANDIDATES,
   type RetroCandidate,
 } from "./retro.js";
-import { checkMcpCommand, loadMcpAllowlist } from "./toolAllowlist.js";
+import { checkMcpCommand, loadMcpAllowlist, npxPinWarning } from "./toolAllowlist.js";
 import { hashToolInput, type ToolCall } from "./toolCalls.js";
 import { gitCommonDir } from "./paths.js";
 import { runGit } from "./git.js";
@@ -976,6 +976,12 @@ export async function invokeReviewer(params: {
       if (reason !== null) {
         throw new Error(
           `reviewer "${params.reviewer}" mcp_servers.${serverName}: ${reason}`,
+        );
+      }
+      const pinWarning = npxPinWarning(srv.command, srv.args);
+      if (pinWarning !== null) {
+        process.stderr.write(
+          `warning: reviewer "${params.reviewer}" mcp_servers.${serverName}: ${pinWarning}\n`,
         );
       }
     }

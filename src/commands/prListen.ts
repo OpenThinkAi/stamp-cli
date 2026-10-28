@@ -106,6 +106,18 @@ import {
   printPeerEgressMarker,
   resolvePeerLlmEndpoint,
 } from "../lib/dataFlow.js";
+import { stripTerminalControls } from "../lib/terminalText.js";
+
+/**
+ * Every line this listener prints can carry text another party controls:
+ * server error bodies and SSE comments, peer PR titles / URLs, gh and LLM
+ * output. Strip terminal control sequences before it reaches the
+ * operator's terminal (AGT-2270). Resolves process.stderr at call time so
+ * tests that stub it still capture.
+ */
+function termErr(text: string): boolean {
+  return process.stderr.write(stripTerminalControls(text));
+}
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -340,7 +352,7 @@ export function parseSseStream(
     try {
       parsed = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      process.stderr.write(`note: dropping malformed SSE frame\n`);
+      termErr(`note: dropping malformed SSE frame\n`);
       return;
     }
     const event: PeerReviewEvent = {
@@ -371,7 +383,7 @@ export function parseSseStream(
         // Comment / heartbeat — ignore, except the server's denied-orgs
         // notice (AGT-2256), which the operator needs to see.
         const notice = sseCommentNotice(line);
-        if (notice) process.stderr.write(notice);
+        if (notice) termErr(notice);
         continue;
       }
       if (line.startsWith("data:")) {
@@ -610,7 +622,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   // out of scope for this feature. --headless opts into daemon-mode with
   // loud, non-suppressible warnings.
   if (opts.headless) {
-    process.stderr.write(
+    termErr(
       `warning: --headless: listener will run without a hosting Claude session.\n` +
         `  - no presence: events will be triaged and posted to GitHub on your behalf\n` +
         `    with no interactive operator. close this terminal and you have a daemon.\n` +
@@ -626,7 +638,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     const envToProbe = opts._envForTest ?? process.env;
     const sessionResult = detectClaudeSession(envToProbe);
     if (!sessionResult.ok) {
-      process.stderr.write(
+      termErr(
         `error: stamp pr listen requires an active Claude Code session as its host.\n` +
           `  open Claude Code and run this command from within the session (so it can\n` +
           `  spawn the listener as a managed background process). without a hosting\n` +
@@ -641,7 +653,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     }
     // Bound to a Claude session — log the binding line.
     const sessionPrefix = sessionResult.session.sessionId.slice(0, 8);
-    process.stderr.write(`note: bound to Claude session ${sessionPrefix}\n`);
+    termErr(`note: bound to Claude session ${sessionPrefix}\n`);
   }
 
   // ─── Auth preflight ───────────────────────────────────────────────
@@ -651,7 +663,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   const keypair: Keypair | null =
     opts._keypairForTest !== undefined ? (opts._keypairForTest as Keypair | null) : loadUserKeypair();
   if (!keypair) {
-    process.stderr.write(
+    termErr(
       `error: no stamp signing key found at ~/.stamp/keys/ed25519. ` +
         `Run 'stamp keys generate' to create one.\n`,
     );
@@ -661,12 +673,12 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   const serverResult = resolveServerConfig(opts.server);
   if (!serverResult.cfg) {
     if (serverResult.reason === "invalid_format") {
-      process.stderr.write(
+      termErr(
         `error: invalid --server format ${JSON.stringify(opts.server)} — expected host:port ` +
           `(e.g. stamp.example.com:2222)\n`,
       );
     } else {
-      process.stderr.write(
+      termErr(
         `error: no stamp-server configured. Run 'stamp server config <host:port>' or pass --server.\n`,
       );
     }
@@ -681,13 +693,13 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   // committed consent for this endpoint before any LLM call.
   const llmEndpoint = resolvePeerLlmEndpoint(opts._llmEnvForTest ?? process.env);
   if (llmEndpoint.offHost && llmEndpoint.host === null) {
-    process.stderr.write(
+    termErr(
       `warning: this listener's LLM endpoint (${llmEndpoint.label}) cannot be pinned to a host, ` +
         `so no repo can consent to it via data_flow.peer_review_endpoints — every event will be ` +
         `skipped. Point ANTHROPIC_BASE_URL at a listed endpoint or a model on this host.\n`,
     );
   } else if (llmEndpoint.offHost) {
-    process.stderr.write(
+    termErr(
       `note: peer reviews send PR content to ${llmEndpoint.host}; ` +
         `events are skipped unless the PR's repo lists that host in ` +
         `data_flow.peer_review_endpoints at base_sha and at the protected tip\n`,
@@ -732,7 +744,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // First attempt — exit 1 on failure (keeps existing startup-failure UX).
     const firstResult = await connectFn(connectAttempt);
     if (!firstResult.ok) {
-      process.stderr.write(
+      termErr(
         `error: SSE connect failed — ${firstResult.reason}\n`,
       );
       process.exit(1);
@@ -742,7 +754,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // sseNextEvent (which is overwritten below with the reconnecting wrapper).
     let innerNextEvent: () => Promise<PeerReviewEvent | null> = firstResult.nextEvent;
     sseCleanup = firstResult.close;
-    process.stderr.write(`⟳ subscribed (SSE); listening for PR events\n`);
+    termErr(`⟳ subscribed (SSE); listening for PR events\n`);
 
     // ── Reconnect-on-end inner loop ─────────────────────────────────
     // Wraps innerNextEvent so that when the stream ends (null returned), the
@@ -781,7 +793,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           return null;
         }
 
-        process.stderr.write(`note: SSE stream ended; reconnecting…\n`);
+        termErr(`note: SSE stream ended; reconnecting…\n`);
 
         // Reconnect with exponential backoff. connectAttempt counts how many
         // times we have attempted a reconnect since the last clean connection.
@@ -802,7 +814,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
               totalRetries === 1
                 ? `⟳ resubscribed (SSE)\n`
                 : `⟳ resubscribed (SSE) after ${totalRetries} retries\n`;
-            process.stderr.write(retryMsg);
+            termErr(retryMsg);
             connectAttempt = 0;
             succeeded = true;
             break;
@@ -811,14 +823,14 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           // caller's grants no longer cover any requested org (AGT-2256).
           // Exit like the first-connect failure instead of retrying forever.
           if (retryResult.status === 401 || retryResult.status === 403) {
-            process.stderr.write(
+            termErr(
               `error: SSE reconnect refused — ${retryResult.reason}; not retrying\n`,
             );
             process.exit(1);
           }
           // Still failing — log the reason and the next delay.
           const nextDelay = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** connectAttempt);
-          process.stderr.write(
+          termErr(
             `note: SSE connect failed (${retryResult.reason}); retrying in ${Math.round(nextDelay / 1000)}s (attempt ${connectAttempt + 1})\n`,
           );
         }
@@ -863,7 +875,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   }
 
   async function shutdown(): Promise<void> {
-    process.stderr.write(`note: shutting down\n`);
+    termErr(`note: shutting down\n`);
     shuttingDown = true;
     clearHeartbeat();
     // Close the SSE stream (no-op in queue-mode tests).
@@ -975,7 +987,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // re-review-requested alike.
     const binding = checkPrUrlBinding(prUrlRaw, repo);
     if (!binding.ok) {
-      process.stderr.write(
+      termErr(
         `note: skipping event for PR #${prNumber} — ${binding.reason}\n`,
       );
       continue;
@@ -986,7 +998,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       typeof baseShaRaw !== "string" || !FULL_SHA_RE.test(baseShaRaw) ||
       typeof headShaRaw !== "string" || !FULL_SHA_RE.test(headShaRaw)
     ) {
-      process.stderr.write(
+      termErr(
         `note: skipping event for PR #${prNumber} — base_sha/head_sha missing or not full 40-char lowercase hex SHAs\n`,
       );
       continue;
@@ -1001,11 +1013,11 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         ? payload["requested_by_fp"]
         : event.actor_fp;
 
-    process.stderr.write(`⟳ triaging event for PR #${prNumber}\n`);
+    termErr(`⟳ triaging event for PR #${prNumber}\n`);
 
     // ─── Author-exclusion ────────────────────────────────────────
     if (requestedByFp === keypair.fingerprint) {
-      process.stderr.write(
+      termErr(
         `note: skipping event for PR #${prNumber} — author matches own fingerprint\n`,
       );
       continue;
@@ -1023,7 +1035,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // about whether that author has since been revoked.
     const localRepoPath = resolveLocalRepoPath(repo, peerReposMap);
     if (localRepoPath === null) {
-      process.stderr.write(
+      termErr(
         `note: skipping event for PR #${prNumber} — repo "${repo}" is not mapped in ` +
           `~/.stamp/peer-repos.yml; add it to enable operator verification for this repo\n`,
       );
@@ -1032,7 +1044,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     const verifyFn = opts._operatorVerifyForTest ?? verifyPeerAuthorLocal;
     const opResult = verifyFn(localRepoPath, baseSha, requestedByFp);
     if (!opResult.ok) {
-      process.stderr.write(
+      termErr(
         `note: skipping event for PR #${prNumber} — operator verification failed: ${opResult.reason}\n`,
       );
       continue;
@@ -1052,7 +1064,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // nothing off-host and needs no consent.
     if (llmEndpoint.offHost) {
       const skip = (why: string) =>
-        process.stderr.write(
+        termErr(
           `note: skipping event for ${repo} PR #${prNumber} — data-flow gate: ${why}\n`,
         );
       const readAt = (ref: string): DataFlowConfig | undefined =>
@@ -1127,7 +1139,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     if (rulesResult === null) {
       // AC #8: peer-watch.md missing → log ⟳ notice + use fallback decision.
-      process.stderr.write(
+      termErr(
         `⟳ no ~/.stamp/peer-watch.md found; using default claim policy (if_available)\n`,
       );
       triageDecision = { ...FALLBACK_DECISION };
@@ -1202,7 +1214,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     // ─── Triage decision: skip? ──────────────────────────────────
     if (triageDecision.claim_seat === "skip") {
-      process.stderr.write(
+      termErr(
         `note: triage decision is skip for PR #${prNumber}; not claiming seat\n`,
       );
       continue;
@@ -1224,7 +1236,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
       if (!resolved.ok) {
         const reason = resolved.reason;
-        process.stderr.write(
+        termErr(
           `✗ named prompt "${promptNameRaw}" not found or invalid (${reason}) for PR #${prNumber}; skipping\n`,
         );
         continue;
@@ -1272,7 +1284,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         const { claimRejectionReason } = claimResult;
         if (claimRejectionReason === "seats_full" && triageDecision.claim_seat === "always") {
           // AGT-451 AC #1: seats_full + always → register as extra and continue.
-          process.stderr.write(
+          termErr(
             `⟳ no primary seat available; posting as extra\n`,
           );
           const registerResult = await callRegisterExtra({
@@ -1295,36 +1307,41 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             _publicKeyPemForHttp: keypair?.publicKeyPem,
           });
           if (!registerResult.ok) {
-            process.stderr.write(
+            termErr(
               `note: register-extra failed for PR #${prNumber}: ${registerResult.message}; skipping\n`,
             );
             continue;
           }
           reviewMode = { kind: "extra" };
         } else if (claimRejectionReason === "seats_full") {
-          process.stderr.write(
+          termErr(
             `note: seats full for PR #${prNumber}; skipping\n`,
           );
           continue;
         } else if (claimRejectionReason === "author_cannot_claim_own_pr") {
-          process.stderr.write(
+          termErr(
             `note: cannot claim own PR #${prNumber} (author_cannot_claim_own_pr); skipping\n`,
           );
           continue;
+        } else if (claimRejectionReason === "patch_not_found") {
+          termErr(
+            `note: the server has no record of PR #${prNumber}'s patch (patch_not_found); skipping\n`,
+          );
+          continue;
         } else if (claimRejectionReason === "already_holds_other_seat") {
-          process.stderr.write(
+          termErr(
             `note: already holding another seat (already_holds_other_seat); skipping PR #${prNumber}\n`,
           );
           continue;
         } else {
-          process.stderr.write(
+          termErr(
             `note: claim rejected for PR #${prNumber}: ${claimResult.message}; skipping\n`,
           );
           continue;
         }
       } else {
         // claim_failed or peer_reviews_not_configured — log and continue.
-        process.stderr.write(
+        termErr(
           `note: claim-seat failed for PR #${prNumber}: ${claimResult.message}; skipping\n`,
         );
         continue;
@@ -1333,7 +1350,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       // Primary seat claimed successfully.
       reviewMode = { kind: "seat", seat: claimResult.seat };
       currentSeatPatchId = patchId;
-      process.stderr.write(`⟳ claimed seat ${claimResult.seat}; running review\n`);
+      termErr(`⟳ claimed seat ${claimResult.seat}; running review\n`);
     }
 
     // ─── AGT-454: fetch the real diff via gh (per-repo auth boundary) ──
@@ -1352,6 +1369,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       let ghDiffStatus: number;
       let ghDiffStdout = "";
       let ghDiffStderr = "";
+      let ghDiffSpawnError: string | undefined;
       const diffArgs = buildPeerDiffFetchArgs(prRef, baseSha, headSha);
       if (opts._ghDiffForTest) {
         const r = opts._ghDiffForTest(prUrl, diffArgs);
@@ -1367,12 +1385,14 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         ghDiffStatus = r.status ?? 1;
         ghDiffStdout = r.stdout ?? "";
         ghDiffStderr = r.stderr?.trim() ?? "";
+        ghDiffSpawnError = (r.error as NodeJS.ErrnoException | undefined)?.code;
       }
 
-      if (ghDiffStatus !== 0 || ghDiffStdout.trim() === "") {
-        const reason = ghDiffStderr || (ghDiffStdout.trim() === "" ? "empty diff" : `exit ${ghDiffStatus}`);
+      const fetched = classifyPeerDiffFetch(ghDiffStatus, ghDiffStdout, ghDiffStderr, ghDiffSpawnError);
+      if (!fetched.ok) {
+        const reason = fetched.reason;
         if (reviewMode.kind === "seat") {
-          process.stderr.write(
+          termErr(
             `✗ could not fetch diff at base...head (gh): ${reason}; releasing seat\n`,
           );
           currentSeatPatchId = null;
@@ -1390,13 +1410,13 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             _publicKeyPemForHttp: keypair?.publicKeyPem,
           });
         } else {
-          process.stderr.write(
+          termErr(
             `✗ could not fetch diff at base...head (gh): ${reason}; skipping extra\n`,
           );
         }
         continue;
       }
-      diff = ghDiffStdout;
+      diff = fetched.diff;
     }
 
     // ─── Heartbeat timer (seat holders only) ────────────────────
@@ -1432,11 +1452,11 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     let reviewBody: string;
     let reviewVerdict: "approve" | "request-changes" | "comment";
     try {
-      process.stderr.write(`⟳ running review with prompt "${promptName}"\n`);
+      termErr(`⟳ running review with prompt "${promptName}"\n`);
       const reviewResult = await runBuiltinReview(reviewInput);
       if (!reviewResult.ok) {
         if (reviewMode.kind === "seat") {
-          process.stderr.write(
+          termErr(
             `✗ review failed (prompt: ${promptName}): ${reviewResult.message}; releasing seat\n`,
           );
           // clearHeartbeat() is called in finally — no explicit call needed here.
@@ -1455,7 +1475,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             _publicKeyPemForHttp: keypair?.publicKeyPem,
           });
         } else {
-          process.stderr.write(
+          termErr(
             `✗ review failed (prompt: ${promptName}): ${reviewResult.message}; skipping extra\n`,
           );
         }
@@ -1475,7 +1495,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       // the file path. A crafted patchId containing `../` sequences would
       // otherwise escape the drafts directory.
       if (!/^[0-9a-f]{40}$/i.test(patchId)) {
-        process.stderr.write(
+        termErr(
           `✗ refusing to save draft for PR #${prNumber}: invalid patchId format ${JSON.stringify(patchId)}\n`,
         );
         if (reviewMode.kind === "seat") {
@@ -1510,9 +1530,9 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
           writeFileSync(draftPath, draftContent, { encoding: "utf8", mode: 0o600 });
           chmodSync(draftPath, 0o600);
         }
-        process.stderr.write(`⟳ saved draft for PR #${prNumber} to ${draftPath}\n`);
+        termErr(`⟳ saved draft for PR #${prNumber} to ${draftPath}\n`);
       } catch (err) {
-        process.stderr.write(
+        termErr(
           `✗ draft save failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
@@ -1538,10 +1558,10 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     // ─── AGT-452: dry-run — log payload, no gh post, no draft file ───
     if (triageDecision.post_mode === "dry-run") {
-      process.stderr.write(
+      termErr(
         `⟳ dry-run for PR #${prNumber} (verdict=${reviewVerdict}); would have posted via gh, no review sent\n`,
       );
-      process.stderr.write(`─── dry-run review body for PR #${prNumber} ───\n${reviewBody}\n─── end dry-run body ───\n`);
+      termErr(`─── dry-run review body for PR #${prNumber} ───\n${reviewBody}\n─── end dry-run body ───\n`);
       if (reviewMode.kind === "seat") {
         currentSeatPatchId = null;
         await callReleaseSeat({
@@ -1595,7 +1615,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     if (ghStatus !== 0) {
       const reason = ghStderr || `exit ${ghStatus}`;
       if (reviewMode.kind === "seat") {
-        process.stderr.write(
+        termErr(
           `✗ gh pr review failed (${reason}); seat released\n`,
         );
         currentSeatPatchId = null;
@@ -1613,7 +1633,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         _publicKeyPemForHttp: keypair?.publicKeyPem,
         });
       } else {
-        process.stderr.write(
+        termErr(
           `✗ gh pr review failed (${reason}); extra skipped\n`,
         );
       }
@@ -1624,7 +1644,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     if (reviewMode.kind === "seat") {
       currentSeatPatchId = null;
     }
-    process.stderr.write(`✓ posted review (verdict=${reviewVerdict}) for PR #${prNumber}\n`);
+    termErr(`✓ posted review (verdict=${reviewVerdict}) for PR #${prNumber}\n`);
   }
 }
 
@@ -1659,6 +1679,51 @@ export function buildPeerDiffFetchArgs(
     "-H", "Accept: application/vnd.github.diff",
     `repos/${pr.owner}/${pr.repo}/compare/${baseSha}...${headSha}`,
   ];
+}
+
+/**
+ * GitHub's compare API lists at most this many files; a larger compare can
+ * come back cut short, so a diff with this many file sections may be
+ * partial (AGT-2270).
+ */
+export const COMPARE_DIFF_FILE_LIMIT = 300;
+
+const DIFF_TOO_LARGE_RE =
+  /too[ _]large|HTTP 406|\b406\b|maximum number of (?:files|lines)|diff (?:exceeded|is too)|timed? ?out generating/i;
+
+/**
+ * Decide whether a `gh api .../compare/<base>...<head>` fetch produced a
+ * whole diff the listener may review (AGT-2270). GitHub refuses (406 /
+ * "too large") or truncates very large compare diffs, and spawnSync cuts
+ * output at its maxBuffer (ENOBUFS); reviewing a partial diff would post a
+ * review that silently skipped part of the change, so every such case is
+ * refused with a reason instead.
+ */
+export function classifyPeerDiffFetch(
+  status: number,
+  stdout: string,
+  stderr: string,
+  spawnErrorCode?: string,
+): { ok: true; diff: string } | { ok: false; reason: string } {
+  const tooLarge =
+    "the diff is too large for GitHub's compare API, which refuses or truncates it; " +
+    "not reviewing a partial diff";
+  if (spawnErrorCode === "ENOBUFS") return { ok: false, reason: `${tooLarge} (local output limit hit)` };
+  if (status !== 0) {
+    if (DIFF_TOO_LARGE_RE.test(stderr)) return { ok: false, reason: `${tooLarge} (${stderr.split("\n")[0]})` };
+    return { ok: false, reason: stderr || `exit ${status}` };
+  }
+  if (stdout.trim() === "") return { ok: false, reason: "empty diff" };
+  const files = (stdout.match(/^diff --git /gm) ?? []).length;
+  if (files >= COMPARE_DIFF_FILE_LIMIT) {
+    return {
+      ok: false,
+      reason:
+        `the diff has ${files} files; GitHub's compare API stops at ${COMPARE_DIFF_FILE_LIMIT}, ` +
+        `so it may be partial — not reviewing it`,
+    };
+  }
+  return { ok: true, diff: stdout };
 }
 
 /** REST `event` value for each verdict (POST /pulls/{n}/reviews). */

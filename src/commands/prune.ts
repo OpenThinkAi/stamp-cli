@@ -17,6 +17,12 @@ export interface PruneOptions {
   olderThan: string;
   /** Print what would be deleted without modifying the DB. */
   dryRun?: boolean;
+  /**
+   * Limit the sweep to state.db review rows (plus the prose-TTL pass) or to
+   * the failed-parse / failed-run spools. Omitted = both (the CLI). Used by
+   * `retention.auto_prune` so each kind gets its own threshold (AGT-2270).
+   */
+  scope?: "reviews" | "spools";
 }
 
 /**
@@ -91,7 +97,16 @@ export function runPrune(opts: PruneOptions): void {
     return;
   }
 
-  const db = existsSync(dbPath) ? openDb(dbPath) : null;
+  const doReviews = opts.scope !== "spools";
+  const doSpools = opts.scope !== "reviews";
+  const spoolDirs = doSpools
+    ? ([
+        ["failed-parse", parsesDir],
+        ["failed-run", runsDir],
+      ] as const)
+    : [];
+
+  const db = doReviews && existsSync(dbPath) ? openDb(dbPath) : null;
   try {
     if (opts.dryRun) {
       let any = false;
@@ -120,10 +135,7 @@ export function runPrune(opts: PruneOptions): void {
           any = true;
         }
       }
-      for (const [label, dir] of [
-        ["failed-parse", parsesDir],
-        ["failed-run", runsDir],
-      ] as const) {
+      for (const [label, dir] of spoolDirs) {
         const peek = peekSpools(dir, spoolCutoffMs);
         if (peek.length > 0) {
           if (any) console.log("");
@@ -178,10 +190,7 @@ export function runPrune(opts: PruneOptions): void {
         any = true;
       }
     }
-    for (const [label, dir] of [
-      ["failed-parse", parsesDir],
-      ["failed-run", runsDir],
-    ] as const) {
+    for (const [label, dir] of spoolDirs) {
       const deleted = pruneSpools(dir, spoolCutoffMs);
       if (deleted > 0) {
         if (any) console.log("");

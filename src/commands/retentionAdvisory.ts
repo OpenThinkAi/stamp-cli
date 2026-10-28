@@ -86,17 +86,12 @@ export function printRetentionAdvisory(
   const auto = retention.auto_prune === true;
 
   if (auto) {
-    // Auto-prune: call runPrune for each configured threshold independently.
-    // `runPrune` accepts a single `olderThan` and sweeps BOTH DB rows and
-    // spool dirs under that one duration — there's no per-category threshold
-    // in its interface. When `reviews` and `spools` are set to different
-    // values we therefore call `runPrune` twice so both thresholds are
-    // honoured independently (idempotent: each sweep deletes what the other
-    // already deleted — harmless). When only one is set, or when they're
-    // equal, a single call is sufficient.
-    const runPruneWithWarning = (olderThan: string): void => {
+    // Auto-prune: each kind with its own threshold (AGT-2270). runPrune
+    // used to sweep rows AND spools under one duration, so two passes
+    // applied the shorter of `reviews` / `spools` to both.
+    const runPruneWithWarning = (olderThan: string, scope: "reviews" | "spools"): void => {
       try {
-        runPrune({ olderThan });
+        runPrune({ olderThan, scope });
       } catch (err) {
         // Surface the error as a stderr warning rather than aborting — the
         // review itself succeeded; a prune failure is advisory, not fatal.
@@ -107,16 +102,8 @@ export function printRetentionAdvisory(
       }
     };
 
-    if (retention.reviews) {
-      runPruneWithWarning(retention.reviews);
-    }
-    // Second pass for spools when the threshold differs from reviews (or
-    // when only spools is set — `"3d" !== undefined` is true, so this
-    // covers both cases). When reviews === spools the first pass already
-    // swept both DB rows and spool dirs at that duration.
-    if (retention.spools && retention.spools !== retention.reviews) {
-      runPruneWithWarning(retention.spools);
-    }
+    if (retention.reviews) runPruneWithWarning(retention.reviews, "reviews");
+    if (retention.spools) runPruneWithWarning(retention.spools, "spools");
     return;
   }
 

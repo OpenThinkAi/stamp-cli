@@ -284,3 +284,16 @@ describe("renderVerifyWorkflow — --action-source override", () => {
     );
   });
 });
+
+describe("renderVerifyWorkflow pins every action to a full SHA (AGT-2270)", () => {
+  it("has no tag-pinned `uses:` lines", () => {
+    const yml = renderVerifyWorkflow();
+    const uses = yml.split("\n").filter((l) => /^\s*uses:/.test(l));
+    assert.ok(uses.length >= 2, yml);
+    for (const l of uses) assert.match(l, /@[0-9a-f]{40}(\s|$)/, l);
+    // Same checkout pin as this repo's own CI.
+    const ci = readFileSync(path.join(import.meta.dirname, "..", ".github", "workflows", "ci.yml"), "utf8");
+    const pin = /actions\/checkout@([0-9a-f]{40})/.exec(ci)?.[1];
+    assert.ok(pin && yml.includes(`actions/checkout@${pin}`), "checkout pin drifted from ci.yml");
+  });
+});

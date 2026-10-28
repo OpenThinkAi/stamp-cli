@@ -450,6 +450,49 @@ describe("printRetentionAdvisory (integration)", () => {
     }
   });
 
+  it("auto_prune: the shorter threshold does not leak onto the other kind (AGT-2270)", () => {
+    const fiveDaysAgo = new Date(Date.now() - 5 * 86_400_000).toISOString().slice(0, 19).replace("T", " ");
+    insertAt(dbPath, "security", fiveDaysAgo);
+    const spoolDir = join(repo, ".git", "stamp", "failed-parses");
+    mkdirSync(spoolDir, { recursive: true });
+    const spoolFile = join(spoolDir, "five-day-spool.txt");
+    writeFileSync(spoolFile, "fake raw output");
+    const mtimeSec = (Date.now() - 5 * 86_400_000) / 1000;
+    utimesSync(spoolFile, mtimeSec, mtimeSec);
+
+    // reviews: 30d keeps the 5-day row even though spools: 1d is shorter.
+    let db = openDb(dbPath);
+    try {
+      captureStderr(() => printRetentionAdvisory(db, repo, { reviews: "30d", spools: "1d", auto_prune: true }));
+    } finally {
+      db.close();
+    }
+    db = openDb(dbPath);
+    try {
+      assert.equal(recentReviewsByReviewer(db, "security", 10).length, 1, "review row pruned by the spool threshold");
+    } finally {
+      db.close();
+    }
+    assert.equal(existsSync(spoolFile), false, "5-day spool should be pruned at spools: 1d");
+
+    // And the other way round: spools: 30d keeps a 5-day spool when reviews: 1d.
+    writeFileSync(spoolFile, "again");
+    utimesSync(spoolFile, mtimeSec, mtimeSec);
+    db = openDb(dbPath);
+    try {
+      captureStderr(() => printRetentionAdvisory(db, repo, { reviews: "1d", spools: "30d", auto_prune: true }));
+    } finally {
+      db.close();
+    }
+    assert.equal(existsSync(spoolFile), true, "spool pruned by the review threshold");
+    db = openDb(dbPath);
+    try {
+      assert.equal(recentReviewsByReviewer(db, "security", 10).length, 0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("auto_prune: dual thresholds — both reviews and spools honored independently", () => {
     // When reviews and spools differ, auto_prune must honour both. Stage an
     // old review row (> 7d) and an old spool file (> 3d) — then configure

@@ -819,3 +819,79 @@ describe("AGT-2249: stamp-pr-opened binds the author key to the SSH caller", () 
     }
   });
 });
+
+// ─── AGT-2270: patch_id shape and duplicate broadcasts ─────────────────
+
+import { insertPatch } from "../src/lib/serverDb.ts";
+
+describe("AGT-2270: stamp-pr-opened patch_id handling", () => {
+  const callerKey = generateKeypair();
+
+  function signed(patchId: string) {
+    const body = {
+      repo: "acme/widget",
+      patch_id: patchId,
+      base_sha: "b".repeat(40),
+      head_sha: "c".repeat(40),
+      requested_by_fp: fingerprintFromPem(callerKey.publicKeyPem),
+      paths_changed: ["src/x.ts"],
+      title: "t",
+      body: "b",
+      pr_url: "https://github.com/acme/widget/pull/7",
+      pubkey: callerKey.publicKeyPem,
+    };
+    return JSON.stringify({ ...body, signature: signBytes(callerKey.privateKeyPem, canonicalSerializePeerPayload(body)) });
+  }
+
+  it("refuses a patch_id that is not 40 lowercase hex (exit 4)", () => {
+    const h = setupHarness("member", callerKey.publicKeyPem);
+    try {
+      for (const bad of ["abc", "A".repeat(40), "a".repeat(39) + "\n"]) {
+        const r = spawnVerb("pr-opened", h, { stdin: signed(bad), peerReviewsEnabled: true });
+        assert.equal(r.status, 4, `${JSON.stringify(bad)}: ${r.stderr}`);
+        assert.match(r.stderr, /patch_id must be a 40-char lowercase hex/);
+      }
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("a re-broadcast by the same author is an idempotent no-op", () => {
+    const h = setupHarness("member", callerKey.publicKeyPem);
+    try {
+      const first = spawnVerb("pr-opened", h, { stdin: signed("e".repeat(40)), peerReviewsEnabled: true });
+      assert.equal(first.status, 0, first.stderr);
+      const again = spawnVerb("pr-opened", h, { stdin: signed("e".repeat(40)), peerReviewsEnabled: true });
+      assert.equal(again.status, 0, again.stderr);
+      assert.deepEqual(JSON.parse(again.stdout.trim()), {
+        ok: true, patch_id: "e".repeat(40), already_broadcast: true,
+      });
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("a patch_id another member registered is refused cleanly (exit 4, no stack)", () => {
+    const h = setupHarness("member", callerKey.publicKeyPem);
+    try {
+      const db = openServerDb({ path: h.dbPath, skipChmod: true });
+      try {
+        insertPatch(db, {
+          patch_id: "f".repeat(40),
+          requested_by_fp: "sha256:" + "9".repeat(64),
+          base_sha: "b".repeat(40),
+          head_sha: "c".repeat(40),
+          repo: "acme/widget",
+        });
+      } finally {
+        db.close();
+      }
+      const r = spawnVerb("pr-opened", h, { stdin: signed("f".repeat(40)), peerReviewsEnabled: true });
+      assert.equal(r.status, 4, r.stderr);
+      assert.match(r.stderr, /already broadcast by another member/);
+      assert.doesNotMatch(r.stderr, /\n\s+at /);
+    } finally {
+      h.cleanup();
+    }
+  });
+});

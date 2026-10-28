@@ -43,6 +43,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -335,7 +336,7 @@ describe("prompts-cache-bootstrap — STAMP_PROMPTS_ALLOWED_SIGNERS", () => {
   function sshKey(name: string): { priv: string; pub: string } {
     const priv = join(workRoot, name);
     execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", name, "-f", priv]);
-    return { priv, pub: execFileSync("cat", [`${priv}.pub`], { encoding: "utf8" }).trim() };
+    return { priv, pub: readFileSync(`${priv}.pub`, "utf8").trim() };
   }
 
   function pushSigned(seed: string, key: string | null, body: string): void {
@@ -381,7 +382,7 @@ describe("prompts-cache-bootstrap — STAMP_PROMPTS_ALLOWED_SIGNERS", () => {
     const r = boot(f, f.signers);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /keeping the last verified prompts/);
-    assert.equal(execFileSync("cat", [join(f.cacheRoot, "security.md")], { encoding: "utf8" }), "signed\n");
+    assert.equal(readFileSync(join(f.cacheRoot, "security.md"), "utf8"), "signed\n");
   });
 
   it("fails the boot when the existing cache was never verified", () => {

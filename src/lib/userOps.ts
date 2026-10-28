@@ -39,6 +39,8 @@ import {
 import {
   countByRole,
   findUserByShortName,
+  retireShortName,
+  retiredShortNameHolder,
   type Role,
   type UserRow,
 } from "./serverDb.js";
@@ -190,6 +192,7 @@ export function removeUser(
   }
 
   db.prepare(`DELETE FROM users WHERE id = ?`).run(target.id);
+  retireShortName(db, target.short_name, target.id);
   return { ok: true, removed: target };
 }
 
@@ -245,7 +248,8 @@ export type SetNameDenial =
   | "target_not_found"
   | "caller_lacks_authority"
   | "invalid_name"
-  | "name_taken";
+  | "name_taken"
+  | "name_retired";
 
 export type SetNameResult =
   | { ok: true; old_name: string; new_name: string; no_change: boolean }
@@ -284,7 +288,21 @@ export function setUserName(
   if (clash && clash.id !== target.id) {
     return { ok: false, reason: "name_taken" };
   }
+  // AGT-2270: a name someone else used to hold is reserved. `stamp trust
+  // grant <name>` fetches whatever key sits behind a name, so a member
+  // renaming themselves to a removed colleague's name would get their key
+  // trusted under that name. Owners and admins may still assign it.
+  const formerHolder = retiredShortNameHolder(db, newName);
+  if (
+    formerHolder !== null &&
+    formerHolder !== target.id &&
+    caller.role !== "owner" &&
+    caller.role !== "admin"
+  ) {
+    return { ok: false, reason: "name_retired" };
+  }
   db.prepare(`UPDATE users SET short_name = ? WHERE id = ?`).run(newName, target.id);
+  retireShortName(db, target.short_name, target.id);
   return { ok: true, old_name: target.short_name, new_name: newName, no_change: false };
 }
 
@@ -327,7 +345,10 @@ export function pruneIdleUsers(
     caller.role === "admin" ? rows.filter((r) => r.role === "member") : rows;
 
   const del = db.prepare(`DELETE FROM users WHERE id = ?`);
-  for (const r of eligible) del.run(r.id);
+  for (const r of eligible) {
+    del.run(r.id);
+    retireShortName(db, r.short_name, r.id);
+  }
   return { ok: true, removed: eligible };
 }
 

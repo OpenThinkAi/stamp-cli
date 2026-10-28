@@ -155,8 +155,9 @@ export function explainExit(
       );
     case EXIT.NAME_TAKEN:
       return new UsageError(
-        `${context}: that short_name is already in use on ${details.server.host}. ` +
-          `Pick a different name (\`stamp users list\` shows what's taken).`,
+        `${context}: that short_name is in use on ${details.server.host}, or is reserved ` +
+          `because a removed or renamed member held it (only an owner or admin can assign ` +
+          `a reserved name). Pick a different name (\`stamp users list\` shows what's taken).`,
       );
     case EXIT.USAGE:
       if (kind === "grant") {

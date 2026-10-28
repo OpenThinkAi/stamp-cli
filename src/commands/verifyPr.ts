@@ -61,7 +61,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { findBranchRule, parseConfigFromYaml } from "../lib/config.js";
-import { resolveDiff, runGit, showAtRef } from "../lib/git.js";
+import { readStampConfigYamlAt, resolveDiff, runGit, showAtRef } from "../lib/git.js";
 import { findRepoRoot } from "../lib/paths.js";
 import { patchIdForSpan } from "../lib/patchId.js";
 import { repoIdRawFromConfigYaml, resolveRepoBinding } from "../lib/repoBinding.js";
@@ -382,7 +382,7 @@ function verifyV3Envelope(
   // before the repo declared its id still has to carry bound approvals.
   const tipSha = runGit(["rev-parse", "--verify", `${opts.base}^{commit}`], repoRoot).trim();
   const repoBinding = resolveRepoBinding([
-    { where: tipSha.slice(0, 8), raw: repoIdRawFromConfigYaml(readConfigYamlAt(tipSha, repoRoot)) },
+    { where: tipSha.slice(0, 8), raw: repoIdRawFromConfigYaml(readStampConfigYamlAt(tipSha, repoRoot)) },
     { where: payload.base_sha.slice(0, 8), raw: repoIdRawFromConfigYaml(configYaml) },
   ]);
 
@@ -977,14 +977,6 @@ function loadPathRulesAtBase(
   return parsedRules.rules;
 }
 
-/** `.stamp/config.yml` text at `ref`, or null when absent/unreadable. */
-function readConfigYamlAt(ref: string, repoRoot: string): string | null {
-  try {
-    return showAtRef(ref, ".stamp/config.yml", repoRoot);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Enumerate files changed between `base_sha` and `head_sha` via

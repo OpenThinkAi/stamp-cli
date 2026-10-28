@@ -119,6 +119,10 @@ describe(".github/workflows/publish.yml", () => {
     assert.deepEqual(needsList(jobs.publish), ["build"]);
   });
 
+  it("annotates the tarball-count failure as a workflow error (AGT-2270)", () => {
+    assert.match(runText(jobs.publish), /echo "::error::expected exactly one tarball/);
+  });
+
   it("installs with --ignore-scripts in every job", () => {
     for (const [name, job] of Object.entries(jobs)) {
       for (const line of runText(job).split("\n")) {
