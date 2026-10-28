@@ -77,6 +77,7 @@ import {
   openServerDb,
   releaseSeat,
   resolveServerRetentionPolicy,
+  retiredShortNameHolder,
   sweepExpiredSeats,
   sweepServerRetention,
   touchHeartbeat,
@@ -282,6 +283,12 @@ function acceptInvite(data: ValidatedAccept): AcceptOutcome {
   // in-process chmod would be redundant even if it could succeed.
   const db = openServerDb({ skipChmod: true });
   try {
+    // AGT-2270: a name a removed or renamed member used to hold is
+    // reserved (see retired_short_names), checked before the token is
+    // consumed so the invitee can retry with another name.
+    if (retiredShortNameHolder(db, data.short_name) !== null) {
+      return { status: 409, body: { ok: false, error: "short_name_retired" } };
+    }
     const consumed = consumeInviteToken(db, data.token);
     if (!consumed.ok) {
       const statusByReason: Record<typeof consumed.reason, number> = {

@@ -1515,7 +1515,7 @@ invites
   .option("--server <host:port>", "server endpoint when passing a bare token (no URL)")
   .option("--ssh-pubkey <path>", "override SSH pubkey path (default ~/.ssh/id_ed25519.pub)")
   .option("--stamp-pubkey <path>", "override stamp signing pubkey path (default ~/.stamp/keys/ed25519.pub)")
-  .option("--short-name <name>", "override the short_name (default derived from user@host)")
+  .option("--short-name <name>", "override the short_name (default: user-<8 hex of your SSH key>, no username or hostname)")
   .option("--yes", "skip the confirmation prompt (required for non-TTY stdin)")
   .option(
     "--insecure-http-for-dev",

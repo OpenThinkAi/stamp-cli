@@ -24,6 +24,7 @@ import {
   findUserByShortName,
   insertUser,
   openServerDb,
+  retiredShortNameHolder,
   touchLastSeen,
   type Role,
   type UserRow,
@@ -679,6 +680,54 @@ describe("touchLastSeen (AGT-422)", () => {
       assert.equal(fx.users.member1.last_seen_at, null);
       touchLastSeen(db, fx.users.member1.id, 1_700_000_000_000);
       assert.equal(findUserByShortName(db, "member1")!.last_seen_at, 1_700_000_000);
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+});
+
+describe("retired short names (AGT-2270)", () => {
+  it("a member cannot take the name of a removed user; an owner can assign it", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      assert.ok(removeUser(db, fx.users.owner1, "member2").ok);
+      const squat = setUserName(db, fx.users.member1, "member1", "member2");
+      assert.equal(squat.ok, false);
+      if (!squat.ok) assert.equal(squat.reason, "name_retired");
+      assert.ok(setUserName(db, fx.users.owner1, "member1", "member2").ok);
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("a member cannot take a name another member renamed away from, but can take back their own", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      assert.ok(setUserName(db, fx.users.member2, "member2", "bob").ok);
+      const squat = setUserName(db, fx.users.member1, "member1", "member2");
+      assert.equal(squat.ok, false);
+      if (!squat.ok) assert.equal(squat.reason, "name_retired");
+      const bob = findUserByShortName(db, "bob")!;
+      assert.ok(setUserName(db, bob, "bob", "member2").ok, "former holder may reclaim");
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
+  it("prune-idle retires the pruned names too", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      const r = pruneIdleUsers(db, fx.users.owner1, 0, Date.now() + 10_000_000);
+      assert.ok(r.ok);
+      if (!r.ok || r.removed.length === 0) return;
+      const freed = r.removed[0]!.short_name;
+      assert.equal(retiredShortNameHolder(db, freed), r.removed[0]!.id);
     } finally {
       db.close();
       fx.cleanup();

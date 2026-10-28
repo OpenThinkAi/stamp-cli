@@ -267,6 +267,17 @@ function initSchema(db: DatabaseSync): void {
     -- the AUTHORIZED_KEYS bootstrap marker (ENV_SEED_MARKER) so the env
     -- var seeds the users table once, on first boot, and never resurrects
     -- a user an operator later removed. Brand-new table; additive.
+    -- AGT-2270: short_names freed by \`stamp users remove\`, \`prune-idle\`
+    -- or a rename. \`stamp trust grant <name>\` resolves a name to a key,
+    -- so a member must not be able to take over a name someone else was
+    -- known by; owners/admins may still assign one explicitly. user_id is
+    -- the last holder (who may take it back). Brand-new table; additive.
+    CREATE TABLE IF NOT EXISTS retired_short_names (
+      short_name  TEXT PRIMARY KEY,
+      user_id     INTEGER NOT NULL,
+      retired_at  INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS server_meta (
       key         TEXT PRIMARY KEY,
       value       TEXT NOT NULL,
@@ -1148,4 +1159,28 @@ export function setServerMeta(db: DatabaseSync, key: string, value: string): voi
 export function countUsers(db: DatabaseSync): number {
   const row = db.prepare(`SELECT COUNT(*) AS n FROM users`).get() as { n: number };
   return row.n;
+}
+
+/**
+ * Record that `shortName` was freed by user `userId` (removed, pruned or
+ * renamed). AGT-2270: see the retired_short_names table.
+ */
+export function retireShortName(
+  db: DatabaseSync,
+  shortName: string,
+  userId: number,
+  now: number = Date.now(),
+): void {
+  db.prepare(
+    `INSERT INTO retired_short_names (short_name, user_id, retired_at) VALUES (?, ?, ?)
+     ON CONFLICT(short_name) DO UPDATE SET user_id = excluded.user_id, retired_at = excluded.retired_at`,
+  ).run(shortName, userId, Math.floor(now / 1000));
+}
+
+/** The user id that last held a retired `shortName`, or null if it never was. */
+export function retiredShortNameHolder(db: DatabaseSync, shortName: string): number | null {
+  const row = db
+    .prepare(`SELECT user_id FROM retired_short_names WHERE short_name = ?`)
+    .get(shortName) as { user_id: number } | undefined;
+  return row ? row.user_id : null;
 }
