@@ -1,22 +1,24 @@
 /**
- * End-to-end test for the boot-time AUTHORIZED_KEYS → sqlite seeder.
+ * End-to-end test for the boot-time AUTHORIZED_KEYS → sqlite bootstrap.
  *
- * The seeder runs as root from entrypoint.sh once per container boot. It
- * walks the AUTHORIZED_KEYS env var, INSERT-OR-NO-OPs each entry into the
- * users table as role=admin source=env, and is safe to re-run. Critical
- * properties exercised below:
+ * The seeder runs as root from entrypoint.sh on every container boot. Since
+ * AGT-2260 it imports AUTHORIZED_KEYS only into an EMPTY users table with no
+ * bootstrap marker, and records the marker so it never imports again — a
+ * user removed with `stamp users remove` must not come back on reboot.
+ * Properties exercised below:
  *
- *   - Multi-line env var with comments + blanks parses correctly
- *   - Each accepted line lands as one row with role=admin source=env
- *   - Re-running with the same env var is a no-op (boot N+1 doesn't
- *     duplicate boot N's rows)
- *   - A row manually demoted between boots (operator action via phase 3
- *     CLI, simulated here with raw UPDATE) is NOT re-promoted to admin
- *   - Malformed lines are logged but do not abort the seed; valid lines
- *     after them still land
- *   - Empty / unset AUTHORIZED_KEYS exits cleanly
- *   - short_name collisions on env keys with the same comment get
- *     auto-suffixed (-2, -3, ...) rather than failing
+ *   - First boot: each valid line lands as role=admin source=env; the
+ *     bootstrap marker is recorded
+ *   - Re-running with the same env var is a no-op
+ *   - A demoted user is not re-promoted; a removed user is not resurrected,
+ *     even when every row is removed
+ *   - Keys added to AUTHORIZED_KEYS after bootstrap are NOT imported, and
+ *     are reported by fingerprint
+ *   - Upgrade of a pre-AGT-2260 server (populated table, no marker): no
+ *     import, marker recorded, existing rows untouched
+ *   - Malformed lines are logged but do not abort the seed
+ *   - Empty / unset AUTHORIZED_KEYS exits cleanly and records no marker
+ *   - short_name collisions on same-comment keys get distinct names
  */
 
 import { strict as assert } from "node:assert";
@@ -26,7 +28,14 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { listUsers, openServerDb } from "../src/lib/serverDb.ts";
+import {
+  ENV_SEED_MARKER,
+  getServerMeta,
+  insertUser,
+  listUsers,
+  openServerDb,
+} from "../src/lib/serverDb.ts";
+import { parseSshPubkey } from "../src/lib/sshKeys.ts";
 
 const SEEDER_TS = path.resolve(
   import.meta.dirname,
@@ -213,6 +222,122 @@ describe("stamp-seed-users", () => {
       assert.notEqual(names[0], names[1]);
       // and no PII from the shared comment leaked into either name
       for (const n of names) assert.doesNotMatch(n, /shared|host/);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("records the bootstrap marker on first boot", () => {
+    const t = tmpDb();
+    try {
+      runSeeder(t.dbPath, KEY_A);
+      const db = openServerDb({ path: t.dbPath, readOnly: true });
+      const marker = getServerMeta(db, ENV_SEED_MARKER);
+      db.close();
+      assert.match(marker ?? "", /seeded 1 key/);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("does not resurrect a removed user on reboot (AGT-2260)", () => {
+    const t = tmpDb();
+    try {
+      runSeeder(t.dbPath, [KEY_A, KEY_B].join("\n"));
+      const fpB = parseSshPubkey(KEY_B).fingerprint;
+      const writer = openServerDb({ path: t.dbPath, skipChmod: true });
+      writer.prepare("DELETE FROM users WHERE ssh_fp = ?").run(fpB);
+      writer.close();
+
+      // Reboot with AUTHORIZED_KEYS unchanged: bob must stay removed.
+      const r = runSeeder(t.dbPath, [KEY_A, KEY_B].join("\n"));
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /already bootstrapped/);
+      assert.ok(r.stderr.includes(fpB), `removed key not reported: ${r.stderr}`);
+
+      const db = openServerDb({ path: t.dbPath, readOnly: true });
+      const fps = listUsers(db).map((u) => u.ssh_fp);
+      db.close();
+      assert.deepEqual(fps, [parseSshPubkey(KEY_A).fingerprint]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("does not re-seed when every user was removed", () => {
+    const t = tmpDb();
+    try {
+      runSeeder(t.dbPath, KEY_A);
+      const writer = openServerDb({ path: t.dbPath, skipChmod: true });
+      writer.prepare("DELETE FROM users").run();
+      writer.close();
+      runSeeder(t.dbPath, KEY_A);
+      const db = openServerDb({ path: t.dbPath, readOnly: true });
+      assert.equal(listUsers(db).length, 0);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("does not import keys added to AUTHORIZED_KEYS after bootstrap", () => {
+    const t = tmpDb();
+    try {
+      runSeeder(t.dbPath, KEY_A);
+      const r = runSeeder(t.dbPath, [KEY_A, KEY_B].join("\n"));
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /1 AUTHORIZED_KEYS key\(s\) are not members and were NOT added/);
+      const db = openServerDb({ path: t.dbPath, readOnly: true });
+      assert.equal(listUsers(db).length, 1);
+      db.close();
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("upgrade: a populated table without a marker is marked, not re-imported", () => {
+    const t = tmpDb();
+    try {
+      // A pre-AGT-2260 server: alice is a member (seeded on an earlier boot
+      // and later demoted); bob was removed before the upgrade but is still
+      // listed in AUTHORIZED_KEYS.
+      const a = parseSshPubkey(KEY_A);
+      const writer = openServerDb({ path: t.dbPath, skipChmod: true });
+      insertUser(writer, {
+        short_name: "alice",
+        ssh_pubkey: KEY_A,
+        ssh_fp: a.fingerprint,
+        role: "member",
+        source: "env",
+      });
+      writer.close();
+
+      const r = runSeeder(t.dbPath, [KEY_A, KEY_B].join("\n"));
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /already has 1 member\(s\); recorded bootstrap as done/);
+
+      const db = openServerDb({ path: t.dbPath, readOnly: true });
+      const users = listUsers(db);
+      const marker = getServerMeta(db, ENV_SEED_MARKER);
+      db.close();
+      assert.equal(users.length, 1);
+      assert.equal(users[0]?.short_name, "alice");
+      assert.equal(users[0]?.role, "member");
+      assert.match(marker ?? "", /existing-users/);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("records no marker when nothing was imported into an empty table", () => {
+    const t = tmpDb();
+    try {
+      runSeeder(t.dbPath, "garbage no-base64");
+      // A later boot with a valid key can still bootstrap the empty server.
+      runSeeder(t.dbPath, KEY_A);
+      const db = openServerDb({ path: t.dbPath, readOnly: true });
+      assert.equal(listUsers(db).length, 1);
+      db.close();
     } finally {
       t.cleanup();
     }

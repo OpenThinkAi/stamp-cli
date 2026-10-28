@@ -455,7 +455,7 @@ function provisionBareRepoOnServer(
   if (result.status !== 0) {
     throw new Error(
       `ssh ${server.user}@${server.host}:${server.port} new-stamp-repo ${name} failed (exit ${result.status}). ` +
-        `Common causes: server unreachable, your SSH key isn't in AUTHORIZED_KEYS, the repo already exists, ` +
+        `Common causes: server unreachable, your SSH key isn't enrolled on the server (ask an admin to run stamp invites mint), the repo already exists, ` +
         `or the host key changed (check the warning above and verify the new fingerprint matches).`,
     );
   }

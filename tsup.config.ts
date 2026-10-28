@@ -46,6 +46,9 @@ export default defineConfig([
       // SSH session gate decision helper (AGT-2265), called by the
       // stamp-gate forced command. A helper, not a verb.
       "server/gate-check": "src/server/gate-check.ts",
+      // Root-only recovery CLI (AGT-2260): enrolls / re-promotes a key in
+      // users.db from a root shell in the container. NOT a verb.
+      "server/break-glass": "src/server/break-glass.ts",
       // Boot-time prompts-cache populator. Invoked by entrypoint.sh as
       // root, after stamp-bootstrap-review-key and before the HTTP
       // server / sshd launch. No-op when STAMP_PROMPTS_REPO_URL is

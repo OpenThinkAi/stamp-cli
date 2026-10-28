@@ -9,6 +9,8 @@
  *   - peer_review_patches: one row per broadcast PR (AGT-427)
  *   - peer_review_events: append-only event log for peer-agentic reviews
  *     (AGT-427)
+ *   - server_meta: one-shot server state, e.g. the AUTHORIZED_KEYS
+ *     bootstrap marker (AGT-2260)
  *
  * Two access modes:
  *   - Writable (boot-time seed, admin operations): opens the DB read/write,
@@ -249,6 +251,16 @@ function initSchema(db: DatabaseSync): void {
       granted_by  INTEGER,
       created_at  INTEGER NOT NULL,
       PRIMARY KEY (user_id, org, repo)
+    );
+
+    -- AGT-2260: small key/value store for one-shot server state. Holds
+    -- the AUTHORIZED_KEYS bootstrap marker (ENV_SEED_MARKER) so the env
+    -- var seeds the users table once, on first boot, and never resurrects
+    -- a user an operator later removed. Brand-new table; additive.
+    CREATE TABLE IF NOT EXISTS server_meta (
+      key         TEXT PRIMARY KEY,
+      value       TEXT NOT NULL,
+      updated_at  INTEGER NOT NULL
     );
   `);
 
@@ -803,9 +815,8 @@ export function insertUser(db: DatabaseSync, input: InsertUserInput): number {
 /**
  * Idempotent insert keyed on ssh_fp. Returns the row id (newly-inserted or
  * pre-existing) and a `created` flag. Does NOT mutate role/short_name of an
- * existing row — the env-sync path runs on every boot, and we don't want
- * a manual admin demotion in the DB to be silently re-promoted by an
- * env-var entry that's still hanging around.
+ * existing row, so a manual admin demotion in the DB is never silently
+ * re-promoted by a re-import of the same key.
  *
  * If the caller's proposed short_name collides with an existing row that
  * has a DIFFERENT fingerprint, this throws. The seed-users entrypoint
@@ -953,4 +964,33 @@ export function suggestUniqueShortName(
   throw new Error(
     `could not find a unique short_name for "${desired}" after 10000 attempts`,
   );
+}
+
+// ─── Server meta (AGT-2260) ─────────────────────────────────────────
+
+/**
+ * server_meta key recording that AUTHORIZED_KEYS has bootstrapped this
+ * server. Once set, stamp-seed-users never imports from the env var again,
+ * so a key an operator removed with `stamp users remove` stays removed
+ * across reboots even if it is still listed in AUTHORIZED_KEYS.
+ */
+export const ENV_SEED_MARKER = "authorized_keys_bootstrapped";
+
+export function getServerMeta(db: DatabaseSync, key: string): string | null {
+  const row = db.prepare(`SELECT value FROM server_meta WHERE key = ?`).get(key) as
+    | { value: string }
+    | undefined;
+  return row ? row.value : null;
+}
+
+export function setServerMeta(db: DatabaseSync, key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO server_meta (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(key, value, Math.floor(Date.now() / 1000));
+}
+
+export function countUsers(db: DatabaseSync): number {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM users`).get() as { n: number };
+  return row.n;
 }

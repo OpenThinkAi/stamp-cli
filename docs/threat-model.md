@@ -91,7 +91,7 @@ gate plus the path-prefix mechanism.
 
 ### 2. SSH-authenticated pusher with no signing key
 
-**Capability:** Has an SSH key in the stamp server's `AUTHORIZED_KEYS`
+**Capability:** Has an SSH key enrolled in the stamp server's membership DB
 and can invoke `git push` and the git-shell wrappers
 (`new-stamp-repo`, `delete-stamp-repo`, …). Does not hold a private
 signing key trusted by `.stamp/trusted-keys/`.

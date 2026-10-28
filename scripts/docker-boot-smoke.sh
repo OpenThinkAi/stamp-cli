@@ -27,6 +27,8 @@ set -euo pipefail
 
 IMAGE_TAG="stamp-server-smoke:$(date +%s)-$$"
 CONTAINER_NAME="stamp-smoke-$$"
+REVOKE_CONTAINER="stamp-smoke-revoke-$$"
+REVOKE_KEYS=""
 BOOT_WAIT_SECS="${STAMP_SMOKE_BOOT_WAIT:-10}"
 
 # Files that affect how the image BUILDS or BOOTS. A pure `src/lib/*` change
@@ -68,6 +70,8 @@ fi
 # shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT`
 cleanup() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker rm -f "$REVOKE_CONTAINER" >/dev/null 2>&1 || true
+  [ -n "${REVOKE_KEYS:-}" ] && rm -rf "$REVOKE_KEYS"
   docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -145,8 +149,8 @@ echo "docker-boot-smoke: hook sees STAMP_FORBID_AI_ATTRIBUTION via /etc/stamp/en
 # line any enrolled key got a file session as the git user — bypassing
 # git-shell, pre-receive and the review gate. Drive real SSH sessions from
 # inside the container to its own sshd (no published port, so concurrent
-# smoke runs can't clash): a throwaway key goes into the git user's
-# AuthorizedKeysFile fallback, then
+# smoke runs can't clash): a throwaway key is enrolled in users.db with the
+# root-only stamp-break-glass CLI (AGT-2260), then
 #   - positive controls: a git-shell-commands verb, git push and git clone
 #     over SSH all still work (so the refusal below isn't just "auth broke");
 #   - the assertion: an sftp session is refused with sshd's
@@ -155,12 +159,8 @@ echo "docker-boot-smoke: asserting the sftp subsystem is refused while git + git
 sftp_probe_script='set -e
 k=$(mktemp -d)
 ssh-keygen -q -t ed25519 -N "" -C smoke-sftp -f "$k/id" >/dev/null
-# Enroll through users.db (the AuthorizedKeysCommand path): since AGT-2265
-# every session runs the stamp-gate forced command, which refuses keys
-# that are not in the membership DB.
-AUTHORIZED_KEYS="$(cat "$k/id.pub")" /usr/local/sbin/stamp-seed-users >/dev/null
-chown root:git /srv/git/.stamp-state/users.db
-chmod 0660 /srv/git/.stamp-state/users.db
+# Enroll through users.db, the only source of SSH access (AGT-2260).
+/usr/local/sbin/stamp-break-glass add "$k/id.pub" >/dev/null
 SSH_OPTS="-i $k/id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 export GIT_SSH_COMMAND="ssh $SSH_OPTS"
 
@@ -199,8 +199,9 @@ echo "docker-boot-smoke: sftp refused; git push/clone + git-shell-commands work 
 # AGT-2259: the repo-management verbs are role-gated. Every SSH user runs
 # them as the Unix user `git`, so before the fix any enrolled key —
 # including role=member — could create, delete, purge or restore any repo.
-# Enroll two throwaway keys in users.db (seeded as admin, the second then
-# demoted to member) and drive the verbs over real SSH sessions:
+# Enroll two throwaway keys in users.db (added as admin with
+# stamp-break-glass, the second then demoted to member) and drive the
+# verbs over real SSH sessions:
 #   - member: new / delete / delete --purge / restore are each refused with
 #     exit 3 and leave the repo and its trash copy untouched;
 #   - admin: the same four verbs succeed (create → soft delete → restore →
@@ -210,9 +211,7 @@ role_gate_script='set -e
 k=$(mktemp -d)
 ssh-keygen -q -t ed25519 -N "" -C smoke-admin -f "$k/admin" >/dev/null
 ssh-keygen -q -t ed25519 -N "" -C smoke-member -f "$k/member" >/dev/null
-AUTHORIZED_KEYS="$(cat "$k/admin.pub" "$k/member.pub")" /usr/local/sbin/stamp-seed-users >/dev/null
-chown root:git /srv/git/.stamp-state/users.db
-chmod 0660 /srv/git/.stamp-state/users.db
+cat "$k/admin.pub" "$k/member.pub" | /usr/local/sbin/stamp-break-glass add - >/dev/null
 member_fp=$(ssh-keygen -lf "$k/member.pub" | awk "{print \$2}")
 node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"/srv/git/.stamp-state/users.db\");const r=db.prepare(\"UPDATE users SET role=? WHERE ssh_fp=?\").run(\"member\",process.argv[1]);if(r.changes!==1)process.exit(1)" "$member_fp"
 # new-stamp-repo seeds the operator key as the first trusted signer; the
@@ -264,18 +263,13 @@ echo "docker-boot-smoke: member refused new/delete/purge/restore; admin admitted
 #   - admin: create, clone, push, list-trash, resync-mirror all work, and
 #     dot-dirs are refused for admins too;
 #   - member with a repo grant: only the repo whose .stamp/mirror.yml maps
-#     to the grant; other repos and list-stamp-repos are refused;
-#   - a key in the legacy AuthorizedKeysFile (written by entrypoint's
-#     helper) still goes through the gate, so an unenrolled one is refused.
+#     to the grant; other repos and list-stamp-repos are refused.
 echo "docker-boot-smoke: asserting the SSH gate scopes reads and keeps git + verbs working…"
 read_gate_script='set -e
 k=$(mktemp -d)
 ssh-keygen -q -t ed25519 -N "" -C smoke-radmin -f "$k/admin" >/dev/null
 ssh-keygen -q -t ed25519 -N "" -C smoke-rmember -f "$k/member" >/dev/null
-ssh-keygen -q -t ed25519 -N "" -C smoke-legacy -f "$k/legacy" >/dev/null
-AUTHORIZED_KEYS="$(cat "$k/admin.pub" "$k/member.pub")" /usr/local/sbin/stamp-seed-users >/dev/null
-chown root:git /srv/git/.stamp-state/users.db
-chmod 0660 /srv/git/.stamp-state/users.db
+cat "$k/admin.pub" "$k/member.pub" | /usr/local/sbin/stamp-break-glass add - >/dev/null
 member_fp=$(ssh-keygen -lf "$k/member.pub" | awk "{print \$2}")
 node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"/srv/git/.stamp-state/users.db\");const r=db.prepare(\"UPDATE users SET role=? WHERE ssh_fp=?\").run(\"member\",process.argv[1]);if(r.changes!==1)process.exit(1)" "$member_fp"
 node -e "process.stdout.write(require(\"node:crypto\").generateKeyPairSync(\"ed25519\").publicKey.export({type:\"spki\",format:\"pem\"}))" > /etc/stamp/operator.pub
@@ -341,17 +335,6 @@ expect_clone_refused member "/srv/git/rg-live.git" "not found or not permitted"
 expect_clone_refused member "/srv/git/rg-nope.git" "not found or not permitted"
 expect_rc 3 member list-stamp-repos
 
-# Legacy AuthorizedKeysFile: gated too, so an unenrolled key gets nothing.
-. /lib/gate-authorized-keys.sh
-_gate_authorized_keys < "$k/legacy.pub" > /home/git/.ssh/authorized_keys
-chown git:git /home/git/.ssh/authorized_keys
-chmod 0600 /home/git/.ssh/authorized_keys
-grep -q "^command=\"stamp-gate legacy\",restrict ssh-ed25519 " /home/git/.ssh/authorized_keys || fail "legacy file line is not gated"
-expect_rc 1 legacy list-stamp-repos
-grep -q "not in the membership DB" "$k/out" || fail "legacy key: wrong refusal"
-expect_clone_refused legacy "/srv/git/rg-live.git" "not in the membership DB"
-: > /home/git/.ssh/authorized_keys
-
 as admin delete-stamp-repo rg-live --purge >/dev/null
 as admin delete-stamp-repo rg-doomed --purge >/dev/null
 rm -rf /srv/git/rg-plain.git /srv/git/rg-mapped.git /srv/git/.prompts-cache "$k" /etc/stamp/operator.pub
@@ -361,6 +344,116 @@ if ! docker exec "$CONTAINER_NAME" sh -c "$read_gate_script"; then
   exit 1
 fi
 echo "docker-boot-smoke: gate refuses .trash/.prompts-cache/ungranted repos; git + verbs work ✓"
+
+# AGT-2260: users.db is the only source of SSH access, and a removed user
+# stays removed across reboots. A second container boots with
+# AUTHORIZED_KEYS listing two keys (op, gone), so the first boot bootstraps
+# both as admins. Over real SSH sessions:
+#   - the root-only stamp-break-glass CLI works as root, but is not
+#     reachable as git (not executable) nor over SSH (not a verb);
+#   - op (promoted to owner with stamp-break-glass) removes gone with
+#     `stamp-users remove`, and gone is refused at authentication;
+#   - a key only in /home/git/.ssh/authorized_keys{,2} is refused
+#     (AuthorizedKeysFile none);
+#   - after `docker restart` with AUTHORIZED_KEYS unchanged, the entrypoint
+#     re-runs the seeder: gone is still refused, op still works, and the
+#     stale authorized_keys file is deleted.
+echo "docker-boot-smoke: asserting key revocation survives a reboot and break-glass is root-only…"
+REVOKE_KEYS=$(mktemp -d)
+for who in op gone fileonly; do
+  ssh-keygen -q -t ed25519 -N "" -C "smoke-$who" -f "$REVOKE_KEYS/$who" >/dev/null
+done
+docker run -d --name "$REVOKE_CONTAINER" \
+  -e AUTHORIZED_KEYS="$(cat "$REVOKE_KEYS/op.pub" "$REVOKE_KEYS/gone.pub")" \
+  "$IMAGE_TAG" >/dev/null
+
+wait_sshd() {
+  for _ in $(seq 1 60); do
+    if docker exec "$REVOKE_CONTAINER" nc -z 127.0.0.1 22 >/dev/null 2>&1; then return 0; fi
+    sleep 0.5
+  done
+  echo "error: sshd in $REVOKE_CONTAINER did not come up" >&2
+  docker logs "$REVOKE_CONTAINER" 2>&1 | tail -40 >&2 || true
+  return 1
+}
+wait_sshd
+docker exec "$REVOKE_CONTAINER" mkdir -m 0700 /root/rk
+for f in op op.pub gone gone.pub fileonly fileonly.pub; do
+  docker cp "$REVOKE_KEYS/$f" "$REVOKE_CONTAINER:/root/rk/$f" >/dev/null
+done
+
+revoke_common='set -e
+k=/root/rk
+chown root:root $k/*
+chmod 0600 $k/op $k/gone $k/fileonly
+OPTS="-o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+as() { who=$1; shift; ssh $OPTS -i "$k/$who" git@127.0.0.1 "$@"; }
+fail() { echo "$*" >&2; [ -f "$k/out" ] && cat "$k/out" >&2; exit 1; }
+expect_authfail() {
+  who=$1
+  set +e; as "$who" list-stamp-repos >"$k/out" 2>&1; rc=$?; set -e
+  [ $rc -eq 255 ] && grep -q "Permission denied (publickey" "$k/out" || fail "$who was NOT refused at authentication (exit $rc)"
+}
+fp() { ssh-keygen -lf "$k/$1.pub" | awk "{print \$2}"; }
+'
+
+revoke_boot1="$revoke_common"'
+as op list-stamp-repos >/dev/null || fail "bootstrapped key op cannot connect"
+as gone list-stamp-repos >/dev/null || fail "bootstrapped key gone cannot connect"
+
+# Break-glass: works as root, not as git, not over SSH.
+/usr/local/sbin/stamp-break-glass list >"$k/out" || fail "stamp-break-glass list failed as root"
+grep -q "$(fp gone)" "$k/out" || fail "break-glass list does not show the bootstrapped keys"
+[ "$(stat -c "%U:%G %a" /usr/local/sbin/stamp-break-glass)" = "root:root 700" ] || fail "stamp-break-glass is not root:root 0700"
+if su -s /bin/sh git -c "/usr/local/sbin/stamp-break-glass add --role owner /dev/null" >"$k/out" 2>&1; then fail "git user could run stamp-break-glass"; fi
+set +e; as op stamp-break-glass list >"$k/out" 2>&1; rc=$?; set -e
+[ $rc -eq 2 ] || fail "stamp-break-glass was reachable over SSH (exit $rc)"
+set +e; as op /usr/local/sbin/stamp-break-glass list >"$k/out" 2>&1; rc=$?; set -e
+[ $rc -eq 2 ] || fail "/usr/local/sbin/stamp-break-glass was reachable over SSH (exit $rc)"
+/usr/local/sbin/stamp-break-glass add --role owner "$k/op.pub" >/dev/null || fail "break-glass promote failed"
+[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state/users.db)" = "root:git 660" ] || fail "users.db not root:git 0660 after break-glass"
+
+# Revoke gone through the documented CLI path.
+gone_name=$(/usr/local/sbin/stamp-break-glass list | awk -F"\t" -v fp="$(fp gone)" "\$4==fp {print \$5}")
+[ -n "$gone_name" ] || fail "could not resolve gone short_name"
+as op stamp-users remove "$gone_name" >"$k/out" 2>&1 || fail "owner could not remove gone"
+expect_authfail gone
+
+# A key only in the per-user authorized_keys files is refused.
+cp "$k/fileonly.pub" /home/git/.ssh/authorized_keys
+cp "$k/fileonly.pub" /home/git/.ssh/authorized_keys2
+chown git:git /home/git/.ssh/authorized_keys /home/git/.ssh/authorized_keys2
+chmod 0600 /home/git/.ssh/authorized_keys /home/git/.ssh/authorized_keys2
+expect_authfail fileonly
+'
+if ! docker exec "$REVOKE_CONTAINER" sh -c "$revoke_boot1"; then
+  echo "error: key-revocation / break-glass assertion failed (AGT-2260, first boot) — see above." >&2
+  exit 1
+fi
+
+echo "docker-boot-smoke: restarting the container with AUTHORIZED_KEYS unchanged…"
+docker restart "$REVOKE_CONTAINER" >/dev/null
+wait_sshd
+revoke_boot2="$revoke_common"'
+expect_authfail gone
+as op list-stamp-repos >/dev/null || fail "op lost access after reboot"
+/usr/local/sbin/stamp-break-glass list >"$k/out"
+grep -q "$(fp gone)" "$k/out" && fail "removed key gone was re-seeded on reboot"
+[ ! -e /home/git/.ssh/authorized_keys ] || fail "stale /home/git/.ssh/authorized_keys survived the reboot"
+'
+if ! docker exec "$REVOKE_CONTAINER" sh -c "$revoke_boot2"; then
+  echo "error: removed key came back after reboot (AGT-2260) — see above." >&2
+  exit 1
+fi
+# Capture first: `docker logs | grep -q` can SIGPIPE docker under pipefail.
+revoke_logs=$(docker logs "$REVOKE_CONTAINER" 2>&1)
+printf '%s\n' "$revoke_logs" | grep "already bootstrapped" >/dev/null || {
+  echo "error: second boot did not report the bootstrap marker (AGT-2260)." >&2
+  printf '%s\n' "$revoke_logs" | tail -40 >&2
+  exit 1
+}
+docker rm -f "$REVOKE_CONTAINER" >/dev/null 2>&1 || true
+echo "docker-boot-smoke: removed key stays refused across reboot; file-only key refused; break-glass root-only ✓"
 
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"

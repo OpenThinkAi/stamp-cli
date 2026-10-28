@@ -2,8 +2,8 @@
  * `stamp-gate-check` — the decision half of the SSH session gate (AGT-2265).
  *
  * sshd runs every session as the forced command `stamp-gate <user-id>`
- * (from the AuthorizedKeysCommand resolver) or `stamp-gate legacy` (keys
- * entrypoint.sh writes to the AuthorizedKeysFile). `stamp-gate` is a thin
+ * (from the AuthorizedKeysCommand resolver — the only source of SSH access
+ * since AGT-2260 set `AuthorizedKeysFile none`). `stamp-gate` is a thin
  * shell verb in git-shell-commands that calls this helper and, on success,
  * execs `git-shell -c "<the command this helper printed>"`.
  *
@@ -41,8 +41,8 @@ function fail(message: string, code: number): never {
 function main(): void {
   const argv = process.argv.slice(2);
   const bound = argv[0];
-  if (argv.length !== 1 || !bound || !(bound === "legacy" || /^[1-9][0-9]{0,15}$/.test(bound))) {
-    fail("usage: stamp-gate-check <user-id|legacy>", 1);
+  if (argv.length !== 1 || !bound || !/^[1-9][0-9]{0,15}$/.test(bound)) {
+    fail("usage: stamp-gate-check <user-id>", 1);
   }
 
   const parsed = parseOriginalCommand(process.env["SSH_ORIGINAL_COMMAND"]);
@@ -63,7 +63,7 @@ function main(): void {
   try {
     const row = findUserBySshFingerprint(db, pk.fingerprint);
     if (!row) fail(`caller fingerprint ${pk.fingerprint} is not in the membership DB.`, 1);
-    if (bound !== "legacy" && String(row.id) !== bound) {
+    if (String(row.id) !== bound) {
       fail("authenticated key does not match the user this session was issued for.", 1);
     }
     caller = { role: row.role, grants: listRepoGrants(db, row.id) };

@@ -2,10 +2,8 @@
  * SSH pubkey parsing + fingerprint regression tests. The fingerprint format
  * is load-bearing: the AuthorizedKeysCommand resolver looks users up by the
  * exact string sshd emits via %f. If the format ever drifts from sshd's
- * own, every connection silently misses the DB and falls back to the
- * legacy AuthorizedKeysFile — a regression that would be invisible in
- * normal operation (legacy path still works) but break the entire phase 2+
- * onboarding surface.
+ * own, every connection silently misses the DB and — with AuthorizedKeysFile
+ * none (AGT-2260) — every SSH login is refused.
  *
  * Fingerprints below were computed externally with `ssh-keygen -lf` against
  * the corresponding pubkey to lock the format. Any change to
