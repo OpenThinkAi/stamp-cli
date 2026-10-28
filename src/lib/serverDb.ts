@@ -92,9 +92,9 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
 
   if (!readOnly) {
     const dir = dirname(path);
-    ensureDir(dir, 0o1770);
+    ensureDir(dir, 0o3770);
     if (!opts.skipChmod) {
-      // 0o1770 = sticky bit (1) + rwx for owner + rwx for group + nothing
+      // 0o3770 = setgid (2) + sticky (1) + rwx for owner + rwx for group + nothing
       // for other. Matches the chmod entrypoint.sh sets, intentionally:
       //   - The 0o770 portion is required for sqlite to write its
       //     `-journal` sidecar in this dir on every transaction (the
@@ -107,14 +107,21 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
       //     so any future root-owned state file landing here is
       //     protected from a git-shell-escapee even though the dir
       //     is otherwise group-writable.
-      // We must mirror the sticky bit here (not just rely on
+      //   - The setgid bit (2, AGT-2264) makes every file created in
+      //     the dir — sqlite's -journal sidecar included — inherit the
+      //     dir's group (stamp-db), whichever user created it. The git
+      //     user and the stamp-http listener both write this DB with
+      //     different primary groups; without setgid a hot journal left
+      //     by a crash of one is unreadable to the other, wedging the DB
+      //     (including the SSH key resolver) until root intervenes.
+      // We must mirror the sticky + setgid bits here (not just rely on
       // entrypoint.sh) because seed-users.ts opens the DB writable
       // (no skipChmod) as root at boot, and a chmod 0o770 here
-      // would silently STRIP the sticky bit entrypoint just set.
+      // would silently STRIP the bits entrypoint just set.
       // ensureDir no-ops on an existing directory, so this explicit
       // chmod is what re-applies sticky+770 on a redeploy where the
       // dir was created at an earlier looser mode.
-      chmodSync(dir, 0o1770);
+      chmodSync(dir, 0o3770);
     }
   }
 
@@ -131,7 +138,8 @@ export function openServerDb(opts: OpenServerDbOpts = {}): DatabaseSync {
     db.exec("PRAGMA foreign_keys = ON");
     initSchema(db);
     if (!opts.skipChmod && existsSync(path)) {
-      // root:git 0660. The HTTP server (git user) writes new user rows
+      // root:stamp-db 0660 (AGT-2264; root:git before). The HTTP server
+      // (stamp-http user, stamp-db group) writes new user rows
       // on invite-accept; the AuthorizedKeysCommand resolver also runs
       // as git but opens readOnly:true so the write bit is dormant on
       // its path. Chown is the operator's responsibility (entrypoint.sh

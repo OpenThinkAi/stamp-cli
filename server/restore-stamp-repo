@@ -146,4 +146,6 @@ if [ -e "$DEST" ]; then
 fi
 
 mv "$SOURCE" "$DEST"
+# AGT-2264: a repo trashed before the upgrade may still be world-readable.
+chmod o-rwx "$DEST"
 echo "restored: $DEST (from $SOURCE)"

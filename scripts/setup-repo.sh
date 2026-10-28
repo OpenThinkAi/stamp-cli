@@ -301,6 +301,8 @@ if [[ -n "$FROM_TARBALL" ]]; then
 
   echo "→ creating bare repo at $REPO_DIR"
   git init --bare --quiet --initial-branch=main --object-format="$OBJECT_FORMAT" "$REPO_DIR"
+  # AGT-2264: closed to "other" (the stamp-http listener user).
+  chmod o-rwx "$REPO_DIR"
 
   echo "→ importing refs and objects from tarball into $REPO_DIR"
   # Hooks are not installed yet, and fetch never runs receive hooks anyway:
@@ -323,6 +325,8 @@ if [[ -n "$FROM_TARBALL" ]]; then
 else
   echo "→ creating bare repo at $REPO_DIR"
   git init --bare --quiet --initial-branch=main "$REPO_DIR"
+  # AGT-2264: closed to "other" (the stamp-http listener user).
+  chmod o-rwx "$REPO_DIR"
 
   # Seed BEFORE installing the hook — this is the bootstrap bypass per DESIGN.md.
   # Once the hook is in place, every push is verified.

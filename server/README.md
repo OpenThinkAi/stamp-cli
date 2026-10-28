@@ -31,8 +31,15 @@ protected branches defined in each repo's committed `.stamp/config.yml`.
   boot fails if the key has any other owner or mode. A key that an older
   image left git-owned is re-owned to `root:root` on the first boot of
   this image.
+- `/usr/local/sbin/stamp-http-server` — the HTTP listener (port 8080:
+  invite accept, prompts webhook, peer endpoints). Runs as the unprivileged
+  `stamp-http` user with an allowlisted environment; see
+  [What the HTTP listener can reach](#what-the-http-listener-can-reach)
+- `/usr/local/sbin/stamp-workers` — the git-user background workers (prompts
+  poll and webhook-triggered refresh, trash sweep). Opens no socket
 - `/entrypoint.sh` — bootstraps the membership DB from `AUTHORIZED_KEYS` on
-  first boot, writes the operator pub key from env, then boots sshd
+  first boot, writes the operator pub key from env, starts the HTTP listener
+  and the workers, then boots sshd
 
 ## Reviewer prompts
 
@@ -166,13 +173,14 @@ After setting the env vars and triggering a redeploy, container logs should show
    ```
    stamp-http-server <ts> info listening on :8080
    ```
-6. **Periodic-poll worker** (when `STAMP_PROMPTS_REPO_URL` is set AND interval > 0):
+6. **Periodic-poll worker** (when `STAMP_PROMPTS_REPO_URL` is set AND interval > 0). It runs in the `stamp-workers` process, not the listener:
    ```
-   stamp-http-server <ts> info prompts-poll: started (interval=3600s, url=..., ref=main, cacheRoot=/srv/git/.prompts-cache)
+   stamp-workers <ts> info prompts-poll: started (interval=3600s, url=..., ref=main, cacheRoot=/srv/git/.prompts-cache)
+   stamp-workers <ts> info prompts-trigger: watching /run/stamp-http/prompts-refresh
    ```
    Or, if explicitly opted out:
    ```
-   stamp-http-server <ts> info prompts-poll: disabled (STAMP_PROMPTS_POLL_INTERVAL_SEC=0)
+   stamp-workers <ts> info prompts-poll: disabled (STAMP_PROMPTS_POLL_INTERVAL_SEC=0)
    ```
 
 Absence of any `prompts-cache: ready` line on boot means the boot-time populate didn't run — `STAMP_PROMPTS_REPO_URL` is unset and the server is still on Phase A. Absence of any `prompts-poll: started` line on boot when `STAMP_PROMPTS_REPO_URL` IS set means the worker was gated off (interval=0) or the env-var resolution fell back to default with a warn-line first.
@@ -193,7 +201,7 @@ Production log lines (grep on `prompts-poll:`):
 | `prompts-poll: refresh failed: <message>` | Transient failure; next tick will retry |
 | `prompts-poll: skipping tick — previous refresh still in flight` | Defensive skip (e.g. a slow git fetch over a saturated link) |
 
-The poll worker and the webhook route share the same in-process refresh state and the cache module's own coalescing — concurrent poll + webhook calls collapse to a single git fetch.
+The poll worker and webhook-triggered refreshes both run in the `stamp-workers` process and share its refresh state and the cache module's own coalescing — concurrent poll + webhook calls collapse to a single git fetch. The listener only verifies the webhook signature and then replaces the trigger file `/run/stamp-http/prompts-refresh`; `stamp-workers` notices it within a second and logs `webhook/prompts refresh start delivery=<id>` / `refresh ok`.
 
 For webhook-only mode (no periodic polling, e.g. dev deploys where the hourly tick clutters logs), set `STAMP_PROMPTS_POLL_INTERVAL_SEC=0` explicitly.
 
@@ -710,7 +718,7 @@ stamp-break-glass list            # id, role, source, fingerprint, name
 `stamp-break-glass add [--role admin|owner] <pubkey-file | ->` adds each key
 that isn't enrolled (`source=manual`) and sets the role of one that is
 (default `admin`). It never removes anyone. It re-pins `users.db` to
-`root:git 0660` afterwards. The binary is `root:root 0700` in
+`root:stamp-db 0660` afterwards. The binary is `root:root 0700` in
 `/usr/local/sbin`, refuses any uid but 0, and is not an SSH verb, so it
 can't be reached as `git`.
 
@@ -880,6 +888,87 @@ negotiated outside the shell are switched off separately in
 
 For container-level diagnostics — log inspection, manual hook refresh,
 disk usage — use your platform's web console or `<platform> exec`.
+
+## What the HTTP listener can reach
+
+Port 8080 is the most exposed surface in the container: it is public on
+Railway and takes unauthenticated invite-accept and webhook traffic. So the
+listener (`stamp-http-server`) gets as little as the image can give it.
+
+**Who it runs as.** The system user `stamp-http`: no password, no login
+shell, home `/var/empty`, no sudo rule. It is not `git` and not in the `git`
+group. Its only supplementary group is `stamp-db`, which it shares with
+`git`, and which owns nothing but the membership DB directory.
+
+**What environment it gets.** The entrypoint starts it from `env -i`, not
+`su -p`, so it inherits none of the container env. It receives `PATH`,
+`HOME=/var/empty` and, if set, exactly these (from
+`server/lib/allowlisted-env.sh`):
+
+| Variable | Why |
+|---|---|
+| `STAMP_HTTP_PORT` | listening port |
+| `STAMP_SERVER_DB_PATH` | DB location override |
+| `STAMP_PROMPTS_WEBHOOK_SECRET` | verifies the webhook HMAC (the one secret it holds) |
+| `STAMP_PROMPTS_REFRESH_TRIGGER` | set by the entrypoint; where to hand off a verified webhook |
+| `STAMP_PEER_REVIEWS_ENABLED`, `STAMP_PEER_EVENTS_POLL_INTERVAL_SEC`, `SEAT_TTL_SECONDS`, `CLAIM_SEAT_RATE_CAP`, `REGISTER_EXTRA_RATE_CAP` | peer-review endpoints |
+
+`GITHUB_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `AUTHORIZED_KEYS`,
+`OPERATOR_PUB_KEY`, `STAMP_PROMPTS_REPO_URL` (it can carry credentials) and
+every platform variable stay out of its environment.
+
+**What it can and cannot touch.**
+
+| Path | Listener access |
+|---|---|
+| `/srv/git/.stamp-state/users.db` (`root:stamp-db 0660`) | read + write: invite accept, peer seats/events |
+| `/srv/git/.stamp-state/` (`root:stamp-db 3770`) | create sqlite journals; sticky, so it can't delete or rename root's files |
+| `/srv/git/.stamp-state/review-signing-key.pem` (`root:root 0600`) | none; it can read the `.pub` |
+| `/run/stamp-http/` (its own) | writes the prompts refresh trigger |
+| `/srv/git` (`git:git 1751`) | traverse only, can't list |
+| bare repos, `.trash` (`o-rwx`), `.prompts-cache` (`git:git 0750`) | none |
+| `/srv/git/.ssh-client-keys/` (mirror and prompts deploy keys, `root:git 0750`) | none |
+| `/etc/stamp/env` (`root:git 0640`, bot token + API key) | none |
+| `/proc/<pid>/environ` of sshd, hooks, workers | none (other uids) |
+| `sudo stamp-sign-approval` / `stamp-ensure-repo-key` | none; those rules are `git`'s only |
+
+What a listener compromise still gets: the webhook secret, read/write on
+the membership DB (it could add a user row and so gain SSH access as a
+`git`-shell user, gated by roles and the session gate like any member), and
+the ability to ask `stamp-workers` for a prompts refresh. It no longer gets
+the GitHub token, the Anthropic key, the deploy keys, the repos, or the
+`git` user.
+
+**The workers.** The prompts poll and webhook-triggered refresh (they need
+the prompts deploy key and the git-owned cache) and the trash sweep (it
+deletes git-owned trashed repos) moved out of the listener into
+`stamp-workers`, which runs as `git` with umask 027, opens no socket, and
+gets its own allowlist (`STAMP_PROMPTS_*` except the webhook secret,
+`GIT_SSH_KNOWN_HOSTS`, `STAMP_TRASH_*`). It has no bot token or API key
+either. The boot-time `stamp-prompts-cache-bootstrap` runs with the same
+allowlist.
+
+**Adding a knob.** A new env var the listener or workers read must be added
+to its allowlist in `server/lib/allowlisted-env.sh`, or it silently does
+nothing in the image. `tests/allowlistedEnvShell.test.ts` fails when the
+source reads a variable that neither list carries.
+
+### Upgrading to this layout
+
+The first boot of this image converts an existing volume in place; no
+operator step is needed:
+
+- `.stamp-state` becomes `root:stamp-db 3770` and `users.db` (plus any
+  leftover `-journal`/`-wal`/`-shm`) group `stamp-db`. `git` is a `stamp-db`
+  member, so SSH verbs and the key resolver keep working.
+- `/srv/git` becomes `1751`; every existing bare repo, `.trash` and the
+  prompts cache lose their "other" bits. New and restored repos are created
+  that way.
+- The listener log prefix stays `stamp-http-server`; prompts-poll,
+  prompts-trigger and trash-sweep lines now come from `stamp-workers`.
+
+If you run your own tooling as a non-`git` user that reads repos directly
+from the volume, it now needs to run as `git` or root.
 
 ## Container runtime — runs as root (accepted trade-off)
 

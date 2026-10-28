@@ -41,7 +41,16 @@ chown -h git:git /srv/git 2>/dev/null || true
 for r in /srv/git/*.git; do
   [ -d "$r" ] && [ ! -L "$r" ] || continue
   chown -R -h git:git "$r" 2>/dev/null || true
+  # AGT-2264: no access for "other". The HTTP listener runs as stamp-http,
+  # which is neither git nor in the git group; a bare repo created with the
+  # default umask is world-readable, so without this a listener compromise
+  # could read every repo. Only the top-level dir needs it (it blocks
+  # traversal); setup-repo.sh / restore-stamp-repo apply it to new repos.
+  chmod o-rwx "$r" 2>/dev/null || true
 done
+if [ -d /srv/git/.trash ] && [ ! -L /srv/git/.trash ]; then
+  chmod o-rwx /srv/git/.trash
+fi
 
 # Sticky bit on /srv/git: prevents the git user from renaming or deleting
 # root-owned subdirectories like .ssh-host-keys. Without sticky, write
@@ -49,7 +58,13 @@ done
 # regardless of child ownership; the prior chmod 700 on .ssh-host-keys
 # only protected the contents, not the directory entry. Sticky bit is the
 # canonical fix (mirrors /tmp).
-chmod +t /srv/git
+#
+# Mode 1751 (AGT-2264): "other" — which now includes the stamp-http
+# listener user — may traverse /srv/git (it must reach
+# .stamp-state/users.db) but not list it. Every entry inside it is closed to
+# "other" by its own mode (repos and .trash o-rwx above, the key dirs
+# root-only / root:git, .stamp-state root:stamp-db).
+chmod 1751 /srv/git
 
 # Refresh stamp hooks in every existing bare repo.
 #
@@ -64,8 +79,8 @@ chmod +t /srv/git
 # there — a planted hooks/ or hooks/<name> link is replaced, never written
 # through, and each hook is staged root-only and rename(2)d into place. See
 # lib/refresh-repo-hooks.sh. It MUST run here, after the scoped chown and
-# before anything runs as git (the prompts-cache bootstrap, the HTTP
-# listener, sshd): its lstat-then-rename steps are only race-free while no
+# before anything runs as git or stamp-http (the prompts-cache bootstrap,
+# stamp-workers, the HTTP listener, sshd): its lstat-then-rename steps are only race-free while no
 # git-user process exists. A hook refreshed at boot is not permanent — git
 # owns the repo directory and can still swap hooks/ between boots; the next
 # boot replaces it again.
@@ -130,7 +145,15 @@ fi
 # (which writes new user rows). The DB lives on the persistent volume
 # so it survives container redeploys.
 #
-# Directory mode: root:git 1770. The 0770 bits give the git user
+# Group (AGT-2264): stamp-db, not git. The git user AND the stamp-http
+# listener user are both members; stamp-http is deliberately NOT in the git
+# group (which reads /etc/stamp/env and the root:git key directory), so the
+# DB is shared through a group that grants nothing else. The leading setgid
+# bit (2) makes every file created in the dir — sqlite's -journal sidecar
+# included — inherit group stamp-db, so a hot journal left by a crash of
+# either writer stays readable by the other.
+#
+# Directory mode: root:stamp-db 3770. The 0770 bits give the git user
 # write+create access in the directory, which sqlite needs to write
 # its `-journal` sidecar files on every transaction (without it,
 # sqlite silently demotes to read-only and every UPDATE throws
@@ -141,11 +164,11 @@ fi
 # Phase 1 had 0750 here, which broke the write path; we found this
 # the first time someone tried `stamp users promote` end-to-end.
 #
-# File mode: root:git 0660. The HTTP server runs as the git user and
-# needs WRITE access for invite/accept (new user rows). The
-# AuthorizedKeysCommand resolver also runs as git but opens the DB
-# `readOnly: true` in code, so it can't mutate state even with the
-# write bit set.
+# File mode: root:stamp-db 0660. The HTTP server (stamp-http) needs WRITE
+# access for invite/accept (new user rows) and the peer seat endpoints;
+# the git-run SSH verbs write it too. The AuthorizedKeysCommand resolver
+# runs as git but opens the DB `readOnly: true` in code, so it can't
+# mutate state even with the write bit set.
 #
 # stamp-seed-users bootstraps the users table from AUTHORIZED_KEYS ONCE
 # (AGT-2260): only when the table is empty and no bootstrap marker is
@@ -155,18 +178,26 @@ fi
 # user removed with `stamp users remove` is not resurrected on restart.
 STAMP_STATE_DIR=/srv/git/.stamp-state
 mkdir -p "$STAMP_STATE_DIR"
-chown root:git "$STAMP_STATE_DIR"
-chmod 1770 "$STAMP_STATE_DIR"
+chown root:stamp-db "$STAMP_STATE_DIR"
+chmod 3770 "$STAMP_STATE_DIR"
 # Export so child processes (stamp-bootstrap-review-key below; future
 # state-dir-aware helpers) can resolve the same location without
 # re-hardcoding the path. The DB-write code paths above use the shell
 # var directly, so no behavior change for them.
 export STAMP_STATE_DIR
 if /usr/local/sbin/stamp-seed-users; then
-  if [ -f "$STAMP_STATE_DIR/users.db" ]; then
-    chown root:git "$STAMP_STATE_DIR/users.db"
+  if [ -f "$STAMP_STATE_DIR/users.db" ] && [ ! -L "$STAMP_STATE_DIR/users.db" ]; then
+    chown root:stamp-db "$STAMP_STATE_DIR/users.db"
     chmod 0660 "$STAMP_STATE_DIR/users.db"
   fi
+  # Upgrade (AGT-2264): sidecars an earlier image left behind carry group
+  # git, which stamp-http can't open. Re-group them (never via a symlink).
+  for _side in "$STAMP_STATE_DIR/users.db-journal" "$STAMP_STATE_DIR/users.db-wal" "$STAMP_STATE_DIR/users.db-shm"; do
+    if [ -f "$_side" ] && [ ! -L "$_side" ]; then
+      chgrp stamp-db "$_side" && chmod 0660 "$_side"
+    fi
+  done
+  unset _side
 else
   # Don't abort the boot: existing members in users.db keep working. There
   # is no file fallback (AuthorizedKeysFile none) — a server with an empty
@@ -198,8 +229,10 @@ fi
 # sudoers rule; the helper only signs a well-formed approval under its
 # own key id). The .pub sibling is root:root 0644 and git-readable —
 # stamp-review and the stamp-server-pubkey wrapper read it. Both live
-# in $STAMP_STATE_DIR, 1770 root:git, so the git user can traverse but
-# not delete/rename the root-owned files within.
+# in $STAMP_STATE_DIR, 3770 root:stamp-db, so the git user (a stamp-db
+# member) can traverse but not delete/rename the root-owned files within.
+# The stamp-http listener is also a stamp-db member: it can read the .pub
+# but not the 0600 private key, and has no sudo rule for the helper.
 #
 # Upgrade: earlier images' boot-time `chown -R git:git /srv/git` left
 # the key git-owned. The bootstrap re-owns a key (and .pub) in exactly
@@ -208,7 +241,19 @@ if /usr/local/sbin/stamp-bootstrap-review-key; then
   # Successful bootstrap. The script handles its own logging
   # (silent on disabled-capability skip, loud banner on first
   # generation, one-line reuse note on subsequent boots).
-  :
+  #
+  # AGT-2264: $STAMP_STATE_DIR is setgid stamp-db, so a key minted there
+  # inherits group stamp-db. The 0600 / 0644 modes already keep the private
+  # half from the group, but pin the group back to root so the key stays
+  # exactly root:root (never via a symlink).
+  _rk="${REVIEW_SIGNING_KEY_PATH:-$STAMP_STATE_DIR/review-signing-key.pem}"
+  case "$_rk" in *.pem) _rp="${_rk%.pem}.pub" ;; *) _rp="$_rk.pub" ;; esac
+  for _f in "$_rk" "$_rp"; do
+    if [ -f "$_f" ] && [ ! -L "$_f" ] && [ "$(stat -c %u "$_f")" = 0 ]; then
+      chgrp root "$_f"
+    fi
+  done
+  unset _rk _rp _f
 else
   # Lowercase `error: ` prefix to match the codebase convention; the
   # Node layer already uses it (process.stderr.write("error: ...")).
@@ -217,6 +262,10 @@ else
   echo "error: stamp-bootstrap-review-key failed; aborting startup" >&2
   exit 1
 fi
+
+# Env allowlists + _exec_allowlisted_env for every background / network
+# process this script starts as an unprivileged user (AGT-2264).
+. "$(dirname "$0")/lib/allowlisted-env.sh"
 
 # External-prompt-storage-via-webhook (Phase B / AGT-375): populate the
 # prompts cache from an external github repo on boot, BEFORE sshd or the
@@ -274,13 +323,17 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
   # Fix A (AGT-468): run bootstrap as the git user, not root. The deploy key
   # at STAMP_PROMPTS_DEPLOY_KEY_PATH is git-readable (mode 0600, git-owned via
   # the explicit chown just above), so the user-switch is clean.
-  # The -p flag preserves the exported env (STAMP_PROMPTS_*, GIT_SSH_*) so the
-  # bootstrap binary sees the same variables it would see when invoked as root.
+  # It gets the same allowlisted env as stamp-workers (AGT-2264: the
+  # STAMP_PROMPTS_* / GIT_SSH_KNOWN_HOSTS vars it reads, no bot token or API
+  # key) and umask 027, so the cache it creates is closed to "other".
   # Running as git ensures the cache dir and its contents are created with
-  # git:git ownership — the poll worker (startPromptsPollWorker in http-server)
-  # also runs as git and would otherwise hit "fatal: dubious ownership" when
-  # fetching into a root-owned repo (AGT-376 / git safe.directory semantics).
-  if ! su -s /bin/sh -p git -c '/usr/local/sbin/stamp-prompts-cache-bootstrap'; then
+  # git:git ownership — the poll worker (startPromptsPollWorker, in the
+  # stamp-workers process since AGT-2264) also runs as git and would
+  # otherwise hit "fatal: dubious ownership" when fetching into a root-owned
+  # repo (AGT-376 / git safe.directory semantics).
+  if ! ( umask 027
+         _exec_allowlisted_env /home/git "$STAMP_WORKERS_ENV" \
+           su -s /bin/sh -p git -c 'exec /usr/local/sbin/stamp-prompts-cache-bootstrap' ); then
     echo "error: stamp-prompts-cache-bootstrap failed; aborting startup" >&2
     exit 1
   fi
@@ -291,6 +344,9 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
   # if, e.g., the dir doesn't exist yet (Phase B disabled mid-deploy).
   if [ -d "$_pcroot" ] && [ ! -L "$_pcroot" ]; then
     chown -R -h git:git "$_pcroot" || true
+    # AGT-2264: closed to "other" (the stamp-http listener). stamp-workers
+    # runs with umask 027, so a rebuilt cache stays closed too.
+    chmod o-rwx "$_pcroot" || true
   fi
   # The .old dir is the atomic-swap staging area used by cloneOrFetchPromptsCache
   # during in-place refreshes. Chown it too: a previous root-owned bootstrap
@@ -302,24 +358,60 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
   fi
 fi
 
-# Launch the HTTP server in the background as the git user, BEFORE
-# sshd's exec replaces this shell. Once exec runs, sshd inherits PID 1
-# and the HTTP server becomes its child via re-parenting. Stdout/stderr
-# go to the container's log stream so operators see invite-accept
-# traffic alongside ssh logs.
+# Launch the HTTP listener and the git-user workers in the background,
+# BEFORE sshd's exec replaces this shell. Once exec runs, sshd inherits
+# PID 1 and both become its children via re-parenting. Stdout/stderr go to
+# the container's log stream so operators see invite-accept traffic
+# alongside ssh logs.
 #
-# `su -s /bin/sh -p git` is the runuser-equivalent that works against
-# Alpine's busybox su (Alpine doesn't ship util-linux by default, and
-# the git user's login shell is /usr/bin/git-shell which would reject
-# `-c <cmd>`; -s overrides that). -p preserves the environment so
-# STAMP_HTTP_PORT (and any STAMP_SERVER_DB_PATH test override) flow
-# through.
+# AGT-2264 — the listener is the most exposed process in the container
+# (public :8080, unauthenticated invite-accept and webhook traffic), so it
+# gets the least:
 #
-# If the HTTP server dies mid-container-life, invite-accept stops
-# working until the operator redeploys. Phase 5 may add a supervisor
-# (s6/tini) for crash-restart; for now the simpler shape ships.
-su -s /bin/sh -p git -c "/usr/local/sbin/stamp-http-server" &
-echo "stamp-http-server: launched as git user (pid $!)" >&2
+#   - It runs as stamp-http: not git (which owns every repo and the mirror
+#     deploy keys) and not in the git group (which reads /etc/stamp/env and
+#     the root:git key directory). It reaches users.db through the stamp-db
+#     group and nothing else. It has no sudo rule.
+#   - It starts from `env -i` with only the variables its code reads
+#     ($STAMP_HTTP_SERVER_ENV in lib/allowlisted-env.sh). No GITHUB_BOT_TOKEN,
+#     ANTHROPIC_API_KEY, AUTHORIZED_KEYS or platform variables; the one
+#     secret it holds is STAMP_PROMPTS_WEBHOOK_SECRET, which it needs to
+#     verify the webhook HMAC. It never sees STAMP_PROMPTS_REPO_URL.
+#
+# The workers that need git's file access — the prompts poll / refresh
+# (deploy key + git-owned cache) and the trash sweep (git-owned trashed
+# repos) — moved out of the listener into stamp-workers, which runs as git
+# with its own allowlist ($STAMP_WORKERS_ENV) and opens no socket. A valid
+# webhook reaches it through a trigger file the listener replaces in
+# /run/stamp-http (stamp-http-owned, world-readable). See server/README.md
+# "What the HTTP listener can reach".
+#
+# `su -s /bin/sh -p <user>` is the runuser-equivalent that works against
+# Alpine's busybox su (Alpine doesn't ship util-linux by default; -s
+# overrides the target's login shell). -p keeps the env exactly as
+# _exec_allowlisted_env built it — busybox su then touches nothing.
+#
+# If either process dies mid-container-life, its endpoints / workers stop
+# until the operator redeploys. Phase 5 may add a supervisor (s6/tini) for
+# crash-restart; for now the simpler shape ships.
+STAMP_HTTP_RUN_DIR=/run/stamp-http
+rm -rf "$STAMP_HTTP_RUN_DIR"
+mkdir -p "$STAMP_HTTP_RUN_DIR"
+chown stamp-http:stamp-http "$STAMP_HTTP_RUN_DIR"
+chmod 0755 "$STAMP_HTTP_RUN_DIR"
+if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
+  STAMP_PROMPTS_REFRESH_TRIGGER="$STAMP_HTTP_RUN_DIR/prompts-refresh"
+  export STAMP_PROMPTS_REFRESH_TRIGGER
+else
+  unset STAMP_PROMPTS_REFRESH_TRIGGER
+fi
+( umask 027
+  _exec_allowlisted_env /home/git "$STAMP_WORKERS_ENV" \
+    su -s /bin/sh -p git -c 'exec /usr/local/sbin/stamp-workers' ) &
+echo "stamp-workers: launched as git user (pid $!)" >&2
+( _exec_allowlisted_env /var/empty "$STAMP_HTTP_SERVER_ENV" \
+    su -s /bin/sh -p stamp-http -c 'exec /usr/local/sbin/stamp-http-server' ) &
+echo "stamp-http-server: launched as stamp-http user with an allowlisted env (pid $!)" >&2
 
 # SSH client setup for the post-receive mirror push.
 #
@@ -497,7 +589,9 @@ write_env_var REVIEW_SIGNING_KEY_PATH
 # inside the long-running stamp-http-server process, which inherits the
 # container env normally, so the cache itself was populating correctly
 # while the consumer side was reading the bundled fallback — a confusing
-# half-broken state.)
+# half-broken state.) Since AGT-2264 those workers run in stamp-workers,
+# which receives the STAMP_PROMPTS_* vars through its env allowlist; the
+# listener never sees the repo URL.
 write_env_var STAMP_PROMPTS_REPO_URL
 
 # AGT-420 — per-caller rate-limit caps consumed by stamp-review.cjs /
@@ -510,8 +604,8 @@ write_env_var MAX_REVIEWS_PER_HOUR
 write_env_var MAX_INVITES_PER_HOUR
 
 # AGT-423 — trash retention. STAMP_TRASH_TTL_DAYS is consumed by the
-# in-process sweep worker (which sees the container env directly via
-# stamp-http-server) AND by the `purge-trash` SSH verb's no-flag fallback
+# sweep worker (which receives it through the stamp-workers env allowlist,
+# AGT-2264) AND by the `purge-trash` SSH verb's no-flag fallback
 # (SSH strips env, so it must be persisted here). Default 30 days; a bad
 # value falls back to the default (no boot guard — a typo must not
 # crash-loop the self-deploying server).
@@ -523,8 +617,8 @@ write_env_var STAMP_TRASH_TTL_DAYS
 # loadServerEnvFile() merge. sshd strips env from the session, so without
 # persisting it here every peer verb sees the flag as unset and reports
 # "peer reviews disabled" — even when the container has STAMP_PEER_REVIEWS_ENABLED=1.
-# (The long-running stamp-http-server / WS path inherits the container env
-# directly, so only the SSH verbs need this.) A bad value is harmless: the
+# (The long-running stamp-http-server receives it through its env allowlist,
+# AGT-2264, so only the SSH verbs need this.) A bad value is harmless: the
 # resolver only enables on an exact "1", anything else stays disabled.
 write_env_var STAMP_PEER_REVIEWS_ENABLED
 

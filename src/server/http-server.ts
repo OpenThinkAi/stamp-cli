@@ -3,8 +3,13 @@
  * accept endpoint so a new operator can redeem a token without first
  * having SSH access.
  *
- * Started by entrypoint.sh as the `git` user (which owns write access to
- * the membership sqlite via the root:git 0660 mode bits). Plain HTTP on
+ * Started by entrypoint.sh as the unprivileged `stamp-http` user with an
+ * explicit allowlisted environment (AGT-2264): it is not in the git group,
+ * holds no deploy key, API key or bot token, and reaches the membership
+ * sqlite through the shared `stamp-db` group (root:stamp-db 0660). The
+ * prompts poll and trash sweep below need git's file access, so in the
+ * container they run in the separate git-user stamp-workers process
+ * (start-workers.ts) — see `StartServerOpts.gitWorkers`. Plain HTTP on
  * STAMP_HTTP_PORT (default 8080); TLS is the hosting platform's job
  * (Railway terminates TLS at its edge proxy; self-hosters terminate at
  * their own reverse proxy).
@@ -40,7 +45,20 @@ import {
   timingSafeEqual,
   type BinaryLike,
 } from "node:crypto";
-import { statSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unwatchFile,
+  watchFile,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
@@ -121,10 +139,18 @@ interface AcceptBody {
   short_name?: unknown;
 }
 
+let logPrefix = "stamp-http-server";
+
+/** Process name on every log line. stamp-workers sets its own (AGT-2264) so
+ *  operators can tell the git-user workers from the listener. */
+export function setLogPrefix(prefix: string): void {
+  logPrefix = prefix;
+}
+
 function logLine(level: "info" | "warn" | "error", msg: string): void {
   const ts = new Date().toISOString();
   const stream = level === "error" ? process.stderr : process.stdout;
-  stream.write(`stamp-http-server ${ts} ${level} ${msg}\n`);
+  stream.write(`${logPrefix} ${ts} ${level} ${msg}\n`);
 }
 
 function sendJson(
@@ -241,7 +267,7 @@ interface AcceptOutcome {
 }
 
 function acceptInvite(data: ValidatedAccept): AcceptOutcome {
-  // skipChmod: HTTP server runs as the git user, but the DB file is
+  // skipChmod: HTTP server runs as the stamp-http user, but the DB file is
   // root-owned (chmod fails with EPERM unless caller is owner).
   // entrypoint.sh handles boot-time perm tightening as root; the
   // in-process chmod would be redundant even if it could succeed.
@@ -450,9 +476,12 @@ export function __resetWebhookStateForTests(): void {
  *
  * `STAMP_PROMPTS_REPO_REF` defaults to `main`. `STAMP_PROMPTS_CACHE_ROOT`
  * defaults to `/srv/git/.prompts-cache` (the path AGT-375's entrypoint
- * provisions on the persistent volume). The deploy-key path defaults to the
- * AGT-375 location; passing it for an HTTPS URL is harmless — the cache
- * module ignores it when the URL isn't SSH-shaped.
+ * provisions on the persistent volume). The deploy-key path is
+ * STAMP_PROMPTS_DEPLOY_KEY_PATH, else the AGT-375 default location only if a
+ * key is actually there. (The cache module does NOT ignore a missing key for
+ * an HTTPS / file:// URL — it throws — so passing the default
+ * unconditionally broke every runtime refresh of a keyless Phase B
+ * deployment while the boot-time bootstrap, which passes no key, worked.)
  */
 function buildRefreshOpts(): CloneOrFetchOpts | null {
   const url = process.env["STAMP_PROMPTS_REPO_URL"];
@@ -461,7 +490,8 @@ function buildRefreshOpts(): CloneOrFetchOpts | null {
   const cacheRoot =
     process.env["STAMP_PROMPTS_CACHE_ROOT"] || DEFAULT_PROMPTS_CACHE_ROOT;
   const deployKeyPath =
-    process.env["STAMP_PROMPTS_DEPLOY_KEY_PATH"] || DEFAULT_DEPLOY_KEY_PATH;
+    process.env["STAMP_PROMPTS_DEPLOY_KEY_PATH"] ||
+    (existsSync(DEFAULT_DEPLOY_KEY_PATH) ? DEFAULT_DEPLOY_KEY_PATH : undefined);
   return { url, ref, cacheRoot, deployKeyPath };
 }
 
@@ -680,6 +710,32 @@ async function handleWebhookPrompts(
   // respond fast — github retries on 5xx OR on response timeout, so we
   // want this round-trip to complete before the refresh's git fetch
   // could possibly stall.
+  //
+  // AGT-2264: in the container the listener runs as the unprivileged
+  // stamp-http user, which can neither read the prompts deploy key nor
+  // write the git-owned cache. It hands the refresh to the git-user
+  // stamp-workers process by touching a trigger file (and does not see
+  // STAMP_PROMPTS_REPO_URL at all — the URL can carry credentials).
+  const triggerPath = process.env["STAMP_PROMPTS_REFRESH_TRIGGER"];
+  if (triggerPath) {
+    try {
+      writePromptsRefreshTrigger(triggerPath, deliveryId);
+    } catch (e) {
+      logLine(
+        "error",
+        `webhook/prompts delivery=${deliveryId} could not write refresh trigger: ${(e as Error).message}`,
+      );
+      sendJson(res, 500, { ok: false, error: "refresh_trigger_failed" });
+      return;
+    }
+    sendJson(res, 202, { ok: true });
+    logLine(
+      "info",
+      `webhook/prompts delivery=${deliveryId} accepted (signature valid; refresh handed to stamp-workers)`,
+    );
+    return;
+  }
+
   const opts = buildRefreshOpts();
   if (!opts) {
     // The HMAC validated against our configured secret, so this is our
@@ -725,6 +781,100 @@ async function handleWebhookPrompts(
       );
     }
   });
+}
+
+// ─── Out-of-process refresh trigger (AGT-2264) ───────────────────────
+
+/**
+ * The internet-facing listener and the prompts refresh run as different
+ * users in the container (stamp-http vs git), so a validated webhook can't
+ * call `scheduleWebhookRefresh` directly. Instead the listener atomically
+ * replaces a small trigger file holding the (already-sanitised) delivery id,
+ * and the git-user stamp-workers process watches it and runs the same
+ * coalesced refresh. The worker treats the file as untrusted: it never
+ * follows a symlink, reads at most a few bytes, and only logs the id if it
+ * matches DELIVERY_ID_RE. The worst a compromised listener can do through
+ * this channel is ask for a refresh of the operator-configured repo, which
+ * the coalescing window already rate-limits.
+ */
+const PROMPTS_REFRESH_TRIGGER_MAX_BYTES = 256;
+
+export function writePromptsRefreshTrigger(triggerPath: string, deliveryId: string): void {
+  const tmp = `${triggerPath}.${process.pid}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, `${deliveryId}\n`, { mode: 0o644, flag: "wx" });
+  renameSync(tmp, triggerPath);
+}
+
+/** Read the trigger's delivery id. Returns null when the file is missing,
+ *  is not a regular file, or is a symlink; "trigger" when its content isn't
+ *  a well-formed delivery id. */
+export function readPromptsRefreshTrigger(triggerPath: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(
+      triggerPath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0),
+    );
+  } catch {
+    return null;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return null;
+    const buf = Buffer.alloc(PROMPTS_REFRESH_TRIGGER_MAX_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const id = buf.subarray(0, n).toString("utf8").trim();
+    return DELIVERY_ID_RE.test(id) ? id : "trigger";
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const triggerWatchState: { path: string | null } = { path: null };
+
+/**
+ * Worker side: watch STAMP_PROMPTS_REFRESH_TRIGGER (stat polling, so it
+ * works across users and on any filesystem) and run a coalesced refresh
+ * each time the listener replaces it. No-op when the trigger path or
+ * STAMP_PROMPTS_REPO_URL is unset. A trigger left over from a previous boot
+ * is ignored — the boot-time bootstrap has just refreshed the cache.
+ */
+export function startPromptsRefreshTriggerWatcher(intervalMs = 1000): void {
+  const triggerPath = process.env["STAMP_PROMPTS_REFRESH_TRIGGER"];
+  if (!triggerPath) return;
+  if (triggerWatchState.path !== null) {
+    logLine("warn", "prompts-trigger: already started — ignoring duplicate start");
+    return;
+  }
+  if (buildRefreshOpts() === null) {
+    logLine("info", "prompts-trigger: disabled (STAMP_PROMPTS_REPO_URL unset)");
+    return;
+  }
+  triggerWatchState.path = triggerPath;
+  watchFile(triggerPath, { interval: intervalMs, persistent: false }, (curr, prev) => {
+    if (curr.mtimeMs === 0) return; // removed / not there yet
+    if (curr.mtimeMs === prev.mtimeMs && curr.ino === prev.ino) return;
+    const id = readPromptsRefreshTrigger(triggerPath);
+    if (id === null) {
+      logLine("warn", `prompts-trigger: ${triggerPath} is not a regular file; ignoring`);
+      return;
+    }
+    const opts = buildRefreshOpts();
+    if (!opts) return;
+    try {
+      scheduleWebhookRefresh(opts, id);
+    } catch (e) {
+      logLine("error", `prompts-trigger: schedule error delivery=${id}: ${(e as Error).message}`);
+    }
+  });
+  logLine("info", `prompts-trigger: watching ${triggerPath}`);
+}
+
+export function stopPromptsRefreshTriggerWatcher(): void {
+  if (triggerWatchState.path !== null) {
+    unwatchFile(triggerWatchState.path);
+    triggerWatchState.path = null;
+  }
 }
 
 // ─── Periodic-poll backstop (AGT-376, Phase B) ───────────────────────
@@ -925,8 +1075,9 @@ export function startPromptsPollWorker(): void {
   }
 
   // Fix B (AGT-468, belt-and-braces): warn loudly when the cache root exists
-  // but is owned by a different uid than the running process. The http-server
-  // runs as the git user (uid != 0); a root-owned cache dir causes git to emit
+  // but is owned by a different uid than the running process. The poll worker
+  // runs as the git user (uid != 0; in the container it lives in the
+  // stamp-workers process, AGT-2264); a root-owned cache dir causes git to emit
   // "fatal: dubious ownership" on every fetch attempt, silently breaking prompt
   // refreshes. We cannot chown from a non-root process, but a clear log line
   // at startup is far more actionable than a series of cryptic per-tick errors.
@@ -1122,6 +1273,10 @@ export function __resetTrashSweepStateForTests(): void {
   trashSweepState.handle = null;
   trashSweepState.inflight = false;
   trashSweepState.tickCount = 0;
+}
+
+export function __isTrashSweepArmedForTests(): boolean {
+  return trashSweepState.handle !== null;
 }
 
 export function __getTrashSweepTickCountForTests(): number {
@@ -2592,7 +2747,24 @@ async function handlePeerRegisterExtra(req: IncomingMessage, res: ServerResponse
 
 export const HTTP_DEFAULT_PORT = DEFAULT_PORT;
 
-export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer> {
+export interface StartServerOpts {
+  /**
+   * Arm the workers that need the git user's file access — the prompts
+   * poll backstop (deploy key + git-owned cache) and the trash sweep
+   * (deletes git-owned trashed repos). Default true, so tests and
+   * single-process setups keep the historical behaviour. The container's
+   * stamp-http-server passes false (AGT-2264): the listener runs as the
+   * unprivileged stamp-http user and these workers run in the separate
+   * git-user stamp-workers process instead.
+   */
+  gitWorkers?: boolean;
+}
+
+export function startServer(
+  port = DEFAULT_PORT,
+  opts: StartServerOpts = {},
+): ReturnType<typeof createServer> {
+  const gitWorkers = opts.gitWorkers ?? true;
   const server = createServer((req, res) => {
     const url = req.url ?? "";
     if (req.method === "GET" && (url === "/healthz" || url === "/")) {
@@ -2669,10 +2841,12 @@ export function startServer(port = DEFAULT_PORT): ReturnType<typeof createServer
     // worker that depends on the same env-var fan-out). The worker is
     // a no-op when STAMP_PROMPTS_REPO_URL is unset, so Phase A
     // deployments see no behavior change.
-    startPromptsPollWorker();
-    // AGT-423: arm the trash-retention sweep (independent of Phase B; runs
-    // whenever STAMP_TRASH_SWEEP_INTERVAL_SEC != 0).
-    startTrashSweepWorker();
+    if (gitWorkers) {
+      startPromptsPollWorker();
+      // AGT-423: arm the trash-retention sweep (independent of Phase B; runs
+      // whenever STAMP_TRASH_SWEEP_INTERVAL_SEC != 0).
+      startTrashSweepWorker();
+    }
     // AGT-454: the SSE peer-review event stream (GET /peer/events) is mounted
     // inline in the request handler above, gated on resolvePeerReviewsEnabled().
     // No separate attach step is needed (it replaced the WS upgrade handler).

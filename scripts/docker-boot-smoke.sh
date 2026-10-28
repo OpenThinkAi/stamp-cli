@@ -33,6 +33,7 @@ SIGN_CONTAINER="stamp-smoke-sign-$$"
 SIGN_KEYS=""
 HOOKS_CONTAINER="stamp-smoke-hooks-$$"
 HOOKS_TMP=""
+LISTEN_CONTAINER="stamp-smoke-listen-$$"
 BOOT_WAIT_SECS="${STAMP_SMOKE_BOOT_WAIT:-10}"
 
 # Files that affect how the image BUILDS or BOOTS. A pure `src/lib/*` change
@@ -77,6 +78,7 @@ cleanup() {
   docker rm -f "$REVOKE_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$SIGN_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$HOOKS_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$LISTEN_CONTAINER" >/dev/null 2>&1 || true
   [ -n "${HOOKS_TMP:-}" ] && rm -rf "$HOOKS_TMP"
   [ -n "${REVOKE_KEYS:-}" ] && rm -rf "$REVOKE_KEYS"
   [ -n "${SIGN_KEYS:-}" ] && rm -rf "$SIGN_KEYS"
@@ -420,7 +422,7 @@ set +e; as op stamp-break-glass list >"$k/out" 2>&1; rc=$?; set -e
 set +e; as op /usr/local/sbin/stamp-break-glass list >"$k/out" 2>&1; rc=$?; set -e
 [ $rc -eq 2 ] || fail "/usr/local/sbin/stamp-break-glass was reachable over SSH (exit $rc)"
 /usr/local/sbin/stamp-break-glass add --role owner "$k/op.pub" >/dev/null || fail "break-glass promote failed"
-[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state/users.db)" = "root:git 660" ] || fail "users.db not root:git 0660 after break-glass"
+[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state/users.db)" = "root:stamp-db 660" ] || fail "users.db not root:stamp-db 0660 after break-glass"
 
 # Revoke gone through the documented CLI path.
 gone_name=$(/usr/local/sbin/stamp-break-glass list | awk -F"\t" -v fp="$(fp gone)" "\$4==fp {print \$5}")
@@ -683,6 +685,178 @@ for want_line in "was a symlink; replacing the link" "is not a real directory; r
 done
 docker rm -f "$HOOKS_CONTAINER" >/dev/null 2>&1 || true
 echo "docker-boot-smoke: hook refresh replaces planted symlinks without touching their targets; refreshed hooks still gate pushes ✓"
+
+# AGT-2264: the internet-facing HTTP listener runs as the unprivileged
+# stamp-http user with an explicit allowlisted environment, and the
+# git-file workers (prompts refresh, trash sweep) run as git in a separate
+# stamp-workers process. A dedicated container boots with fake secrets in its
+# env and Phase B pointed at a local file:// prompts repo, then asserts:
+#   - the listener's uid is stamp-http, it is not in the git group, and its
+#     /proc/<pid>/environ holds none of the container secrets (bot token,
+#     API key, AUTHORIZED_KEYS, platform vars, the prompts repo URL) — only
+#     its allowlist, incl. the webhook HMAC secret it needs;
+#   - stamp-workers runs as git and holds neither the secrets nor the
+#     webhook secret;
+#   - as stamp-http: /etc/stamp/env, the review-signing key, the mirror
+#     deploy keys, the prompts cache and repos (incl. a pre-upgrade
+#     world-readable one, closed on reboot) are unreadable, /srv/git can't
+#     be listed, there is no sudo right — but users.db is writable;
+#   - the endpoints still work: /healthz; /invite/accept writes a row the
+#     git-run SSH key resolver honours (the new key logs in); a signed
+#     webhook is handed to stamp-workers, which refreshes the cache; the
+#     peer endpoints are live (signature check, not 404).
+echo "docker-boot-smoke: asserting the HTTP listener runs as stamp-http with an allowlisted env (AGT-2264)…"
+listen_pre='set -e
+if [ ! -d /opt/prompts.git ]; then
+  mkdir -p /opt/psrc && cd /opt/psrc && git init -q -b main w && cd w
+  printf "smoke prompt\n" > security.md
+  git add -A && git -c user.email=s@x.invalid -c user.name=s commit -qm init
+  git clone -q --bare /opt/psrc/w /opt/prompts.git && chown -R git:git /opt/prompts.git
+fi
+exec /entrypoint.sh'
+docker run -d --name "$LISTEN_CONTAINER" --entrypoint sh \
+  -e GITHUB_BOT_TOKEN=smoke-gh-token-must-not-leak \
+  -e ANTHROPIC_API_KEY=smoke-anthropic-key-must-not-leak \
+  -e SMOKE_PLATFORM_VAR=smoke-platform-must-not-leak \
+  -e STAMP_PROMPTS_WEBHOOK_SECRET=smoke-hook-secret \
+  -e STAMP_PEER_REVIEWS_ENABLED=1 \
+  -e STAMP_PROMPTS_REPO_URL=file:///opt/prompts.git \
+  "$IMAGE_TAG" -c "$listen_pre" >/dev/null
+wait_sshd "$LISTEN_CONTAINER"
+
+listen_common='set -e
+fail() { echo "$*" >&2; exit 1; }
+asl() { su -s /bin/sh stamp-http -c "$1"; }
+pid_of() {
+  for p in /proc/[0-9]*; do
+    c=$(tr "\0" " " <"$p/cmdline" 2>/dev/null) || continue
+    case "$c" in "node $1 "*|"node $1") echo "${p#/proc/}"; return 0 ;; esac
+  done
+  return 1
+}
+for _ in $(seq 1 40); do nc -z 127.0.0.1 8080 >/dev/null 2>&1 && break; sleep 0.25; done
+L=$(pid_of /usr/local/sbin/stamp-http-server) || fail "stamp-http-server is not running"
+W=$(pid_of /usr/local/sbin/stamp-workers) || fail "stamp-workers is not running"
+'
+
+listen_boot1="$listen_common"'
+k=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N "" -C smoke-op -f "$k/op" >/dev/null
+ssh-keygen -q -t ed25519 -N "" -C smoke-new -f "$k/new" >/dev/null
+/usr/local/sbin/stamp-break-glass add "$k/op.pub" >/dev/null
+OPTS="-o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+as() { who=$1; shift; ssh $OPTS -i "$k/$who" git@127.0.0.1 "$@"; }
+
+# --- identity -----------------------------------------------------------
+[ "$(awk "/^Uid:/{print \$2}" /proc/$L/status)" = "$(id -u stamp-http)" ] || fail "listener uid is not stamp-http"
+gid_git=$(getent group git | cut -d: -f3)
+awk "/^(Gid|Groups):/" /proc/$L/status | tr -s " \t" "\n" | grep -qx "$gid_git" && fail "listener has the git group"
+id -nG stamp-http | tr " " "\n" | grep -qx git && fail "stamp-http is a member of the git group"
+[ "$(awk "/^Uid:/{print \$2}" /proc/$W/status)" = "$(id -u git)" ] || fail "stamp-workers uid is not git"
+
+# --- environment (root lacks CAP_SYS_PTRACE here; read as the same uid) ---
+asl "cat /proc/$L/environ" | tr "\0" "\n" > "$k/lenv"
+grep -q "must-not-leak" "$k/lenv" && fail "a container secret reached the listener env: $(grep must-not-leak "$k/lenv" | cut -d= -f1)"
+for v in GITHUB_BOT_TOKEN ANTHROPIC_API_KEY AUTHORIZED_KEYS SMOKE_PLATFORM_VAR HOSTNAME STAMP_PROMPTS_REPO_URL STAMP_PROMPTS_DEPLOY_KEY_PATH; do
+  grep -q "^$v=" "$k/lenv" && fail "listener env carries $v"
+done
+grep -qx "STAMP_PROMPTS_WEBHOOK_SECRET=smoke-hook-secret" "$k/lenv" || fail "listener env lacks its webhook secret"
+grep -qx "STAMP_PEER_REVIEWS_ENABLED=1" "$k/lenv" || fail "listener env lacks STAMP_PEER_REVIEWS_ENABLED"
+grep -qx "HOME=/var/empty" "$k/lenv" || fail "listener HOME is not /var/empty"
+su -s /bin/sh git -c "cat /proc/$W/environ" | tr "\0" "\n" > "$k/wenv"
+grep -q "must-not-leak" "$k/wenv" && fail "a container secret reached the workers env"
+grep -q "^STAMP_PROMPTS_WEBHOOK_SECRET=" "$k/wenv" && fail "workers env carries the webhook secret"
+grep -qx "STAMP_PROMPTS_REPO_URL=file:///opt/prompts.git" "$k/wenv" || fail "workers env lacks STAMP_PROMPTS_REPO_URL"
+
+# --- file access as stamp-http -------------------------------------------
+node -e "process.stdout.write(require(\"node:crypto\").generateKeyPairSync(\"ed25519\").publicKey.export({type:\"spki\",format:\"pem\"}))" > /etc/stamp/operator.pub
+chmod 0444 /etc/stamp/operator.pub
+as op new-stamp-repo listen-smoke >/dev/null || fail "admin new-stamp-repo failed"
+# A pre-upgrade repo: world-readable, closed by the next boot.
+su -s /bin/sh git -c "umask 022; git init -q --bare /srv/git/legacy-smoke.git"
+for f in /etc/stamp/env /srv/git/.stamp-state/review-signing-key.pem /srv/git/.ssh-client-keys/github_ed25519 /srv/git/listen-smoke.git/HEAD /srv/git/.prompts-cache/security.md; do
+  [ -e "$f" ] || fail "fixture $f missing"
+  asl "cat $f" >/dev/null 2>&1 && fail "stamp-http can read $f"
+done
+for d in /srv/git /srv/git/.ssh-client-keys /srv/git/listen-smoke.git /srv/git/.prompts-cache; do
+  asl "ls $d" >/dev/null 2>&1 && fail "stamp-http can list $d"
+done
+asl "sudo -n -l" >/dev/null 2>&1 && fail "stamp-http has a sudo rule"
+asl "sudo -n /usr/local/sbin/stamp-sign-approval \"\"" </dev/null >/dev/null 2>&1 && fail "stamp-http can run the signing helper"
+asl "test -w /srv/git/.stamp-state/users.db" || fail "stamp-http cannot write users.db"
+[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state/users.db)" = "root:stamp-db 660" ] || fail "users.db is $(stat -c "%U:%G %a" /srv/git/.stamp-state/users.db)"
+[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state)" = "root:stamp-db 3770" ] || fail ".stamp-state is $(stat -c "%U:%G %a" /srv/git/.stamp-state)"
+
+# --- endpoints still work ------------------------------------------------
+node -e "fetch(\"http://127.0.0.1:8080/healthz\").then(r=>process.exit(r.status===200?0:1),()=>process.exit(1))" || fail "/healthz failed"
+op_id=$(node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"/srv/git/.stamp-state/users.db\",{readOnly:true});process.stdout.write(String(db.prepare(\"SELECT id FROM users LIMIT 1\").get().id))")
+# Minted as git: the git user still writes the DB alongside stamp-http.
+cat > /tmp/mint2264.cjs <<MINT
+const {DatabaseSync}=require("node:sqlite");
+const db=new DatabaseSync("/srv/git/.stamp-state/users.db");
+const n=Math.floor(Date.now()/1000);
+db.prepare("INSERT INTO invites(token,role,invited_by,created_at,expires_at) VALUES(?,?,?,?,?)").run("smoketoken2264","member",Number(process.argv[2]),n,n+3600);
+MINT
+chmod 0644 /tmp/mint2264.cjs
+su -s /bin/sh git -c "node /tmp/mint2264.cjs $op_id" || fail "git could not mint an invite"
+node -e "
+const pub=require(\"fs\").readFileSync(process.argv[1],\"utf8\").trim();
+fetch(\"http://127.0.0.1:8080/invite/accept\",{method:\"POST\",headers:{\"content-type\":\"application/json\"},body:JSON.stringify({token:\"smoketoken2264\",ssh_pubkey:pub,short_name:\"smoke-new\"})})
+.then(async r=>{const b=await r.text();if(r.status!==200){console.error(r.status,b);process.exit(1)}})
+.catch(e=>{console.error(e);process.exit(1)})" "$k/new.pub" || fail "/invite/accept failed"
+as new list-stamp-repos >/dev/null || fail "key enrolled through /invite/accept cannot log in"
+node -e "
+const c=require(\"crypto\");const body=Buffer.from(\"{}\");
+const sig=\"sha256=\"+c.createHmac(\"sha256\",\"smoke-hook-secret\").update(body).digest(\"hex\");
+fetch(\"http://127.0.0.1:8080/webhook/prompts\",{method:\"POST\",headers:{\"x-hub-signature-256\":sig,\"x-github-delivery\":\"smoke-delivery-2264\"},body})
+.then(r=>process.exit(r.status===202?0:1),()=>process.exit(1))" || fail "signed webhook was not accepted"
+[ "$(cat /run/stamp-http/prompts-refresh)" = "smoke-delivery-2264" ] || fail "webhook did not write the refresh trigger"
+code=$(node -e "fetch(\"http://127.0.0.1:8080/peer/claim-seat\",{method:\"POST\",body:\"{}\"}).then(r=>process.stdout.write(String(r.status)),()=>process.stdout.write(\"ERR\"))")
+case "$code" in 400|401|403) ;; *) fail "/peer/claim-seat returned $code (want an auth/validation refusal, not 404/5xx)" ;; esac
+rm -rf "$k" /tmp/mint2264.cjs /etc/stamp/operator.pub
+# Roll the DB back to the pre-upgrade layout; the next boot must convert it.
+chgrp git /srv/git/.stamp-state /srv/git/.stamp-state/users.db
+chmod 1770 /srv/git/.stamp-state
+'
+if ! docker exec "$LISTEN_CONTAINER" sh -c "$listen_boot1"; then
+  echo "error: HTTP listener isolation assertion failed (AGT-2264) — see above." >&2
+  docker logs "$LISTEN_CONTAINER" 2>&1 | tail -30 >&2 || true
+  exit 1
+fi
+listen_refreshed=""
+for _ in $(seq 1 40); do
+  listen_logs=$(docker logs "$LISTEN_CONTAINER" 2>&1)
+  if printf '%s\n' "$listen_logs" | grep "^stamp-workers .*refresh ok delivery=smoke-delivery-2264" >/dev/null; then
+    listen_refreshed=1; break
+  fi
+  sleep 0.25
+done
+if [ -z "$listen_refreshed" ]; then
+  echo "error: stamp-workers did not refresh the prompts cache after the webhook (AGT-2264)." >&2
+  printf '%s\n' "$listen_logs" | tail -30 >&2
+  exit 1
+fi
+
+echo "docker-boot-smoke: restarting the listener container (pre-upgrade world-readable repo + root:git DB planted)…"
+docker restart "$LISTEN_CONTAINER" >/dev/null
+wait_sshd "$LISTEN_CONTAINER"
+listen_boot2="$listen_common"'
+[ "$(awk "/^Uid:/{print \$2}" /proc/$L/status)" = "$(id -u stamp-http)" ] || fail "listener uid is not stamp-http after restart"
+asl "cat /srv/git/legacy-smoke.git/HEAD" >/dev/null 2>&1 && fail "pre-upgrade repo still readable by stamp-http after reboot"
+[ "$(stat -c "%a" /srv/git/legacy-smoke.git)" = "750" ] || fail "legacy repo mode is $(stat -c "%a" /srv/git/legacy-smoke.git), want 750"
+[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state)" = "root:stamp-db 3770" ] || fail "pre-upgrade .stamp-state not converted: $(stat -c "%U:%G %a" /srv/git/.stamp-state)"
+[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state/users.db)" = "root:stamp-db 660" ] || fail "pre-upgrade users.db not converted: $(stat -c "%U:%G %a" /srv/git/.stamp-state/users.db)"
+asl "test -w /srv/git/.stamp-state/users.db" || fail "stamp-http cannot write the converted users.db"
+[ "$(stat -c "%U:%G %a" /srv/git/.stamp-state/review-signing-key.pem)" = "root:root 600" ] || fail "review key is $(stat -c "%U:%G %a" /srv/git/.stamp-state/review-signing-key.pem) after restart"
+node -e "fetch(\"http://127.0.0.1:8080/healthz\").then(r=>process.exit(r.status===200?0:1),()=>process.exit(1))" || fail "/healthz failed after restart"
+'
+if ! docker exec "$LISTEN_CONTAINER" sh -c "$listen_boot2"; then
+  echo "error: HTTP listener isolation assertion failed after restart (AGT-2264) — see above." >&2
+  docker logs "$LISTEN_CONTAINER" 2>&1 | tail -30 >&2 || true
+  exit 1
+fi
+docker rm -f "$LISTEN_CONTAINER" >/dev/null 2>&1 || true
+echo "docker-boot-smoke: listener runs as stamp-http with only its allowlisted env; secrets, keys and repos unreachable; invite/webhook/peer endpoints work ✓"
 
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"
