@@ -12,7 +12,7 @@ import {
   EXAMPLE_REVIEWER_PROMPT,
   loadConfig,
   parseEnvIdentifierArray,
-  stringifyConfig,
+  patchConfigYaml,
   parseToolsLoose,
   type McpServerDef,
   type ToolSpec,
@@ -170,7 +170,10 @@ export function reviewersAdd(name: string, opts: { noEdit?: boolean } = {}): voi
   );
 
   config.reviewers[name] = { prompt: promptRel };
-  writeFileSync(configPath, stringifyConfig(config));
+  writeFileSync(
+    configPath,
+    patchConfigYaml(readFileSync(configPath, "utf8"), { reviewers: config.reviewers }),
+  );
 
   console.log(`reviewer "${name}" added.`);
   console.log(`  prompt file: ${promptRel}`);
@@ -215,7 +218,10 @@ export function reviewersRemove(
   }
 
   delete config.reviewers[name];
-  writeFileSync(configPath, stringifyConfig(config));
+  writeFileSync(
+    configPath,
+    patchConfigYaml(readFileSync(configPath, "utf8"), { reviewers: config.reviewers }),
+  );
   console.log(`reviewer "${name}" removed from .stamp/config.yml`);
 
   if (def.prompt === undefined) {

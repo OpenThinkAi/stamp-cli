@@ -9,6 +9,7 @@ import {
   findBranchRule,
   loadConfig,
   parseConfigFromYaml,
+  patchConfigYaml,
   stringifyConfig,
   type BranchRule,
   type StampConfig,
@@ -446,7 +447,16 @@ function writeBootstrapFiles(repoRoot: string, plan: BootstrapPlan): void {
     writeFileSync(join(repoRoot, ".stamp/mirror.yml"), plan.mirrorYml);
   }
 
-  writeFileSync(stampConfigFile(repoRoot), stringifyConfig(plan.newConfig));
+  // AGT-2270: patch only the keys bootstrap sets, keeping comments (the
+  // init retention scaffold) and other top-level keys (data_flow, ...).
+  const configPath = stampConfigFile(repoRoot);
+  const raw = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+  writeFileSync(
+    configPath,
+    raw
+      ? patchConfigYaml(raw, { branches: plan.newConfig.branches, reviewers: plan.newConfig.reviewers })
+      : stringifyConfig(plan.newConfig),
+  );
 }
 
 function printPlan(plan: BootstrapPlan, opts: BootstrapOptions): void {
