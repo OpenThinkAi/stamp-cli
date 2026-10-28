@@ -133,6 +133,14 @@ exploit the server-side scripts to disrupt other tenants.
   stray `.git` gitfile, `commondir`, grafts or hooks never reach a
   directory git reads as a repository. It refuses to finish if `core.hooksPath` is
   set from any config source.
+- *Link entries in a `--from-tarball` import.* A symlink entry followed
+  by a file written through it, or a hardlink entry, can write or alias
+  files outside the extraction dir on a tar that follows them. Closed by
+  AGT-2267: before extracting, `setup-repo.sh` lists the archive with the
+  same tar and refuses any entry that is not a regular file or directory
+  (and any absolute or `..` path), then extracts from a private copy. The
+  post-extraction scan refuses anything that is not a singly-linked file
+  or a directory.
 
 **Effective?** Push paths are closed. Server-side scripts are bounded
 to operator-shaped inputs.

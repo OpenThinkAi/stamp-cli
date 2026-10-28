@@ -39,6 +39,16 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   user has a global or system `core.hooksPath` used to get repos where git
   never ran the stamp-verify hook; `new-stamp-repo` now fails instead, removes
   the half-built repo, and says how to find and unset the setting.
+- **Brownfield `--from-tarball` imports refuse link entries before
+  extracting anything.** The pre-extraction check used to look only at entry
+  names, so a symlink entry followed by a file written through it, or a
+  hardlink entry, reached the extracting tar and depended on that tar's own
+  protections. `setup-repo.sh` now lists the archive with the tar that will
+  extract it and refuses any entry that is not a regular file or directory
+  (symlinks, hardlinks, devices, fifos, and busybox-style link names on
+  regular entries), as well as absolute and `..` paths, then extracts from a
+  private copy of the tarball. The post-extraction scan stays as a second
+  layer and now also refuses special files and multiply-linked files.
 
 ### Changed
 

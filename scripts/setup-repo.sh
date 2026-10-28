@@ -131,23 +131,61 @@ if [[ -n "$FROM_TARBALL" ]]; then
     echo "error: --from-tarball file not found at $FROM_TARBALL" >&2
     exit 1
   fi
-  # Pre-extraction entry-name check. Reject the tarball outright if any
-  # entry is absolute (`^/`) or contains a `..` path segment. We do this
-  # ahead of extraction because (a) busybox tar (older Alpine images) has
-  # had weaker path-traversal protections than GNU tar, and (b) even with
-  # GNU tar refusing such entries by default, an explicit reject + clear
-  # error message is more useful than tar's silent skip + nonzero exit.
-  # The regex matches a leading `/` OR a `..` segment bounded by start-of-
-  # string / `/` on each side (so legitimate names like `..foo` or
-  # `foo..bar` are not rejected). `tar -tzf` lists entries without
-  # extracting; works identically with busybox or GNU tar.
+  # Inspect a private copy, so the bytes listed below are the bytes
+  # extracted (the upload path is in shared /tmp and could be swapped
+  # between the two reads).
+  TARBALL="$SCRATCH/import.tar.gz"
+  cp "$FROM_TARBALL" "$TARBALL"
+
+  # Pre-extraction checks (AGT-033, AGT-2267). Nothing is extracted until
+  # every entry passes, because the dangerous cases do their damage DURING
+  # extraction: a symlink entry `x -> /srv/git/other.git/hooks` followed by
+  # a regular entry `x/post-update` writes through the link on a tar that
+  # follows it (older busybox tar did; GNU tar and busybox 1.37 refuse),
+  # and a hardlink entry can alias a file outside the extraction dir. We
+  # don't rely on any one tar's protections: a post-extraction scan (below)
+  # would be too late for those, so it is only a second layer.
+  #
+  # The listings come from the same tar that extracts, so there is no
+  # parser mismatch between what we check and what gets written. Their
+  # format differs by implementation (verified on GNU tar 1.35, busybox
+  # tar in alpine:3.21 and bsdtar):
+  #   - GNU / bsdtar `-tv`: type in column 1 (`l` symlink, `h` hardlink,
+  #     `c`/`b`/`p` devices and fifos); `-t` prints names unaltered.
+  #   - busybox `-tv`: hardlinks show as `-` with ` -> target`, and so does
+  #     ANY entry whose header carries a link name (busybox extracts those
+  #     as hardlinks); `-t` strips leading `/` and `../` from names, the
+  #     same way its extraction does. (busybox tar also rejects the GNU-only
+  #     `--no-overwrite-dir` below, so it never gets to extract.)
+  # So the type check is an ALLOWLIST: every `-tv` line must be a regular
+  # file (`-`) or directory (`d`) and must not carry a ` -> ` or
+  # ` link to ` target. A bare clone holds nothing else, and no git ref or
+  # object name contains those strings. Anything else (including lines a
+  # tar we have not seen formats differently) is refused.
   echo "→ inspecting tarball entries before extraction"
-  if BAD=$(tar -tzf "$FROM_TARBALL" | grep -E '^/|(^|/)\.\.(/|$)' | head -n 1); then
-    if [[ -n "$BAD" ]]; then
-      echo "error: tarball $FROM_TARBALL contains unsafe entry: $BAD" >&2
-      echo "       entries must not be absolute (^/) or contain a '..' path segment" >&2
-      exit 1
-    fi
+  if ! tar -tzf "$TARBALL" > "$SCRATCH/names.lst" 2> "$SCRATCH/list.err" || \
+     ! tar -tvzf "$TARBALL" > "$SCRATCH/verbose.lst" 2>> "$SCRATCH/list.err"; then
+    echo "error: could not list the entries of $FROM_TARBALL:" >&2
+    cat "$SCRATCH/list.err" >&2
+    exit 1
+  fi
+  # Entry names: no absolute path (`^/`) and no `..` segment, bounded by
+  # start-of-string / `/` on each side (so `..foo` and `foo..bar` pass).
+  # (`|| true`: grep exits 1 on no match, which pipefail would surface.)
+  BAD=$(grep -E '^/|(^|/)\.\.(/|$)' "$SCRATCH/names.lst" | head -n 1 || true)
+  if [[ -n "$BAD" ]]; then
+    echo "error: tarball $FROM_TARBALL contains unsafe entry: $BAD" >&2
+    echo "       entries must not be absolute (^/) or contain a '..' path segment" >&2
+    exit 1
+  fi
+  BAD=$(grep -vE '^[-d]' "$SCRATCH/verbose.lst" | head -n 1 || true)
+  if [[ -z "$BAD" ]]; then
+    BAD=$(grep -E ' -> | link to ' "$SCRATCH/verbose.lst" | head -n 1 || true)
+  fi
+  if [[ -n "$BAD" ]]; then
+    echo "error: tarball $FROM_TARBALL contains a link or special-file entry: $BAD" >&2
+    echo "       a bare clone holds only regular files and directories; symlinks, hardlinks and devices are refused" >&2
+    exit 1
   fi
 
   # The tarball is NOT trusted as a bare repo in place (AGT-2266). A bare
@@ -181,19 +219,24 @@ if [[ -n "$FROM_TARBALL" ]]; then
   #                          setuid/setgid surprises and overly-loose perms.
   #   --no-overwrite-dir     refuse to replace an existing directory's
   #                          metadata with a tar entry's metadata.
-  tar -xzf "$FROM_TARBALL" -C "$IMPORT_DIR" --strip-components=1 \
+  tar -xzf "$TARBALL" -C "$IMPORT_DIR" --strip-components=1 \
       --no-same-owner --no-same-permissions --no-overwrite-dir
 
-  # A bare clone produced by `git clone --bare` contains no symlinks. One
-  # in the extracted tree could redirect the sanitizing `rm` below, or the
-  # fetch's object reads, into another repo on the host (e.g. `objects` ->
-  # /srv/git/other.git/objects). Refuse rather than reason about it.
-  # (Rejecting link entries before extraction is AGT-2267.)
+  # Second layer (defense in depth; the entry checks above are the gate):
+  # a bare clone produced by `git clone --bare` holds only regular files
+  # and directories, each file with one link. A symlink in the extracted
+  # tree could redirect the sanitizing `rm` below, or the fetch's object
+  # reads, into another repo on the host (e.g. `objects` ->
+  # /srv/git/other.git/objects); a multiply-linked file aliases something
+  # else. Allowlist: refuse anything that is not a plain file or directory.
   # (`| head` rather than `-quit`, which busybox find may lack; `|| true`
   # because pipefail would otherwise turn find's SIGPIPE into a skip.)
-  LINK=$(find "$IMPORT_DIR" -type l -print | head -n 1 || true)
-  if [[ -n "$LINK" ]]; then
-    echo "error: tarball $FROM_TARBALL contains a symlink: ${LINK#"$IMPORT_DIR"/}" >&2
+  ODD=$(find "$IMPORT_DIR" ! -type f ! -type d -print | head -n 1 || true)
+  if [[ -z "$ODD" ]]; then
+    ODD=$(find "$IMPORT_DIR" -type f -links +1 -print | head -n 1 || true)
+  fi
+  if [[ -n "$ODD" ]]; then
+    echo "error: tarball $FROM_TARBALL extracted a symlink, hardlink or special file: ${ODD#"$IMPORT_DIR"/}" >&2
     exit 1
   fi
 
