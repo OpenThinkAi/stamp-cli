@@ -17,6 +17,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { parse } from "yaml";
 
 const ACTION_PATH = path.resolve(
   import.meta.dirname,
@@ -27,6 +28,34 @@ const ACTION_PATH = path.resolve(
   "action.yml",
 );
 const body = readFileSync(ACTION_PATH, "utf8");
+
+interface Step {
+  name?: string;
+  id?: string;
+  run?: string;
+  env?: Record<string, string>;
+}
+interface ActionYml {
+  inputs: Record<string, { default?: string }>;
+  runs: { steps: Step[] };
+}
+const action = parse(body) as ActionYml;
+const steps = action.runs.steps;
+const VERIFIER_DIR = path.join(path.dirname(ACTION_PATH), "verifier");
+
+function installStep(): Step {
+  const step = steps.find((s) => s.name === "Install stamp-cli");
+  assert.ok(step?.run, "action.yml has no `Install stamp-cli` run step");
+  return step;
+}
+
+/** Shell lines only — comments describe the old global install by name. */
+function codeLines(run: string): string[] {
+  return run
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+}
 
 describe(".github/actions/verify-attestation/action.yml", () => {
   it("does NOT shallow-fetch base/head SHAs (1.6.0 regression)", () => {
@@ -93,5 +122,77 @@ describe(".github/actions/verify-attestation/action.yml", () => {
       !/default:\s*"?latest"?\s*$/m.test(body),
       "stamp-version must NOT default to 'latest' — pin to a specific release",
     );
+  });
+
+  // AGT-2235: the verifier is the gate's trust anchor. Its install must
+  // not run lifecycle scripts, must not float transitive dependencies,
+  // and no event field may be spliced into bash text.
+
+  it("never interpolates ${{ }} expressions into run: blocks", () => {
+    for (const step of steps) {
+      if (!step.run) continue;
+      assert.ok(
+        !/\$\{\{/.test(step.run),
+        `step "${step.name ?? step.id}" interpolates an expression into bash — pass it via env:`,
+      );
+    }
+  });
+
+  it("passes the PR event fields to the refs step via env:", () => {
+    const refs = steps.find((s) => s.id === "refs");
+    assert.ok(refs?.env, "refs step has no env: block");
+    assert.equal(refs.env.HEAD_SHA, "${{ github.event.pull_request.head.sha }}");
+    assert.equal(refs.env.BASE_SHA, "${{ github.event.pull_request.base.sha }}");
+    assert.equal(refs.env.BASE_REF, "${{ github.event.pull_request.base.ref }}");
+    assert.equal(refs.env.EVENT_NAME, "${{ github.event_name }}");
+  });
+
+  it("installs the verifier with --ignore-scripts on every path, never globally", () => {
+    const lines = codeLines(installStep().run!).filter((l) =>
+      /^npm (ci|install|i)\b/.test(l),
+    );
+    assert.ok(lines.length >= 2, "expected a lockfile install and an override install");
+    for (const line of lines) {
+      assert.match(line, /--ignore-scripts/, `npm install without --ignore-scripts: ${line}`);
+      assert.ok(!/(^|\s)(-g|--global)(\s|$)/.test(line), `global install: ${line}`);
+    }
+  });
+
+  it("installs the default verifier with `npm ci` from the committed lockfile", () => {
+    const run = installStep().run!;
+    assert.ok(
+      codeLines(run).some((l) => /^npm ci\b.*--ignore-scripts/.test(l)),
+      "default path must use `npm ci --ignore-scripts`",
+    );
+    assert.match(run, /\$GITHUB_ACTION_PATH\/verifier/);
+  });
+
+  it("keeps the stamp-version default, verifier/package.json and the lockfile in lockstep", () => {
+    const def = action.inputs["stamp-version"]?.default;
+    assert.ok(def && /^\d+\.\d+\.\d+$/.test(def), `stamp-version default not exact: ${def}`);
+    const pkg = JSON.parse(readFileSync(path.join(VERIFIER_DIR, "package.json"), "utf8"));
+    assert.equal(
+      pkg.dependencies["@openthink/stamp"],
+      def,
+      "verifier/package.json must pin the exact stamp-version default",
+    );
+    const lock = JSON.parse(readFileSync(path.join(VERIFIER_DIR, "package-lock.json"), "utf8"));
+    const root = lock.packages[""];
+    assert.equal(root.dependencies["@openthink/stamp"], def, "lockfile root out of date — re-run npm install");
+    const stamp = lock.packages["node_modules/@openthink/stamp"];
+    assert.equal(stamp?.version, def, "lockfile resolves a different stamp version");
+  });
+
+  it("pins every locked package to a registry tarball with an integrity hash", () => {
+    const lock = JSON.parse(readFileSync(path.join(VERIFIER_DIR, "package-lock.json"), "utf8"));
+    const entries = Object.entries(lock.packages as Record<string, Record<string, unknown>>).filter(
+      ([k]) => k !== "",
+    );
+    assert.ok(entries.length > 1, "lockfile has no transitive dependencies — regenerate it");
+    for (const [name, meta] of entries) {
+      if (meta.link) continue;
+      assert.match(String(meta.resolved), /^https:\/\/registry\.npmjs\.org\//, `${name}: not from the npm registry`);
+      assert.match(String(meta.integrity), /^sha512-/, `${name}: no sha512 integrity`);
+    }
   });
 });

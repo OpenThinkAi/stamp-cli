@@ -39,6 +39,20 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   user has a global or system `core.hooksPath` used to get repos where git
   never ran the stamp-verify hook; `new-stamp-repo` now fails instead, removes
   the half-built repo, and says how to find and unset the setting.
+- **The `stamp/verify-attestation` action locks down the verifier install.**
+  It used to run `npm install -g @openthink/stamp@<version>`, which ignores
+  stamp's lockfile: every transitive dependency floated to the newest version
+  its semver range allowed at CI time, and their install scripts ran in the
+  job that verifies the attestation. The default verifier (1.11.0, unchanged,
+  so v2 envelopes still verify) now installs with `npm ci --ignore-scripts`
+  from a lockfile committed beside the action
+  (`.github/actions/verify-attestation/verifier/`), pinning every transitive
+  dependency and checking its integrity hash. An overridden `stamp-version`
+  also installs with `--ignore-scripts` and warns that its transitive
+  dependencies are not locked. The action's PR event fields now reach bash
+  via `env:` instead of `${{ }}` interpolation inside `run:`. Repos pick this
+  up when the action ref in `stamp-verify.yml` is bumped to a release that
+  contains it.
 
 ### Changed
 
