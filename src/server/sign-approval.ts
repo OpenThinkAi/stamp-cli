@@ -24,6 +24,9 @@ import { resolveReviewSigningKeyPath } from "../lib/reviewSigningKey.js";
 import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { runSignApproval } from "../lib/signApprovalHelper.js";
 
+/** Backing word for the EAGAIN back-off; allocated once, not per wait. */
+const WAIT_CELL = new Int32Array(new SharedArrayBuffer(4));
+
 /** Read stdin, but never more than cap+1 bytes (the +1 lets the
  *  validator report "too large" instead of silently truncating). */
 function readBoundedStdin(cap: number): Buffer {
@@ -38,7 +41,7 @@ function readBoundedStdin(cap: number): Buffer {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "EAGAIN") {
         // Non-blocking stdin with no data yet: wait briefly, don't spin.
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        Atomics.wait(WAIT_CELL, 0, 0, 10);
         continue;
       }
       if (code === "EOF") break;

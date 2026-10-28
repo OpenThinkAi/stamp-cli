@@ -572,12 +572,12 @@ export function runSignApprovalHelper(
     );
     child.on("close", (code, signal) =>
       done(() => {
-        // The helper's own lines carry an `error: ` lead; drop it so the
-        // verb doesn't print `error: … error: …`.
+        // The helper's own lines carry an `error: ` lead; drop it from
+        // every line so the verb doesn't print `error: … error: …`.
         const stderr = Buffer.concat(errOut)
           .toString("utf8")
           .trim()
-          .replace(/^error:\s*/, "");
+          .replace(/^error:\s*/gm, "");
         if (code !== 0) {
           const how = code === null ? `was killed by ${signal ?? "a signal"}` : `exited ${code}`;
           reject(

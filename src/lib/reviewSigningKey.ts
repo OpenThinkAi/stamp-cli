@@ -123,7 +123,7 @@ export function assertPrivateKeyPosture(
   if (st.nlink !== 1) {
     throw new ReviewSigningKeyError(
       `review-signing key at ${privateKeyPath} has ${st.nlink} hard links; required exactly 1. ` +
-        `Refusing to load. Remove the extra links (find / -samefile ${privateKeyPath}).`,
+        `Refusing to load. Remove the extra links (find /srv/git -xdev -samefile ${privateKeyPath}).`,
     );
   }
   const expectedUid = process.getuid?.();
