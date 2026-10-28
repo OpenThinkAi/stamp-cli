@@ -17,8 +17,8 @@
 # git-shell, which dispatches it exactly as before (git-upload-pack /
 # git-receive-pack / git-upload-archive, or a git-shell-commands verb).
 #
-# Exit codes are stamp-gate-check's: 1 identity, 2 refused command,
-# 3 denied by role or grants.
+# Exit codes are stamp-gate-check's: 1 identity or server error, 2 refused
+# command or bad usage, 3 denied by role or grants, or repo not found.
 #
 set -e
 

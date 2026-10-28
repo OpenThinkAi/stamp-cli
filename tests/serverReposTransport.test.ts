@@ -271,3 +271,16 @@ describe("server-repos git-shell transport (issue #67)", () => {
     assert.deepEqual(filterLiveBareRepoNames("(no live bare repos)\n"), []);
   });
 });
+
+// AGT-2270: exit 3 from a server verb is a role refusal, explained.
+import { serverRoleRefusalHint } from "../src/commands/serverRepo.ts";
+
+describe("serverRoleRefusalHint (AGT-2270)", () => {
+  it("explains exit 3 as a role refusal naming what the verb needs", () => {
+    const hint = serverRoleRefusalHint(3, "resync-mirror", "owner or admin");
+    assert.match(hint, /refused the request for your role \(exit 3\): resync-mirror needs owner or admin/);
+  });
+  it("is empty for every other status", () => {
+    for (const s of [0, 1, 2, 4, 255, null]) assert.equal(serverRoleRefusalHint(s, "x", "y"), "");
+  });
+});

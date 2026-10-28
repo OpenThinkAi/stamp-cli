@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { serverRoleRefusalHint } from "./serverRepo.js";
 import { maybeWarnAgentsMdDrift } from "../lib/agentsMd.js";
 import { runGit } from "../lib/git.js";
 import { findRepoRoot } from "../lib/paths.js";
@@ -118,8 +119,9 @@ function resyncMirror(remote: string, target: string, repoRoot: string): void {
   );
   if (result.status !== 0) {
     console.error(
-      `error: resync-mirror failed (exit ${result.status}). If you see "command not ` +
-        `found", the server image predates the resync-mirror verb — redeploy it first.`,
+      `error: resync-mirror failed (exit ${result.status}).` +
+        (serverRoleRefusalHint(result.status, "resync-mirror", "owner or admin") ||
+          ` If you see "command not found", the server image predates the resync-mirror verb — redeploy it first.`),
     );
     process.exit(1);
   }

@@ -890,7 +890,9 @@ pty allocation and all forwarding for the key. The gate:
    exactly what was checked.
 
 Exit codes: 1 no or unenrolled identity, 2 refused command or path, 3
-denied by role or grants. Interactive logins (`ssh git@<host>` with no
+denied by role or grants, or no such repo (a scoped member gets the same
+refusal for both, so the gate never confirms which repo names exist).
+Refusals list the commands the gate serves. Interactive logins (`ssh git@<host>` with no
 command) are refused.
 
 `git-shell` only constrains what runs as the login shell. sshd features

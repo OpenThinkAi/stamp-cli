@@ -83,8 +83,9 @@ export async function runServerRepoDelete(opts: ServerRepoDeleteOptions): Promis
   );
   if (result.status !== 0) {
     throw new Error(
-      `server-side delete failed (exit ${result.status}). The bare repo on the stamp server was NOT touched. ` +
-        `If you see "command not found", the server image is older than 0.7.3 — redeploy it first.`,
+      `server-side delete failed (exit ${result.status}). The bare repo on the stamp server was NOT touched.` +
+        (serverRoleRefusalHint(result.status, opts.purge ? "purge" : "delete", "owner or admin") ||
+          ` If you see "command not found", the server image is older than 0.7.3 — redeploy it first.`),
     );
   }
 
@@ -171,8 +172,9 @@ export async function runServerRepoRestore(opts: ServerRepoRestoreOptions): Prom
   );
   if (result.status !== 0) {
     throw new Error(
-      `server-side restore failed (exit ${result.status}). ` +
-        `Run \`stamp server-repos list --trash\` to see what's available.`,
+      `server-side restore failed (exit ${result.status}).` +
+        (serverRoleRefusalHint(result.status, "restore", "owner or admin") ||
+          ` Run \`stamp server-repos list --trash\` to see what's available.`),
     );
   }
 }
@@ -226,8 +228,9 @@ export async function runServerRepoPurge(opts: ServerRepoPurgeOptions): Promise<
   );
   if (result.status !== 0) {
     throw new Error(
-      `server-side purge failed (exit ${result.status}). If you see "command not found", ` +
-        `the server image predates AGT-423 (trash TTL) — redeploy it first.`,
+      `server-side purge failed (exit ${result.status}).` +
+        (serverRoleRefusalHint(result.status, "purge-trash", "owner or admin") ||
+          ` If you see "command not found", the server image predates AGT-423 (trash TTL) — redeploy it first.`),
     );
   }
 }
@@ -247,8 +250,9 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
     );
     if (result.status !== 0) {
       throw new Error(
-        `list --trash failed (exit ${result.status}). If you see "command not found", ` +
-          `the server image is older than 0.7.3 — redeploy it first.`,
+        `list --trash failed (exit ${result.status}).` +
+          (serverRoleRefusalHint(result.status, "listing the trash", "owner or admin") ||
+            ` If you see "command not found", the server image is older than 0.7.3 — redeploy it first.`),
       );
     }
     return;
@@ -272,9 +276,14 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
   );
   if (result.status !== 0) {
     throw new Error(
-      `list failed (exit ${result.status}). If you see "unrecognized command" or ` +
-        `"command not found", the server image predates the list-stamp-repos verb ` +
-        `(issue #67) — redeploy it first.`,
+      `list failed (exit ${result.status}).` +
+        (serverRoleRefusalHint(
+          result.status,
+          "listing every repo",
+          "owner, admin, or a member with no repo grants (see `stamp users grants <you>`)",
+        ) ||
+          ` If you see "unrecognized command" or "command not found", the server image predates ` +
+            `the list-stamp-repos verb (issue #67) — redeploy it first.`),
     );
   }
   const entries = filterLiveBareRepoNames(result.stdout);
@@ -286,6 +295,21 @@ export function runServerRepoList(opts: ServerRepoListOptions): void {
 }
 
 // ---------- helpers ----------
+
+/**
+ * AGT-2270: explain the stamp server's role refusal. Since AGT-2259/2265
+ * the server verbs and the session gate exit 3 when the caller's role or
+ * repo grants don't allow the request; without this the client printed a
+ * bare "failed (exit 3)". Returns "" for any other status.
+ */
+export function serverRoleRefusalHint(status: number | null, verb: string, needs: string): string {
+  if (status !== 3) return "";
+  return (
+    ` The server refused the request for your role (exit 3): ${verb} needs ${needs}. ` +
+    `Ask an owner or admin to run it, or to change your role with ` +
+    `\`stamp users promote\`.`
+  );
+}
 
 export function resolveServer(serverFlag: string | undefined): ServerConfig {
   const server = serverFlag ? parseServerFlag(serverFlag) : loadServerConfig();

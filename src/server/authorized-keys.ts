@@ -17,10 +17,9 @@
  * Constraints sshd enforces on this script:
  *   - Must be owned by root, no group/other write bits (sshd validates).
  *   - Must produce its output quickly — every SSH handshake invokes us.
- *   - Runs as AuthorizedKeysCommandUser (we use `git`), which has READ-ONLY
- *     access to the DB via the root:git 0640 mode bits. Opening the DB
- *     read-only here means even a future bug that tries to mutate state
- *     fails at open time instead of corrupting authz.
+ *   - Runs as AuthorizedKeysCommandUser (`git`). It opens the DB
+ *     read-only, so even a future bug that tries to mutate state fails at
+ *     open time instead of corrupting authz.
  *
  * Failure handling: ANY error (DB open failure, malformed arguments, etc.)
  * is logged to stderr and the script exits 0 with empty stdout, so the key
