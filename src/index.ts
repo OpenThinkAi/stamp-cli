@@ -1215,11 +1215,13 @@ drafts
   .description("delete a draft by patch-id; --all --yes to delete all")
   .option("--all", "delete all drafts")
   .option("--yes", "required with --all to confirm bulk deletion")
+  .option("--older-than <duration>", "with --all: only drafts older than <n>d / <n>h / <n>m (e.g. 30d)")
   .addHelpText(
     "after",
     `
 Delete a single draft by patch-id (or unambiguous prefix), or delete all drafts
 with --all --yes. Without --yes, --all lists files that would be deleted and exits 1.
+--all --older-than 30d --yes prunes only drafts last written more than 30 days ago.
 
 Exit codes:
   0   — success
@@ -1228,8 +1230,8 @@ Exit codes:
   3   — I/O error
 `,
   )
-  .action((patchId: string | undefined, opts: { all?: boolean; yes?: boolean }) => {
-    runDraftsDelete({ patchId, all: opts.all, yes: opts.yes });
+  .action((patchId: string | undefined, opts: { all?: boolean; yes?: boolean; olderThan?: string }) => {
+    runDraftsDelete({ patchId, all: opts.all, yes: opts.yes, olderThan: opts.olderThan });
   });
 
 program

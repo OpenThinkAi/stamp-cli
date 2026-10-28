@@ -422,3 +422,53 @@ describe("peerDrafts delete --all --yes → exit 0, all deleted", () => {
     assert.equal(capturedCode(), 1, `expected exit 1 for empty dir, got ${capturedCode()}`);
   });
 });
+
+// ─── AGT-2270: delete --all --older-than ─────────────────────────────
+
+import { utimesSync } from "node:fs";
+
+describe("peerDrafts delete --all --older-than (AGT-2270)", () => {
+  it("deletes only drafts older than the duration", () => {
+    const dir = makeDraftsDir();
+    const oldId = "1".repeat(40);
+    const newId = "2".repeat(40);
+    const oldPath = writeDraft(dir, oldId);
+    const newPath = writeDraft(dir, newId);
+    const longAgo = new Date(Date.now() - 40 * 86_400_000);
+    utimesSync(oldPath, longAgo, longAgo);
+    const { exitFn, capturedCode } = makeExitCapture();
+    const out: string[] = [];
+    try {
+      runDraftsDelete({
+        all: true, yes: true, olderThan: "30d",
+        _dirForTest: dir, _exitForTest: exitFn,
+        _stdoutWriteForTest: (s) => { out.push(s); },
+        _stderrWriteForTest: () => {},
+      });
+    } catch { /* exitFn throws */ }
+    try {
+      assert.equal(capturedCode(), 0);
+      assert.equal(existsSync(oldPath), false);
+      assert.equal(existsSync(newPath), true);
+      assert.match(out.join(""), new RegExp(`deleted ${oldId}`));
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("refuses --older-than without --all and a malformed duration (exit 2)", () => {
+    const dir = makeDraftsDir();
+    writeDraft(dir, "3".repeat(40));
+    try {
+      for (const opts of [{ olderThan: "30d" }, { all: true, yes: true, olderThan: "soon" }]) {
+        const { exitFn, capturedCode } = makeExitCapture();
+        try {
+          runDraftsDelete({ ...opts, _dirForTest: dir, _exitForTest: exitFn, _stderrWriteForTest: () => {} });
+        } catch { /* exitFn throws */ }
+        assert.equal(capturedCode(), 2, JSON.stringify(opts));
+      }
+    } finally {
+      cleanup(dir);
+    }
+  });
+});
