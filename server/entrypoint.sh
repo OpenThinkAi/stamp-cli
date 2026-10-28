@@ -355,6 +355,7 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
   # write perms on the parent).
   if [ -d "${_pcroot}.old" ] && [ ! -L "${_pcroot}.old" ]; then
     chown -R -h git:git "${_pcroot}.old" || true
+    chmod o-rwx "${_pcroot}.old" || true
   fi
 fi
 

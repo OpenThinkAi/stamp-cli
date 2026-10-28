@@ -288,7 +288,8 @@ COPY server/stamp-gate /usr/local/bin/stamp-gate
 # running deploy finds the tables already present).
 COPY --from=builder /build/dist/server/pr-opened.cjs /usr/local/bin/stamp-pr-opened
 # HTTP listener for invite/accept. Started by entrypoint.sh as the
-# unprivileged stamp-http user with an allowlisted env (AGT-2264), runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
+# unprivileged stamp-http user with an allowlisted env (AGT-2264), runs
+# alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
 # the hosting platform's job (Railway terminates at its edge proxy).
 COPY --from=builder /build/dist/server/start-http-server.cjs /usr/local/sbin/stamp-http-server
 # Git-user background workers split out of the listener (AGT-2264): the

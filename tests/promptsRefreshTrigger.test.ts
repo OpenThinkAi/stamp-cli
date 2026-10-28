@@ -244,10 +244,10 @@ describe("readPromptsRefreshTrigger treats the file as untrusted (AGT-2264)", ()
     assert.equal(readPromptsRefreshTrigger(p), "abc-123");
   });
 
-  it("returns 'trigger' (not the content) for a malformed one", () => {
+  it("returns 'invalid' (not the content) for a malformed one", () => {
     const p = path.join(dir, "t");
     writeFileSync(p, "line1\nINJECTED log line\n");
-    assert.equal(readPromptsRefreshTrigger(p), "trigger");
+    assert.equal(readPromptsRefreshTrigger(p), "invalid");
   });
 
   it("refuses to follow a symlink", () => {
@@ -258,7 +258,7 @@ describe("readPromptsRefreshTrigger treats the file as untrusted (AGT-2264)", ()
     assert.equal(readPromptsRefreshTrigger(p), null);
   });
 
-  it("returns null when missing", () => {
-    assert.equal(readPromptsRefreshTrigger(path.join(dir, "nope")), null);
+  it("returns 'missing' when the file is gone", () => {
+    assert.equal(readPromptsRefreshTrigger(path.join(dir, "nope")), "missing");
   });
 });

@@ -18,6 +18,7 @@
  */
 
 import {
+  logInfo,
   setLogPrefix,
   startPromptsPollWorker,
   startPromptsRefreshTriggerWatcher,
@@ -34,4 +35,4 @@ startTrashSweepWorker();
 // explicitly. sshd is PID 1; if this process dies the workers stop until the
 // next redeploy, same as the listener.
 setInterval(() => {}, 1 << 30);
-process.stderr.write("stamp-workers: started\n");
+logInfo("started");

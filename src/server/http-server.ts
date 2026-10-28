@@ -806,25 +806,26 @@ export function writePromptsRefreshTrigger(triggerPath: string, deliveryId: stri
   renameSync(tmp, triggerPath);
 }
 
-/** Read the trigger's delivery id. Returns null when the file is missing,
- *  is not a regular file, or is a symlink; "trigger" when its content isn't
- *  a well-formed delivery id. */
+/** Read the trigger's delivery id. Returns "missing" when the file is gone
+ *  (e.g. replaced between the watcher's stat and this open), null when it is
+ *  a symlink or not a regular file, and "invalid" when its content isn't a
+ *  well-formed delivery id. */
 export function readPromptsRefreshTrigger(triggerPath: string): string | null {
   let fd: number;
   try {
     fd = openSync(
       triggerPath,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0),
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
     );
-  } catch {
-    return null;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : null;
   }
   try {
     if (!fstatSync(fd).isFile()) return null;
     const buf = Buffer.alloc(PROMPTS_REFRESH_TRIGGER_MAX_BYTES);
     const n = readSync(fd, buf, 0, buf.length, 0);
     const id = buf.subarray(0, n).toString("utf8").trim();
-    return DELIVERY_ID_RE.test(id) ? id : "trigger";
+    return DELIVERY_ID_RE.test(id) ? id : "invalid";
   } finally {
     closeSync(fd);
   }
@@ -855,6 +856,7 @@ export function startPromptsRefreshTriggerWatcher(intervalMs = 1000): void {
     if (curr.mtimeMs === 0) return; // removed / not there yet
     if (curr.mtimeMs === prev.mtimeMs && curr.ino === prev.ino) return;
     const id = readPromptsRefreshTrigger(triggerPath);
+    if (id === "missing") return; // replaced mid-read; the next stat fires again
     if (id === null) {
       logLine("warn", `prompts-trigger: ${triggerPath} is not a regular file; ignoring`);
       return;
@@ -868,6 +870,12 @@ export function startPromptsRefreshTriggerWatcher(intervalMs = 1000): void {
     }
   });
   logLine("info", `prompts-trigger: watching ${triggerPath}`);
+}
+
+/** Log through the process's prefixed log format (stamp-workers uses it for
+ *  its own lifecycle lines). */
+export function logInfo(msg: string): void {
+  logLine("info", msg);
 }
 
 export function stopPromptsRefreshTriggerWatcher(): void {

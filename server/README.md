@@ -951,7 +951,10 @@ allowlist.
 **Adding a knob.** A new env var the listener or workers read must be added
 to its allowlist in `server/lib/allowlisted-env.sh`, or it silently does
 nothing in the image. `tests/allowlistedEnvShell.test.ts` fails when the
-source reads a variable that neither list carries.
+source reads a variable that neither list carries. It scans a fixed list of
+files for `process.env["X"]`, `process.env.X` and the two env-helper call
+shapes, so add a new module the listener or workers import to that list, and
+read env in one of those shapes.
 
 ### Upgrading to this layout
 
