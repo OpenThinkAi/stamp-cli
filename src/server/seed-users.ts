@@ -67,6 +67,27 @@ function reportIgnored(db: DatabaseSync, pubkeys: SshPubkey[]): void {
   );
 }
 
+/**
+ * AGT-2270: the reverse of reportIgnored. A member seeded from
+ * AUTHORIZED_KEYS whose key the operator has since deleted from the env
+ * var still has access (the env var only bootstraps), and their row keeps
+ * their key and name. Say so, so removing the line isn't mistaken for
+ * revoking access. Only runs while AUTHORIZED_KEYS is still set.
+ */
+function reportDropped(db: DatabaseSync, pubkeys: SshPubkey[]): void {
+  const listed = new Set(pubkeys.map((pk) => pk.fingerprint));
+  const rows = db
+    .prepare(`SELECT short_name, ssh_fp FROM users WHERE source = 'env' ORDER BY short_name`)
+    .all() as Array<{ short_name: string; ssh_fp: string }>;
+  const dropped = rows.filter((r) => !listed.has(r.ssh_fp));
+  if (dropped.length === 0) return;
+  console.error(
+    `stamp-seed-users: warning: ${dropped.length} member(s) seeded from AUTHORIZED_KEYS are no longer listed ` +
+      `there but still have access: ${dropped.map((r) => `${r.short_name} (${r.ssh_fp})`).join(", ")}. ` +
+      `Removing a line does not revoke anyone; run 'stamp users remove <name>' for each who should lose access.`,
+  );
+}
+
 function main(): void {
   if (AUTHORIZED_KEYS.trim().length === 0) {
     console.log("stamp-seed-users: AUTHORIZED_KEYS env var unset or empty; nothing to bootstrap");
@@ -88,6 +109,7 @@ function main(): void {
         `stamp-seed-users: server already bootstrapped (${marker}); AUTHORIZED_KEYS is not re-imported`,
       );
       reportIgnored(db, pubkeys);
+      reportDropped(db, pubkeys);
       return;
     }
 
@@ -102,6 +124,7 @@ function main(): void {
           `AUTHORIZED_KEYS is no longer re-imported on boot.`,
       );
       reportIgnored(db, pubkeys);
+      reportDropped(db, pubkeys);
       return;
     }
 

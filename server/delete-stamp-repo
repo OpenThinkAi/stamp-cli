@@ -77,10 +77,29 @@ case "$LIVE_REPO" in
     ;;
 esac
 
+# AGT-2270: a purge removes only this server's copies. Name the GitHub
+# mirror (from .stamp/mirror.yml on the repo's HEAD branch, read before the
+# rm) that still holds the full history, so an operator erasing committed
+# data knows the job isn't done. Best effort: no mirror.yml, no warning.
+warn_mirror_survives() {
+  _mirror=$(git --git-dir="$1" show HEAD:.stamp/mirror.yml 2>/dev/null \
+    | sed -n 's/^[[:space:]]*repo:[[:space:]]*["'\'']\{0,1\}\([A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]*\).*/\1/p' \
+    | head -n 1) || _mirror=""
+  if [ -n "$_mirror" ]; then
+    echo "warning: '$NAME' mirrors to github.com/$_mirror; the purge does not touch it." >&2
+    echo "         That repo (and its forks and caches) still holds the full history, and so do" >&2
+    echo "         any volume backups taken before now. To erase committed data, also delete or" >&2
+    echo "         rewrite the mirror and let old backups age out (server/README.md, Backup)." >&2
+  fi
+}
+
 if [ $PURGE -eq 1 ]; then
   # Purge mode: nuke the live repo if present, AND any trashed copies.
   removed_anything=0
+  mirror_warned=0
   if [ -d "$LIVE_REPO" ]; then
+    warn_mirror_survives "$LIVE_REPO"
+    mirror_warned=1
     rm -rf "$LIVE_REPO"
     echo "purged: $LIVE_REPO"
     removed_anything=1
@@ -96,6 +115,10 @@ if [ $PURGE -eq 1 ]; then
       # Strip exactly the timestamp prefix (16 chars + dash = 17).
       remainder=$(printf '%s' "$base" | sed -n 's/^[0-9]\{8\}T[0-9]\{6\}Z-//p')
       if [ "$remainder" = "${NAME}.git" ]; then
+        if [ $mirror_warned -eq 0 ]; then
+          warn_mirror_survives "$trashed"
+          mirror_warned=1
+        fi
         rm -rf "$trashed"
         echo "purged: $trashed"
         removed_anything=1

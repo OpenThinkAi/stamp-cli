@@ -497,7 +497,10 @@ field is optional — when absent or empty, no tags are mirrored (the
 pre-0.7.8 behavior).
 
 Tag mirroring exists for repos that publish on tag push (npm `on: push: tags`,
-Cargo, PyPI, etc.). Without it, `git push origin v1.0.0` lands on the stamp
+Cargo, PyPI, etc.). Gate those publish jobs on a protected GitHub
+environment (required reviewers or a deployment-branch rule) so a tag
+pushed straight to the mirror with a leaked mirror credential can't
+publish on its own. Without it, `git push origin v1.0.0` lands on the stamp
 server but the GitHub action never fires; the workaround was a parallel
 `git push github v1.0.0` that bypasses the stamp gate.
 
@@ -744,11 +747,43 @@ that isn't enrolled (`source=manual`) and sets the role of one that is
 `/usr/local/sbin`, refuses any uid but 0, and is not an SSH verb, so it
 can't be reached as `git`.
 
+## Where user data lives
+
+What the server keeps about members and their code, and who else gets it:
+
+| Where | What | Kept until |
+| --- | --- | --- |
+| `/srv/git/.stamp-state/users.db` | members: SSH key (comment stripped), stamp signing key, short name, role, last seen; invites; repo grants; names freed by removed or renamed members | a member's row: `stamp users remove` / `prune-idle`. Removing a key from `AUTHORIZED_KEYS` does not remove it (boot warns) |
+| `users.db` peer tables | `stamp pr open` broadcasts (title, body, paths, URL), seat claims, cached server-side verdict prose | title/body/paths dropped after an hour; rows after 30 days (`STAMP_PEER_EVENT_RETENTION_DAYS`, `STAMP_SERVER_VERDICT_RETENTION_DAYS`) |
+| `/srv/git/<name>.git`, `/srv/git/.trash/` | repository content | live repos: until deleted; trash: `STAMP_TRASH_TTL_DAYS` (default 30) or `--purge` |
+| container log stream | invite accepts (short name), webhook deliveries, rejected-request addresses, signing audit lines | your platform's log retention |
+| Anthropic (sub-processor) | the diff, PR title and changed paths of each server-side review | Anthropic's API retention terms |
+| GitHub mirror (sub-processor) | mirrored branches and tags, `stamp/verified` statuses | until you delete or rewrite the mirror |
+| your backups of `/srv/git` | everything above | your backup retention (see below) |
+
+**Server-side review sends diffs to Anthropic.** When `ANTHROPIC_API_KEY`
+is set, the `stamp-review` verb sends each reviewed diff to the Anthropic
+API under the operator's account. Diffs are repository content and can
+carry whatever was committed, personal data included. `stamp invites accept`
+tells new members this before they enroll; a repo that must not leave your
+infrastructure should not use a `review_server`.
+
+**Deleting a repo does not reach copies outside the server.** `--purge`
+and the trash sweep remove `/srv/git` copies only; `delete-stamp-repo
+--purge` names the GitHub mirror that still holds the history. To erase
+committed data, also delete or rewrite the mirror and let backups that
+contain it age out.
+
 ## Backup
 
 The entire state is in the Railway volume at `/srv/git/`. Back it up by
 copying that directory periodically; a freshly-provisioned container
 pointed at the same volume will pick up exactly where it left off.
+
+Give backups a retention window and keep it no longer than you need:
+every backup holds `users.db` and every repo, trashed ones included, so a
+purge is only complete once the backups taken before it expire. Matching
+`STAMP_TRASH_TTL_DAYS` (30 days by default) keeps the two in step.
 
 ## AI-attribution policy
 

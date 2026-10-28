@@ -383,3 +383,56 @@ function spawnSyncVerb(
   });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
+
+// AGT-2270: --purge names the GitHub mirror it cannot reach.
+import { execFileSync } from "node:child_process";
+
+describe("delete-stamp-repo --purge warns that the mirror keeps history (AGT-2270)", () => {
+  function seedBareWithMirror(bare: string, mirrorYml: string | null): void {
+    const work = `${bare}-work`;
+    const g = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, stdio: "pipe" });
+    mkdirSync(work, { recursive: true });
+    g(work, "init", "-q", "-b", "main");
+    g(work, "config", "user.email", "t@example.com");
+    g(work, "config", "user.name", "T");
+    if (mirrorYml !== null) {
+      mkdirSync(path.join(work, ".stamp"));
+      writeFileSync(path.join(work, ".stamp", "mirror.yml"), mirrorYml);
+      g(work, "add", ".");
+    }
+    g(work, "commit", "-q", "--allow-empty", "-m", "x");
+    execFileSync("git", ["clone", "-q", "--bare", work, bare], { stdio: "pipe" });
+    rmSync(work, { recursive: true, force: true });
+  }
+
+  it("names github.repo before purging a live repo", () => {
+    const h = shellHarness();
+    try {
+      seedBareWithMirror(path.join(h.gitRoot, "victim.git"), "github:\n  repo: \"acme/victim\"\n  branches: [main]\n");
+      const r = h.run("delete-stamp-repo", ["victim", "--purge"], 0);
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(!existsSync(path.join(h.gitRoot, "victim.git")));
+      assert.match(r.stderr, /warning: 'victim' mirrors to github\.com\/acme\/victim; the purge does not touch it/);
+      assert.match(r.stderr, /volume backups/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("names it from a trashed copy, and stays quiet without a mirror.yml", () => {
+    const h = shellHarness();
+    try {
+      seedBareWithMirror(path.join(h.trashDir, TRASHED), "github:\n  repo: acme/victim\n");
+      const r = h.run("delete-stamp-repo", ["victim", "--purge"], 0);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /mirrors to github\.com\/acme\/victim/);
+
+      seedBareWithMirror(path.join(h.gitRoot, "plain.git"), null);
+      const q = h.run("delete-stamp-repo", ["plain", "--purge"], 0);
+      assert.equal(q.status, 0, q.stderr);
+      assert.doesNotMatch(q.stderr, /warning/);
+    } finally {
+      h.cleanup();
+    }
+  });
+});
