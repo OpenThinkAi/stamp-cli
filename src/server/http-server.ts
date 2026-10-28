@@ -49,6 +49,7 @@ import {
   claimSeatTx,
   findPatch,
   findPeerReviewEventsAfter,
+  findUserById,
   findUserByShortName,
   findUserByStampPubkey,
   insertUser,
@@ -58,8 +59,10 @@ import {
   sweepExpiredSeats,
   touchHeartbeat,
   touchLastSeen,
+  type UserRow,
 } from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
+import { isCallerAuthorizedForOrg, mayReceiveRepoEvents } from "../lib/repoAccess.js";
 import { verifyBytes } from "../lib/signing.js";
 import { fingerprintFromPem } from "../lib/keys.js";
 import {
@@ -1293,11 +1296,21 @@ function runPeerEventsPollTick(): void {
     const db = openServerDb({ readOnly: true });
     try {
       const rows = findPeerReviewEventsAfter(db, peerEventsPollState.cursor);
+      // AGT-2256: re-resolve each subscriber's CURRENT role/grants once per
+      // tick, so a revoked grant, demotion or removed user stops delivery
+      // without waiting for the stream to reconnect.
+      const callers = new Map<number, UserRow | null>();
+      const callerFor = (userId: number): UserRow | null => {
+        if (!callers.has(userId)) callers.set(userId, findUserById(db, userId));
+        return callers.get(userId) ?? null;
+      };
       for (const row of rows) {
         // Derive org from repo ("org/repo" → "org") and lowercase so the
         // comparison against listener-stored orgs (also lowercased via
         // parseOrgQuery) is case-insensitive by construction.
-        const org = (row.repo.split("/")[0] ?? "").toLowerCase();
+        const [rawOrg, rawRepo] = row.repo.split("/");
+        const org = (rawOrg ?? "").toLowerCase();
+        const repoName = (rawRepo ?? "").toLowerCase();
         // Parse the stored payload JSON; fall back to empty object on corrupt data.
         let payload: object;
         try {
@@ -1311,11 +1324,27 @@ function runPeerEventsPollTick(): void {
           actor_fp: row.actor_fp,
           payload,
         };
-        // Deliver to every SSE client subscribed to this org.
+        // Deliver to every SSE client subscribed to this org AND currently
+        // authorized for this repo (AGT-2256).
         for (const [fp, client] of sseConnections) {
-          if (client.orgs.includes(org)) {
-            pushEventToSseClient(fp, event);
+          if (!client.orgs.includes(org)) continue;
+          const caller = callerFor(client.userId);
+          if (caller === null) {
+            // The subscriber's account was removed: drop it from the
+            // registry now (so later rows this tick skip it) and end the
+            // stream rather than keep streaming.
+            logLine("info", `SSE /peer/events: closing fp=${fp}: user no longer enrolled`);
+            sseConnections.delete(fp);
+            clearInterval(client.heartbeat);
+            unregisterListener(fp);
+            try { client.res.end(); } catch { /* ignore */ }
+            continue;
           }
+          // A malformed repo (no "<org>/<repo>") is delivered to no one —
+          // same fail-closed rule as the in-process path.
+          if (!org || !repoName) continue;
+          if (!mayReceiveRepoEvents(db, caller, org, repoName)) continue;
+          pushEventToSseClient(fp, event);
         }
         // Advance cursor past this row.
         if (row.id > peerEventsPollState.cursor) {
@@ -1440,8 +1469,56 @@ export const SSE_PEER_EVENTS_PATH = "/peer/events";
 /** Per-connection SSE state bound after successful auth. */
 interface SseClientState {
   res: ServerResponse;
+  /** Subscribed orgs, already filtered to the caller's authorization. */
   orgs: string[];
+  /** users.id of the authenticated subscriber; delivery re-checks its grants. */
+  userId: number;
   heartbeat: ReturnType<typeof setInterval>;
+}
+
+/**
+ * Serialize an event as an SSE `data:` frame. AGT-2256: the free-text PR
+ * `body` is stripped from fanned-out payloads — listeners triage on title
+ * + paths only and fetch the real PR via `gh`, which enforces GitHub's own
+ * access control. The stored event row is unchanged.
+ */
+function sseDataFrame(event: PeerReviewEvent): string {
+  const payload = event.payload as Record<string, unknown> | null | undefined;
+  let out: PeerReviewEvent = event;
+  if (payload && typeof payload === "object" && "body" in payload) {
+    const { body: _body, ...rest } = payload;
+    out = { ...event, payload: rest };
+  }
+  return `data: ${JSON.stringify(out)}\n\n`;
+}
+
+/**
+ * Delivery check for the in-process listener path (`fanoutEvent` /
+ * seat-holder fanout): the event's `payload.repo` names the `<org>/<repo>`
+ * it concerns, and the subscriber must currently be authorized for it.
+ * Events that carry no repo are dropped — fail closed.
+ */
+function inProcessEventAuthorized(userId: number, event: PeerReviewEvent): boolean {
+  const payload = event.payload as Record<string, unknown> | null | undefined;
+  const repoField = payload && typeof payload === "object" ? payload["repo"] : undefined;
+  if (typeof repoField !== "string") return false;
+  const [org, repo] = repoField.split("/");
+  if (!org || !repo) return false;
+  try {
+    const db = openServerDb({ readOnly: true });
+    try {
+      const caller = findUserById(db, userId);
+      return caller !== null && mayReceiveRepoEvents(db, caller, org, repo);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    logLine(
+      "error",
+      `SSE /peer/events: authorization lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
 }
 
 /** Active SSE connections keyed by fingerprint (for event fanout). */
@@ -1484,7 +1561,7 @@ function decodePubkeyHeader(raw: string): string | null {
  */
 function authenticateSseRequest(
   req: IncomingMessage,
-): { ok: true; pubkeyPem: string } | { ok: false; reason: string } {
+): { ok: true; pubkeyPem: string; user: UserRow } | { ok: false; reason: string } {
   const rawPubkey = headerValue(req, "x-stamp-pubkey");
   const timestamp = headerValue(req, "x-stamp-timestamp");
   const signature = headerValue(req, "x-stamp-signature");
@@ -1521,11 +1598,11 @@ function authenticateSseRequest(
   }
 
   // (3) Enrollment — the key must belong to a known user.
-  let enrolled = false;
+  let user: UserRow | null = null;
   try {
     const db = openServerDb({ readOnly: true });
     try {
-      enrolled = findUserByStampPubkey(db, pubkeyPem) !== null;
+      user = findUserByStampPubkey(db, pubkeyPem);
     } finally {
       db.close();
     }
@@ -1535,11 +1612,11 @@ function authenticateSseRequest(
       reason: `user lookup failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  if (!enrolled) {
+  if (user === null) {
     return { ok: false, reason: "key is not an enrolled user" };
   }
 
-  return { ok: true, pubkeyPem };
+  return { ok: true, pubkeyPem, user };
 }
 
 /** Read a request header as a single string (first value if repeated). */
@@ -1573,6 +1650,9 @@ function parseOrgQuery(url: string): string[] {
  * Push a PeerReviewEvent to the SSE client identified by `fingerprint`.
  * Returns true when the stream was found and the frame was written; false
  * when no active SSE connection exists for that fingerprint.
+ *
+ * This is the raw write primitive: it does NOT check authorization. Callers
+ * (the poll tick) must have checked `mayReceiveRepoEvents` first (AGT-2256).
  */
 export function pushEventToSseClient(
   fingerprint: string,
@@ -1581,7 +1661,7 @@ export function pushEventToSseClient(
   const client = sseConnections.get(fingerprint);
   if (!client) return false;
   try {
-    client.res.write(`data: ${JSON.stringify(event)}\n\n`);
+    client.res.write(sseDataFrame(event));
     return true;
   } catch {
     return false;
@@ -1613,7 +1693,46 @@ export function handlePeerEventsRequest(
   // Fingerprint binds the stream to the verified pubkey (same namespace the
   // listener registry / seat verbs use).
   const fingerprint = fingerprintFromPem(auth.pubkeyPem);
-  const orgs = parseOrgQuery(req.url ?? "");
+  const requestedOrgs = parseOrgQuery(req.url ?? "");
+
+  // AGT-2256: the `?org=` list is caller-supplied. Bind it to the caller's
+  // repo grants (src/lib/repoAccess.ts): owners/admins may subscribe to any
+  // org; a member only to orgs where they hold a grant. A member with no
+  // grants (unscoped) gets none — fail closed. Every delivered event is
+  // re-checked at <org>/<repo> granularity against the current grants.
+  const user = auth.user;
+  let orgs: string[];
+  try {
+    const db = openServerDb({ readOnly: true });
+    try {
+      orgs = requestedOrgs.filter((o) => isCallerAuthorizedForOrg(db, user, o));
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    logLine(
+      "error",
+      `SSE /peer/events: authorization lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    sendJson(res, 500, { ok: false, error: "authorization_lookup_failed" });
+    return;
+  }
+  const deniedOrgs = requestedOrgs.filter((o) => !orgs.includes(o));
+  if (requestedOrgs.length > 0 && orgs.length === 0) {
+    logLine(
+      "warn",
+      `SSE /peer/events: fp=${fingerprint} user=${user.short_name} not authorized for orgs=[${deniedOrgs.join(",")}]`,
+    );
+    sendJson(res, 403, {
+      ok: false,
+      error: "forbidden",
+      reason:
+        `${user.short_name} is not granted access to org(s) ${deniedOrgs.join(", ")} on this server. ` +
+        `Ask an admin to run 'stamp users grant ${user.short_name} --repo <org>/*' ` +
+        `(or --repo <org>/<repo> for specific repos).`,
+    });
+    return;
+  }
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -1622,6 +1741,11 @@ export function handlePeerEventsRequest(
   });
   // Open the stream with a comment so proxies flush headers immediately.
   res.write(`: connected ${fingerprint}\n\n`);
+  if (deniedOrgs.length > 0) {
+    // Tell the client which requested orgs were dropped so a misconfigured
+    // listener is diagnosable (SSE comment frame; ignored by parsers).
+    res.write(`: not authorized for orgs ${deniedOrgs.join(",")}\n\n`);
+  }
 
   const heartbeat = setInterval(() => {
     try {
@@ -1633,7 +1757,7 @@ export function handlePeerEventsRequest(
   // Don't let the heartbeat timer keep the event loop alive on its own.
   if (typeof heartbeat.unref === "function") heartbeat.unref();
 
-  const state: SseClientState = { res, orgs, heartbeat };
+  const state: SseClientState = { res, orgs, userId: user.id, heartbeat };
   // Replace any prior stream for this fingerprint (a reconnect supersedes).
   const prior = sseConnections.get(fingerprint);
   if (prior) {
@@ -1647,8 +1771,9 @@ export function handlePeerEventsRequest(
   registerListener(fingerprint, {
     orgs,
     onEvent: (event: PeerReviewEvent) => {
+      if (!inProcessEventAuthorized(user.id, event)) return;
       try {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        res.write(sseDataFrame(event));
       } catch {
         // Best-effort; cleanup happens on close.
       }
@@ -1657,7 +1782,8 @@ export function handlePeerEventsRequest(
 
   logLine(
     "info",
-    `SSE /peer/events: connected fp=${fingerprint} orgs=[${orgs.join(",")}]`,
+    `SSE /peer/events: connected fp=${fingerprint} user=${user.short_name} orgs=[${orgs.join(",")}]` +
+      (deniedOrgs.length > 0 ? ` denied=[${deniedOrgs.join(",")}]` : ""),
   );
 
   const cleanup = (): void => {
@@ -1688,7 +1814,7 @@ export function __getSseConnectionsForTests(): string[] {
  */
 export function __injectSseConnectionForTests(
   fingerprint: string,
-  client: { res: ServerResponse; orgs: string[] },
+  client: { res: ServerResponse; orgs: string[]; userId: number },
 ): void {
   // Create a minimal heartbeat interval that does nothing (unref'd so it
   // doesn't keep the test process alive). The real cleanup path calls
@@ -1698,7 +1824,7 @@ export function __injectSseConnectionForTests(
   // Normalize orgs to lowercase, mirroring what parseOrgQuery does on the real
   // code path (so tests that pass mixed-case orgs behave consistently).
   const orgs = client.orgs.map((o) => o.toLowerCase());
-  sseConnections.set(fingerprint, { res: client.res, orgs, heartbeat });
+  sseConnections.set(fingerprint, { res: client.res, orgs, userId: client.userId, heartbeat });
 }
 
 /** Test-only: clear all SSE connections (for teardown). */

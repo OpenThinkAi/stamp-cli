@@ -887,6 +887,18 @@ export function findUserByShortName(
   return row ?? null;
 }
 
+/** Look up a user by primary key (null when the row no longer exists). */
+export function findUserById(db: DatabaseSync, id: number): UserRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, short_name, ssh_pubkey, ssh_fp, stamp_pubkey, role, source,
+              invited_by, created_at, last_seen_at
+       FROM users WHERE id = ?`,
+    )
+    .get(id) as UserRow | undefined;
+  return row ?? null;
+}
+
 export function listUsers(db: DatabaseSync): UserRow[] {
   const stmt = db.prepare(
     `SELECT id, short_name, ssh_pubkey, ssh_fp, stamp_pubkey, role, source,

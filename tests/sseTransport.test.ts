@@ -24,7 +24,8 @@ import path from "node:path";
 
 import { signBytes } from "../src/lib/signing.ts";
 import { fingerprintFromPem } from "../src/lib/keys.ts";
-import { insertUser, openServerDb } from "../src/lib/serverDb.ts";
+import { insertUser, openServerDb, type Role } from "../src/lib/serverDb.ts";
+import { addRepoGrant } from "../src/lib/repoAccess.ts";
 import {
   startServer,
   pushEventToSseClient,
@@ -53,19 +54,29 @@ interface Ctx {
   cleanup: () => void;
 }
 
-function setupDb(stampPubkeyPem: string | null): Ctx {
+/**
+ * Seed one user. Defaults to a member granted `acme/*` — the subscription
+ * the happy-path tests open (AGT-2256 binds `?org=` to repo grants).
+ */
+function setupDb(
+  stampPubkeyPem: string | null,
+  opts: { role?: Role; grants?: Array<[string, string]> } = {},
+): Ctx {
   const dir = mkdtempSync(path.join(os.tmpdir(), "stamp-sse-tests-"));
   const dbPath = path.join(dir, "users.db");
   const db = openServerDb({ path: dbPath, skipChmod: true });
   try {
-    insertUser(db, {
+    const id = insertUser(db, {
       short_name: "sse-user",
       ssh_pubkey: SSH_LINE,
       ssh_fp: "SHA256:" + "x".repeat(43),
       stamp_pubkey: stampPubkeyPem,
-      role: "member",
+      role: opts.role ?? "member",
       source: "env",
     });
+    for (const [org, repo] of opts.grants ?? [["acme", "*"]]) {
+      addRepoGrant(db, id, org, repo, null);
+    }
   } finally {
     db.close();
   }
@@ -113,18 +124,21 @@ function authHeaders(
 function openEvents(
   port: number,
   headers: Record<string, string>,
+  reqPath = "/peer/events?org=acme",
 ): Promise<{
   status: number;
   contentType: string;
   nextData: () => Promise<string>;
+  comments: () => string[];
   abort: () => void;
 }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { host: "127.0.0.1", port, path: "/peer/events?org=acme", method: "GET", headers },
+      { host: "127.0.0.1", port, path: reqPath, method: "GET", headers },
       (res) => {
         res.setEncoding("utf8");
         let buffer = "";
+        const comments: string[] = [];
         let dataResolve: ((s: string) => void) | null = null;
         res.on("data", (chunk: string) => {
           buffer += chunk;
@@ -133,6 +147,7 @@ function openEvents(
           while ((idx = buffer.indexOf("\n\n")) >= 0) {
             const frame = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
+            if (frame.startsWith(":")) comments.push(frame);
             const dataLine = frame
               .split("\n")
               .find((l) => l.startsWith("data:"));
@@ -150,6 +165,7 @@ function openEvents(
             new Promise<string>((r) => {
               dataResolve = r;
             }),
+          comments: () => comments,
           abort: () => req.destroy(),
         });
       },
@@ -167,13 +183,16 @@ function openEvents(
 function getStatus(
   port: number,
   headers: Record<string, string>,
-): Promise<{ status: number }> {
+  reqPath = "/peer/events?org=acme",
+): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { host: "127.0.0.1", port, path: "/peer/events?org=acme", method: "GET", headers },
+      { host: "127.0.0.1", port, path: reqPath, method: "GET", headers },
       (res) => {
-        res.resume();
-        resolve({ status: res.statusCode ?? 0 });
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c: string) => { body += c; });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
       },
     );
     req.on("error", reject);
@@ -351,6 +370,164 @@ describe("GET /peer/events — feature flag off → inert (404)", () => {
       await withServer(async (port) => {
         const { status } = await getStatus(port, authHeaders(kp, new Date().toISOString()));
         assert.equal(status, 404, "endpoint should be inert (404) when feature is dark");
+      });
+    } finally {
+      ctx.cleanup();
+    }
+  });
+});
+
+// ─── AGT-2256: subscription bound to the caller's repo grants ─────────
+
+/** Resolve with the next data frame, or null if none arrives within `ms`. */
+function nextDataOrNull(
+  conn: { nextData: () => Promise<string> },
+  ms = 150,
+): Promise<string | null> {
+  return Promise.race([
+    conn.nextData(),
+    new Promise<null>((r) => setTimeout(() => r(null), ms)),
+  ]);
+}
+
+function prOpened(repo: string): PeerReviewEvent {
+  return {
+    event_type: "pr-opened",
+    patch_id: "c".repeat(40),
+    actor_fp: "sha256:author",
+    payload: {
+      repo,
+      title: "Rotate the prod signing key",
+      body: "secret rollout plan",
+      paths_changed: ["infra/keys.tf"],
+      pr_url: `https://github.com/${repo}/pull/1`,
+    },
+  };
+}
+
+describe("GET /peer/events — org subscription bound to repo grants (AGT-2256)", () => {
+  it("refuses (403) an unscoped member (no grants) — fail closed", async () => {
+    const kp = genStampKeypair();
+    const ctx = setupDb(kp.publicKeyPem, { grants: [] });
+    process.env["STAMP_SERVER_DB_PATH"] = ctx.dbPath;
+    process.env["STAMP_PEER_REVIEWS_ENABLED"] = "1";
+    try {
+      await withServer(async (port) => {
+        const r = await getStatus(port, authHeaders(kp, new Date().toISOString()));
+        assert.equal(r.status, 403);
+        assert.match(r.body, /stamp users grant sse-user --repo <org>\/\*/);
+        assert.equal(__getSseConnectionsForTests().length, 0);
+      });
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("refuses (403) a member naming only another team's org", async () => {
+    const kp = genStampKeypair();
+    const ctx = setupDb(kp.publicKeyPem, { grants: [["acme", "*"]] });
+    process.env["STAMP_SERVER_DB_PATH"] = ctx.dbPath;
+    process.env["STAMP_PEER_REVIEWS_ENABLED"] = "1";
+    try {
+      await withServer(async (port) => {
+        const r = await getStatus(port, authHeaders(kp, new Date().toISOString()), "/peer/events?org=other-org");
+        assert.equal(r.status, 403);
+      });
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("drops unauthorized orgs from a mixed list and never delivers their events", async () => {
+    const kp = genStampKeypair();
+    const ctx = setupDb(kp.publicKeyPem, { grants: [["acme", "*"]] });
+    process.env["STAMP_SERVER_DB_PATH"] = ctx.dbPath;
+    process.env["STAMP_PEER_REVIEWS_ENABLED"] = "1";
+    try {
+      await withServer(async (port) => {
+        const conn = await openEvents(
+          port,
+          authHeaders(kp, new Date().toISOString()),
+          "/peer/events?org=acme&org=Other-Org",
+        );
+        assert.equal(conn.status, 200);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.ok(
+          conn.comments().some((c) => c.includes("not authorized for orgs other-org")),
+          `expected a denied-orgs comment, got ${JSON.stringify(conn.comments())}`,
+        );
+        assert.equal(fanoutEvent("other-org", prOpened("other-org/secret")), 0);
+        assert.equal(await nextDataOrNull(conn), null);
+        conn.abort();
+      });
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("a repo-scoped grant does not leak sibling repos in the same org", async () => {
+    const kp = genStampKeypair();
+    const ctx = setupDb(kp.publicKeyPem, { grants: [["acme", "widget"]] });
+    process.env["STAMP_SERVER_DB_PATH"] = ctx.dbPath;
+    process.env["STAMP_PEER_REVIEWS_ENABLED"] = "1";
+    try {
+      await withServer(async (port) => {
+        const conn = await openEvents(port, authHeaders(kp, new Date().toISOString()));
+        assert.equal(conn.status, 200);
+        await new Promise((r) => setTimeout(r, 50));
+        fanoutEvent("acme", prOpened("acme/gadget"));
+        assert.equal(await nextDataOrNull(conn), null, "acme/gadget must not be delivered");
+        const p = conn.nextData();
+        fanoutEvent("acme", prOpened("acme/widget"));
+        const parsed = JSON.parse(await p) as PeerReviewEvent;
+        assert.equal((parsed.payload as { repo: string }).repo, "acme/widget");
+        conn.abort();
+      });
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("owners/admins need no grants and may subscribe to any org", async () => {
+    const kp = genStampKeypair();
+    const ctx = setupDb(kp.publicKeyPem, { role: "admin", grants: [] });
+    process.env["STAMP_SERVER_DB_PATH"] = ctx.dbPath;
+    process.env["STAMP_PEER_REVIEWS_ENABLED"] = "1";
+    try {
+      await withServer(async (port) => {
+        const conn = await openEvents(
+          port,
+          authHeaders(kp, new Date().toISOString()),
+          "/peer/events?org=anything",
+        );
+        assert.equal(conn.status, 200);
+        await new Promise((r) => setTimeout(r, 50));
+        const p = conn.nextData();
+        fanoutEvent("anything", prOpened("anything/repo"));
+        assert.ok(await p);
+        conn.abort();
+      });
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  it("strips the PR body from fanned-out payloads (title + paths kept)", async () => {
+    const kp = genStampKeypair();
+    const ctx = setupDb(kp.publicKeyPem);
+    process.env["STAMP_SERVER_DB_PATH"] = ctx.dbPath;
+    process.env["STAMP_PEER_REVIEWS_ENABLED"] = "1";
+    try {
+      await withServer(async (port) => {
+        const conn = await openEvents(port, authHeaders(kp, new Date().toISOString()));
+        await new Promise((r) => setTimeout(r, 50));
+        const p = conn.nextData();
+        fanoutEvent("acme", prOpened("acme/widget"));
+        const payload = (JSON.parse(await p) as PeerReviewEvent).payload as Record<string, unknown>;
+        assert.equal("body" in payload, false);
+        assert.equal(payload["title"], "Rotate the prod signing key");
+        assert.deepEqual(payload["paths_changed"], ["infra/keys.tf"]);
+        conn.abort();
       });
     } finally {
       ctx.cleanup();

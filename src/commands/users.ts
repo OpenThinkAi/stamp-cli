@@ -102,13 +102,35 @@ function callRemote(server: ServerConfig, remoteArgs: string[]): RemoteResult {
   return { status: result.status, stdout: result.stdout ?? "" };
 }
 
-function explainExit(
+/**
+ * Which verb family failed. The server's AUTHORITY / USAGE exits mean
+ * different things for role management (promote/demote/remove/...) and
+ * repo grants, so the prose is chosen per family.
+ */
+type ExplainKind = "role" | "grant" | "grants";
+
+/** Exported for unit tests. */
+export function explainExit(
   status: number | null,
   context: string,
-  details: { shortName?: string; server: ServerConfig },
+  details: { shortName?: string; server: ServerConfig; kind?: ExplainKind },
 ): Error {
+  const kind = details.kind ?? "role";
   switch (status) {
     case EXIT.AUTHORITY:
+      if (kind === "grant") {
+        return new UsageError(
+          `${context}: your role on ${details.server.host} doesn't permit this action. ` +
+            `Only owners and admins may grant or revoke repo access. ` +
+            `Ask an owner or admin to perform this action.`,
+        );
+      }
+      if (kind === "grants") {
+        return new UsageError(
+          `${context}: your role on ${details.server.host} doesn't permit this action. ` +
+            `Members may only list their own grants; owners and admins may list anyone's.`,
+        );
+      }
       return new UsageError(
         `${context}: your role on ${details.server.host} doesn't permit this action. ` +
           `Owners may manage any user; admins may manage members only (and may ` +
@@ -137,6 +159,21 @@ function explainExit(
           `Pick a different name (\`stamp users list\` shows what's taken).`,
       );
     case EXIT.USAGE:
+      if (kind === "grant") {
+        return new UsageError(
+          `${context}: server rejected the request as a usage error. ` +
+            `Check that --repo is <org>/<repo> or <org>/* (alphanumerics + . _ -, ` +
+            `max 100 chars each) and that the target is a member — owners and ` +
+            `admins already have access to every repo, so grants don't apply to them.`,
+        );
+      }
+      if (kind === "grants") {
+        return new UsageError(
+          `${context}: server rejected the request as a usage error. ` +
+            `Double-check the short_name (alphanumerics + . _ -, must start with ` +
+            `alnum, max 63 chars).`,
+        );
+      }
       return new UsageError(
         `${context}: server rejected the request as a usage error. ` +
           `Double-check the short_name (alphanumerics + . _ -, must start with ` +
@@ -363,6 +400,7 @@ export function runUsersGrant(opts: RepoGrantOptions): void {
     throw explainExit(result.status, `stamp users grant ${opts.shortName}`, {
       server,
       shortName: opts.shortName,
+      kind: "grant",
     });
   }
 }
@@ -374,6 +412,7 @@ export function runUsersRevoke(opts: RepoGrantOptions): void {
     throw explainExit(result.status, `stamp users revoke ${opts.shortName}`, {
       server,
       shortName: opts.shortName,
+      kind: "grant",
     });
   }
 }
@@ -391,6 +430,7 @@ export function runUsersGrants(opts: { shortName: string; json?: boolean }): voi
     throw explainExit(result.status, `stamp users grants ${opts.shortName}`, {
       server,
       shortName: opts.shortName,
+      kind: "grants",
     });
   }
   if (opts.json) {
@@ -419,7 +459,8 @@ export function formatGrants(payload: RemoteGrantsPayload): string {
   if (grants.length === 0) {
     return (
       `${name} has no repo grants: unscoped — may review under the server's default ` +
-      `prompts, but never under a per-repo prompt override\n`
+      `prompts, but never under a per-repo prompt override, and receives no ` +
+      `peer-review events (stamp pr listen)\n`
     );
   }
   return grants.map((g) => `${g.org}/${g.repo}`).join("\n") + "\n";

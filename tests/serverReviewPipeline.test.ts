@@ -1245,6 +1245,24 @@ describe("runReviewPipeline — per-repo override authorization (AGT-2252)", () 
     }
   });
 
+  it("names the caller (not a placeholder) in the grant hint (AGT-2256)", async () => {
+    const fx = makeFixtureCache();
+    try {
+      const diff = Buffer.from("x\n");
+      await assert.rejects(
+        runReviewPipeline(fixtureInput(fx, diff, withOverride(fx))),
+        (err: unknown) => {
+          assert.ok(err instanceof RepoOverrideNotAuthorizedError);
+          assert.match(err.message, /stamp users grant test-caller --repo acme\/widget-co/);
+          assert.doesNotMatch(err.message, /<your-short-name>/);
+          return true;
+        },
+      );
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   it("applies the override when allowRepoOverride is true", async () => {
     const fx = makeFixtureCache();
     try {

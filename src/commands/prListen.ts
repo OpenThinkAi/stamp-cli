@@ -213,7 +213,7 @@ export interface PrListenOptions {
     attempt: number,
   ) => Promise<
     | { ok: true; nextEvent: () => Promise<PeerReviewEvent | null>; close: () => void }
-    | { ok: false; reason: string }
+    | { ok: false; reason: string; status?: number }
   >;
   /**
    * Test-only: cap the number of reconnect attempts before the reconnect loop
@@ -322,7 +322,10 @@ export function parseSseStream(
         continue;
       }
       if (line.startsWith(":")) {
-        // Comment / heartbeat — ignore.
+        // Comment / heartbeat — ignore, except the server's denied-orgs
+        // notice (AGT-2256), which the operator needs to see.
+        const notice = sseCommentNotice(line);
+        if (notice) process.stderr.write(notice);
         continue;
       }
       if (line.startsWith("data:")) {
@@ -333,6 +336,43 @@ export function parseSseStream(
       // emits data: frames.
     }
   });
+}
+
+/** Prefix of the SSE comment the server sends for dropped `?org=` values. */
+const DENIED_ORGS_COMMENT = ": not authorized for orgs ";
+
+/**
+ * Map an SSE comment line to an operator-facing stderr line, or null for
+ * comments that are just noise (connected / heartbeat). AGT-2256: the
+ * server drops `--org` values the caller holds no grant for and says so in
+ * a comment frame; without this the listener would sit silent on them.
+ * Exported for unit testing.
+ */
+export function sseCommentNotice(line: string): string | null {
+  if (!line.startsWith(DENIED_ORGS_COMMENT)) return null;
+  const orgs = line.slice(DENIED_ORGS_COMMENT.length).trim();
+  if (!orgs) return null;
+  return (
+    `warning: server is not streaming org(s) ${orgs.split(",").join(", ")} — ` +
+    `your account has no grant there; ask an admin to run ` +
+    `'stamp users grant <your-name> --repo <org>/*'\n`
+  );
+}
+
+/**
+ * Pull a readable reason out of a non-200 response body: the server's JSON
+ * `{ error, reason }` when present, else the raw (trimmed) body.
+ */
+function describeErrorBody(body: string): string {
+  const trimmed = body.trim();
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (typeof parsed["reason"] === "string") return parsed["reason"];
+    if (typeof parsed["error"] === "string") return parsed["error"];
+  } catch {
+    // not JSON — fall through
+  }
+  return trimmed;
 }
 
 /**
@@ -358,7 +398,7 @@ async function connectSseTransport(
   streamOverride?: Readable,
 ): Promise<
   | { ok: true; nextEvent: () => Promise<PeerReviewEvent | null>; close: () => void }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; status?: number }
 > {
   // Per-event delivery plumbing shared by both the live and injected paths.
   const queue: PeerReviewEvent[] = [];
@@ -433,9 +473,11 @@ async function connectSseTransport(
           res.setEncoding("utf8");
           res.on("data", (c: string) => { body += c; });
           res.on("end", () => {
+            const detail = describeErrorBody(body);
             resolve({
               ok: false,
-              reason: `server responded ${res.statusCode}${body ? `: ${body.trim()}` : ""}`,
+              status: res.statusCode,
+              reason: `server responded ${res.statusCode}${detail ? `: ${detail}` : ""}`,
             });
           });
           return;
@@ -697,6 +739,15 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             connectAttempt = 0;
             succeeded = true;
             break;
+          }
+          // 401/403 are not transient: the key was unenrolled or the
+          // caller's grants no longer cover any requested org (AGT-2256).
+          // Exit like the first-connect failure instead of retrying forever.
+          if (retryResult.status === 401 || retryResult.status === 403) {
+            process.stderr.write(
+              `error: SSE reconnect refused — ${retryResult.reason}; not retrying\n`,
+            );
+            process.exit(1);
           }
           // Still failing — log the reason and the next delay.
           const nextDelay = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** connectAttempt);

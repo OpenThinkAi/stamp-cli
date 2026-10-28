@@ -22,9 +22,14 @@
  *     for them — the verb refuses when one exists for the requested pair
  *     instead of silently swapping prompts.
  *
- * Org-level helpers (`isCallerAuthorizedForOrg`) are exported for the
- * SSE subscription binding (AGT-2256), which filters `?org=` lists
- * against the same grants.
+ * The SSE peer-review event stream (AGT-2256) reuses the same grants:
+ * `isCallerAuthorizedForOrg` filters the caller-supplied `?org=` list at
+ * subscribe time, and `mayReceiveRepoEvents` re-checks every delivered
+ * event at `<org>/<repo>` granularity. Unlike the review verb, the
+ * stream FAILS CLOSED for unscoped members: a member with no grants
+ * receives no events at all (there is no "default" audience for another
+ * team's PR titles and paths), so a multi-member server must grant each
+ * listener `<org>/*` or specific repos. Owners/admins are unaffected.
  *
  * All org/repo comparisons are case-insensitive (GitHub slugs are);
  * values are stored lowercased.
@@ -150,4 +155,20 @@ export function isCallerAuthorizedForOrg(
     .prepare(`SELECT 1 AS ok FROM user_repo_grants WHERE user_id = ? AND org = ? LIMIT 1`)
     .get(caller.id, org.toLowerCase());
   return row !== undefined;
+}
+
+/**
+ * AGT-2256: may `caller` receive a peer-review event (PR title, changed
+ * paths, URL) for `<org>/<repo>`? Operators always; members only with a
+ * matching grant. Unscoped members (no grants) are refused — fail closed,
+ * unlike `resolveRepoAccess`'s permissive `unscoped` outcome for reviews.
+ */
+export function mayReceiveRepoEvents(
+  db: DatabaseSync,
+  caller: Pick<UserRow, "id" | "role">,
+  org: string,
+  repo: string,
+): boolean {
+  const access = resolveRepoAccess(db, caller, org, repo);
+  return access === "operator" || access === "granted";
 }
