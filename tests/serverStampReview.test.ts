@@ -44,6 +44,13 @@ const STAMP_REVIEW_TS = path.resolve(
   "server",
   "stamp-review.ts",
 );
+const SIGN_APPROVAL_TS = path.resolve(
+  import.meta.dirname,
+  "..",
+  "src",
+  "server",
+  "sign-approval.ts",
+);
 
 // Re-uses tests/sshKeys.test.ts fixture so the fingerprint is known.
 const MEMBER_SSH_LINE =
@@ -141,6 +148,10 @@ function setupWithFixturePromptCache(
   }) as string;
   const publicPem = publicKey.export({ type: "spki", format: "pem" }) as string;
   writeFileSync(signingKeyPath, privatePem, { mode: 0o600 });
+  // AGT-2263: stamp-review reads only the .pub (server_key_id + checking
+  // the helper's signature); the private key is read by the signing
+  // helper, run here without sudo via STAMP_SIGN_APPROVAL_ARGV.
+  writeFileSync(signingKeyPath.replace(/\.pem$/, ".pub"), publicPem, { mode: 0o644 });
   const signingKeyFingerprint = fingerprintFromPem(publicPem);
 
   return {
@@ -180,6 +191,12 @@ function runStampReview(
   }
   if (harness.signingKeyPath) {
     env.REVIEW_SIGNING_KEY_PATH = harness.signingKeyPath;
+    env.STAMP_SIGN_APPROVAL_ARGV = JSON.stringify([
+      process.execPath,
+      "--import",
+      "tsx",
+      SIGN_APPROVAL_TS,
+    ]);
   }
   if (opts.envOverrides) {
     for (const [k, v] of Object.entries(opts.envOverrides)) {

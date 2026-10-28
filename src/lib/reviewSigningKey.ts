@@ -22,9 +22,11 @@
  *      - File absent → generate a fresh Ed25519 keypair, write the
  *        private half mode 0600 + public half mode 0644, return with
  *        `created: true`.
- *      - File present, mode 0600, readable → load + return with
- *        `created: false`. Same fingerprint as the previous boot.
- *      - File present but wrong mode / unreadable → throw a structured
+ *      - File present, regular file owned by the loading process
+ *        (root in the container), mode 0600, readable → load + return
+ *        with `created: false`. Same fingerprint as the previous boot.
+ *      - File present but wrong owner / mode, a symlink, or unreadable
+ *        → throw a structured
  *        error. The caller (bootstrap script) must abort startup;
  *        silently re-generating would rotate the server's identity
  *        without operator consent.
@@ -59,9 +61,11 @@ import {
 } from "node:crypto";
 import {
   chmodSync,
+  chownSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
-  statSync,
+  type Stats,
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -82,6 +86,97 @@ export const REQUIRED_PRIVATE_KEY_MODE = 0o600;
  *  the .pub file with strict-perms expectations, but uniform mode keeps
  *  operator mental-model simple. */
 export const PUBLIC_KEY_MODE = 0o644;
+
+/**
+ * AGT-2263: the private key must be a regular file (never a symlink)
+ * owned by the uid of the process loading it, with mode exactly 0600.
+ *
+ * In the container the only loaders are root — the boot-time bootstrap
+ * (`stamp-bootstrap-review-key`) and the sudo-invoked signing helper
+ * (`stamp-sign-approval`) — so this pins the key to root:root 0600 and
+ * a git-owned key fails the load (and therefore the boot) loudly. The
+ * git user never opens the file: `stamp-review` signs through the
+ * helper. Expressing the rule as "owned by the loader" rather than
+ * "owned by uid 0" keeps the module usable in tests and dev, where the
+ * loader is an ordinary user.
+ *
+ * Refusing (rather than auto-chmod/chown) is deliberate: a wrong owner
+ * or mode usually means a backup restore that dropped perms or another
+ * process touching the file. The one sanctioned repair — the legacy
+ * git-owned key left by pre-AGT-2263 images' boot-time `chown -R` — is
+ * done explicitly, and logged, by the bootstrap script before it calls
+ * in here.
+ */
+export function assertPrivateKeyPosture(
+  privateKeyPath: string,
+  st: Stats,
+): void {
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new ReviewSigningKeyError(
+      `review-signing key at ${privateKeyPath} is not a regular file ` +
+        `(symlinks are refused). Refusing to load.`,
+    );
+  }
+  const expectedUid = process.getuid?.();
+  if (expectedUid !== undefined && st.uid !== expectedUid) {
+    throw new ReviewSigningKeyError(
+      `review-signing key at ${privateKeyPath} is owned by uid ${st.uid}; ` +
+        `required uid ${expectedUid} (the process loading it — root on stamp-server). ` +
+        `Refusing to load. Fix with: chown root:root ${privateKeyPath}`,
+    );
+  }
+  const mode = st.mode & 0o777;
+  if (mode !== REQUIRED_PRIVATE_KEY_MODE) {
+    throw new ReviewSigningKeyError(
+      `review-signing key at ${privateKeyPath} has mode 0${mode.toString(8).padStart(3, "0")}; ` +
+        `required 0${REQUIRED_PRIVATE_KEY_MODE.toString(8).padStart(3, "0")} (owner read+write, no group/other access). ` +
+        `Refusing to load. Fix with: chmod 600 ${privateKeyPath}`,
+    );
+  }
+}
+
+/**
+ * Read the PUBLIC half of the review-signing key (the `.pub` sibling)
+ * and its fingerprint. This is what the git-user side (`stamp-review`)
+ * uses to learn `server_key_id` and to check the signing helper's
+ * output: it never touches the private key (AGT-2263). The `.pub` is
+ * root-owned 0644, world-readable by design.
+ */
+export function readReviewSigningPublicKey(opts: {
+  privateKeyPath: string;
+}): { publicKeyPath: string; publicKeyPem: string; fingerprint: string } {
+  const publicKeyPath = publicKeyPathFor(opts.privateKeyPath);
+  let publicKeyPem: string;
+  try {
+    publicKeyPem = readFileSync(publicKeyPath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new ReviewSigningKeyError(
+        `review-signing public key not found at ${publicKeyPath}. ` +
+          `The server's bootstrap step (stamp-bootstrap-review-key) writes ` +
+          `it on every boot. Check that ANTHROPIC_API_KEY is set on the ` +
+          `server (so bootstrap runs) and that REVIEW_SIGNING_KEY_PATH / ` +
+          `STAMP_STATE_DIR points at the persistent volume.`,
+      );
+    }
+    throw new ReviewSigningKeyError(
+      `review-signing public key at ${publicKeyPath} could not be read: ${(err as Error).message}`,
+    );
+  }
+  let fingerprint: string;
+  try {
+    const pub = createPublicKey({ key: publicKeyPem, format: "pem" });
+    if (pub.asymmetricKeyType !== "ed25519") {
+      throw new Error(`expected ed25519, got ${pub.asymmetricKeyType ?? "<unknown>"}`);
+    }
+    fingerprint = fingerprintFromPem(publicKeyPem);
+  } catch (err) {
+    throw new ReviewSigningKeyError(
+      `review-signing public key at ${publicKeyPath} is not a valid Ed25519 SPKI PEM: ${(err as Error).message}`,
+    );
+  }
+  return { publicKeyPath, publicKeyPem, fingerprint };
+}
 
 /** Suffix swap for the public key path. The private key lives at
  *  `<base>.pem`; the public key lives at `<base>.pub`. This is the
@@ -148,7 +243,8 @@ export class ReviewSigningKeyError extends Error {
  *
  * Throws `ReviewSigningKeyError` on conditions where silent recovery
  * would compromise the trust model:
- *   - Existing private key has group/other permission bits set
+ *   - Existing private key has group/other permission bits set, is
+ *     owned by another uid, or is a symlink (AGT-2263)
  *   - Existing private key file is unreadable
  *   - Existing private key parses but the public key derivation fails
  *
@@ -166,9 +262,9 @@ export function ensureReviewSigningKey(opts: {
   // check is done via statSync (rather than readFileSync + ENOENT
   // catch) so we can also inspect the mode before reading the bytes —
   // a wrong-mode file should abort before we even open it.
-  let existingStat;
+  let existingStat: Stats;
   try {
-    existingStat = statSync(privateKeyPath);
+    existingStat = lstatSync(privateKeyPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       // First-boot path: mint a new key.
@@ -190,14 +286,7 @@ export function ensureReviewSigningKey(opts: {
   // that someone restored from a backup that didn't preserve perms,
   // or that an unrelated process is touching the file — either way,
   // failing loud is correct.
-  const mode = existingStat.mode & 0o777;
-  if (mode !== REQUIRED_PRIVATE_KEY_MODE) {
-    throw new ReviewSigningKeyError(
-      `review-signing key at ${privateKeyPath} has mode 0${mode.toString(8).padStart(3, "0")}; ` +
-        `required 0${REQUIRED_PRIVATE_KEY_MODE.toString(8).padStart(3, "0")} (owner read+write, no group/other access). ` +
-        `Refusing to load. Fix with: chmod 600 ${privateKeyPath}`,
-    );
-  }
+  assertPrivateKeyPosture(privateKeyPath, existingStat);
 
   // Mode looks right — read and parse. We materialize the PEM as a
   // string only as long as it takes to construct the KeyObject, then
@@ -293,9 +382,11 @@ function exportPublicPem(privateKey: KeyObject): string {
  *
  * The bootstrap script (`src/server/bootstrap-review-key.ts`) is the
  * ONLY caller permitted to mint — it runs once per container boot, as
- * root, before sshd accepts connections. Every subsequent caller (the
- * review pipeline, future admin verbs that need to read the fingerprint)
- * MUST use this loader so the "key is stable across boots" invariant is
+ * root, before sshd accepts connections. The only other caller is the
+ * root signing helper (`src/server/sign-approval.ts`, AGT-2263), which
+ * the git-user review pipeline invokes through one sudoers rule; the
+ * pipeline itself never loads the private key. Every loader MUST use
+ * this function so the "key is stable across boots" invariant is
  * structural rather than convention.
  *
  * Mode + parse validation are the same as `ensureReviewSigningKey`: a
@@ -309,9 +400,9 @@ export function loadReviewSigningKey(opts: {
   const privateKeyPath = opts.privateKeyPath;
   const publicKeyPath = publicKeyPathFor(privateKeyPath);
 
-  let existingStat;
+  let existingStat: Stats;
   try {
-    existingStat = statSync(privateKeyPath);
+    existingStat = lstatSync(privateKeyPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       throw new ReviewSigningKeyError(
@@ -326,14 +417,7 @@ export function loadReviewSigningKey(opts: {
     throw err;
   }
 
-  const mode = existingStat.mode & 0o777;
-  if (mode !== REQUIRED_PRIVATE_KEY_MODE) {
-    throw new ReviewSigningKeyError(
-      `review-signing key at ${privateKeyPath} has mode 0${mode.toString(8).padStart(3, "0")}; ` +
-        `required 0${REQUIRED_PRIVATE_KEY_MODE.toString(8).padStart(3, "0")} (owner read+write, no group/other access). ` +
-        `Refusing to load. Fix with: chmod 600 ${privateKeyPath}`,
-    );
-  }
+  assertPrivateKeyPosture(privateKeyPath, existingStat);
 
   let privateKey: KeyObject;
   let publicKeyPem: string;
@@ -445,4 +529,58 @@ function mintNewKey(
     fingerprint: fingerprintFromPem(publicKeyPem),
     created: true,
   };
+}
+
+/**
+ * AGT-2263 upgrade path. Images before AGT-2263 ran `chown -R git:git
+ * /srv/git` on every boot, which left the review-signing key (and its
+ * `.pub`) owned by the git user. The new posture is root:root, and
+ * `assertPrivateKeyPosture` refuses anything else — so the bootstrap,
+ * running as root, first re-owns files in exactly that legacy state:
+ * a regular file (never a symlink — lchown semantics are not relied on,
+ * the file is skipped) owned by the git user's uid. Any other foreign
+ * owner is left alone and fails the boot loudly.
+ *
+ * Returns the paths it re-owned so the caller can log them. `chown` is
+ * injectable for tests (only root can really chown to 0).
+ */
+export function reownLegacyGitOwnedKeyFiles(opts: {
+  privateKeyPath: string;
+  gitUid: number;
+  chown?: (path: string, uid: number, gid: number) => void;
+}): string[] {
+  const chown = opts.chown ?? chownSync;
+  const reowned: string[] = [];
+  if (opts.gitUid === 0) return reowned;
+  for (const p of [opts.privateKeyPath, publicKeyPathFor(opts.privateKeyPath)]) {
+    let st: Stats;
+    try {
+      st = lstatSync(p);
+    } catch {
+      continue;
+    }
+    if (!st.isFile() || st.isSymbolicLink()) continue;
+    if (st.uid !== opts.gitUid) continue;
+    chown(p, 0, 0);
+    reowned.push(p);
+  }
+  return reowned;
+}
+
+/** uid of the `git` account from /etc/passwd, or null if absent. */
+export function lookupGitUid(passwdPath = "/etc/passwd"): number | null {
+  let text: string;
+  try {
+    text = readFileSync(passwdPath, "utf8");
+  } catch {
+    return null;
+  }
+  for (const line of text.split("\n")) {
+    const f = line.split(":");
+    if (f[0] === "git" && f.length >= 3) {
+      const uid = Number(f[2]);
+      return Number.isInteger(uid) ? uid : null;
+    }
+  }
+  return null;
 }

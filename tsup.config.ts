@@ -49,6 +49,10 @@ export default defineConfig([
       // Root-only recovery CLI (AGT-2260): enrolls / re-promotes a key in
       // users.db from a root shell in the container. NOT a verb.
       "server/break-glass": "src/server/break-glass.ts",
+      // Root signing helper (AGT-2263): the git user's stamp-review pipes
+      // a canonical approval to it via one sudoers rule and gets the
+      // signature back; the review key stays root:root 0600. NOT a verb.
+      "server/sign-approval": "src/server/sign-approval.ts",
       // Boot-time prompts-cache populator. Invoked by entrypoint.sh as
       // root, after stamp-bootstrap-review-key and before the HTTP
       // server / sshd launch. No-op when STAMP_PROMPTS_REPO_URL is

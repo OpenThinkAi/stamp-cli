@@ -591,6 +591,13 @@ mode 0600. Generated on first boot if absent (AGT-327 shipped this in
 `src/server/bootstrap-review-key.ts`; the pubkey is printed loudly to
 stderr with an instruction to commit it to the manifest).
 
+Since AGT-2263 the private key is `root:root 0600`, and boot fails on any
+other owner or mode. The git user, which runs `stamp-review`, never reads
+it. Each approval is signed by the root helper `stamp-sign-approval`,
+invoked through a single no-argument sudoers rule. The helper signs only a
+canonical, well-formed approval under its own key id, with an `issued_at`
+within 5 minutes of its clock. See `src/lib/approvalSigning.ts`.
+
 No platform-specific bootstrap. No `/etc/stamp/env`-style shims in the
 review-capability code paths. Same binary on Docker / systemd / bare
 process.

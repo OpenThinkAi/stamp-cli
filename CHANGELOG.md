@@ -293,6 +293,32 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `AUTHORIZED_KEYS` no longer enrolls it; use `stamp invites mint`, or
   `stamp-break-glass add` as root. The `stamp-gate legacy` binding for
   `authorized_keys` file lines is gone.
+- **The server's review-signing key is root-only; approvals are signed by a
+  root helper.** Every boot ran `chown -R git:git /srv/git`, which handed the
+  review-signing private key in `.stamp-state` to the git user, the user the
+  HTTP listener, the receive hooks and `stamp-review` run as. A foothold as
+  git could then copy the key and forge server-attested approvals
+  indefinitely. The key is now `root:root 0600`, and the server refuses to
+  boot if the key has any other owner or mode, or is a symlink.
+  `stamp-review` never opens it. Instead it pipes each canonical approval
+  to a new root helper, `/usr/local/sbin/stamp-sign-approval`, through one
+  no-argument sudoers rule, and checks the returned signature against the
+  `.pub`. The helper is not an SSH verb. It signs only a well-formed
+  approval: the exact field set including `repo_id`, strict field shapes,
+  its own key id, an `issued_at` within 5 minutes of now, and canonical
+  bytes. It never signs arbitrary bytes, and it writes one line per
+  signature to the container log. The boot `chown` now covers only the
+  volume root and each `/srv/git/<name>.git` (`-R -h`, symlinks never
+  followed, dot-dirs never swept). The prompts-cache deploy key and cache
+  are handed to git explicitly.
+  **Upgrade note:** on the first boot of the new image, a review-signing
+  key (and `.pub`) that an older image left owned by the git user is
+  re-owned to `root:root` automatically, and the boot log says so. Any
+  other unexpected owner or mode stops the boot. Fix it with
+  `chown root:root` / `chmod 600` on the key. If you think the git user may
+  have been compromised before you upgraded, rotate the key, because it was
+  readable until this boot. Servers without `ANTHROPIC_API_KEY` have no
+  key, and nothing changes for them.
 
 ---
 

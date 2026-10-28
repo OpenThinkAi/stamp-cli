@@ -30,11 +30,13 @@
  *     gone. The server is now manifest-blind: it produces an approval
  *     body whose `server_key_id` the operator+verifier resolve against
  *     the manifest at `base_sha` on their side.
- *   - load the server's Ed25519 review-signing key from the path the
- *     bootstrap script (AGT-327) minted into, and stamp the fingerprint
- *     into `approval.server_key_id`
- *   - canonical-serialize the approval and sign with the server's
- *     private key; emit the base64 signature alongside the approval body
+ *   - read the server's review-signing PUBLIC key (the `.pub` the
+ *     bootstrap script, AGT-327, writes) and stamp its fingerprint into
+ *     `approval.server_key_id`
+ *   - canonical-serialize the approval and have the root signing helper
+ *     (`stamp-sign-approval`, via sudo — AGT-2263) sign it; this process
+ *     runs as git and never reads the private key. Emit the base64
+ *     signature alongside the approval body
  *
  * The diff_sha256 baked into the signed approval comes from the SERVER's
  * own hash of the streamed diff bytes — the client-supplied
@@ -71,7 +73,15 @@
  * a merge.
  */
 
-import { createHash, randomBytes, sign, type KeyObject } from "node:crypto";
+import { spawn } from "node:child_process";
+import {
+  createHash,
+  createPublicKey,
+  randomBytes,
+  sign,
+  verify,
+  type KeyObject,
+} from "node:crypto";
 
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -85,7 +95,7 @@ import {
   type AnthropicClientShape,
 } from "../lib/headlessReviewer.js";
 import {
-  loadReviewSigningKey,
+  readReviewSigningPublicKey,
   ReviewSigningKeyError,
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
@@ -456,6 +466,177 @@ export interface ReviewSigningMaterial {
 }
 
 /**
+ * How the pipeline gets an approval signed (AGT-2263). Production uses
+ * `helperApprovalSignerFromEnv()`: the fingerprint comes from the
+ * git-readable `.pub`, and `signApproval` pipes the canonical bytes to
+ * the root helper `stamp-sign-approval` through sudo. Tests inject one
+ * (or the legacy in-process `signingKey`) via `deps`.
+ */
+export interface ApprovalSigner {
+  /** `sha256:<hex>`; embedded in every approval as `server_key_id`. */
+  fingerprint: string;
+  /** Return the base64 Ed25519 signature over `canonical`
+   *  (= `canonicalSerializeApproval(approval)`). */
+  signApproval(canonical: Buffer): Promise<string>;
+}
+
+/** Default argv for the production signer: the root helper via the one
+ *  sudoers rule (`-n`: never prompt; fail instead). */
+export const DEFAULT_SIGN_APPROVAL_ARGV: readonly string[] = [
+  "sudo",
+  "-n",
+  "/usr/local/sbin/stamp-sign-approval",
+];
+
+/**
+ * Test/dev seam: `STAMP_SIGN_APPROVAL_ARGV` = a JSON array of strings,
+ * the full argv to run instead of `sudo -n /usr/local/sbin/stamp-sign-approval`
+ * (e.g. `["node","dist/server/sign-approval.cjs"]` in tests, where there
+ * is no sudo and the key is owned by the test user). Not a privilege
+ * boundary: sshd strips client env and /etc/stamp/env is root-written,
+ * and whatever command it names still can't read a root:root 0600 key.
+ */
+export function resolveSignApprovalArgv(): string[] {
+  const raw = process.env["STAMP_SIGN_APPROVAL_ARGV"];
+  if (!raw) return [...DEFAULT_SIGN_APPROVAL_ARGV];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new SigningKeyUnavailableError(
+      "STAMP_SIGN_APPROVAL_ARGV is not a JSON array of strings",
+    );
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    !parsed.every((x) => typeof x === "string" && x.length > 0)
+  ) {
+    throw new SigningKeyUnavailableError(
+      "STAMP_SIGN_APPROVAL_ARGV is not a non-empty JSON array of strings",
+    );
+  }
+  return parsed as string[];
+}
+
+/** Wrap in-process signing material (tests) in the signer interface. */
+export function inProcessApprovalSigner(material: ReviewSigningMaterial): ApprovalSigner {
+  return {
+    fingerprint: material.fingerprint,
+    signApproval: async (canonical) =>
+      sign(null, canonical, material.privateKey).toString("base64"),
+  };
+}
+
+/** Bound on how long the helper may take (sudo + node start + one sign). */
+const SIGN_HELPER_TIMEOUT_MS = 30_000;
+
+/**
+ * Run the signing helper once: canonical bytes on stdin, base64
+ * signature on stdout. Any non-zero exit, timeout or malformed output
+ * is a `SigningKeyUnavailableError` carrying the helper's stderr.
+ */
+export function runSignApprovalHelper(
+  argv: readonly string[],
+  canonical: Buffer,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(argv[0]!, argv.slice(1), {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const out: Buffer[] = [];
+    const errOut: Buffer[] = [];
+    let settled = false;
+    const done = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      done(() =>
+        reject(new SigningKeyUnavailableError("signing helper timed out")),
+      );
+    }, SIGN_HELPER_TIMEOUT_MS);
+    child.stdout.on("data", (c: Buffer) => out.push(c));
+    child.stderr.on("data", (c: Buffer) => errOut.push(c));
+    child.on("error", (err) =>
+      done(() =>
+        reject(
+          new SigningKeyUnavailableError(
+            `signing helper could not be started (${argv[0]}): ${err.message}`,
+          ),
+        ),
+      ),
+    );
+    child.on("close", (code) =>
+      done(() => {
+        const stderr = Buffer.concat(errOut).toString("utf8").trim();
+        if (code !== 0) {
+          reject(
+            new SigningKeyUnavailableError(
+              `signing helper exited ${code}${stderr ? `: ${stderr}` : ""}`,
+            ),
+          );
+          return;
+        }
+        const sig = Buffer.concat(out).toString("utf8").trim();
+        if (!/^[A-Za-z0-9+/]{86}==$/.test(sig)) {
+          reject(
+            new SigningKeyUnavailableError(
+              "signing helper returned output that is not an Ed25519 signature",
+            ),
+          );
+          return;
+        }
+        resolve(sig);
+      }),
+    );
+    child.stdin.on("error", () => {
+      // EPIPE if the helper exits before reading; the close handler
+      // reports the real failure.
+    });
+    child.stdin.end(canonical);
+  });
+}
+
+/**
+ * Production signer: fingerprint from the `.pub`, signatures from the
+ * root helper, each one verified against the `.pub` before use so a
+ * misbehaving or mis-keyed helper fails loudly here instead of producing
+ * approvals the client would reject.
+ */
+export function helperApprovalSignerFromEnv(): ApprovalSigner {
+  const privateKeyPath = resolveReviewSigningKeyPath();
+  let pub;
+  try {
+    pub = readReviewSigningPublicKey({ privateKeyPath });
+  } catch (err) {
+    if (err instanceof ReviewSigningKeyError) {
+      throw new SigningKeyUnavailableError(err.message);
+    }
+    throw new SigningKeyUnavailableError(
+      `${(err as Error).message ?? String(err)} (path=${privateKeyPath})`,
+    );
+  }
+  const argv = resolveSignApprovalArgv();
+  const publicKey = createPublicKey({ key: pub.publicKeyPem, format: "pem" });
+  return {
+    fingerprint: pub.fingerprint,
+    signApproval: async (canonical) => {
+      const sig = await runSignApprovalHelper(argv, canonical);
+      if (!verify(null, canonical, publicKey, Buffer.from(sig, "base64"))) {
+        throw new SigningKeyUnavailableError(
+          `signing helper's signature does not verify against ${pub.publicKeyPath}`,
+        );
+      }
+      return sig;
+    },
+  };
+}
+
+/**
  * Dependency-injection seam for tests. Same pattern as
  * `headlessReviewer.ts:RunHeadlessReviewOptions.client` — production
  * code path constructs these from env, tests inject mocks.
@@ -467,8 +648,9 @@ export interface ReviewSigningMaterial {
  *     `STAMP_PROMPTS_DIR || /etc/stamp/reviewers` (Phase A fallback).
  *   - `anthropic`: `new Anthropic({apiKey: process.env.ANTHROPIC_API_KEY})`
  *   - `timeoutMs`: `resolveReviewTimeoutMs()`
- *   - `signingKey`: `loadReviewSigningKey({privateKeyPath:
- *     resolveReviewSigningKeyPath()})`
+ *   - `signer` / `signingKey`: `helperApprovalSignerFromEnv()` — the
+ *     root helper via sudo (AGT-2263); the private key is never loaded
+ *     in this process
  *
  * The injection seam is the documented pattern from AGT-341's retro —
  * Node's ESM exports are read-only, so mutating a module member from a
@@ -485,11 +667,12 @@ export interface ReviewPipelineDeps {
   /** Override the model id. Defaults to `SERVER_DEFAULT_MODEL` (=
    *  `HEADLESS_DEFAULT_MODEL` for cross-mode consistency). */
   model?: string;
-  /** Server's review-signing key + fingerprint. Production callers leave
-   *  unset and the pipeline calls `loadReviewSigningKey` against the
-   *  env-resolved path; tests pass a synthetic Ed25519 pair so signature
-   *  round-trips can be asserted with fixture keys. */
+  /** In-process signing material (tests): a synthetic Ed25519 pair so
+   *  signature round-trips can be asserted with fixture keys. Production
+   *  leaves both this and `signer` unset and signs via the root helper. */
   signingKey?: ReviewSigningMaterial;
+  /** Signer override (tests). Wins over `signingKey`. */
+  signer?: ApprovalSigner;
 }
 
 /**
@@ -637,8 +820,8 @@ export class SigningKeyUnavailableError extends Error {
  *      the manifest at `base_sha` — that lookup happens operator-side
  *      and verifier-side, never server-side. See `AttestationPayloadV4`
  *      docstring for the trust-chain.
- *   2. Load the server's review-signing key from the env-resolved
- *      path. Failure THROWS `SigningKeyUnavailableError` — without a
+ *   2. Resolve the signer: the review-signing PUBLIC key from the
+ *      env-resolved path + the root signing helper. Failure THROWS `SigningKeyUnavailableError` — without a
  *      stable signing identity we cannot produce a verifiable
  *      attestation.
  *   3. Build the Anthropic Messages call: prompt-as-system,
@@ -658,8 +841,8 @@ export class SigningKeyUnavailableError extends Error {
  *      against the client's claimed value, and binding the server's
  *      hash here makes "approval covers the bytes we actually
  *      reviewed" structural rather than convention.
- *   6. Canonical-serialize the approval and sign with the server's
- *      Ed25519 private key. The base64 signature is returned alongside
+ *   6. Canonical-serialize the approval and have the root helper sign
+ *      it with the server's Ed25519 private key (AGT-2263). The base64 signature is returned alongside
  *      the approval; the client (AGT-332) re-canonicalizes the parsed
  *      approval and verifies the signature against the same canonical
  *      bytes — byte identity is the contract.
@@ -743,11 +926,16 @@ export async function runReviewPipeline(
     throw new PromptFetchFailedError(prompt.kind, prompt.detail);
   }
 
-  // Stage 2: load the server's review-signing key. Mint-on-missing is
-  // a bootstrap-only concern; at request time, a missing key is a
-  // deployment fault that must surface — not be papered over with a
-  // freshly-rotated identity.
-  const signingMaterial = deps.signingKey ?? loadSigningMaterialFromEnv();
+  // Stage 2: resolve the signer (public key + root helper, AGT-2263).
+  // Mint-on-missing is a bootstrap-only concern; at request time, a
+  // missing key is a deployment fault that must surface — not be
+  // papered over with a freshly-rotated identity. Resolving it before
+  // the model call fails fast on a key-less server.
+  const signer =
+    deps.signer ??
+    (deps.signingKey
+      ? inProcessApprovalSigner(deps.signingKey)
+      : helperApprovalSignerFromEnv());
 
   // AGT-420: server-side verdict cache. Compute the diff hash now (also
   // reused as `approval.diff_sha256` below) and look up a saved verdict for
@@ -869,7 +1057,7 @@ export async function runReviewPipeline(
     base_sha: input.params.baseSha,
     head_sha: input.params.headSha,
     issued_at,
-    server_key_id: signingMaterial.fingerprint,
+    server_key_id: signer.fingerprint,
     // AGT-2272: bind the approval to the org/repo the prompt was
     // selected by. Always the REQUESTED pair (shape-checked by the verb
     // and authorized by `resolveRepoAccess`), whether or not a per-repo
@@ -880,12 +1068,11 @@ export async function runReviewPipeline(
   };
 
   // Stage 7: sign canonical bytes. The canonical serializer is the
-  // SAME function the client's verifier calls; byte identity here is
-  // the contract with AGT-332's sshReviewClient.
+  // SAME function the client's verifier calls (and the one the root
+  // helper re-derives and checks the input against); byte identity here
+  // is the contract with AGT-332's sshReviewClient.
   const canonical = canonicalSerializeApproval(approval);
-  const signature = sign(null, canonical, signingMaterial.privateKey).toString(
-    "base64",
-  );
+  const signature = await signer.signApproval(canonical);
 
   // AGT-355: surface the canonical per-approval bytes + signature
   // verbatim under the v3 PR-attestation field names so the client
@@ -905,32 +1092,6 @@ export async function runReviewPipeline(
     pr_attestation_v3_payload_b64: prAttestationV3PayloadB64,
     pr_attestation_v3_signature_b64: signature,
   };
-}
-
-/**
- * Load the production review-signing material from disk. Wraps the
- * `ReviewSigningKeyError` thrown by `loadReviewSigningKey` in a typed
- * `SigningKeyUnavailableError` so the verb's `.catch()` can match a
- * single class instead of importing from the keys module.
- */
-function loadSigningMaterialFromEnv(): ReviewSigningMaterial {
-  const privateKeyPath = resolveReviewSigningKeyPath();
-  try {
-    const loaded = loadReviewSigningKey({ privateKeyPath });
-    return {
-      privateKey: loaded.privateKey,
-      fingerprint: loaded.fingerprint,
-    };
-  } catch (err) {
-    if (err instanceof ReviewSigningKeyError) {
-      throw new SigningKeyUnavailableError(err.message);
-    }
-    // Any other error (EIO, etc.) — surface with a wrap that names the
-    // path so operators have a useful stderr line to start with.
-    throw new SigningKeyUnavailableError(
-      `${(err as Error).message ?? String(err)} (path=${privateKeyPath})`,
-    );
-  }
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────

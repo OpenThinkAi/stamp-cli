@@ -35,7 +35,8 @@
  * boots without re-spamming the loud block.
  *
  * Failure handling:
- *   - ReviewSigningKeyError (wrong mode, unreadable, unparseable):
+ *   - ReviewSigningKeyError (wrong owner or mode, symlink, unreadable,
+ *     unparseable):
  *     print to stderr with the `error: ` prefix and exit 1.
  *     Entrypoint.sh treats this as a fatal startup failure — the
  *     trust model requires a stable server identity, and silently
@@ -46,8 +47,13 @@
  *     orchestration bugs the operator needs to see verbatim.
  */
 
+import { chmodSync, lstatSync } from "node:fs";
+
 import {
   ensureReviewSigningKey,
+  lookupGitUid,
+  PUBLIC_KEY_MODE,
+  reownLegacyGitOwnedKeyFiles,
   resolveReviewSigningKeyPath,
   ReviewSigningKeyError,
 } from "../lib/reviewSigningKey.js";
@@ -103,6 +109,22 @@ function main(): void {
 
   const privateKeyPath = resolveReviewSigningKeyPath();
 
+  // AGT-2263 upgrade: pre-AGT-2263 images' boot-time `chown -R git:git
+  // /srv/git` left the key git-owned. Re-own exactly that legacy state
+  // to root:root (as root only), then let ensureReviewSigningKey enforce
+  // root:root 0600 — any other owner/mode still fails the boot.
+  if (process.getuid?.() === 0) {
+    const gitUid = lookupGitUid();
+    if (gitUid !== null) {
+      for (const p of reownLegacyGitOwnedKeyFiles({ privateKeyPath, gitUid })) {
+        console.log(
+          `stamp-bootstrap-review-key: re-owned legacy git-owned ${p} to root:root (AGT-2263). ` +
+            `If the git user may have been compromised before this upgrade, rotate the key.`,
+        );
+      }
+    }
+  }
+
   let result;
   try {
     result = ensureReviewSigningKey({ privateKeyPath });
@@ -116,6 +138,17 @@ function main(): void {
       process.exit(1);
     }
     throw err;
+  }
+
+  // The .pub must stay readable by the git user: stamp-review reads it
+  // for server_key_id and to check the helper's signatures. Public
+  // material, so re-pin 0644 every boot (a regular file only).
+  try {
+    if (lstatSync(result.publicKeyPath).isFile()) {
+      chmodSync(result.publicKeyPath, PUBLIC_KEY_MODE);
+    }
+  } catch {
+    // ensureReviewSigningKey just wrote it; nothing useful to add here.
   }
 
   if (result.created) {

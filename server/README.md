@@ -20,6 +20,17 @@ protected branches defined in each repo's committed `.stamp/config.yml`.
   a verb rather than a raw `ls` because the git user's shell is `git-shell`)
 - `/usr/local/sbin/stamp-break-glass` — root-only recovery CLI that adds or
   re-promotes a key in the membership DB (see [Locked out](#locked-out-break-glass))
+- `/usr/local/sbin/stamp-sign-approval` — root signing helper (not an SSH
+  verb). When review attestation is on (`ANTHROPIC_API_KEY` set), the
+  review-signing key at `/srv/git/.stamp-state/review-signing-key.pem` is
+  `root:root 0600` and the git user cannot read it. `stamp-review` signs
+  each approval by piping it to `sudo -n stamp-sign-approval`, which is the
+  only sudoers rule for it and takes no arguments. The helper signs only a
+  well-formed, current approval under its own key, and each signature
+  appears in the container log as `stamp-sign-approval: signed …`. The
+  boot fails if the key has any other owner or mode. A key that an older
+  image left git-owned is re-owned to `root:root` on the first boot of
+  this image.
 - `/entrypoint.sh` — bootstraps the membership DB from `AUTHORIZED_KEYS` on
   first boot, writes the operator pub key from env, then boots sshd
 

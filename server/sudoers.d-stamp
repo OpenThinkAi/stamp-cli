@@ -2,9 +2,10 @@
 # inside the container (root-owned, mode 0440 — required by sudo's own
 # file-perm check).
 #
-# Grants the git user passwordless invocation of stamp-ensure-repo-key,
-# and nothing else. The helper is the only privilege-escalation surface
-# the git user has, and it is hardcoded to:
+# Grants the git user passwordless invocation of stamp-ensure-repo-key
+# (and, below, the no-argument stamp-sign-approval helper — AGT-2263),
+# and nothing else. These helpers are the only privilege-escalation surface
+# the git user has. stamp-ensure-repo-key is hardcoded to:
 #   - validate its <owner>/<repo> argument shape strictly
 #   - refuse to overwrite an existing key file
 #   - chown the resulting file root:git mode 0640
@@ -17,3 +18,16 @@
 # is the access-control gate (who may invoke this binary at all), not the
 # input filter.
 git ALL=(root) NOPASSWD: /usr/local/sbin/stamp-ensure-repo-key *
+
+# AGT-2263: the review-signing private key is root:root 0600 and never
+# readable by git. stamp-review (running as git via git-shell-commands)
+# signs each approval by piping its canonical bytes to this helper, which
+# writes only the base64 signature to stdout. The empty-string argument
+# list ("") means sudo admits the command with NO arguments at all. The
+# helper itself is the input filter: it signs only a well-formed ApprovalV4
+# (exact key set incl. repo_id, strict field shapes, server_key_id equal to
+# its own key, issued_at within 5 minutes of now, canonical bytes) — never
+# arbitrary bytes — and logs each signature to the container log. env_reset
+# (sudo default; no SETENV tag here) keeps the caller from steering the key
+# path. See src/lib/approvalSigning.ts.
+git ALL=(root) NOPASSWD: /usr/local/sbin/stamp-sign-approval ""

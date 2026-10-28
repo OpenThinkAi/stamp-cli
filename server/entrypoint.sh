@@ -24,8 +24,24 @@ mkdir -p /etc/stamp/reviewers
 echo "reviewer prompts available: $(ls /etc/stamp/reviewers/*.md 2>/dev/null | xargs -n1 basename 2>/dev/null | paste -sd ',' - || echo none)" >&2
 
 # Platform volume mounts (Railway, Fly, etc.) come up root-owned, overriding
-# any build-time chown. Fix at boot so the git user can write its own repos.
-chown -R git:git /srv/git 2>/dev/null || true
+# any build-time chown. Fix at boot so the git user can create and write its
+# own repos.
+#
+# Scoped, not `chown -R git:git /srv/git` (AGT-2263): the recursive form ran
+# as root over the whole volume and so handed every root-owned file in the
+# dot-dirs — notably the review-signing private key in .stamp-state — to the
+# git user on each boot. Now: the volume root itself (non-recursive, -h so a
+# symlink is never followed), then each bare repo /srv/git/<name>.git that
+# is a real directory (a symlinked "repo" is skipped) with -R -h, so a
+# symlink planted inside a repo is re-owned itself rather than root chowning
+# whatever it points at. Dot-dirs (.stamp-state, .ssh-host-keys,
+# .ssh-client-keys, .prompts-cache, .trash) are never swept: each is pinned
+# explicitly below or created and owned by the git user itself.
+chown -h git:git /srv/git 2>/dev/null || true
+for r in /srv/git/*.git; do
+  [ -d "$r" ] && [ ! -L "$r" ] || continue
+  chown -R -h git:git "$r" 2>/dev/null || true
+done
 
 # Sticky bit on /srv/git: prevents the git user from renaming or deleting
 # root-owned subdirectories like .ssh-host-keys. Without sticky, write
@@ -152,17 +168,21 @@ fi
 # logs "skipped" and exits 0 and the server continues to boot as it
 # does today.
 #
-# Permissions: the script runs as root (everything in entrypoint.sh
-# does until the exec at the bottom), creates the key file mode
-# 0600, and writes the .pub sibling mode 0644. The git user (which
-# runs SSH sessions and the stamp-server-pubkey wrapper) needs READ
-# access to the .pub file only — the .pub lives in $STAMP_STATE_DIR
-# which is 1770 root:git so the git user can traverse but not
-# delete/rename root-owned files within. The private .pem is
-# never read by the git user under any documented code path; if
-# Phase 2's signing handler runs as the git user, the file will
-# need to be chowned at that point (deferred — handled when the
-# signing path lands).
+# Permissions (AGT-2263): the script runs as root (everything in
+# entrypoint.sh does until the exec at the bottom). The private .pem
+# is root:root 0600 and the bootstrap FAILS THE BOOT if it is anything
+# else (wrong owner, wrong mode, a symlink). The git user cannot read
+# it: stamp-review, which runs as git, signs each approval through the
+# root helper /usr/local/sbin/stamp-sign-approval (one no-argument
+# sudoers rule; the helper only signs a well-formed approval under its
+# own key id). The .pub sibling is root:root 0644 and git-readable —
+# stamp-review and the stamp-server-pubkey wrapper read it. Both live
+# in $STAMP_STATE_DIR, 1770 root:git, so the git user can traverse but
+# not delete/rename the root-owned files within.
+#
+# Upgrade: earlier images' boot-time `chown -R git:git /srv/git` left
+# the key git-owned. The bootstrap re-owns a key (and .pub) in exactly
+# that state to root:root and logs it; any other foreign owner fails.
 if /usr/local/sbin/stamp-bootstrap-review-key; then
   # Successful bootstrap. The script handles its own logging
   # (silent on disabled-capability skip, loud banner on first
@@ -216,9 +236,23 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
     exit 1
   fi
   export GIT_SSH_KNOWN_HOSTS="${STAMP_PROMPTS_KNOWN_HOSTS_PATH:-${GIT_SSH_KNOWN_HOSTS:-/etc/ssh/ssh_known_hosts}}"
+  _pcroot="${STAMP_PROMPTS_CACHE_ROOT:-/srv/git/.prompts-cache}"
+  # The git-run bootstrap below must be able to read the deploy key and
+  # write the cache. Earlier images got that for free from the boot-time
+  # `chown -R git:git /srv/git`; that sweep is now scoped to repo dirs
+  # (AGT-2263), so hand exactly these paths to git explicitly — the key
+  # only if it is a regular file (never follow a symlink), the cache with
+  # -R -h (symlinks re-owned, not followed).
+  if [ -n "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ] && [ -f "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ] && [ ! -L "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ]; then
+    chown git:git "$STAMP_PROMPTS_DEPLOY_KEY_PATH"
+    chmod 0600 "$STAMP_PROMPTS_DEPLOY_KEY_PATH"
+  fi
+  if [ -d "$_pcroot" ] && [ ! -L "$_pcroot" ]; then
+    chown -R -h git:git "$_pcroot" || true
+  fi
   # Fix A (AGT-468): run bootstrap as the git user, not root. The deploy key
   # at STAMP_PROMPTS_DEPLOY_KEY_PATH is git-readable (mode 0600, git-owned via
-  # the ssh-client-keys ownership loop above), so the user-switch is clean.
+  # the explicit chown just above), so the user-switch is clean.
   # The -p flag preserves the exported env (STAMP_PROMPTS_*, GIT_SSH_*) so the
   # bootstrap binary sees the same variables it would see when invoked as root.
   # Running as git ensures the cache dir and its contents are created with
@@ -234,17 +268,16 @@ if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
   # layouts where the cache was migrated from an older root-owned install or
   # where a manual operator chown went wrong. The || true keeps the boot alive
   # if, e.g., the dir doesn't exist yet (Phase B disabled mid-deploy).
-  _pcroot="${STAMP_PROMPTS_CACHE_ROOT:-/srv/git/.prompts-cache}"
-  if [ -d "$_pcroot" ]; then
-    chown -R git:git "$_pcroot" || true
+  if [ -d "$_pcroot" ] && [ ! -L "$_pcroot" ]; then
+    chown -R -h git:git "$_pcroot" || true
   fi
   # The .old dir is the atomic-swap staging area used by cloneOrFetchPromptsCache
   # during in-place refreshes. Chown it too: a previous root-owned bootstrap
   # could have left an orphaned .old dir that the poll worker's rename(2) call
   # would EACCES on (git user cannot rmdir a root-owned directory, even with
   # write perms on the parent).
-  if [ -d "${_pcroot}.old" ]; then
-    chown -R git:git "${_pcroot}.old" || true
+  if [ -d "${_pcroot}.old" ] && [ ! -L "${_pcroot}.old" ]; then
+    chown -R -h git:git "${_pcroot}.old" || true
   fi
 fi
 
@@ -427,6 +460,11 @@ write_env_var() {
 
 write_env_var GITHUB_BOT_TOKEN
 write_env_var ANTHROPIC_API_KEY  # consumed by stamp-review.cjs via lib/serverEnvFile.loadServerEnvFile()
+# AGT-2263: a REVIEW_SIGNING_KEY_PATH override must reach both
+# stamp-review (git, SSH-stripped env) and the sudo-invoked
+# stamp-sign-approval (env_reset) — both reload this root-written file —
+# so they agree with the boot-time bootstrap on which key is "the" key.
+write_env_var REVIEW_SIGNING_KEY_PATH
 
 # Phase B (AGT-373) — STAMP_PROMPTS_REPO_URL and STAMP_PROMPTS_DIR are read
 # by resolvePromptCacheRoot() at SSH-verb request time. stamp-review.cjs's
