@@ -34,12 +34,15 @@ import {
   findDeployKey,
   findExistingStampRuleset,
   getRulesetBypassActors,
+  getRulesetRefCondition,
   lookupAuthenticatedUserId,
+  lookupRepoDefaultBranch,
   lookupRepoOwnerType,
   parseGithubOriginUrl,
   registerDeployKey,
   replaceBypassActors,
   STAMP_MIRROR_DEPLOY_KEY_TITLE,
+  uncoveredMirrorBranches,
   type BypassActor,
 } from "../lib/ghRuleset.js";
 import {
@@ -267,7 +270,7 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
   //    per-repo key now exists server-side before bootstrap's own push
   //    fires the post-receive hook, so the very first mirror leg works.
   if (mirrorRepo && !opts.noRuleset) {
-    applyMirrorRuleset(mirrorRepo, server);
+    applyMirrorRuleset(mirrorRepo, server, cloneTarget);
   }
 
   // 9. Run the existing bootstrap flow (in the clone) to land real reviewers.
@@ -511,17 +514,25 @@ function writeMirrorYml(
 function applyMirrorRuleset(
   mirror: { owner: string; repo: string },
   server: ServerConfig,
+  repoRoot: string,
 ): void {
+  // The Ruleset must protect every branch the mirror pushes, not just the
+  // default branch (AGT-2245) — derive its include list from the same
+  // mirror.yml the post-receive hook reads.
+  const mirrorBranches = readMirrorYmlBranches(repoRoot);
+
   // Short-circuit on re-runs: if a stamp-mirror-only ruleset is already
   // present we don't touch it (operator may have customized the actor;
   // we never clobber). Doing this BEFORE deploy-key registration avoids
   // depositing a stray key on a repo whose ruleset we won't end up
-  // wiring up to it anyway.
+  // wiring up to it anyway. We do still check its branch coverage and
+  // warn, since an untouched ruleset may predate a widened mirror.yml.
   const existing = findExistingStampRuleset(mirror.owner, mirror.repo);
   if (existing !== null) {
     console.log(
       `GitHub Ruleset: stamp-mirror-only already present on ${mirror.owner}/${mirror.repo}. Not modified.`,
     );
+    warnUncoveredMirrorBranches(mirror, existing, mirrorBranches);
     return;
   }
 
@@ -596,12 +607,17 @@ function applyMirrorRuleset(
     actorDescription = `${user.login}, id ${user.id}`;
   }
 
-  const result = applyStampRuleset(mirror.owner, mirror.repo, actor);
+  const result = applyStampRuleset(mirror.owner, mirror.repo, actor, mirrorBranches);
   switch (result.status) {
     case "created":
       console.log(
         `GitHub Ruleset: created stamp-mirror-only on ${mirror.owner}/${mirror.repo} (bypass actor: ${actorDescription}).`,
       );
+      if (mirrorBranches.length > 0) {
+        console.log(
+          `                Protected branches: default branch + ${mirrorBranches.map((b) => JSON.stringify(b)).join(", ")} (from .stamp/mirror.yml).`,
+        );
+      }
       break;
     case "exists":
       // The findExistingStampRuleset short-circuit above should make
@@ -643,7 +659,12 @@ function verifyMirrorProvisioned(
       STAMP_MIRROR_DEPLOY_KEY_TITLE,
     ),
     rulesetId: findExistingStampRuleset(mirror.owner, mirror.repo),
+    uncoveredBranches: [] as string[],
   };
+  if (state.rulesetId !== null) {
+    state.uncoveredBranches =
+      findUncoveredMirrorBranches(mirror, state.rulesetId, readMirrorYmlBranches(cloneTarget)) ?? [];
+  }
   const problems = computeMirrorProvisionProblems(state, mirror, cloneTarget);
   if (problems.length === 0) {
     console.log(
@@ -798,7 +819,7 @@ async function runMigrateExisting(
   // 8. Apply the GitHub Ruleset on the existing GitHub repo. Skipped
   // under --no-ruleset.
   if (!opts.noMirror && !opts.noRuleset) {
-    applyMirrorRuleset(mirrorParse, server);
+    applyMirrorRuleset(mirrorParse, server, repoRoot);
   }
 
   // 9. Success.
@@ -1000,6 +1021,76 @@ function printMigrateSuccess(args: {
     console.log(`  git checkout main && stamp merge chore/add-mirror-yml --into main`);
     console.log(`  stamp push main`);
   }
+}
+
+// ---------- ruleset branch coverage (AGT-2245) ----------
+
+/**
+ * The `github.branches` list from `<repoRoot>/.stamp/mirror.yml`, or []
+ * when the file is absent or malformed. The post-receive hook
+ * (readMirrorConfig) is the strict, canonical parser and reports
+ * malformed configs at push time; this reader only feeds the Ruleset's
+ * include list, where "no extra branches" safely degrades to the
+ * default-branch-only protection stamp has always applied.
+ */
+export function readMirrorYmlBranches(repoRoot: string): string[] {
+  const path = join(repoRoot, ".stamp", "mirror.yml");
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = parseYaml(readFileSync(path, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    const gh = (parsed as Record<string, unknown>)["github"];
+    if (!gh || typeof gh !== "object" || Array.isArray(gh)) return [];
+    const branches = (gh as Record<string, unknown>)["branches"];
+    if (!Array.isArray(branches)) return [];
+    return branches.map(String).filter((b) => b.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Mirrored branches the existing Ruleset doesn't cover, or null when the
+ * Ruleset's conditions couldn't be read (gh failure).
+ */
+function findUncoveredMirrorBranches(
+  mirror: { owner: string; repo: string },
+  rulesetId: number,
+  mirrorBranches: readonly string[],
+): string[] | null {
+  if (mirrorBranches.length === 0) return [];
+  const condition = getRulesetRefCondition(mirror.owner, mirror.repo, rulesetId);
+  if (condition === null) return null;
+  const defaultBranch = lookupRepoDefaultBranch(mirror.owner, mirror.repo);
+  return uncoveredMirrorBranches(mirrorBranches, condition, defaultBranch);
+}
+
+/**
+ * Print a `warning:` when an existing (untouched) Ruleset leaves mirrored
+ * branches unprotected. stamp never rewrites an existing Ruleset, so the
+ * fix is the operator's — the warning names the branches and the doc.
+ */
+function warnUncoveredMirrorBranches(
+  mirror: { owner: string; repo: string },
+  rulesetId: number,
+  mirrorBranches: readonly string[],
+): void {
+  const uncovered = findUncoveredMirrorBranches(mirror, rulesetId, mirrorBranches);
+  if (uncovered === null) {
+    console.log(
+      `warning: couldn't read ruleset ${rulesetId}'s target branches to check them against .stamp/mirror.yml.`,
+    );
+    return;
+  }
+  if (uncovered.length === 0) return;
+  console.log(
+    `warning: ruleset ${rulesetId} does not cover mirrored branch(es) ` +
+      `${uncovered.map((b) => JSON.stringify(b)).join(", ")} from .stamp/mirror.yml — ` +
+      `anyone with write access to ${mirror.owner}/${mirror.repo} can push to them directly.`,
+  );
+  console.log(
+    `         Add them to the ruleset's target branches; see "Mirroring more than the default branch" in docs/github-ruleset-setup.md.`,
+  );
 }
 
 // ---------- bypass-actor migration ----------
@@ -1256,6 +1347,7 @@ async function runMigrateBypass(
   } else {
     console.log(`Ruleset bypass: already up to date. No change.`);
   }
+  warnUncoveredMirrorBranches(mirror, rulesetId, readMirrorYmlBranches(repoRoot));
 
   printMigrateBypassSuccess({ mirror, server, opts, rulesetUpdated: true });
 }

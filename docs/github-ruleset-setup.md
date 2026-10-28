@@ -39,7 +39,7 @@ For most operators this is one command. The flow registers a per-repo deploy key
 2. Creates the GitHub mirror repo and writes `.stamp/mirror.yml`.
 3. Asks the stamp server to lazy-generate a per-repo SSH keypair (`stamp-server-pubkey <owner>/<repo>` triggers it).
 4. Registers the public half as a deploy key titled `stamp-mirror` on the new GitHub repo.
-5. Applies the `stamp-mirror-only` Ruleset with `DeployKey` (org repo) or `User` (personal repo) as the bypass actor.
+5. Applies the `stamp-mirror-only` Ruleset with `DeployKey` (org repo) or `User` (personal repo) as the bypass actor. Its target branches are the default branch plus every entry in `.stamp/mirror.yml`'s `github.branches` (see [Mirroring more than the default branch](#mirroring-more-than-the-default-branch)).
 
 No additional UI clicks. If you want to inspect the plan first, pass `--dry-run`.
 
@@ -91,7 +91,7 @@ If you prefer clicking, or are setting up a one-off without the stamp CLI:
 1. **`Settings → Rules → Rulesets → New ruleset → New branch ruleset`**
 2. **Ruleset name:** `stamp-mirror-only`
 3. **Enforcement status:** Active
-4. **Target branches:** Add target → Include by pattern → `main` (add other mirrored branches the same way)
+4. **Target branches:** Add target → Include default branch, then Add target → Include by pattern for **every** entry in `.stamp/mirror.yml`'s `github.branches` (e.g. `release/**` for `release/*` — see [Mirroring more than the default branch](#mirroring-more-than-the-default-branch)). A mirrored branch that isn't a target is unprotected.
 5. **Bypass list → Add bypass:** add a Deploy key, OR your designated mirror identity (your user / machine user / GitHub App). `bypass_mode: always`. For deploy keys, you need to register the key first under `Settings → Deploy keys → Add deploy key` (paste the output of `ssh git@<stamp-server> stamp-server-pubkey <owner>/<repo>`, allow write access).
 6. **Branch rules** to enable:
    - **Restrict deletions** — on
@@ -107,6 +107,8 @@ If you prefer clicking, or are setting up a one-off without the stamp CLI:
 ## Apply via the `gh` CLI (manual)
 
 This repo ships [`docs/github-ruleset-template.json`](./github-ruleset-template.json) — a sanitized copy of the same configuration. The template defaults to a `DeployKey` actor with `actor_id: 0` (an invalid placeholder); **replace the actor_id** with the numeric key id you got back from registering the deploy key.
+
+The template's `conditions.ref_name.include` targets the default branch plus `refs/heads/release/**` — the shape `stamp provision` generates for a mirror.yml of `branches: [main, "release/*"]`. **Edit the include list to match your own `.stamp/mirror.yml`** before applying: one `refs/heads/<pattern>` entry per mirrored branch, with every `*` written as `**` (see below). Extra entries for branches you don't mirror are harmless; a missing entry leaves that branch unprotected.
 
 ```sh
 # Step 1 — register the per-repo deploy key on the GitHub mirror.
@@ -144,6 +146,21 @@ git push origin main
 ```
 
 From the stamp server's mirror push (using the registered deploy key as the SSH identity) — should sail through normally.
+
+## Mirroring more than the default branch
+
+`.stamp/mirror.yml` can mirror any set of branches (`branches: [main, "release/*"]`). The Ruleset has to protect **every one of them**: a mirrored branch outside the Ruleset's target list has no deletion, update or force-push rule on GitHub, so anyone with repo write access (or a leaked agent token) can push straight to it and skip the stamp gate — and a release pipeline that builds from that branch would ship unstamped code.
+
+- `stamp provision` derives the Ruleset's include list from `.stamp/mirror.yml` when it creates the Ruleset: `~DEFAULT_BRANCH` plus `refs/heads/<entry>` for each entry.
+- **Glob translation.** In mirror.yml, `*` matches across `/` (`release/*` mirrors `release/2026/q4`). In a GitHub Ruleset, `*` stops at `/` and `**` crosses it. So every `*` becomes `**` in the Ruleset: `release/*` → `refs/heads/release/**`. Literal names pass through: `main` → `refs/heads/main`.
+- **stamp never rewrites an existing Ruleset.** If you widen mirror.yml later, update the Ruleset's target branches yourself (UI, or the PUT below). `stamp provision` (re-runs and `--migrate-bypass`) prints a `warning:` naming any mirrored branch an existing `stamp-mirror-only` Ruleset doesn't cover, and the post-provision verification fails on it.
+
+To check by hand:
+
+```sh
+cat .stamp/mirror.yml
+gh api /repos/<owner>/<repo>/rulesets/<id> --jq .conditions.ref_name
+```
 
 ## Bypass-actor choices: when to use which
 

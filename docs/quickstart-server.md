@@ -126,7 +126,7 @@ If you want a public GitHub mirror that deploy pipelines can integrate with:
        - main
        - "release/*"
    ```
-4. **Set up the GitHub-side ruleset** on the mirror's `main` so only your designated mirror identity can update the branch. Without this, anyone with repo write access can `git push origin main` and bypass the entire stamp gate. See [`github-ruleset-setup.md`](./github-ruleset-setup.md) for the full walkthrough — both UI and CLI paths, plus a [`github-ruleset-template.json`](./github-ruleset-template.json) you can `gh api`-import after editing in your bypass actor's numeric ID. (Note: GitHub is phasing out the legacy "Branch protection rules" UI in favor of "Rulesets"; many newer repos only see the Ruleset surface now.)
+4. **Set up the GitHub-side ruleset** on the mirror so only your designated mirror identity can update `main` **and every other branch listed in `mirror.yml`** (here, `release/*` → Ruleset pattern `refs/heads/release/**`). Without this, anyone with repo write access can `git push origin main` — or push to an unprotected `release/x` — and bypass the entire stamp gate. See [`github-ruleset-setup.md`](./github-ruleset-setup.md) for the full walkthrough — both UI and CLI paths, plus a [`github-ruleset-template.json`](./github-ruleset-template.json) you can `gh api`-import after editing in your bypass actor's numeric ID. (Note: GitHub is phasing out the legacy "Branch protection rules" UI in favor of "Rulesets"; many newer repos only see the Ruleset surface now.)
 
 Push the mirror.yml change through the normal flow. From the next stamped merge onward, every accepted push is mirrored to GitHub automatically.
 
