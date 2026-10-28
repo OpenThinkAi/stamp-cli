@@ -48,7 +48,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadUserKeypair, type Keypair } from "../lib/keys.js";
 import { signBytes } from "../lib/signing.js";
@@ -1503,8 +1503,12 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         if (opts._writeDraftForTest) {
           opts._writeDraftForTest(draftPath, draftContent);
         } else {
-          mkdirSync(dirname(draftPath), { recursive: true });
-          writeFileSync(draftPath, draftContent, "utf8");
+          // AGT-2249: a draft is review prose about someone else's PR —
+          // owner-only, like state.db.
+          mkdirSync(dirname(draftPath), { recursive: true, mode: 0o700 });
+          chmodSync(dirname(draftPath), 0o700);
+          writeFileSync(draftPath, draftContent, { encoding: "utf8", mode: 0o600 });
+          chmodSync(draftPath, 0o600);
         }
         process.stderr.write(`⟳ saved draft for PR #${prNumber} to ${draftPath}\n`);
       } catch (err) {

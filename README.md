@@ -1129,6 +1129,11 @@ required.
 - The signed `Stamp-Payload` trailer carrying approvals, base/head
   SHAs, signer key fingerprint, and a tool-call audit trace (tool
   names + input hashes — not the diff content itself).
+- Each approval's reviewer **provenance**: backend kind and model id, and
+  the endpoint as `sha256:<16 hex>` of its URL rather than the URL itself,
+  so an internal gateway or LAN model host is not published in mirrored
+  history (AGT-2249). `STAMP_HASH_PROVENANCE_ENDPOINT=0` records the URL
+  verbatim; the local `state.db` row always keeps it.
 
 **Disclosure on run.** Two notices fire on stderr:
 
@@ -1167,6 +1172,25 @@ data_flow:
   confirmed: true
 ```
 
+**Which providers may see the diff (`review_endpoints`).** Reviewers can
+run on Anthropic or on any OpenAI-compatible host (OpenAI, DeepSeek, a
+corporate gateway), and each provider is another sub-processor, possibly in
+another jurisdiction. To pin the set, commit the hosts `stamp review` may
+send this repo's diffs to:
+
+```yaml
+data_flow:
+  review_endpoints: [api.anthropic.com]
+```
+
+When the list is present, a review whose off-host reviewer would reach any
+other host — an unlisted openai-compatible endpoint, an `ANTHROPIC_BASE_URL`
+gateway, or Bedrock/Vertex routing that cannot be pinned to a host — is
+refused before the diff leaves the machine, naming the reviewer and host
+(AGT-2249). Reviewers on this host need no entry. Absent means no
+restriction. `review_server` branches are exempt: there the stamp-server
+chooses the provider.
+
 **Peer listeners (`stamp pr listen`).** A peer listener reviews *someone
 else's* PR, under its own operator's provider account. It runs unattended,
 so it fails closed. It skips any event unless the PR's repo lists, at
@@ -1183,6 +1207,20 @@ Committing this list is the repo's consent, and so every author's, to
 peer LLM review at those endpoints. A listener whose model is on its own
 host needs no entry. `require_confirmation` without `confirmed` refuses
 peer review too.
+
+**Where peer-review data is kept.** `stamp pr open` sends the PR's title,
+body, changed paths and URL to the stamp-server, which relays them to
+subscribed listeners. The server stores the broadcast in `users.db` only
+until it is delivered: an hour after broadcast the title, body and paths
+are dropped from the row, and events, patches and cached server-side
+verdict prose are deleted after 30 days (`STAMP_PEER_EVENT_RETENTION_DAYS`,
+`STAMP_SERVER_VERDICT_RETENTION_DAYS`; see `server/README.md`). Each
+listener machine keeps `~/.stamp/peer-watch.log` (mode `0600`): one line per
+triage with the repo, PR URL, SHAs, author fingerprint and decision, and
+only hashes and lengths of the title, body and paths — never the text
+(AGT-2249). Drafts saved by `stamp pr listen` are the listener's own review
+prose about someone else's PR, kept in `~/.stamp/drafts/` (`0600`) until
+`stamp peer drafts delete` removes them.
 
 The block is read from the merge-base tree like every other policy field,
 so a feature branch cannot ship its own `confirmed: true` to wave its own

@@ -140,6 +140,7 @@ All Phase B configuration is via env vars on the stamp-server deployment (Railwa
 |---|---|---|---|
 | `STAMP_PROMPTS_REPO_URL` | Yes (to enable Phase B) | unset | `https://github.com/owner/name.git` or `git@github.com:owner/name.git`. Unset = stay on Phase A bundled prompts. |
 | `STAMP_PROMPTS_REPO_REF` | No | `main` | Branch or tag to track on the prompts repo. |
+| `STAMP_PROMPTS_ALLOWED_SIGNERS` | No (strongly recommended) | unset | OpenSSH `allowed_signers` file. When set, a fetched tip is accepted only if `git verify-commit` finds an SSH signature by a listed key; otherwise the cache keeps its last verified commit (AGT-2249). Unset logs a boot warning. |
 | `STAMP_PROMPTS_WEBHOOK_SECRET` | Yes (to accept webhook deliveries) | unset | HMAC-SHA256 shared secret. Must match the github webhook config. Missing = `503 webhook_secret_unconfigured` on every delivery. |
 | `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Conditional | `/srv/git/.ssh-client-keys/prompts_repo_key` | Private SSH key for SSH URLs to private repos. Ignored for HTTPS URLs. Path must exist at boot when set explicitly. |
 | `STAMP_PROMPTS_CACHE_ROOT` | No | `/srv/git/.prompts-cache` | Absolute directory path for the local cache. The default is on the persistent volume so the cache survives container redeploys. |
@@ -213,7 +214,7 @@ Adapted from the project README's mitigations table:
 |---|---|
 | Malicious client supplies prompt bytes via SSH verb | Same as Phase A: client supplies only `--reviewer` (a name); server reads file content from its own cache. Client cannot influence file contents. |
 | Attacker spoofs webhook delivery | HMAC-SHA256 validation on every request. Secret never leaves stamp-server + github webhook config. Rejected deliveries logged with delivery ID + remote address (never the bad signature itself). |
-| Compromised prompts repo (e.g. github account compromise) | **Operator responsibility — see below.** Phase B inherits the prompts repo's access-control posture; a compromise there propagates into the LLM prompts the server uses. |
+| Compromised prompts repo (e.g. github account compromise) | With `STAMP_PROMPTS_ALLOWED_SIGNERS` set, a pushed commit not signed by a listed key is refused and the last verified prompts stay in use (AGT-2249). Without it: **operator responsibility — see below**; a compromise there propagates into the LLM prompts the server uses. |
 | Webhook delivery missed / delayed → stale cache | Periodic-poll backstop (default 3600s) refreshes from origin even without webhook traffic. Operator can also confirm freshness by grepping `prompts-poll: refresh ok` in logs. |
 | MITM on the prompts-repo clone/fetch | HTTPS URL: github's TLS handles it. SSH URL: deploy key + `StrictHostKeyChecking=yes` against the pinned `server/github-known-hosts` file (overridable via `STAMP_PROMPTS_KNOWN_HOSTS_PATH` for self-hosted github enterprise). |
 | Cache corruption / partial fetch | Atomic refresh: clone to `<cacheRoot>.tmp`, `rev-parse HEAD` to confirm, then POSIX `rename(2)` to commit. Mid-fetch failure leaves the existing `<cacheRoot>` untouched. |
@@ -221,7 +222,7 @@ Adapted from the project README's mitigations table:
 **Operator responsibilities** (you own these — they are NOT mitigated by the stamp-server code):
 
 - **Branch protection on the prompts repo's tracked branch** (typically `main`). The server fetches whatever the configured ref points to; any commit that lands there becomes the new reviewer prompts on the next refresh. Use github's branch protection rules + ruleset to require PR review + status checks on the prompts repo, the same way you protect your code repos.
-- **Signed commits on the prompts repo (recommended).** The current Phase B implementation does NOT verify commit signatures on the prompts repo — that's an explicit deferred item in the project's scope. If your threat model depends on tamper-evident prompt history, enforce GPG/SSH commit signing via branch protection and audit it separately.
+- **Signed commits on the prompts repo (strongly recommended).** Set `STAMP_PROMPTS_ALLOWED_SIGNERS` to an OpenSSH `allowed_signers` file listing the keys allowed to sign prompts-repo commits (one `<principal> <key-type> <base64>` line per key, the format `git config gpg.ssh.allowedSignersFile` takes). The server then runs `git verify-commit` on every fetched tip — at boot, on each webhook and each poll — and refuses any tip that is not signed by a listed SSH key. A refused tip never reaches the cache: the server keeps serving the last verified commit and logs the refusal (a boot with no verified cache yet fails). Sign prompts commits with `git -c gpg.format=ssh -c user.signingkey=<key> commit -S`. Keep the file root-owned and read-only to the git user (e.g. baked into the image or under `/etc/stamp/`); boots without it log a warning that the prompts are trusted unverified.
 - **Webhook secret rotation.** Rotate the shared secret periodically: generate a new value, update the github webhook config FIRST (github accepts both old and new during a brief overlap if you save twice in quick succession), then update `STAMP_PROMPTS_WEBHOOK_SECRET` on the server and redeploy. No special tooling — operators rotate by editing the env var + github webhook config.
 - **Deploy-key custody.** The private half on the volume is recoverable by anyone who can read the volume (e.g. platform support, anyone with `docker exec` equivalent). Treat it the same way you treat `GITHUB_BOT_TOKEN`.
 
@@ -357,9 +358,12 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      at container port `8080`). Example: `https://stamp-cli-production.up.railway.app`.
      `stamp invites mint` bakes this into share URLs; without it, mint
      refuses with a clear error.
-   - `GITHUB_BOT_TOKEN` — **optional**, only needed if you want to mirror
-     verified commits to a GitHub repo (see "GitHub mirror" below). A
-     fine-scoped GitHub PAT with `contents: write` on the target repo(s).
+   - `GITHUB_BOT_TOKEN` — **optional**. Posts the `stamp/verified` commit
+     statuses on a GitHub mirror (see "GitHub mirror" below); mirror pushes
+     use the per-repo deploy key. Use a fine-grained PAT (or GitHub App
+     installation token) scoped to the mirror repo(s) with *Commit statuses:
+     read and write* and an expiry; add `contents: write` only for the HTTPS
+     push fallback (no deploy key registered).
    - `STAMP_REVIEWER_MODEL` — **optional** (default `claude-sonnet-5-5`, the
      same id headless mode uses). Anthropic model id the `stamp-review` verb
      sends for every reviewer on this server — e.g. `claude-opus-5` to
@@ -392,6 +396,19 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
    - `STAMP_TRASH_SWEEP_INTERVAL_SEC` — **optional** (default `21600`, i.e.
      6h). How often the in-process trash sweep runs; `0` disables it (rely on
      the on-demand purge instead).
+   - `STAMP_PEER_EVENT_RETENTION_DAYS` — **optional** (default `30`). Peer
+     review events and patches in `users.db` older than this are deleted by
+     the hourly retention sweep in `stamp-workers` (AGT-2249). Independently,
+     an event's PR content (title, body, changed paths, signing key and
+     signature) is dropped from its row an hour after it was broadcast — it
+     is only needed until the listener has delivered it. `0` keeps the rows
+     forever (content is still dropped). A bad value falls back to the
+     default.
+   - `STAMP_SERVER_VERDICT_RETENTION_DAYS` — **optional** (default `30`).
+     Cached server-side verdicts — including the reviewer prose, which quotes
+     the reviewed diff — older than this are deleted by the same sweep. The
+     table is only a cache: an expired entry costs one re-review of an
+     identical diff. `0` keeps them forever.
 6. **Expose port 22** via Railway's TCP proxy:
    - Settings → Networking → Public Networking → TCP Proxy → create one
      pointing at container port 22. Railway gives you a public host +
@@ -486,8 +503,13 @@ server but the GitHub action never fires; the workaround was a parallel
 
 ### Server-side credentials
 
-Set `GITHUB_BOT_TOKEN` as a Railway env var with a GitHub PAT (or GitHub App
-installation token) that has `contents: write` on the target repo. The
+The push transport is, in order: the per-repo SSH deploy key that `stamp
+provision` registers (the default), the legacy shared deploy key, and only
+then HTTPS with `GITHUB_BOT_TOKEN`. With a deploy key in place the token only
+posts `stamp/verified` statuses, so scope it to that: a fine-grained PAT (or
+GitHub App installation token) limited to the mirror repo(s) with *Commit
+statuses: read and write* and an expiry you rotate on. For the HTTPS
+fallback it additionally needs `contents: write` on the target repo; the
 post-receive hook reads it from `/etc/stamp/env` (written by the entrypoint,
 chmod 600, git-owned) and constructs:
 
@@ -780,7 +802,13 @@ skipped, a symlinked or non-directory `hooks/` is replaced with a real
 directory, and each hook is staged in a root-only directory and renamed into
 place — a symlink or hard link at `hooks/pre-receive` is replaced, never
 written through, and root never `chown`s or `chmod`s the final path
-(AGT-2261). The logic lives in `server/lib/refresh-repo-hooks.sh`.
+(AGT-2261). The same pass also strips `core.hooksPath`, `include.path` and
+`includeIf.<cond>.path` from each repo's own `config` and from the git
+user's global config (`~git/.gitconfig`, `~git/.config/git/config`),
+editing them as the git user, never as root, and logs a warning per key removed: any of them could
+point git at a hook directory other than `hooks/` and skip the stamp
+pre-receive (AGT-2249). A key that cannot be removed fails the boot. The
+logic lives in `server/lib/refresh-repo-hooks.sh`.
 
 **Break-glass manual refresh** (useful if you need to push a hook update
 without restarting the container, or you're debugging):

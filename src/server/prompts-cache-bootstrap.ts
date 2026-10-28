@@ -24,6 +24,10 @@
  *     `/srv/git/.prompts-cache`): absolute directory path. The parent
  *     must exist and be writable; the cache dir itself is created by
  *     `cloneOrFetchPromptsCache`. Override in tests.
+ *   - `STAMP_PROMPTS_ALLOWED_SIGNERS` (optional, recommended): OpenSSH
+ *     allowed_signers file; when set, only a tip commit signed by a listed
+ *     key is accepted (AGT-2249). A rejected tip with a verified cache
+ *     already on disk warns and keeps the cache; with no cache it fails.
  *   - `STAMP_PROMPTS_DEPLOY_KEY_PATH` (optional): private SSH key for
  *     SSH URLs. The entrypoint pre-checks existence with a clearer
  *     error before invoking us (AC #2 of AGT-375); we re-pass the
@@ -50,6 +54,8 @@ import { join } from "node:path";
 
 import {
   cloneOrFetchPromptsCache,
+  PromptsSignatureError,
+  isPromptsCacheVerified,
   scrubGitUrlCredentials,
   type RefreshResult,
 } from "./prompts-cache.js";
@@ -88,6 +94,16 @@ async function main(): Promise<void> {
   const ref = process.env["STAMP_PROMPTS_REPO_REF"] || DEFAULT_REF;
   const cacheRoot = process.env["STAMP_PROMPTS_CACHE_ROOT"] || DEFAULT_CACHE_ROOT;
   const deployKeyPath = process.env["STAMP_PROMPTS_DEPLOY_KEY_PATH"] || undefined;
+  const allowedSignersPath = process.env["STAMP_PROMPTS_ALLOWED_SIGNERS"] || undefined;
+  if (!allowedSignersPath) {
+    // AGT-2249: the prompts are the trust anchor for every server-signed
+    // verdict. Say so on every boot that trusts a mutable ref unverified.
+    process.stderr.write(
+      `warning: prompts-cache: STAMP_PROMPTS_ALLOWED_SIGNERS is not set — prompts at ${ref} are trusted ` +
+        `without commit-signature verification; anyone who can push to that ref controls the reviewers ` +
+        `(see docs/migration-1.x-to-2.x.md)\n`,
+    );
+  }
 
   // Pre-flight log: surface what we're about to do before the git
   // network round-trip. Operators debugging a slow boot will see this
@@ -105,8 +121,24 @@ async function main(): Promise<void> {
       ref,
       cacheRoot,
       deployKeyPath,
+      ...(allowedSignersPath ? { allowedSignersPath } : {}),
     });
   } catch (err) {
+    // AGT-2249: an unsigned / wrongly signed tip must not brick the boot
+    // when a previously VERIFIED cache exists — keep serving that one. A
+    // cache whose own HEAD does not verify (populated before verification
+    // was enabled, or by the very push being refused) is not kept.
+    if (
+      err instanceof PromptsSignatureError &&
+      allowedSignersPath !== undefined &&
+      existsSync(`${cacheRoot}/.git`) &&
+      isPromptsCacheVerified(cacheRoot, allowedSignersPath)
+    ) {
+      process.stderr.write(
+        `warning: ${err.message}\nwarning: prompts-cache: keeping the last verified prompts at ${cacheRoot}\n`,
+      );
+      return;
+    }
     // The module throws on any condition the operator must fix
     // synchronously — missing deploy key, unreachable remote,
     // unresolvable ref, etc. Surface verbatim with the `error: `

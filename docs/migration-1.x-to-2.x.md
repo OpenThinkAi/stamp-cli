@@ -122,10 +122,20 @@ release ≥ 0.7.x can use it to step forward to 2.0.1.
 ### Step 1 — Upgrade stamp-server to a 2.x-capable build
 
 ```sh
-# Railway / Fly / K8s: redeploy from the 2.x image
-# Self-hosted Docker: pull and restart
-docker pull openthinkai/stamp-server:2.x
+# Railway / Fly / K8s: redeploy from a 2.x build of this repo
+# Self-hosted Docker: pull an EXACT image by digest and restart
+docker pull openthinkai/stamp-server@sha256:<digest>
 ```
+
+Pin the image by digest (or at least an exact version tag), never a moving
+tag like `2.x`. This image holds the review-signing key, `ANTHROPIC_API_KEY`,
+`GITHUB_BOT_TOKEN` and the per-repo deploy keys, and in Phase A it also
+carries the reviewer prompts — whatever is published under a moving tag is
+what you would deploy, with no record of which bytes ran and nothing to roll
+back to. Take the digest from a build you made or reviewed (`docker buildx
+imagetools inspect <image>:<version>` prints it), record it with the
+deployment, and bump it deliberately. Building the image yourself from a
+pinned commit of this repo (the Railway path) gives the same property.
 
 Add the new env vars:
 
@@ -312,7 +322,7 @@ The migration is a **single PR**. `stamp init --migrate-to-server-attested` scaf
 
 Upgrade stamp-server to a 2.1+ build (server-bundled reviewer prompts require 2.1).
 
-The server image bundles canonical reviewer prompts (`security.md`, `standards.md`, `product.md`) at `/etc/stamp/reviewers/` at build time. Operators who maintain a fork of stamp-server edit `server/reviewers/*.md` in the fork and rebuild — see [`server/README.md`](../server/README.md#reviewer-prompts) for the editing workflow. Upstream `openthinkai/stamp-server:2.x` ships with the default prompt set.
+The server image bundles canonical reviewer prompts (`security.md`, `standards.md`, `product.md`) at `/etc/stamp/reviewers/` at build time. Operators who maintain a fork of stamp-server edit `server/reviewers/*.md` in the fork and rebuild — see [`server/README.md`](../server/README.md#reviewer-prompts) for the editing workflow. Upstream stamp-server images ship with the default prompt set.
 
 ### Step 2 — Per-repo: one-command scaffold
 
@@ -497,6 +507,7 @@ In Railway (Settings → Variables) or your platform's equivalent:
 |---|---|
 | `STAMP_PROMPTS_REPO_URL` | `git@github.com:your-org/stamp-reviewers.git` (SSH for private repos) or `https://github.com/your-org/stamp-reviewers.git` (HTTPS for public) |
 | `STAMP_PROMPTS_REPO_REF` | Defaults to `main`; override only if you track a different branch/tag |
+| `STAMP_PROMPTS_ALLOWED_SIGNERS` | Path to an OpenSSH `allowed_signers` file; only tips signed by a listed key are accepted (strongly recommended — see the threat-model footnote below) |
 | `STAMP_PROMPTS_WEBHOOK_SECRET` | Paste the same string you typed into the github webhook config in step 3 |
 | `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Defaults to `/srv/git/.ssh-client-keys/prompts_repo_key`; override only if you stored the key elsewhere |
 
@@ -574,9 +585,11 @@ There's no special tooling for rotating the webhook secret — operators rotate 
 
 ### Threat-model footnote (signed commits on the prompts repo)
 
-The stamp-server does NOT verify commit signatures on the prompts repo at refresh time. This is an explicit deferred item in the Phase B scope — `cloneOrFetchPromptsCache` performs a `git fetch + checkout` against the configured ref and trusts whatever's at HEAD. There's no equivalent of pre-receive verification on the prompts-repo side.
+By default the stamp-server trusts whatever commit the configured ref points at: `cloneOrFetchPromptsCache` fetches the ref and checks it out. Anyone who can push to that ref controls every server-attested review on the next refresh, so **turn on signature verification** (AGT-2249):
 
-If your threat model depends on tamper-evident prompt history, **enforce signed commits via the prompts repo's branch protection** (github → Settings → Rules → Rulesets → require signed commits on the tracked branch). The same rule pattern documented in [`docs/github-ruleset-setup.md`](./github-ruleset-setup.md) for the code-mirror case applies here.
+Set `STAMP_PROMPTS_ALLOWED_SIGNERS` to an OpenSSH `allowed_signers` file listing the keys allowed to sign prompts-repo commits (one `<principal> <key-type> <base64>` line per key, the format `git config gpg.ssh.allowedSignersFile` takes). The server then runs `git verify-commit` on every fetched tip — at boot, on each webhook and each poll — and refuses any tip that is not signed by a listed SSH key. A refused tip never reaches the cache: the server keeps serving the last verified commit and logs the refusal (a boot with no verified cache yet fails). Sign prompts commits with `git -c gpg.format=ssh -c user.signingkey=<key> commit -S`. Keep the file root-owned and read-only to the git user (e.g. baked into the image or under `/etc/stamp/`); boots without it log a warning that the prompts are trusted unverified.
+
+Also protect the prompts repo itself (github → Settings → Rules → Rulesets on the tracked branch): require pull requests, require signed commits, block force-pushes and deletions, and restrict who can push. The same rule pattern documented in [`docs/github-ruleset-setup.md`](./github-ruleset-setup.md) for the code-mirror case applies here. Every refresh logs the commit SHA it now serves (`prompts-cache: ready … sha=…` at boot, `refresh ok … sha=…` on webhook/poll), so a prompt change is always visible in the container log.
 
 This is a deliberate layer-shift relative to Phase A. In Phase A, the trust chain for prompt bytes is "operator controls the image build → image controls the prompts → server reads from `/etc/stamp/reviewers/` → server signs verdict against `prompt_sha256`." Every link in that chain is enforced inside stamp-server (or its image-build pipeline) and verifiable post-hoc by the verifier. In Phase B, the chain extends one link outward: "operator controls the prompts repo → server clones from prompts repo → server reads from cache → server signs verdict against `prompt_sha256`." That new first link — *operator controls the prompts repo* — is not enforced by stamp-server code. It's enforced by github (branch protection, signed commits, audit log) at the operator's discretion.
 

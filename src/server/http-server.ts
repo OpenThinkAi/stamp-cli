@@ -75,13 +75,15 @@ import {
   maxPeerReviewEventId,
   openServerDb,
   releaseSeat,
+  resolveServerRetentionPolicy,
   sweepExpiredSeats,
+  sweepServerRetention,
   touchHeartbeat,
   touchLastSeen,
   type PeerReviewPatchRow,
   type UserRow,
 } from "../lib/serverDb.js";
-import { parseSshPubkey } from "../lib/sshKeys.js";
+import { parseSshPubkey, sshPubkeyBody } from "../lib/sshKeys.js";
 import { isCallerAuthorizedForOrg, mayReceiveRepoEvents } from "../lib/repoAccess.js";
 import { verifyBytes } from "../lib/signing.js";
 import { fingerprintFromPem } from "../lib/keys.js";
@@ -253,7 +255,10 @@ function validateAcceptBody(body: AcceptBody):
     ok: true,
     data: {
       token: body.token,
-      ssh_pubkey: parsed.full,
+      // AGT-2249: store the comment-stripped key, like the AUTHORIZED_KEYS
+      // seed path (AGT-422). The comment is conventionally user@host (PII)
+      // and sshd matches on the blob, not the comment.
+      ssh_pubkey: sshPubkeyBody(parsed),
       ssh_fp: parsed.fingerprint,
       short_name: body.short_name,
       stamp_pubkey,
@@ -492,7 +497,8 @@ function buildRefreshOpts(): CloneOrFetchOpts | null {
   const deployKeyPath =
     process.env["STAMP_PROMPTS_DEPLOY_KEY_PATH"] ||
     (existsSync(DEFAULT_DEPLOY_KEY_PATH) ? DEFAULT_DEPLOY_KEY_PATH : undefined);
-  return { url, ref, cacheRoot, deployKeyPath };
+  const allowedSignersPath = process.env["STAMP_PROMPTS_ALLOWED_SIGNERS"] || undefined;
+  return { url, ref, cacheRoot, deployKeyPath, ...(allowedSignersPath ? { allowedSignersPath } : {}) };
 }
 
 /**
@@ -1289,6 +1295,64 @@ export function __isTrashSweepArmedForTests(): boolean {
 
 export function __getTrashSweepTickCountForTests(): number {
   return trashSweepState.tickCount;
+}
+
+// ─── Server retention sweep worker (AGT-2249) ───────────────────────
+//
+// Ages PR content and reviewer prose out of the shared users.db
+// (AGT-2255, AGT-2258; decision D-5 — server-side retention gets a
+// configurable TTL): drops title/body/paths from delivered peer events
+// after an hour, deletes peer events/patches past
+// STAMP_PEER_EVENT_RETENTION_DAYS and cached server verdicts (prose) past
+// STAMP_SERVER_VERDICT_RETENTION_DAYS. Both default to 30 days; "0" keeps
+// forever. Runs in stamp-workers (git user), once at start and hourly.
+
+export const SERVER_RETENTION_SWEEP_INTERVAL_SEC = 3600;
+
+const retentionSweepState: { handle: ReturnType<typeof setInterval> | null } = {
+  handle: null,
+};
+
+function runServerRetentionSweepTick(): void {
+  try {
+    const policy = resolveServerRetentionPolicy();
+    const db = openServerDb({ skipChmod: true });
+    try {
+      const r = sweepServerRetention(db, policy);
+      if (r.eventsScrubbed + r.eventsDeleted + r.patchesDeleted + r.verdictsDeleted > 0) {
+        logLine(
+          "info",
+          `retention-sweep: scrubbed ${r.eventsScrubbed} delivered peer event(s); deleted ` +
+            `${r.eventsDeleted} event(s), ${r.patchesDeleted} patch(es), ${r.verdictsDeleted} cached verdict(s)`,
+        );
+      }
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    logLine(
+      "error",
+      `retention-sweep: tick failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/** Arm the hourly server retention sweep (and run one pass now). Idempotent. */
+export function startServerRetentionSweepWorker(): void {
+  if (retentionSweepState.handle !== null) return;
+  runServerRetentionSweepTick();
+  const handle = setInterval(
+    () => runServerRetentionSweepTick(),
+    SERVER_RETENTION_SWEEP_INTERVAL_SEC * 1000,
+  );
+  handle.unref();
+  retentionSweepState.handle = handle;
+  const p = resolveServerRetentionPolicy();
+  logLine(
+    "info",
+    `retention-sweep: started (peer events ${p.peerEventRetentionDays ?? "kept"}d, ` +
+      `verdict prose ${p.verdictRetentionDays ?? "kept"}d)`,
+  );
 }
 
 // ─── Seat-TTL sweep worker (AGT-454, G3) ─────────────────────────────

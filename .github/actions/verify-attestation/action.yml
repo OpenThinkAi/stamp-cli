@@ -63,12 +63,26 @@ runs:
           exit 2
         fi
         TARGET="${TARGET_BRANCH_OVERRIDE:-$BASE_REF}"
-        echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-        echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
-        echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+        # Every value is validated before it reaches $GITHUB_OUTPUT: a
+        # newline in one (the caller-supplied target-branch input is the
+        # realistic source) would otherwise inject extra output keys. The
+        # values are deliberately not echoed in the errors.
+        if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ && "$BASE_SHA" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+          echo "::error::stamp/verify-attestation: the PR head/base SHAs are not hex commit ids."
+          exit 2
+        fi
+        if ! [[ "$TARGET" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$TARGET" == *..* ]]; then
+          echo "::error::stamp/verify-attestation: target-branch must be a plain branch name ([A-Za-z0-9._/-], no '..')."
+          exit 2
+        fi
+        {
+          echo "head=$HEAD_SHA"
+          echo "base=$BASE_SHA"
+          echo "target=$TARGET"
+        } >> "$GITHUB_OUTPUT"
 
     - name: Setup Node.js
-      uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: ${{ inputs.node-version }}
 

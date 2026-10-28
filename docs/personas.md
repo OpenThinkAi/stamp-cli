@@ -257,7 +257,7 @@ tools:
     path_prefix: /repos/      # only /repos/* paths on api.github.com
 ```
 
-By default the query string is **not** inspected — `?state=open&per_page=5` and similar legitimate API parameters pass through. That makes an allowlisted host a **diff-exfil channel** under prompt injection: a reviewer with `Read` access can encode repo bytes into query values (e.g. `?title=<base64-blob>`), and the upstream host's request log captures the query whether or not the request succeeds. For hosts that don't need open-ended queries, constrain them with `query_param_allowlist` (permitted param names) and/or `query_param_max_length` (cap on total query-value length — long enough for an issue ID, too short for a meaningful exfil chunk):
+Query strings are a **diff-exfil channel** under prompt injection: a reviewer with `Read` access can encode repo bytes into query values (e.g. `?title=<base64-blob>`), and the upstream host's request log captures the query whether or not the request succeeds. So by default (no query control on the entry) the decoded query values of a WebFetch URL may total at most **64 characters** — `?state=open&per_page=5` and similar API parameters pass, a base64'd chunk of the diff does not (AGT-2249). Tune it per entry with `query_param_max_length` (replaces the default cap) and/or `query_param_allowlist` (permitted param names; setting it without a max length lifts the default cap):
 
 ```yaml
 tools:
@@ -325,7 +325,12 @@ Tag the source repo with versions (e.g. `v3.2`). Consumers pin to specific tags.
 ```sh
 # install + pin 'standards' from acme/stamp-personas at tag v3.2
 stamp reviewers fetch standards --from acme/stamp-personas@v3.2
+
+# stronger: pin the commit the tag points at (tags can be moved)
+stamp reviewers fetch standards --from acme/stamp-personas@<40-hex-commit-sha>
 ```
+
+Git tags and branches are mutable: whoever controls the source repo can move `v3.2` after you read the release notes. A full 40-hex commit SHA as `<ref>` names exactly one tree. Without a trust anchor (a signed manifest verified against `.stamp/verifying-keys/`, or `--expect-prompt-sha`), a fetch from a tag or branch prints a trust-on-first-use warning saying so (AGT-2249).
 
 This writes:
 

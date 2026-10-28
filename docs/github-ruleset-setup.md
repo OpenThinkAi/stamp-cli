@@ -20,7 +20,7 @@ Why this shape over alternatives:
 
 ### Trust property worth understanding
 
-GitHub's Ruleset evaluator treats `DeployKey` as a repo-scoped *role*, not a key-id-scoped reference: at the API level, you POST `actor_id: <numeric>` but it round-trips back as `actor_id: null`, and the semantics are "**any deploy key on this repo can bypass**." The defense is therefore "*only the stamp-mirror key should ever exist on a mirror repo*." If a CI deploy key gets added later for a different purpose, it ALSO becomes a bypass actor on the same ruleset — keep the mirror repo's deploy-keys list to one entry.
+GitHub's Ruleset evaluator treats `DeployKey` as a repo-scoped *role*, not a key-id-scoped reference: at the API level, you POST `actor_id: <numeric>` but it round-trips back as `actor_id: null`, and the semantics are "**any deploy key on this repo can bypass**." The defense is therefore "*only the stamp-mirror key should ever exist on a mirror repo*." If a CI deploy key gets added later for a different purpose, it ALSO becomes a bypass actor on the same ruleset — keep the mirror repo's deploy-keys list to one entry. `stamp provision` and `stamp provision --migrate-bypass` list the repo's deploy keys after registering `stamp-mirror` and print a warning naming every *other* write-enabled key (read-only keys can't push and are ignored) (AGT-2249); re-run either at any time as a check. Also make the `stamp/verified` commit status a required status check in the ruleset if you can: a stray write key can then still push, but it cannot get an unstamped commit merged through a pull request.
 
 ## Two preconditions before you start
 

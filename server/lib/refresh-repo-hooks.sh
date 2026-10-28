@@ -40,17 +40,89 @@
 # refresh; the fix here is that the refresh itself can no longer be turned
 # against root.
 #
+# Config redirection (AGT-2249): replacing hooks/ is not enough on its own —
+# a git foothold can set `core.hooksPath` in the repo's git-writable config
+# (or an `include.path` / `includeIf.<cond>.path` that pulls one in), and git
+# would then run hooks from wherever that points, skipping the stamp
+# pre-receive entirely. So each boot also strips those keys from every
+# repo's own config file and from the git user's global config
+# (~git/.gitconfig, ~git/.config/git/config), logging each removal. The edit runs as the git
+# user ($STAMP_REPO_CONFIG_USER), never as root: the config file is
+# git-owned and may be a planted symlink, and `git config` writes through
+# symlinks — as git, that can only touch what git could already write. A key
+# that cannot be removed fails the refresh (and so the boot), the same as
+# setup-repo.sh refusing to report a repo ready with core.hooksPath set
+# (AGT-2266). A file git cannot parse at all only warns: receive-pack cannot
+# parse it either, so it cannot redirect hooks.
+#
 # Env knobs exist solely for unit-test isolation (tests run unprivileged);
 # production callers leave them unset:
 #   STAMP_GIT_ROOT          default /srv/git
 #   STAMP_HOOK_SRC_DIR      default /etc/stamp  (reads <hook>.cjs)
 #   STAMP_HOOK_OWNER        default root:root   (owner of installed hooks)
 #   STAMP_HOOKS_DIR_OWNER   default git:git     (owner of a recreated hooks/)
+#   STAMP_REPO_CONFIG_USER  default git         (user that edits repo config;
+#                                                empty = the current user)
+#   STAMP_GIT_HOME          default /home/git   (git user's HOME: its global
+#                                                config is cleaned too)
 
 : "${STAMP_GIT_ROOT:=/srv/git}"
 : "${STAMP_HOOK_SRC_DIR:=/etc/stamp}"
 : "${STAMP_HOOK_OWNER:=root:root}"
 : "${STAMP_HOOKS_DIR_OWNER:=git:git}"
+: "${STAMP_REPO_CONFIG_USER=git}"
+: "${STAMP_GIT_HOME:=/home/git}"
+
+# Runs (as $STAMP_REPO_CONFIG_USER) against the config file named by
+# $STAMP_RRH_CFG: prints each hook-redirecting key it removes, exits non-zero
+# if the file cannot be read or edited or a key survives. --no-includes:
+# only the file's own entries matter (its include keys are removed here).
+_RRH_SANITIZE_CONFIG='
+cfg=$STAMP_RRH_CFG
+[ -e "$cfg" ] || [ -L "$cfg" ] || exit 0
+_redirect_keys() {
+  _all=$(git config --file "$cfg" --no-includes --name-only --list) || return 2
+  printf "%s\n" "$_all" | grep -iE "^(core\.hookspath|include\.path|includeif\..*\.path)\$" | sort -u
+}
+found=$(_redirect_keys) || exit 2
+[ -n "$found" ] || exit 0
+printf "%s\n" "$found" | while IFS= read -r k; do
+  printf "%s\n" "$k"
+  git config --file "$cfg" --unset-all "$k" || exit 3
+done || exit 3
+left=$(_redirect_keys) || exit 2
+[ -z "$left" ] || exit 3
+'
+
+# _rrh_sanitize_config_file FILE — strip hook-redirecting keys from FILE.
+_rrh_sanitize_config_file() {
+  if [ -n "$STAMP_REPO_CONFIG_USER" ]; then
+    _rrh_removed=$(cd / && STAMP_RRH_CFG="$1" su -s /bin/sh -p "$STAMP_REPO_CONFIG_USER" -c "$_RRH_SANITIZE_CONFIG")
+  else
+    _rrh_removed=$(cd / && STAMP_RRH_CFG="$1" sh -c "$_RRH_SANITIZE_CONFIG")
+  fi
+  _rrh_cfg_rc=$?
+  if [ -n "$_rrh_removed" ]; then
+    printf '%s\n' "$_rrh_removed" | while IFS= read -r _rrh_key; do
+      echo "warning: refresh-repo-hooks: removed '$_rrh_key' from $1 (it redirects hooks away from the stamp pre-receive)" >&2
+    done
+  fi
+  case "$_rrh_cfg_rc" in
+    0) return 0 ;;
+    2)
+      # git cannot read the file as config at all (malformed, or a dangling
+      # symlink). git-receive-pack reads the same file, so a push to this
+      # repo fails (or runs with defaults) — it cannot honour a hooksPath
+      # from it. Warn rather than let a git foothold brick the boot.
+      echo "warning: refresh-repo-hooks: $1 is not readable as git config; left as is (pushes that read it will fail until an operator repairs it)" >&2
+      return 0
+      ;;
+    *)
+      echo "error: refresh-repo-hooks: cannot remove hook-redirecting keys from $1 (exit $_rrh_cfg_rc); refusing to boot with hooks that may be redirected" >&2
+      return 1
+      ;;
+  esac
+}
 
 _refresh_repo_hooks() {
   _rrh_stage="$STAMP_GIT_ROOT/.stamp-hook-staging"
@@ -64,12 +136,20 @@ _refresh_repo_hooks() {
   fi
 
   _rrh_rc=0
+  # The git user's own global config is read by receive-pack for every
+  # repo, and git can write it: clean it too (AGT-2249). /etc/gitconfig
+  # is root-owned and not a git-foothold surface.
+  for _rrh_global in "$STAMP_GIT_HOME/.gitconfig" "$STAMP_GIT_HOME/.config/git/config"; do
+    _rrh_sanitize_config_file "$_rrh_global" || _rrh_rc=1
+  done
   for _rrh_repo in "$STAMP_GIT_ROOT"/*.git; do
     if [ -L "$_rrh_repo" ]; then
       echo "warning: refresh-repo-hooks: skipping symlinked repo path $_rrh_repo" >&2
       continue
     fi
     [ -d "$_rrh_repo" ] || continue
+
+    _rrh_sanitize_config_file "$_rrh_repo/config" || _rrh_rc=1
 
     _rrh_hooks="$_rrh_repo/hooks"
     if [ -L "$_rrh_hooks" ] || { [ -e "$_rrh_hooks" ] && [ ! -d "$_rrh_hooks" ]; }; then

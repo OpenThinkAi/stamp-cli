@@ -97,7 +97,20 @@ describe("pre-receive: protected-branch deletion (AGT-2254)", () => {
     git(work, ["commit", "-q", "-m", "protect release/*"]);
 
     git(work, ["branch", "scratch"]);
-    git(work, ["push", "-q", "origin", "main", "release/1.x", "scratch"]);
+    // v1.0.0 points into main's history; old-wip points at a commit only
+    // the unprotected `wip` branch carries (as a pre-stamp tag would).
+    git(work, ["tag", "v1.0.0"]);
+    git(work, ["tag", "-a", "-m", "annotated", "v1.0.1"]);
+    git(work, ["checkout", "-q", "-b", "wip"]);
+    writeFileSync(path.join(work, "wip.txt"), "wip\n");
+    git(work, ["add", "-A"]);
+    git(work, ["commit", "-q", "-m", "wip"]);
+    git(work, ["tag", "old-wip"]);
+    git(work, ["checkout", "-q", "main"]);
+    git(work, [
+      "push", "-q", "origin", "main", "release/1.x", "scratch", "wip",
+      "refs/tags/v1.0.0", "refs/tags/v1.0.1", "refs/tags/old-wip",
+    ]);
 
     const hookPath = path.join(bare, "hooks", "pre-receive");
     buildSync({
@@ -130,6 +143,27 @@ describe("pre-receive: protected-branch deletion (AGT-2254)", () => {
     assert.notEqual(r.status, 0, r.stderr);
     assert.match(r.stderr, /deleting a protected branch is not allowed/);
     assert.ok(refExists(bare, "refs/heads/release/1.x"));
+  });
+
+  it("rejects deleting a tag that points into protected history (AGT-2249)", () => {
+    const r = push(work, ":refs/tags/v1.0.0");
+    assert.notEqual(r.status, 0, r.stderr);
+    assert.match(r.stderr, /stamp-verify: rejecting refs\/tags\/v1\.0\.0/);
+    assert.match(r.stderr, /deleting a protected tag is not allowed/);
+    assert.ok(refExists(bare, "refs/tags/v1.0.0"));
+  });
+
+  it("rejects deleting an annotated protected tag (AGT-2249)", () => {
+    const r = push(work, ":refs/tags/v1.0.1");
+    assert.notEqual(r.status, 0, r.stderr);
+    assert.match(r.stderr, /deleting a protected tag is not allowed/);
+    assert.ok(refExists(bare, "refs/tags/v1.0.1"));
+  });
+
+  it("still allows deleting a tag outside protected history", () => {
+    const r = push(work, ":refs/tags/old-wip");
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!refExists(bare, "refs/tags/old-wip"));
   });
 
   it("still allows deleting an unprotected branch", () => {

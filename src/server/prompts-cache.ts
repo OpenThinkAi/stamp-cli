@@ -113,12 +113,22 @@ import { REVIEWER_NAME_RE } from "./promptFetch.js";
  *                       Ignored for HTTPS URLs. The corresponding pubkey
  *                       must already be registered as a deploy key on the
  *                       prompts repo.
+ *   - `allowedSignersPath` — optional OpenSSH `allowed_signers` file
+ *                       (STAMP_PROMPTS_ALLOWED_SIGNERS, AGT-2249). When set,
+ *                       a fetched tip is accepted only if `git verify-commit`
+ *                       finds a valid SSH signature by one of the listed
+ *                       keys; otherwise the refresh throws and the cache
+ *                       keeps its last verified commit. The prompts are the
+ *                       trust anchor for every server-signed verdict, so
+ *                       without this, anyone who can push to the tracked
+ *                       ref controls the security reviewer.
  */
 export interface CloneOrFetchOpts {
   url: string;
   ref: string;
   cacheRoot: string;
   deployKeyPath?: string;
+  allowedSignersPath?: string;
 }
 
 /**
@@ -378,6 +388,16 @@ function validateOpts(opts: CloneOrFetchOpts): void {
   if (!opts.cacheRoot || typeof opts.cacheRoot !== "string") {
     throw new Error("cloneOrFetchPromptsCache: cacheRoot is required");
   }
+  if (opts.allowedSignersPath !== undefined) {
+    // Fail closed: an operator who configured signature verification and
+    // then lost the file must not silently fall back to trusting the ref.
+    if (typeof opts.allowedSignersPath !== "string" || !existsSync(opts.allowedSignersPath)) {
+      throw new Error(
+        `cloneOrFetchPromptsCache: allowed-signers file ${JSON.stringify(opts.allowedSignersPath)} ` +
+          `(STAMP_PROMPTS_ALLOWED_SIGNERS) does not exist; refusing to refresh prompts unverified`,
+      );
+    }
+  }
   // Disallow shell metacharacters in `ref` — even though we use execFileSync
   // (no shell), a refspec like `;rm -rf /` would be passed to git verbatim
   // and git's own parser might do something unexpected on certain refspecs.
@@ -497,9 +517,20 @@ async function refreshInternal(
     try {
       runGit(cacheRoot, buildRemoteSetUrlArgs(url), env);
       runGit(cacheRoot, ["fetch", "--prune", "origin", "--", ref], env);
-      runGit(cacheRoot, ["checkout", ref], env);
-      runGit(cacheRoot, ["reset", "--hard", `origin/${ref}`], env);
+      // Verify the fetched tip BEFORE it touches the working tree, so a
+      // rejected tip leaves the last verified prompts in place.
+      const fetched = runGit(cacheRoot, ["rev-parse", "FETCH_HEAD^{commit}"], env).trim();
+      verifyPromptsCommit(cacheRoot, fetched, opts.allowedSignersPath, env);
+      // Check out exactly the commit that was verified (by SHA, never by a
+      // ref name that could resolve elsewhere). Detached HEAD is fine: the
+      // cache is read as files only.
+      runGit(cacheRoot, ["checkout", "--quiet", "--force", "--detach", fetched], env);
       const commitSha = runGit(cacheRoot, ["rev-parse", "HEAD"], env).trim();
+      if (commitSha !== fetched) {
+        throw new Error(
+          `prompts-cache: checked-out ${commitSha} is not the verified fetched tip ${fetched}`,
+        );
+      }
       return { commitSha, refreshedAt: new Date().toISOString() };
     } catch (err) {
       // In-place fetch failed (corrupted tree, remote moved, ref renamed,
@@ -527,6 +558,7 @@ async function refreshInternal(
       `prompts-cache: rev-parse HEAD in ${tmpPath} returned non-SHA ${JSON.stringify(commitSha)}`,
     );
   }
+  verifyPromptsCommit(tmpPath, commitSha, opts.allowedSignersPath, env);
 
   // Atomic swap. POSIX rename(2) is atomic within a filesystem; we verified
   // both paths share a parent dir, so they're on the same filesystem by
@@ -557,6 +589,69 @@ async function refreshInternal(
   }
 
   return { commitSha, refreshedAt: new Date().toISOString() };
+}
+
+/** A prompts commit failed signature verification (AGT-2249). */
+export class PromptsSignatureError extends Error {
+  override name = "PromptsSignatureError";
+}
+
+/**
+ * AGT-2249 (folds AGT-2262): when an allowed-signers file is configured,
+ * require `sha` to carry a valid SSH signature by a key listed in it.
+ * Throws on any failure (unsigned, unknown signer, bad signature). No-op
+ * when verification isn't configured. gpg.format, allowedSignersFile and
+ * the ssh program are passed with -c so the cache's own .git/config
+ * (git-writable) cannot override them.
+ */
+function verifyPromptsCommit(
+  cwd: string,
+  sha: string,
+  allowedSignersPath: string | undefined,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (allowedSignersPath === undefined) return;
+  try {
+    runGit(
+      cwd,
+      [
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        `gpg.ssh.allowedSignersFile=${allowedSignersPath}`,
+        // The cache's .git/config is git-writable; pin the verifier too.
+        "-c",
+        "gpg.ssh.program=ssh-keygen",
+        "verify-commit",
+        "--",
+        sha,
+      ],
+      env,
+    );
+  } catch (err) {
+    throw new PromptsSignatureError(
+      `prompts-cache: refusing prompts commit ${sha}: it is not signed by a key in ` +
+        `${allowedSignersPath} (STAMP_PROMPTS_ALLOWED_SIGNERS). ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * True when `cacheRoot`'s checked-out HEAD carries a valid signature by a
+ * key in `allowedSignersPath` (AGT-2249). Used before keeping an existing
+ * cache after a refused refresh: a cache populated before verification was
+ * turned on (or by an unsigned push before then) is not "last verified".
+ */
+export function isPromptsCacheVerified(cacheRoot: string, allowedSignersPath: string): boolean {
+  try {
+    const env = { ...process.env };
+    const head = runGit(cacheRoot, ["rev-parse", "HEAD^{commit}"], env).trim();
+    verifyPromptsCommit(cacheRoot, head, allowedSignersPath, env);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

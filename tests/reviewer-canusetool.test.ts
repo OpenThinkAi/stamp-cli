@@ -516,9 +516,9 @@ describe("checkReviewerTool — WebFetch path_prefix (AGT-036 / audit M4)", () =
     assert.equal(r.allow, true);
   });
 
-  // AC #3: pin the no-query-filtering guarantee against drift — even a
-  // long random-looking value must NOT cause a deny.
-  it("ignores query values entirely, even high-entropy ones", () => {
+  // AGT-2249: with no query controls configured, a default cap applies —
+  // a long encoded value is the exfil shape and is denied; short values pass.
+  it("denies a long query value under the default cap when no query control is set", () => {
     const r = checkReviewerTool({
       toolName: "WebFetch",
       toolInput: {
@@ -528,6 +528,43 @@ describe("checkReviewerTool — WebFetch path_prefix (AGT-036 / audit M4)", () =
       },
       repoRoot,
       webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, false);
+    if (!r.allow) assert.match(r.reason, /default query cap 64/);
+  });
+
+  it("allows a query exactly at the default cap", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: {
+        url: "https://api.linear.app/api/issues/ABC-1?q=" + "x".repeat(64),
+      },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("an explicit query_param_max_length replaces the default cap", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: {
+        url: "https://api.linear.app/api/issues/ABC-1?q=" + "x".repeat(120),
+      },
+      repoRoot,
+      webFetchPolicy: new Map([["api.linear.app", { query_param_max_length: 200 }]]),
+    });
+    assert.equal(r.allow, true);
+  });
+
+  it("an explicit query_param_allowlist lifts the default cap", () => {
+    const r = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: {
+        url: "https://api.linear.app/api/issues/ABC-1?q=" + "x".repeat(120),
+      },
+      repoRoot,
+      webFetchPolicy: new Map([["api.linear.app", { query_param_allowlist: ["q"] }]]),
     });
     assert.equal(r.allow, true);
   });
@@ -634,14 +671,21 @@ describe("checkReviewerTool — WebFetch query controls (AGT-419)", () => {
     assert.equal(r.allow, false);
   });
 
-  it("leaves the query unconstrained on a host with neither control (back-compat)", () => {
-    const r = checkReviewerTool({
+  it("applies the default cap on a host with neither control (AGT-2249)", () => {
+    const long = checkReviewerTool({
       toolName: "WebFetch",
       toolInput: { url: "https://linear.app/x?anything=" + "z".repeat(200) },
       repoRoot,
       webFetchPolicy: policy,
     });
-    assert.equal(r.allow, true);
+    assert.equal(long.allow, false);
+    const short = checkReviewerTool({
+      toolName: "WebFetch",
+      toolInput: { url: "https://linear.app/x?anything=" + "z".repeat(20) },
+      repoRoot,
+      webFetchPolicy: policy,
+    });
+    assert.equal(short.allow, true);
   });
 });
 

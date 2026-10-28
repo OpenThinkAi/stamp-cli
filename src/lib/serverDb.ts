@@ -230,9 +230,11 @@ function initSchema(db: DatabaseSync): void {
       ON peer_review_patches(repo);
 
     -- AGT-427: append-only event log for peer-agentic review lifecycle.
-    -- payload is the full event JSON for future audit/replay.
-    -- NOTE: no row-level TTL sweep is scoped to this ticket; the
-    -- event log is unbounded in this release. A future ticket adds a sweep.
+    -- payload is the full event JSON, needed only until the listener's
+    -- poll worker has delivered it. AGT-2249: the stamp-workers retention
+    -- sweep (sweepServerRetention) drops the PR content (title, body,
+    -- paths_changed, pubkey, signature) from rows older than an hour and
+    -- deletes rows past STAMP_PEER_EVENT_RETENTION_DAYS.
     CREATE TABLE IF NOT EXISTS peer_review_events (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       patch_id    TEXT NOT NULL,
@@ -718,6 +720,151 @@ export function checkAndConsumeToken(
 export interface CachedServerVerdict {
   verdict: string;
   prose: string;
+}
+
+// ─── AGT-2249: server-side retention (peer events, verdict prose) ────
+
+/**
+ * Event payload keys that carry PR content (or bulky signing material) and
+ * are only needed until the poll worker has pushed the event to connected
+ * listeners. Everything else in a payload is routing metadata (repo,
+ * patch_id, SHAs, fingerprints, pr_url, seat) and is kept for audit.
+ */
+export const PEER_EVENT_CONTENT_KEYS = [
+  "title",
+  "body",
+  "paths_changed",
+  "pubkey",
+  "signature",
+] as const;
+
+/** Events older than this lose their content keys. The poll worker
+ *  delivers within seconds and never replays history (its cursor starts at
+ *  MAX(id)), so an hour is generous. */
+export const PEER_EVENT_CONTENT_TTL_SEC = 3600;
+
+export const PEER_EVENT_RETENTION_DAYS_DEFAULT = 30;
+export const SERVER_VERDICT_RETENTION_DAYS_DEFAULT = 30;
+
+/**
+ * Resolve a retention period in days from `envName`. Unset/empty → the
+ * default; the literal `"0"` → keep forever (null); anything that isn't a
+ * non-negative integer → the default (a typo never silently disables the
+ * sweep).
+ */
+export function resolveRetentionDays(envName: string, fallback: number): number | null {
+  const raw = process.env[envName]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return fallback;
+  const n = Number(raw);
+  return n === 0 ? null : n;
+}
+
+export interface ServerRetentionPolicy {
+  /** Delete peer events + patches older than this many days; null = keep. */
+  peerEventRetentionDays: number | null;
+  /** Delete cached server verdicts (and their prose) older than this; null = keep. */
+  verdictRetentionDays: number | null;
+}
+
+export function resolveServerRetentionPolicy(): ServerRetentionPolicy {
+  return {
+    peerEventRetentionDays: resolveRetentionDays(
+      "STAMP_PEER_EVENT_RETENTION_DAYS",
+      PEER_EVENT_RETENTION_DAYS_DEFAULT,
+    ),
+    verdictRetentionDays: resolveRetentionDays(
+      "STAMP_SERVER_VERDICT_RETENTION_DAYS",
+      SERVER_VERDICT_RETENTION_DAYS_DEFAULT,
+    ),
+  };
+}
+
+export interface ServerRetentionResult {
+  eventsScrubbed: number;
+  eventsDeleted: number;
+  patchesDeleted: number;
+  verdictsDeleted: number;
+}
+
+/**
+ * One retention pass over the server DB (AGT-2249; folds AGT-2255 and
+ * AGT-2258):
+ *   1. peer_review_events older than PEER_EVENT_CONTENT_TTL_SEC have their
+ *      PR content keys removed from `payload` (routing fields stay).
+ *   2. peer_review_events and peer_review_patches older than the event
+ *      retention are deleted.
+ *   3. server_verdicts older than the verdict retention are deleted. The
+ *      table is a cache: a deleted row costs one re-review, never a gate.
+ * `now` (ms) is injectable for tests.
+ */
+export function sweepServerRetention(
+  db: DatabaseSync,
+  policy: ServerRetentionPolicy,
+  now: number = Date.now(),
+): ServerRetentionResult {
+  const nowSec = Math.floor(now / 1000);
+  const result: ServerRetentionResult = {
+    eventsScrubbed: 0,
+    eventsDeleted: 0,
+    patchesDeleted: 0,
+    verdictsDeleted: 0,
+  };
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (policy.peerEventRetentionDays !== null) {
+      const cutoff = nowSec - policy.peerEventRetentionDays * 86400;
+      result.eventsDeleted = (
+        db.prepare(`DELETE FROM peer_review_events WHERE occurred_at < ?`).run(cutoff) as {
+          changes: number;
+        }
+      ).changes;
+      result.patchesDeleted = (
+        db.prepare(
+          `DELETE FROM peer_review_patches
+            WHERE broadcast_at < ?
+              AND NOT EXISTS (SELECT 1 FROM peer_review_events e
+                               WHERE e.patch_id = peer_review_patches.patch_id)`,
+        ).run(cutoff) as { changes: number }
+      ).changes;
+    }
+
+    const scrubCutoff = nowSec - PEER_EVENT_CONTENT_TTL_SEC;
+    const rows = db
+      .prepare(`SELECT id, payload FROM peer_review_events WHERE occurred_at < ?`)
+      .all(scrubCutoff) as unknown as Array<{ id: number; payload: string }>;
+    const update = db.prepare(`UPDATE peer_review_events SET payload = ? WHERE id = ?`);
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.payload);
+      } catch {
+        update.run("{}", row.id);
+        result.eventsScrubbed += 1;
+        continue;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const obj = parsed as Record<string, unknown>;
+      if (!PEER_EVENT_CONTENT_KEYS.some((k) => k in obj)) continue;
+      for (const k of PEER_EVENT_CONTENT_KEYS) delete obj[k];
+      update.run(JSON.stringify(obj), row.id);
+      result.eventsScrubbed += 1;
+    }
+
+    if (policy.verdictRetentionDays !== null) {
+      const cutoff = nowSec - policy.verdictRetentionDays * 86400;
+      result.verdictsDeleted = (
+        db.prepare(`DELETE FROM server_verdicts WHERE created_at < ?`).run(cutoff) as {
+          changes: number;
+        }
+      ).changes;
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  return result;
 }
 
 /** Look up a cached server verdict for an identical (reviewer, diff, prompt)

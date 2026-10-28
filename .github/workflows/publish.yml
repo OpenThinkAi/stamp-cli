@@ -213,6 +213,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    # Deployment environment (AGT-2249). The OIDC token then carries an
+    # `environment: npm-publish` claim, so the npm Trusted Publisher can be
+    # bound to this environment, and the environment's deployment-branch
+    # rule (main + release/1.x) / required reviewers become a second control
+    # on who can mint a release, independent of the branch rulesets.
+    # Operator setup: Settings -> Environments -> npm-publish -> Deployment
+    # branches: main, release/1.x; then npm package -> Settings -> Trusted
+    # Publishers -> Environment: npm-publish.
+    environment: npm-publish
+
     # id-token: write is the only grant: OIDC for npm Trusted Publishing
     # (the registry PUT) and for --provenance (the SLSA attestation). No
     # contents permission — this job does not check out the repo.

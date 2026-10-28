@@ -15,6 +15,8 @@
  *   - prompts refresh trigger   (STAMP_PROMPTS_REFRESH_TRIGGER: the file
  *                                the listener replaces on a valid webhook)
  *   - trash-retention sweep     (STAMP_TRASH_SWEEP_INTERVAL_SEC)
+ *   - server retention sweep    (STAMP_PEER_EVENT_RETENTION_DAYS,
+ *                                STAMP_SERVER_VERDICT_RETENTION_DAYS; AGT-2249)
  */
 
 import {
@@ -22,6 +24,7 @@ import {
   setLogPrefix,
   startPromptsPollWorker,
   startPromptsRefreshTriggerWatcher,
+  startServerRetentionSweepWorker,
   startTrashSweepWorker,
 } from "./http-server.js";
 
@@ -29,6 +32,7 @@ setLogPrefix("stamp-workers");
 startPromptsPollWorker();
 startPromptsRefreshTriggerWatcher();
 startTrashSweepWorker();
+startServerRetentionSweepWorker();
 
 // Every worker timer is unref'd (so the listener's tests can exit); this
 // process has nothing else holding the event loop open, so keep it alive

@@ -277,3 +277,62 @@ export function printPeerEgressMarker(
   if (noticesSuppressed()) return;
   process.stderr.write(`${formatPeerEgressMarker(prLabel, repo, endpoint)}\n`);
 }
+
+// ─── AGT-2249: `stamp review` endpoint allowlist (data_flow.review_endpoints) ──
+
+/** One off-host reviewer and the host its diff would reach (null when the
+ *  endpoint cannot be pinned to a host — cloud routing, unparseable URL). */
+export interface ReviewEgress {
+  reviewer: string;
+  label: string;
+  host: string | null;
+}
+
+/** Host of an endpoint URL, lowercased, or null when it doesn't parse. */
+export function endpointHost(url: string): string | null {
+  try {
+    return new URL(url).host.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where an Anthropic (Agent SDK) reviewer's diff goes from this machine:
+ * the same resolution the peer listener uses (cloud-routing flags, else
+ * ANTHROPIC_BASE_URL, else api.anthropic.com).
+ */
+export function anthropicReviewEgress(
+  reviewer: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ReviewEgress {
+  const e = resolvePeerLlmEndpoint(env);
+  return { reviewer, label: e.label, host: e.host };
+}
+
+/**
+ * Refuse a review when the repo committed `data_flow.review_endpoints` and
+ * an off-host reviewer would send the diff to a host not on it. Absent list
+ * → no restriction (opt-in). The list is read from the merge-base config,
+ * like every other data_flow field, so a branch cannot widen it for itself.
+ */
+export function assertReviewEndpointsAllowed(
+  dataFlow: DataFlowConfig | undefined,
+  egress: ReviewEgress[],
+): void {
+  const allowed = dataFlow?.review_endpoints;
+  if (allowed === undefined) return;
+  const refused = egress.filter((e) => e.host === null || !allowed.includes(e.host));
+  if (refused.length === 0) return;
+  const lines = refused.map((e) =>
+    e.host === null
+      ? `  - ${e.reviewer}: ${e.label} cannot be pinned to a host`
+      : `  - ${e.reviewer}: ${e.host} (${e.label})`,
+  );
+  throw new Error(
+    `data_flow.review_endpoints in .stamp/config.yml does not allow where these reviewers would send the diff:\n` +
+      `${lines.join("\n")}\n` +
+      `Allowed: ${allowed.length > 0 ? allowed.join(", ") : "(none)"}. Point the reviewer at an allowed ` +
+      `endpoint (or a model on this host), or add the host to data_flow.review_endpoints through stamp review.`,
+  );
+}

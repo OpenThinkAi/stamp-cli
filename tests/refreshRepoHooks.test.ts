@@ -82,6 +82,9 @@ function run(h: Harness): { status: number | null; stderr: string } {
       STAMP_HOOK_SRC_DIR: h.srcDir,
       STAMP_HOOK_OWNER: owner,
       STAMP_HOOKS_DIR_OWNER: owner,
+      // Edit repo config as the current (unprivileged) user, not via su.
+      STAMP_REPO_CONFIG_USER: "",
+      STAMP_GIT_HOME: path.join(h.dir, "home-git"),
     },
     encoding: "utf8",
   });
@@ -284,6 +287,90 @@ describe("AGT-2261: refresh-repo-hooks.sh", () => {
       assert.equal(r.status, 0, r.stderr);
       assertInstalled(repo, "pre-receive", PRE);
       assert.ok(!existsSync(path.join(repo, "hooks", "post-receive")));
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  // ─── AGT-2249: hook-redirecting config keys ───────────────────────
+
+  function gitCfg(repo: string, ...args: string[]): { status: number | null; stdout: string } {
+    const r = spawnSync("git", ["config", "--file", path.join(repo, "config"), ...args], {
+      encoding: "utf8",
+    });
+    return { status: r.status, stdout: r.stdout ?? "" };
+  }
+
+  it("removes core.hooksPath and include paths from a repo's config, keeping other keys", () => {
+    const h = setup();
+    try {
+      const repo = bareRepo(h, "redirected");
+      writeFileSync(
+        path.join(repo, "config"),
+        "[core]\n\tbare = true\n\thooksPath = /tmp/evil-hooks\n" +
+          "[include]\n\tpath = /tmp/evil.cfg\n" +
+          '[includeIf "gitdir:/srv/"]\n\tpath = /tmp/evil2.cfg\n' +
+          "[receive]\n\tfsckObjects = true\n",
+      );
+      const r = run(h);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /removed 'core\.hookspath' from .*redirected\.git\/config/);
+      assert.match(r.stderr, /removed 'include\.path'/);
+      assert.match(r.stderr, /removed 'includeif\.gitdir:\/srv\/\.path'/);
+      assert.notEqual(gitCfg(repo, "--get", "core.hooksPath").status, 0);
+      assert.notEqual(gitCfg(repo, "--get", "include.path").status, 0);
+      assert.equal(gitCfg(repo, "--get", "core.bare").stdout.trim(), "true");
+      assert.equal(gitCfg(repo, "--get", "receive.fsckObjects").stdout.trim(), "true");
+      // Hooks were still installed.
+      assert.equal(readFileSync(path.join(repo, "hooks", "pre-receive"), "utf8"), PRE);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("leaves a clean config untouched and says nothing", () => {
+    const h = setup();
+    try {
+      const repo = bareRepo(h, "clean");
+      const body = "[core]\n\tbare = true\n";
+      writeFileSync(path.join(repo, "config"), body);
+      const r = run(h);
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stderr, /removed/);
+      assert.equal(readFileSync(path.join(repo, "config"), "utf8"), body);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("warns (does not fail) on a config git cannot parse", () => {
+    const h = setup();
+    try {
+      const repo = bareRepo(h, "garbled");
+      writeFileSync(path.join(repo, "config"), "[core\n\thooksPath = /tmp/x\n");
+      const r = run(h);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /is not readable as git config/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("removes core.hooksPath from the git user's global config", () => {
+    const h = setup();
+    try {
+      const home = path.join(h.dir, "home-git");
+      mkdirSync(path.join(home, ".config", "git"), { recursive: true });
+      writeFileSync(path.join(home, ".gitconfig"), "[core]\n\thooksPath = /tmp/evil\n[user]\n\tname = git\n");
+      writeFileSync(path.join(home, ".config", "git", "config"), "[core]\n\thooksPath = /tmp/evil2\n");
+      const r = run(h);
+      assert.equal(r.status, 0, r.stderr);
+      for (const f of [path.join(home, ".gitconfig"), path.join(home, ".config", "git", "config")]) {
+        const g = spawnSync("git", ["config", "--file", f, "--get", "core.hooksPath"], { encoding: "utf8" });
+        assert.notEqual(g.status, 0, `${f} still sets core.hooksPath`);
+      }
+      assert.match(readFileSync(path.join(home, ".gitconfig"), "utf8"), /name = git/);
+      assert.match(r.stderr, /removed 'core\.hookspath' from .*\.gitconfig/);
     } finally {
       h.cleanup();
     }

@@ -37,6 +37,7 @@ interface Step {
   with?: Record<string, unknown>;
 }
 interface Job {
+  environment?: string | { name: string };
   needs?: string | string[];
   if?: string;
   permissions?: Record<string, string>;
@@ -72,6 +73,10 @@ describe(".github/workflows/publish.yml", () => {
     assert.deepEqual(jobs.build.permissions, { contents: "read" });
     assert.deepEqual(jobs.publish.permissions, { "id-token": "write" });
     assert.deepEqual(jobs.tag.permissions, { contents: "write" });
+  });
+
+  it("binds the OIDC-holding publish job to the npm-publish environment (AGT-2249)", () => {
+    assert.equal(jobs.publish.environment, "npm-publish");
   });
 
   it("holds id-token: write in the publish job only", () => {

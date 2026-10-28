@@ -163,8 +163,9 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
   // branch must be refused here. Recreating one by push is also refused
   // (see the creation check below), so an allowed deletion would leave
   // the repo broken until an operator re-seeds it on the server.
-  // Non-protected branches, tags and other ref classes may still be
-  // deleted.
+  // Protected tags (those pointing into protected history — the ones
+  // verifyTagPush admits) are refused too (AGT-2249). Non-protected
+  // branches and tags, and other ref classes, may still be deleted.
   if (newSha === ZERO_SHA) {
     verifyDeletion(oldSha, refname);
     return;
@@ -275,6 +276,10 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
  * they seed one.
  */
 function verifyDeletion(oldSha: string, refname: string): void {
+  if (refname.startsWith("refs/tags/")) {
+    verifyTagDeletion(oldSha, refname);
+    return;
+  }
   if (!refname.startsWith("refs/heads/")) return;
   const branch = refname.slice("refs/heads/".length);
 
@@ -295,6 +300,50 @@ function verifyDeletion(oldSha: string, refname: string): void {
         refname,
         `deleting a protected branch is not allowed. Branch "${branch}" matches a rule in .stamp/config.yml; ` +
           `an operator must remove it directly on the server if that is really intended.`,
+      );
+    }
+  }
+}
+
+/**
+ * Reject the deletion of a protected tag (AGT-2249). The mirror of
+ * verifyTagPush: a tag is "protected" when the commit it points at is
+ * reachable from a branch matched by a rule in the default branch's
+ * `.stamp/config.yml` — exactly the tags verifyTagPush lets in, i.e.
+ * release tags cut from verified history. Deleting one by push would let
+ * anyone with push access un-publish (and, via the mirror, re-point) a
+ * release tag that downstream publish-on-tag workflows trust; an operator
+ * who really means it removes the tag directly on the server.
+ *
+ * Tags whose commit is NOT in protected history (possible only for tags
+ * that predate stamp, since verifyTagPush refuses new ones) may still be
+ * deleted, as may any tag in a repo whose default branch carries no
+ * readable config.
+ */
+function verifyTagDeletion(oldSha: string, refname: string): void {
+  if (oldSha === ZERO_SHA) return;
+  let pointedCommit: string;
+  try {
+    pointedCommit = run(["rev-parse", "--verify", "--quiet", `${oldSha}^{commit}`]).trim();
+  } catch {
+    return; // tag of a non-commit object (tree/blob): not release history
+  }
+  if (!pointedCommit) return;
+
+  const defaultTip = readDefaultBranchTip();
+  if (defaultTip === null) return;
+  const config = readConfigAt(defaultTip);
+  if (!config) return;
+
+  const branchListing = run(["for-each-ref", "--format=%(refname:short)", "refs/heads/"]);
+  for (const b of branchListing.split("\n").filter((x) => x.length > 0)) {
+    if (!resolveBranchRule(config.branches, b)) continue;
+    const tip = run(["rev-parse", `refs/heads/${b}`]).trim();
+    if (isAncestor(pointedCommit, tip)) {
+      reject(
+        refname,
+        `deleting a protected tag is not allowed. It points at ${pointedCommit.slice(0, 8)}, which is in the ` +
+          `verified history of protected branch "${b}"; an operator must remove it directly on the server if that is really intended.`,
       );
     }
   }

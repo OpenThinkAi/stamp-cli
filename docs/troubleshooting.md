@@ -243,13 +243,13 @@ remote: mirror: status post for <sha8> on github.com/<owner>/<repo> failed — H
 
 **No `stamp/verified` row at all on a commit:** the GitHub status POST itself failed. The hook logs the HTTP error at push time. Common causes:
 - `GITHUB_BOT_TOKEN` PAT lacks the `commit statuses: write` (or fine-grained equivalent) on the mirror repo.
-- The hook hit the per-push cap (100 statuses) for an unusually large initial mirror — older commits in the range will not have a row. Re-trigger the hook for a small follow-up push, or post manually:
+- The hook hit the per-push cap (100 statuses) for an unusually large initial mirror — older commits in the range will not have a row. For a branch tip, re-run the hook's own verification and status post with `ssh git@<host> resync-mirror <repo> [<branch>...]` (owner/admin). For an older commit, **verify it before posting anything** — `stamp/verified` is a claim that the attestation checked out, and a hand-posted `success` on an unverified SHA marks an unstamped commit green:
   ```sh
-  curl -sS -X POST -H "Authorization: Bearer $GITHUB_BOT_TOKEN" \
-    -H "Accept: application/vnd.github+json" \
-    https://api.github.com/repos/<owner>/<repo>/statuses/<sha> \
-    -d '{"state":"success","context":"stamp/verified","description":"manual backfill"}'
+  # Post success ONLY if stamp verify exits 0 for this exact commit.
+  stamp verify <sha> && gh api -X POST repos/<owner>/<repo>/statuses/<sha> \
+    -f state=success -f context=stamp/verified -f description="backfill after stamp verify"
   ```
+  Anyone holding a token with commit-status write can post this status, so treat `stamp/verified` as only as strong as the custody of `GITHUB_BOT_TOKEN` (keep it statuses-only and scoped to the mirror; see docs/quickstart-server.md).
 
 The stamp push itself is unaffected by status-post failures — they're best-effort.
 

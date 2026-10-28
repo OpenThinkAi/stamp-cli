@@ -231,6 +231,14 @@ function denyIfReviewerInternal(
 }
 
 /**
+ * Total decoded query-value length allowed on a WebFetch URL when the entry
+ * configures neither `query_param_max_length` nor `query_param_allowlist`
+ * (AGT-2249). Ordinary API queries (`?state=open&per_page=5`) are far under
+ * it; base64'd diff content is far over.
+ */
+export const DEFAULT_WEBFETCH_QUERY_MAX_LENGTH = 64;
+
+/**
  * Per-host WebFetch policy carried into the runtime gate. Built by
  * `invokeReviewer` from the parsed reviewer config and consulted by
  * `checkReviewerTool` on every WebFetch invocation.
@@ -245,8 +253,8 @@ function denyIfReviewerInternal(
  * attacker-encoded query values regardless of whether the request
  * succeeds. When `query_param_allowlist` is set, any query param outside it
  * is rejected; when `query_param_max_length` is set, the sum of decoded
- * query-value lengths must not exceed it. Absent fields = no query
- * constraint (back-compat).
+ * query-value lengths must not exceed it. With neither set, the sum is capped
+ * at DEFAULT_WEBFETCH_QUERY_MAX_LENGTH (AGT-2249).
  */
 export interface WebFetchHostPolicy {
   path_prefix?: string;
@@ -429,17 +437,29 @@ export function checkReviewerTool(args: {
         }
       }
     }
-    if (policy.query_param_max_length !== undefined) {
+    // AGT-2249: with neither control configured, a conservative default
+    // cap applies — an allowlisted host's access log is otherwise an
+    // unbounded exfil channel for an injected reviewer. An explicit
+    // query_param_max_length replaces it; an explicit query_param_allowlist
+    // (names only) is the operator choosing the query policy and lifts it.
+    const maxLength =
+      policy.query_param_max_length ??
+      (policy.query_param_allowlist ? undefined : DEFAULT_WEBFETCH_QUERY_MAX_LENGTH);
+    if (maxLength !== undefined) {
       let total = 0;
       for (const value of parsed.searchParams.values()) total += value.length;
-      if (total > policy.query_param_max_length) {
+      if (total > maxLength) {
+        const source =
+          policy.query_param_max_length !== undefined
+            ? `query_param_max_length ${maxLength}`
+            : `the default query cap ${maxLength} (no query_param_max_length configured)`;
         return {
           allow: false,
           reason:
             `WebFetch URL "${url}" query values total ${total} chars, exceeding ` +
-            `query_param_max_length ${policy.query_param_max_length} for host ` +
-            `"${parsed.hostname}". Query params are a diff-exfil channel; raise ` +
-            `the cap in .stamp/config.yml if a longer query is legitimately needed.`,
+            `${source} for host "${parsed.hostname}". Query params are a diff-exfil ` +
+            `channel; set query_param_max_length on the WebFetch entry in ` +
+            `.stamp/config.yml if a longer query is legitimately needed.`,
         };
       }
     }

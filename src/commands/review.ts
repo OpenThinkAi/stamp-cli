@@ -37,7 +37,11 @@ import {
 } from "../lib/reviewer.js";
 import { maybePrintLlmNotice } from "../lib/llmNotice.js";
 import {
+  anthropicReviewEgress,
   assertDataFlowConfirmed,
+  assertReviewEndpointsAllowed,
+  endpointHost,
+  type ReviewEgress,
   printDataFlowDisclosure,
   printDiffSentMarker,
   printNoRetainWarning,
@@ -600,6 +604,16 @@ export async function runReview(opts: ReviewOptions): Promise<void> {
   // that arm data_flow.require_confirmation.
   if (offHostCount > 0) {
     assertDataFlowConfirmed(config.data_flow);
+    // AGT-2249: the repo may pin which providers its diffs may reach.
+    // review_server branches are exempt — the server picks its provider.
+    if (!serverMode) {
+      assertReviewEndpointsAllowed(
+        config.data_flow,
+        reviewerNames
+          .filter((n) => backendSendsOffHost(backendByReviewer.get(n)!))
+          .map((n) => reviewEgressFor(n, backendByReviewer.get(n)!)),
+      );
+    }
     printNoRetainWarning();
     printDiffSentMarker(offHostCount);
     printDataFlowDisclosure(config.data_flow);
@@ -1161,6 +1175,13 @@ export function maybeMintPrAttestation(args: {
         `  Recover with: stamp attest --into ${targetBranch}`,
     );
   }
+}
+
+/** Where a locally run reviewer's diff goes (AGT-2249 review_endpoints). */
+function reviewEgressFor(reviewer: string, backend: ReviewerBackend): ReviewEgress {
+  if (backend.kind === "anthropic") return anthropicReviewEgress(reviewer);
+  const url = backend.endpoint ?? LOCAL_DEFAULT_BASE_URL;
+  return { reviewer, label: url, host: endpointHost(url) };
 }
 
 /**

@@ -428,6 +428,17 @@ export interface DataFlowConfig {
    * endpoints; it goes through stamp review like any other config change.
    */
   peer_review_endpoints?: string[];
+  /**
+   * AGT-2249 — the LLM endpoints `stamp review` may send this repo's diffs
+   * to when it runs reviewers on this machine (Anthropic directly, or an
+   * openai-compatible provider such as OpenAI or DeepSeek). Opt-in: when
+   * absent, any configured endpoint is used (the pre-AGT-2249 behaviour).
+   * When present, a review whose off-host reviewer would hit a host not
+   * listed here is refused before any diff leaves the machine. Same entry
+   * shape as `peer_review_endpoints`. Not applied to `review_server`
+   * branches: there the stamp-server, not this machine, picks the provider.
+   */
+  review_endpoints?: string[];
 }
 
 /**
@@ -693,34 +704,37 @@ function parseDataFlow(input: unknown): DataFlowConfig | undefined {
     confirmed = d.confirmed;
   }
 
-  let peer_review_endpoints: string[] | undefined;
-  if (d.peer_review_endpoints !== undefined) {
-    if (
-      !Array.isArray(d.peer_review_endpoints) ||
-      !d.peer_review_endpoints.every((e) => typeof e === "string")
-    ) {
-      throw new Error(
-        "config.data_flow.peer_review_endpoints must be a list of host or host:port strings",
-      );
-    }
-    peer_review_endpoints = (d.peer_review_endpoints as string[]).map((e) => {
-      const host = e.trim().toLowerCase();
-      if (!PEER_ENDPOINT_HOST_RE.test(host)) {
-        throw new Error(
-          `config.data_flow.peer_review_endpoints entry ${JSON.stringify(e)} is not a host or host:port ` +
-            `(e.g. "api.anthropic.com") — list hosts, not URLs`,
-        );
-      }
-      return host;
-    });
-  }
+  const peer_review_endpoints = parseEndpointHostList(
+    d.peer_review_endpoints,
+    "peer_review_endpoints",
+  );
+  const review_endpoints = parseEndpointHostList(d.review_endpoints, "review_endpoints");
 
   return {
     ...(disclosure !== undefined ? { disclosure } : {}),
     ...(require_confirmation !== undefined ? { require_confirmation } : {}),
     ...(confirmed !== undefined ? { confirmed } : {}),
     ...(peer_review_endpoints !== undefined ? { peer_review_endpoints } : {}),
+    ...(review_endpoints !== undefined ? { review_endpoints } : {}),
   };
+}
+
+/** Parse a `data_flow.<field>` list of `host` / `host:port` entries. */
+function parseEndpointHostList(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every((e) => typeof e === "string")) {
+    throw new Error(`config.data_flow.${field} must be a list of host or host:port strings`);
+  }
+  return (value as string[]).map((e) => {
+    const host = e.trim().toLowerCase();
+    if (!PEER_ENDPOINT_HOST_RE.test(host)) {
+      throw new Error(
+        `config.data_flow.${field} entry ${JSON.stringify(e)} is not a host or host:port ` +
+          `(e.g. "api.anthropic.com") — list hosts, not URLs`,
+      );
+    }
+    return host;
+  });
 }
 
 /**
