@@ -59,9 +59,9 @@ fi
 # admin) before anything under /srv/git is touched. Soft delete is gated
 # too: it takes a live repo offline, and restore is itself admin-only.
 if [ $PURGE -eq 1 ]; then
-  /usr/local/sbin/stamp-require-role admin "purge repos (irreversible)" || exit $?
+  /usr/local/sbin/stamp-require-role admin "purge repo '$NAME' (irreversible)" || exit $?
 else
-  /usr/local/sbin/stamp-require-role admin "delete repos" || exit $?
+  /usr/local/sbin/stamp-require-role admin "delete repo '$NAME'" || exit $?
 fi
 
 GIT_ROOT=/srv/git

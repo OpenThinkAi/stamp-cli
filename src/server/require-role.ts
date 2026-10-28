@@ -21,7 +21,7 @@
  * the verbs call, not a verb itself.
  */
 
-import { checkCallerRole, type MinRole } from "../lib/sshRoleGate.js";
+import { checkCallerRole } from "../lib/sshRoleGate.js";
 
 function fail(message: string, code: number): never {
   process.stderr.write(`error: ${message}\n`);
@@ -31,15 +31,12 @@ function fail(message: string, code: number): never {
 function main(): void {
   const [min, action, ...rest] = process.argv.slice(2);
   if ((min !== "admin" && min !== "owner") || !action || rest.length > 0) {
-    fail('usage: stamp-require-role <admin|owner> "<action>"', 2);
+    process.stderr.write('usage: stamp-require-role <admin|owner> "<action>"\n');
+    process.exit(2);
   }
-  let result;
-  try {
-    result = checkCallerRole(min as MinRole, action);
-  } catch (err) {
-    // Unreadable/corrupt DB, etc. Fail closed.
-    fail(`role check failed: ${err instanceof Error ? err.message : String(err)}`, 1);
-  }
+  // A DB error throws out of here; Node exits 1 on an uncaught throw, so
+  // the gate fails closed, same as purge-trash.
+  const result = checkCallerRole(min, action);
   if (!result.ok) fail(result.message, result.kind === "denied" ? 3 : 1);
 }
 

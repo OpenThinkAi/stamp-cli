@@ -24,22 +24,6 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   (`git@github.com:<org>/<name>.git`), the same remote layout
   `--migrate-existing` leaves.
 
-### Security
-
-- **Brownfield `--from-tarball` imports no longer keep the tarball's git
-  config or hooks.** `setup-repo.sh` used to extract the uploaded bare clone
-  in place, so a `core.hooksPath` in its config made git skip the stamp-verify
-  pre-receive, and hooks it shipped (`update`, `reference-transaction`, ...)
-  ran as the server's git user on every push. The import now builds a fresh
-  bare repo and fetches only refs and objects into it, rejects tarballs
-  containing symlinks, sets `receive.denyNonFastForwards true` on this path
-  too. Brownfield import of a shallow clone now fails with a clear message.
-- **`setup-repo.sh` refuses to finish if `core.hooksPath` is set from any
-  config source**, on both the fresh and brownfield paths. A server whose git
-  user has a global or system `core.hooksPath` used to get repos where git
-  never ran the stamp-verify hook; `new-stamp-repo` now fails instead, removes
-  the half-built repo, and says how to find and unset the setting.
-
 ### Changed
 
 - **Per-repo prompt overrides need a repo grant (security).** The `--org` /
@@ -64,6 +48,19 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
 
 ### Security
 
+- **Brownfield `--from-tarball` imports no longer keep the tarball's git
+  config or hooks.** `setup-repo.sh` used to extract the uploaded bare clone
+  in place, so a `core.hooksPath` in its config made git skip the stamp-verify
+  pre-receive, and hooks it shipped (`update`, `reference-transaction`, ...)
+  ran as the server's git user on every push. The import now builds a fresh
+  bare repo and fetches only refs and objects into it, rejects tarballs
+  containing symlinks, sets `receive.denyNonFastForwards true` on this path
+  too. Brownfield import of a shallow clone now fails with a clear message.
+- **`setup-repo.sh` refuses to finish if `core.hooksPath` is set from any
+  config source**, on both the fresh and brownfield paths. A server whose git
+  user has a global or system `core.hooksPath` used to get repos where git
+  never ran the stamp-verify hook; `new-stamp-repo` now fails instead, removes
+  the half-built repo, and says how to find and unset the setting.
 - **Repo create, delete, purge and restore need owner or admin.**
   `new-stamp-repo`, `delete-stamp-repo` (soft delete and `--purge`) and
   `restore-stamp-repo` did no role check, so any enrolled key, a `member`

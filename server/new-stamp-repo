@@ -112,7 +112,7 @@ fi
 # user `git`, so the caller's role comes from SSH_USER_AUTH + users.db via
 # stamp-require-role. Exits 1 (no/unenrolled identity) or 3 (role below
 # admin) before anything under /srv/git is touched.
-/usr/local/sbin/stamp-require-role admin "create repos" || exit $?
+/usr/local/sbin/stamp-require-role admin "create repo '$NAME'" || exit $?
 
 GIT_ROOT=/srv/git
 REPO="$GIT_ROOT/${NAME}.git"

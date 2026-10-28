@@ -209,7 +209,7 @@ describe("repo verbs are role-gated (AGT-2259)", () => {
       const r = h.run("delete-stamp-repo", ["victim"], 3);
       assert.equal(r.status, 3, r.stderr);
       assert.ok(existsSync(path.join(h.gitRoot, "victim.git")));
-      assert.match(readFileSync(h.gateLog, "utf8"), /^admin delete repos$/m);
+      assert.match(readFileSync(h.gateLog, "utf8"), /^admin delete repo 'victim'$/m);
     } finally {
       h.cleanup();
     }
@@ -223,7 +223,7 @@ describe("repo verbs are role-gated (AGT-2259)", () => {
       assert.equal(r.status, 3, r.stderr);
       assert.ok(existsSync(path.join(h.gitRoot, "victim.git")));
       assert.ok(existsSync(path.join(h.trashDir, TRASHED)));
-      assert.match(readFileSync(h.gateLog, "utf8"), /^admin purge repos \(irreversible\)$/m);
+      assert.match(readFileSync(h.gateLog, "utf8"), /^admin purge repo 'victim' \(irreversible\)$/m);
     } finally {
       h.cleanup();
     }
@@ -266,7 +266,7 @@ describe("repo verbs are role-gated (AGT-2259)", () => {
       assert.equal(r.status, 3, r.stderr);
       assert.ok(existsSync(path.join(h.trashDir, TRASHED)));
       assert.ok(!existsSync(path.join(h.gitRoot, "hijack.git")));
-      assert.match(readFileSync(h.gateLog, "utf8"), /^admin restore repos$/m);
+      assert.match(readFileSync(h.gateLog, "utf8"), /^admin restore repo 'victim'$/m);
     } finally {
       h.cleanup();
     }
@@ -290,7 +290,7 @@ describe("repo verbs are role-gated (AGT-2259)", () => {
       const r = h.run("new-stamp-repo", ["fresh"], 3);
       assert.equal(r.status, 3, r.stderr);
       assert.ok(!existsSync(path.join(h.gitRoot, "fresh.git")));
-      assert.match(readFileSync(h.gateLog, "utf8"), /^admin create repos$/m);
+      assert.match(readFileSync(h.gateLog, "utf8"), /^admin create repo 'fresh'$/m);
     } finally {
       h.cleanup();
     }

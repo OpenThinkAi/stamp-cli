@@ -24,17 +24,17 @@ import { readAuthenticatedPubkey } from "./sshUserAuth.js";
 export type MinRole = "admin" | "owner";
 
 export type RoleGateResult =
-  | { ok: true; role: Role; shortName: string }
+  | { ok: true }
   /** No authenticated identity, or the key isn't enrolled. Exit 1. */
   | { ok: false; kind: "identity"; message: string }
   /** Enrolled, but the role is below `min`. Exit 3. */
-  | { ok: false; kind: "denied"; role: Role; message: string };
+  | { ok: false; kind: "denied"; message: string };
 
 const RANK: Record<Role, number> = { member: 0, admin: 1, owner: 2 };
 
 /**
  * Check the SSH caller's role against `min`. `action` is operator prose
- * for the denial message ("delete repos"). Records last_seen on success,
+ * for the denial message ("delete repo 'foo'"). Records last_seen on success,
  * matching the other authenticated verbs (AGT-422).
  *
  * Absence of an identity is never a green light: a missing/unreadable
@@ -66,12 +66,13 @@ export function checkCallerRole(min: MinRole, action: string): RoleGateResult {
       return {
         ok: false,
         kind: "denied",
-        role: row.role,
-        message: `role ${row.role} is not permitted to ${action}; need ${need}.`,
+        message:
+          `role ${row.role} is not permitted to ${action}; need ${need}. ` +
+          `Ask an ${need} to run it.`,
       };
     }
     touchLastSeen(db, row.id);
-    return { ok: true, role: row.role, shortName: row.short_name };
+    return { ok: true };
   } finally {
     db.close();
   }
