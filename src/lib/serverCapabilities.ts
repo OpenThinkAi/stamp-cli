@@ -70,6 +70,15 @@ export function describeProbeTarget(t: CapabilityProbeTarget): string {
 function realProbe(target: CapabilityProbeTarget): CapabilityProbeResult {
   // `--` before the destination, as at every other ssh call site: the
   // target's fields are shape-validated upstream, this is the second layer.
+  //
+  // No `-o BatchMode=yes` (AGT-2243 decision). None of stamp's ssh call
+  // sites set it: each lets ssh ask on the terminal for a first-contact
+  // host key or a key passphrase. Setting it here alone would make the
+  // probe the one call that fails on first contact, quietly leaving
+  // repo_id undeclared while the same command's other ssh calls prompt
+  // and succeed. Without a terminal ssh cannot prompt anyway and fails,
+  // which reads as "capability not present" (the safe default), and the
+  // timeout below bounds a stalled connection.
   const result = spawnSync(
     "ssh",
     ["-p", String(target.port), "--", `${target.user}@${target.host}`, "stamp-server-pubkey", CAPABILITIES_FLAG],

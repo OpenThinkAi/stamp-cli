@@ -39,7 +39,14 @@ Include:
   loading, reviewer invocation).
 - The hook bundle (`dist/hooks/pre-receive.cjs`, `dist/hooks/post-receive.cjs`).
 - The reference server image (`server/Dockerfile`, `server/entrypoint.sh`,
-  `server/setup-repo.sh`).
+  `server/setup-repo.sh`, `server/lib/`), including the SSH session gate
+  (`stamp-gate`), the SSH verbs, the HTTP listener and the root helpers
+  (`stamp-sign-approval`, `stamp-ensure-repo-key`, `stamp-break-glass`).
+- The `verify-attestation` GitHub Action
+  (`.github/actions/verify-attestation/`) and the `stamp-verify.yml`
+  workflow `stamp init` generates.
+- The peer-review path (`stamp pr open` / `stamp pr listen` and the
+  server's peer endpoints).
 - Any documented trust boundary — pre-receive hook enforcement, attestation
   verification, key-trust rules.
 

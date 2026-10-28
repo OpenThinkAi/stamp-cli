@@ -425,13 +425,17 @@ note: state.db has 3 reviews older than 90d; run `stamp prune --older-than 90d` 
 note: state.db has 1 spool file older than 30d; run `stamp prune --older-than 30d` to clean up
 ```
 
-Both fields are optional — omitting a field suppresses its advisory entirely. The `retention:` block is advisory-only by default so prose history is never silently deleted. To auto-prune instead of advising, set `retention.auto_prune: true`:
+Both fields are optional — omitting a field suppresses its advisory entirely. The `retention:` block is advisory-only by default so prose history is never silently deleted. To auto-prune instead of advising, set `retention.auto_prune: true` (review rows are pruned under `reviews` and spool files under `spools`, each with its own threshold):
 
 ```yaml
 retention:
   reviews: 90d
   auto_prune: true   # calls `stamp prune` automatically after each review
 ```
+
+**Nothing is pruned unless you ask.** stamp keeps local review prose until you run `stamp prune` or turn on `auto_prune`; there is no default expiry, so upgrading never deletes history. `stamp init` writes the `retention:` block commented out, for you to uncomment. The prose sits in `.git/` next to the code it quotes, so pruning it mainly controls disk use and how long a quoted secret lingers on this machine.
+
+The stamp server keeps its own copies separately. An hourly sweep drops PR titles, bodies and paths from delivered peer events after an hour, and deletes peer events and patches after `STAMP_PEER_EVENT_RETENTION_DAYS` (default 30) and cached server-side verdicts (reviewer prose) after `STAMP_SERVER_VERDICT_RETENTION_DAYS` (default 30). Set either to `0` to keep everything. See `server/README.md`, "Where user data lives".
 
 The advisory is silenced by `STAMP_SUPPRESS_LLM_NOTICE=1`; auto-prune is not (it's an explicit operator opt-in, not a notice). Duration syntax (`<n>d`, `<n>h`, `<n>m`) is validated at config-load time — a typo surfaces immediately as a `parseConfigFromYaml` error rather than silently at advisory time.
 
@@ -550,6 +554,52 @@ route to the Anthropic backend. The concrete threshold depends on your hardware 
 model — TBD pending a full benchmark.
 
 ---
+
+## `stamp pr listen` skips an event
+
+The listener checks every event against your local clone of the repo (the path mapped in `~/.stamp/peer-repos.yml`) before it spends anything on triage. It does not fetch for you, so most skips are fixed by fetching. Each skip prints `note: skipping event for PR #<n> — <reason>`:
+
+| Reason starts with | What it means | Fix |
+| --- | --- | --- |
+| `protected_tip_not_found` | `origin/HEAD` is not set in the mapped clone. The listener uses it as the protected branch tip. | `git -C <clone> remote set-head origin --auto` then `git -C <clone> fetch origin` |
+| `base_sha_not_found` | The PR's base commit is not in the clone yet. | `git -C <clone> fetch origin` |
+| `base_sha_not_on_protected_branch` | The base commit is not on the default branch as your clone knows it. Either the clone is stale, or the PR really is based off another branch (those are never reviewed). | Fetch; if it persists, the event cites a base off the protected branch. |
+| `revoked at protected tip` | The author is an `operator` at the PR's base but no longer in `.stamp/trusted-keys/manifest.yml` at the default branch tip. Revocations take effect once your clone has fetched them. | Expected after a key is removed. Re-add the key through stamp review if it should still be trusted. |
+| `data-flow gate: …` | The repo has not consented to sending diffs to this listener's LLM host. | Land `data_flow: { peer_review_endpoints: [api.anthropic.com] }` (or your `ANTHROPIC_BASE_URL` host) in `.stamp/config.yml` through stamp review. It must be present at both the PR's base and the default branch tip. Bedrock, Vertex and Foundry routing are always refused. |
+| `repo "…" is not mapped` | No local clone is mapped for this repo. | Add it to `~/.stamp/peer-repos.yml`. |
+| `base_sha/head_sha missing` | The server sent an event without full commit ids, usually a `re-review-requested` event from a server older than the listener. | Upgrade the stamp server. |
+
+A listener that gets 401/403 when it connects or reconnects exits with status 1: the server is refusing your account the event stream. On a server with members, an admin grants the repos with `stamp users grant <name> --repo <org>/*`.
+
+## `stamp pr open` fails with "has no stamp signing key enrolled"
+
+The server only accepts a PR broadcast signed by the caller's own enrolled stamp key. Accounts seeded from `AUTHORIZED_KEYS`, or created by an invite accepted without a stamp key, have none. Ask an admin for an invite (`stamp invites mint`) and accept it with `stamp invites accept` on the machine whose `~/.stamp/keys/ed25519` signs your broadcasts. A "`requested_by_fp` … is not the stamp key enrolled" error means you are broadcasting from a machine whose stamp key differs from the enrolled one; the same re-enrollment fixes it.
+
+## `repo_id` is not declared after provision, bootstrap or migration
+
+`stamp provision`, `stamp bootstrap` and `stamp init --migrate-to-server-attested` declare `repo_id: <org>/<repo>` in `.stamp/config.yml` only when the stamp server says it signs `repo_id` into approvals. They ask with `ssh -p <port> git@<host> stamp-server-pubkey --capabilities`; a current server prints `{"approval_repo_id":true}`. If the command printed `note: .stamp/config.yml was left without repo_id …`, the reason is in the note: no server was known, the `origin` URL has no `<org>/<repo>` shape, or the server did not answer (an older server refuses the flag). Upgrade the server, then add the line the note shows as an admin-signed `.stamp/` change. If the config already declares one, the command leaves it alone and prints `repo_id already declared: <id>`.
+
+The probe is an ordinary ssh call: on a terminal, ssh can ask you to accept a new host key or unlock your key, exactly like stamp's other ssh calls. Run headless, it cannot ask, so the probe fails and `repo_id` stays undeclared (the safe default). Run the ssh command above once by hand to accept the host key, then add `repo_id` yourself.
+
+## Renaming a repo that declares `repo_id`
+
+`repo_id` names the repo the server reviewed for, and verifiers accept approvals for the id declared at the target branch's tip **or** at the merge base. To rename (for example after moving the repo to a new org):
+
+1. Make sure the server has the repo's prompts under the new `<org>/<repo>` (per-repo overrides live there) and, on a server with members, that reviewers have a grant for the new name.
+2. Change `repo_id:` in `.stamp/config.yml` to the new id as an admin-signed `.stamp/` change, reviewed and merged like any other.
+3. Open branches cut before the rename keep verifying with approvals for the old id, because their merge base still declares it. Once a branch is rebased onto the renamed tip, only the new id is accepted: re-run `stamp review` on it.
+
+So during a rename both ids are briefly accepted for older branches. That is deliberate (in-flight work isn't stranded), and it ends as branches rebase.
+
+## Stamp server won't boot: `error: refresh-repo-hooks: cannot …`
+
+On every boot, before sshd starts, the server re-installs the stamp hooks into each `/srv/git/<repo>.git/hooks/` and strips hook-redirecting settings from each repo's `config`. It stops the boot rather than run with hooks it could not install. The error names the path:
+
+- `cannot remove hook-redirecting keys from <path>` — `core.hooksPath`, `include.path` or `includeIf.*.path` is set in that config file and could not be removed. Open a root shell in the container (`railway ssh`, `docker exec`), inspect the file, and remove the key as the git user: `su -s /bin/sh git -c 'git config --file <path> --unset-all core.hooksPath'`. Someone may have planted it to skip the pre-receive hook, so check how it got there.
+- `cannot create staging dir` — the `/srv/git` volume is not mounted, not writable by root, or full.
+- `cannot create <repo>/hooks`, `cannot stage <hook> for <repo>`, `cannot install <path>` — that repo's `hooks/` directory is in a state root cannot fix (wrong file type, permissions, full disk). Inspect the named repo; moving the bad `hooks/` aside lets the next boot recreate it.
+
+Warnings (`skipping symlinked repo path`, `was a symlink; replacing the link`, `removed '<key>' from <path>`) do not stop the boot, but each one means something in a repo directory was not as stamp left it. Investigate how it got there.
 
 ## When all else fails
 

@@ -52,7 +52,7 @@ reviewers:
     mcp_servers:
       linear:
         command: npx
-        args: ["-y", "@linear/mcp"]
+        args: ["-y", "@linear/mcp@<x.y.z>"]   # pin an exact version
         env:
           LINEAR_API_KEY: $LINEAR_API_KEY
 ```

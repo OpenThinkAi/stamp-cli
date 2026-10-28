@@ -50,7 +50,7 @@ Out of scope by design:
 
 ## Attacker positions
 
-Five attackers, ranked by capability:
+Five attackers, ranked by capability, plus the peer-review path (6):
 
 ### 1. External pusher with no SSH access
 
@@ -79,9 +79,10 @@ data from the mirror.
   of whether the request succeeds. Defense: WebFetch is opt-in
   per-reviewer in `.stamp/config.yml` (gated by `stamp review` on
   config changes), the runtime hook enforces the host allowlist, any
-  `path_prefix`, and — for the query string — the optional
-  `query_param_allowlist` (permitted param names) and
-  `query_param_max_length` (total query-value length cap); operators
+  `path_prefix`, and — for the query string — a default 64-character
+  cap on the total decoded query values, which the optional
+  `query_param_max_length` replaces and `query_param_allowlist`
+  (permitted param names) can lift (AGT-2249); operators
   are steered toward narrow prefixes and query constraints in
   [`docs/personas.md`](./personas.md).
 
@@ -92,9 +93,11 @@ gate plus the path-prefix mechanism.
 ### 2. SSH-authenticated pusher with no signing key
 
 **Capability:** Has an SSH key enrolled in the stamp server's membership DB
-and can invoke `git push` and the git-shell wrappers
-(`new-stamp-repo`, `delete-stamp-repo`, …). Does not hold a private
-signing key trusted by `.stamp/trusted-keys/`.
+as a `member` and can `git push` to the repos the session gate lets it
+reach (with any repo grant, only the granted repos). Repo create, delete,
+restore, `list-trash` and `resync-mirror` need owner or admin and refuse a
+member. Does not hold a private signing key trusted by
+`.stamp/trusted-keys/`.
 
 **Goal:** Push commits to `main` of any stamp-protected repo, or
 exploit the server-side scripts to disrupt other tenants.
@@ -114,6 +117,15 @@ exploit the server-side scripts to disrupt other tenants.
   or brownfield-imported (audit #20 fix; AGT-2266), AND `pre-receive` re-reads the live ref tip
   via `rev-parse` and re-checks FF against it — catching the race
   where stdin's `oldSha` is stale because a peer pushed first.
+- *Delete a protected branch or tag by push.* `git push origin :main`
+  (or `:refs/tags/<tag>` for a tag in a protected branch's verified
+  history) is refused by `pre-receive`; such refs are removed only on
+  the server.
+- *Borrow a lenient repo's prompts.* A member reviews a protected repo's
+  diff under another repo's lenient per-repo prompt override and
+  presents the approval. Closed by grant checks on `--org`/`--repo` and
+  by the server signing `repo_id` into the approval, which a repo that
+  declares `repo_id` checks (AGT-2252, AGT-2272).
 - *Cross-tenant `rm` via `new-stamp-repo --from-tarball`.* The
   command's argument used to be operator-controlled with no path
   constraint; the EXIT trap's `rm -f` was a destructive primitive
@@ -178,8 +190,8 @@ reviewer agents into approving, or by escaping their intended scope.
   check, closing the audit M-S1 / M-LL1 bypass), reviewer-internal
   paths (all of `.git/` and `.stamp/trusted-keys/`) are denylisted
   even inside the repo — for Read, Grep, AND Glob (AGT-418) — WebFetch
-  enforces both host allowlist and
-  optional `path_prefix`, MCP launches are gated by an allowlist.
+  enforces the host allowlist, optional `path_prefix` and the default
+  64-character query cap, MCP launches are gated by an allowlist.
 - *Inject a reviewer that approves a `.stamp/` change.* Modifying
   `.stamp/config.yml` or a reviewer prompt is a way to change
   future reviews. Defenses: changes to `.stamp/config.yml` and
@@ -269,6 +281,39 @@ keyholder." Use a forge-side mechanism (CODEOWNERS, branch
 protection, multi-keyholder signing requirement) on top of stamp
 if your threat model includes this attacker.
 
+### 6. PR author or member on the peer-review path
+
+**Capability:** An enrolled member who can `stamp pr open`, or the author
+of a PR that peer listeners pick up. Peer review is advisory: a peer
+review posts a GitHub review, it never signs a stamp merge.
+
+**Goal:** Get another operator's listener to spend its LLM account on, or
+post an approval for, content the repo never agreed to send; or read
+other teams' PR metadata from the event stream.
+
+**Paths and defenses:**
+
+- *Send a diff to an LLM the repo didn't consent to.* The listener skips
+  the event unless `data_flow.peer_review_endpoints` names its endpoint
+  host at both the PR's `base_sha` and the default branch tip; cloud
+  routing is always refused (AGT-2248).
+- *Cite an old or off-branch base* to use a revoked key or withdrawn
+  consent. `base_sha` must be an ancestor of the listener clone's
+  `origin/HEAD`, and the author must be an `operator` at both places
+  (AGT-2241). Revocations apply once the listener has fetched.
+- *Broadcast or claim seats as someone else.* `pr-opened` must be signed
+  by the caller's enrolled stamp key; seat claims are bound to the key
+  that signed the request (AGT-2249, AGT-2253).
+- *Read another team's PRs.* The event stream and seat claims are
+  filtered by repo grants, and the PR body is not streamed (AGT-2256).
+- *Have the review land on a later commit.* Reviews are posted with
+  `commit_id=<head_sha>` and the diff is fetched at exactly
+  `base_sha...head_sha` (AGT-2241, AGT-2248).
+
+**Effective?** Residual: a listener operator's own prompt and
+`post_mode` decide what is posted under their GitHub identity
+(`dry-run` and `draft` post nothing).
+
 ## Architectural residual
 
 The audit's persistent HIGH-then-INFO finding ("LLM verdict directly
@@ -327,14 +372,18 @@ Audit your own setup against this list. If a control is absent, the
   a merge if branch protection is configured to require it. *What
   fails:* the verifier becomes advisory — a malicious or careless
   push can land an unverified commit.
-- **The verifier install in `stamp/verify-attestation`.** The action
+- **The verifier install in `stamp/verify-attestation`.** From the release
+  after 3.6.2, the action
   installs the verifier with `npm ci --ignore-scripts` from the lockfile in
   `.github/actions/verify-attestation/verifier/`, so its transitive
   dependencies are pinned and hash-checked and none of their install
   scripts run. *What fails if weakened:* overriding `stamp-version` to a
   version without a committed lockfile lets transitive dependencies float
   at CI time (the action warns), and a compromised dependency could make
-  `stamp verify-pr` pass an unattested PR.
+  `stamp verify-pr` pass an unattested PR. A `stamp-verify.yml` pinned to
+  an older action commit (including the v3.2.0 pin `stamp init` writes
+  until `VERIFY_ACTION_REF` is bumped at release) still runs
+  `npm install -g`; bump the `uses:` SHA to pick up the locked install.
 
 ### Operator configuration choices
 

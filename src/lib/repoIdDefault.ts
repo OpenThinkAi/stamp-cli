@@ -37,6 +37,14 @@ export type RepoIdDefault =
   | { kind: "skip"; note: string };
 
 /**
+ * The line printed when the config already declares `repo_id` (AGT-2243):
+ * the command leaves it alone, and says so instead of printing nothing.
+ */
+export function repoIdAlreadyDeclaredLine(repoId: string): string {
+  return `${REPO_ID_CONFIG_KEY} already declared: ${repoId}`;
+}
+
+/**
  * Note for a repo left without `repo_id` (same advice `stamp review`
  * prints for an unbound repo).
  */

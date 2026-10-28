@@ -30,10 +30,12 @@ The fastest path is Railway, but the image runs on any Docker host (Fly, a Linux
    - **Build → Dockerfile Path:** `server/Dockerfile`
    - **Volume:** mount one at `/srv/git` (this persists your bare repos)
    - **Variables:**
-     - `AUTHORIZED_KEYS` — your laptop's SSH pubkey (`cat ~/.ssh/id_ed25519.pub`); newline-delimited list if multiple operators. Read once, on first boot, to enroll the first admins; after that, add and remove people with `stamp invites` / `stamp users`
+     - `AUTHORIZED_KEYS` — your laptop's SSH pubkey (`cat ~/.ssh/id_ed25519.pub`); newline-delimited list if multiple operators. Read once, on first boot, to enroll the first admins; after that, add and remove people with `stamp invites` / `stamp users`. Promote yourself to owner once with `stamp users promote <your-short-name> --to owner` (`stamp users list` shows the name)
+     - `ANTHROPIC_API_KEY` — *optional*, turns on server-side review: the server runs the reviewers and signs each verdict with its own key (generated on first boot). Diffs reviewed this way go to Anthropic under this key
+     - `STAMP_PUBLIC_URL` — the public HTTPS address of the container's port 8080 (see Networking). Needed for `stamp invites mint`
      - `OPERATOR_PUB_KEY` — your stamp signing key (`cat ~/.stamp/keys/ed25519.pub`); generate with `stamp keys generate` if you don't have one
      - `GITHUB_BOT_TOKEN` — *optional*, only for the `stamp/verified` commit statuses on a GitHub mirror. Mirror **pushes** use the per-repo deploy key `stamp provision` registers, not this token. Use a **fine-grained** PAT (or a GitHub App installation token) limited to the mirror repo(s) with **Commit statuses: read and write** only, and an expiry you rotate on. Grant `contents: write` only if you deliberately use the HTTPS push fallback (no deploy key) — a classic PAT reaches every repo its user can
-   - **Networking:** add a TCP proxy for container port 22; Railway gives you `<host>:<port>`.
+   - **Networking:** add a TCP proxy for container port 22; Railway gives you `<host>:<port>`. For invites and peer review, also expose container port 8080 over HTTPS and put that address in `STAMP_PUBLIC_URL`.
 3. Add a convenient SSH alias on your laptop:
    ```sh
    cat >> ~/.ssh/config <<EOF
@@ -69,6 +71,8 @@ stamp provision myproject --org <github-org-or-user>
 ```
 
 This single command does everything: SSHes to your stamp server and creates the bare repo via `new-stamp-repo`, clones it locally, creates a private GitHub mirror repo (added to the clone as the `github` remote), writes `.stamp/mirror.yml`, applies the `stamp-mirror-only` Ruleset on the mirror so direct pushes from any other identity are rejected by GitHub, and runs `stamp bootstrap` (which lands the three real reviewers via a signed merge).
+
+Bootstrap also asks the server whether it signs `repo_id` into approvals (`stamp-server-pubkey --capabilities`). A current server does, so `.stamp/config.yml` gets `repo_id: <org>/<repo>`, binding this repo's approvals to it. Against an older server nothing is written and the command prints the line to add after you upgrade.
 
 End state: `main` requires `security`, `standards`, `product` reviewers. `origin` is your stamp server; `github` is the mirror, locked down to the bypass actor. The clone is at `./myproject` and ready to work in.
 
@@ -155,7 +159,7 @@ These run on the post-merge tree before the merge is signed. Non-zero exit block
 
 Anyone else who wants to push needs:
 
-1. Their **SSH** pubkey enrolled on the server with `stamp invites mint` (so they can connect). `AUTHORIZED_KEYS` only seeds the first boot; editing it later enrolls no one. See [`server/README.md`](../server/README.md#onboarding-teammates).
+1. Their **SSH** pubkey enrolled on the server with `stamp invites mint` (so they can connect). They accept with `stamp invites accept`; enrolling their stamp signing key at the same time is what lets them `stamp pr open`. For `stamp pr listen`, or reviews under a per-repo prompt override, they also need a grant: `stamp users grant <name> --repo <org>/*` (once a member has any grant, they can reach only the repos they are granted). `AUTHORIZED_KEYS` only seeds the first boot; editing it later enrolls no one. See [`server/README.md`](../server/README.md#onboarding-teammates).
 2. Their **stamp signing** pubkey committed to `.stamp/trusted-keys/` in the repo (so their signed merges verify). They generate it with `stamp keys generate`, then you commit the `.pub` file via the normal stamped review/merge cycle.
 
 ## What's next

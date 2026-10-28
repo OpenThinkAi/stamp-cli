@@ -206,7 +206,8 @@ When the `pr-opened` event arrives:
      to whatever the PR head is when the post lands).
    - `draft`: save body + decision to `~/.stamp/drafts/<patch-id>.md`,
      fire a desktop notification, do NOT post.
-   - `dry-run`: log only.
+   - `dry-run`: print the verdict and body to the listener terminal; post
+     nothing and write no draft.
 8. Listener loops, waits for next event.
 
 **At PR update (laptop A, after pushing new commits):**

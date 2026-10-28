@@ -7,8 +7,9 @@ protected branches defined in each repo's committed `.stamp/config.yml`.
 
 ## What's in the image
 
-- `git` + `openssh-server` + `nodejs` (Alpine-based, ~200 MB)
-- `/etc/stamp/pre-receive` — the built hook
+- `git` + `openssh-server` + `nodejs` 24 (Alpine-based, ~200 MB)
+- `/etc/stamp/pre-receive.cjs`, `/etc/stamp/post-receive.cjs` — the built hooks
+- `stamp-gate` — every SSH session's forced command; serves git and the verbs listed under "SSH access model"
 - `/etc/stamp/reviewers/` — canonical reviewer prompts (`security.md`, `standards.md`, `product.md`), bundled at build time from `server/reviewers/` in the repo
 - `/usr/local/bin/setup-repo.sh` — bootstrap script
 - `/usr/local/bin/new-stamp-repo <name>` — one-line repo provisioner
@@ -91,7 +92,7 @@ your-org/your-repo/standards.md      # optional per-repo override
 
 `default/<reviewer>.md` is the canonical fallback for any reviewed repo. The optional per-repo path is consulted first when the SSH verb carries `(org, repo)` context: `getPromptPath` in `src/server/prompts-cache.ts` looks for `<cacheRoot>/<org>/<repo>/<reviewer>.md`, and falls through to `<cacheRoot>/<reviewer>.md` if the override doesn't exist. Per-repo overrides are entirely optional; many deployments will only ever ship the `default/` tree.
 
-> **Per-repo overrides need a repo grant.** The `--org`/`--repo` a client sends are chosen by the caller, and the signed approval does not record them. So the server applies an override only to callers authorized for that pair: owners and admins always, members only when granted it with `stamp users grant <name> --repo <org>/<repo>` (or `<org>/*` for the whole org). A member with no grants can still review under the default prompts, but a review that names a repo with an override is refused (exit 3) rather than run under a different prompt. Once a member has any grant, they can review only the repos they are granted. See "Manage members" below.
+> **Per-repo overrides need a repo grant.** The `--org`/`--repo` a client sends are chosen by the caller. The server signs the pair into the approval as `repo_id: <org>/<repo>`, and a repo that declares top-level `repo_id:` in `.stamp/config.yml` refuses approvals signed for any other id (see the main README, "Binding approvals to the repo"). Which override applies is still decided here: the server applies an override only to callers authorized for that pair: owners and admins always, members only when granted it with `stamp users grant <name> --repo <org>/<repo>` (or `<org>/*` for the whole org). A member with no grants can still review under the default prompts, but a review that names a repo with an override is refused (exit 3) rather than run under a different prompt. Once a member has any grant, they can review only the repos they are granted. See "Manage members" below.
 
 > **Note on the `default/` prefix.** The path inside the cache is determined by `getPromptPath`'s fallback logic, which reads `<cacheRoot>/<reviewer>.md` when no per-repo override is present. The `default/` directory convention in the prompts repo therefore needs to be flattened into the cache root at populate time — see "Migrating bundled prompts" below for the recommended layout if you're seeding the repo from `server/reviewers/`.
 
@@ -122,7 +123,7 @@ If the prompts repo is private, the stamp-server needs SSH access via a github d
    ```
 2. **Register the public half** as a deploy key on the prompts repo (Settings → Deploy keys → Add deploy key). **Read-only access is sufficient** — the stamp-server only ever fetches; it never pushes back.
 3. **Drop the private half into the stamp-server's volume.** The default path the server checks is `/srv/git/.ssh-client-keys/prompts_repo_key`. The directory is created at boot (`server/entrypoint.sh`), owned `root:git` mode `0750`, so the git user can READ + traverse but cannot CREATE or DELETE entries. Upload the file via your platform's volume-mount mechanism (Railway: web console shell into the container; Fly: `fly ssh console`; self-hosted Docker: `docker cp`). The file itself should be mode `0600` git-owned, matching the existing `github_ed25519` mirror-push key alongside it.
-4. **Set `STAMP_PROMPTS_DEPLOY_KEY_PATH`** on the server pointing at the file (or leave unset to use the default path).
+4. **Set `STAMP_PROMPTS_DEPLOY_KEY_PATH`** on the server pointing at the file, even when it is the default path. Only runtime refreshes fall back to the default when the variable is unset; the boot-time clone and the entrypoint's `0600` re-pin of the key use it only when it is set.
 
 If `STAMP_PROMPTS_DEPLOY_KEY_PATH` is set but the file is missing at boot, `entrypoint.sh` aborts startup with:
 
@@ -143,7 +144,7 @@ All Phase B configuration is via env vars on the stamp-server deployment (Railwa
 | `STAMP_PROMPTS_ALLOWED_SIGNERS` | No (strongly recommended) | unset | OpenSSH `allowed_signers` file. When set, a fetched tip is accepted only if `git verify-commit` finds an SSH signature by a listed key; otherwise the cache keeps its last verified commit (AGT-2249). Unset logs a boot warning. |
 | `STAMP_PROMPTS_WEBHOOK_SECRET` | Yes (to accept webhook deliveries) | unset | HMAC-SHA256 shared secret. Must match the github webhook config. Missing = `503 webhook_secret_unconfigured` on every delivery. |
 | `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Conditional | `/srv/git/.ssh-client-keys/prompts_repo_key` | Private SSH key for SSH URLs to private repos. Ignored for HTTPS URLs. Path must exist at boot when set explicitly. |
-| `STAMP_PROMPTS_CACHE_ROOT` | No | `/srv/git/.prompts-cache` | Absolute directory path for the local cache. The default is on the persistent volume so the cache survives container redeploys. |
+| `STAMP_PROMPTS_CACHE_ROOT` | No | `/srv/git/.prompts-cache` | Absolute directory path for the local cache. The default is on the persistent volume so the cache survives container redeploys. Leave it at the default: the boot step and `stamp-workers` honour it, but `stamp-review` always reads `/srv/git/.prompts-cache`. |
 | `STAMP_PROMPTS_POLL_INTERVAL_SEC` | No | `3600` (1 hour) | Periodic-poll backstop interval in seconds. Floor `5` (values 1–4 are clamped up with a warn line). Literal `"0"` disables polling entirely. Non-integer / negative / whitespace values fall back to the default with a warn line — see "Periodic-poll backstop" below. |
 | `STAMP_PROMPTS_KNOWN_HOSTS_PATH` | No | `/etc/ssh/ssh_known_hosts` (bundled `server/github-known-hosts`) | Override for self-hosted github enterprise. Standard github.com deployments don't need this. |
 | `STAMP_PROMPTS_DIR` | No (Phase A only) | `/etc/stamp/reviewers` | Phase A bundled-prompts fallback path. **IGNORED when `STAMP_PROMPTS_REPO_URL` is set** — Phase B mode reads from the cache root above. **Setting a non-default value fails the boot in production** (AGT-411). |
@@ -390,11 +391,11 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      compromised admin key's ability to flood invites.
    - `STAMP_TRASH_TTL_DAYS` — **optional** (default `30`). Soft-deleted bare
      repos in `/srv/git/.trash/` are auto-purged once older than this (AGT-423)
-     by an in-process sweep — so a repo "deleted" to erase committed PII
+     by a sweep in `stamp-workers` — so a repo "deleted" to erase committed PII
      doesn't linger forever. On-demand purge: `stamp server-repos purge
      --older-than <N>d` (`0d` = all). A bad value falls back to the default.
    - `STAMP_TRASH_SWEEP_INTERVAL_SEC` — **optional** (default `21600`, i.e.
-     6h). How often the in-process trash sweep runs; `0` disables it (rely on
+     6h). How often the `stamp-workers` trash sweep runs; `0` disables it (rely on
      the on-demand purge instead).
    - `STAMP_PEER_EVENT_RETENTION_DAYS` — **optional** (default `30`). Peer
      review events and patches in `users.db` older than this are deleted by
@@ -514,7 +515,7 @@ GitHub App installation token) limited to the mirror repo(s) with *Commit
 statuses: read and write* and an expiry you rotate on. For the HTTPS
 fallback it additionally needs `contents: write` on the target repo; the
 post-receive hook reads it from `/etc/stamp/env` (written by the entrypoint,
-chmod 600, git-owned) and constructs:
+`root:git 0640`; it also holds `ANTHROPIC_API_KEY`) and constructs:
 
 ```
 https://x-access-token:$GITHUB_BOT_TOKEN@github.com/<owner>/<repo>.git
@@ -621,8 +622,8 @@ stamp users promote <your-short-name> --to owner
 
 This works exactly once — the server allows admin self-promotion to
 owner only when the owner count is zero. After that, owner promotion is
-owner-gated like everything else. `<your-short-name>` is the slug
-derived from your SSH key's comment (`stamp users list` shows it).
+owner-gated like everything else. `<your-short-name>` is the seeded
+name, `user-<first 8 hex of your key's hash>` (`stamp users list` shows it).
 
 ### Invite a teammate
 
@@ -666,8 +667,10 @@ server. Result: an enrolled `member` row in the membership DB. Your
 teammate can now `git clone`, push, pull from the server.
 
 If they don't have a stamp signing keypair yet, the accept TUI tells
-them — they can re-run later with `--stamp-pubkey <path>` once
-generated, and the trust-grant step below will pick it up.
+them. They can still clone and push, but without an enrolled stamp key
+the server refuses their `stamp pr open` broadcasts and the trust-grant
+step below has nothing to pick up; they fix it by accepting a new invite
+with `--stamp-pubkey <path>` once the key exists.
 
 **Sanity check:**
 
@@ -820,6 +823,79 @@ Agents merging locally see the same refusal earlier if their shell also
 exports `STAMP_FORBID_AI_ATTRIBUTION=1`; without it, `stamp merge`
 succeeds and the server rejects the push instead.
 
+## Upgrading the server to this release
+
+This release (the October 2026 hardening) changes who can reach what on the
+server. Most of it converts itself on the first boot of the new image; the
+steps below are the parts that need you.
+
+**Order.** Redeploy the server image first, then have every operator
+upgrade their stamp CLI, then point CI's `stamp/verify-attestation`
+`stamp-version` at the new release, and only then declare `repo_id` in
+repos (see the main README, "Binding approvals to the repo"). An older CLI
+keeps working against the new server; a repo that declares `repo_id` before
+the server is upgraded cannot merge.
+
+**What converts itself on first boot** (check the boot log):
+
+- `users.db` becomes the only source of SSH access. sshd reads no
+  `authorized_keys` file, and `AUTHORIZED_KEYS` only seeds an empty
+  membership DB, once. A server that already has members records the seed
+  as done and ignores the variable from then on.
+- The review-signing key is re-owned to `root:root 0600` and approvals are
+  signed by the root helper `stamp-sign-approval` (see "What's in the
+  image"). Any other unexpected owner or mode stops the boot.
+- The HTTP listener runs as the `stamp-http` user with an allowlisted
+  environment, and background jobs move to `stamp-workers` (see "What the
+  HTTP listener can reach" below). `.stamp-state`, `users.db`, `/srv/git`
+  and the repos get new owners and modes.
+- Every repo's hooks are re-installed without following symlinks, and
+  `core.hooksPath` / `include.path` / `includeIf.*.path` are stripped from
+  repo and git-user config. A key that can't be removed stops the boot
+  (see the troubleshooting entry in `docs/troubleshooting.md`).
+- `sftp` and other SSH subsystems are gone; every session goes through
+  `stamp-gate`.
+
+**What you do after the first boot:**
+
+1. **Re-check `stamp users list`.** The old image re-imported every
+   `AUTHORIZED_KEYS` key as admin on each restart, so anyone you removed
+   before upgrading whose key is still in that variable is back. Remove
+   them again with `stamp users remove`. They stay removed now.
+2. **Enroll new people with invites.** Adding a key to `AUTHORIZED_KEYS`
+   no longer enrolls it. Use `stamp invites mint`. If you are locked out,
+   use `stamp-break-glass` from a root shell ("Locked out (break-glass)").
+3. **Grant members their repos** (`stamp users grant <name> --repo
+   <org>/*`) on servers with members who listen for peer reviews or use
+   per-repo overrides. A member with any grant can then reach only the
+   granted repos. Without a grant a member's
+   `stamp pr listen` gets a 403 and its seat claims are refused, and
+   reviews of a repo that has a per-repo prompt override are refused.
+   Owners and admins need nothing.
+4. **Members who want to `stamp pr open`** need an enrolled stamp signing
+   key. Accounts seeded from `AUTHORIZED_KEYS` have none; they re-enroll
+   through an invite.
+5. **Optional settings:**
+   - `STAMP_PROMPTS_ALLOWED_SIGNERS` (Phase B): accept only prompts-repo
+     commits signed by listed keys. Boots without it warn.
+   - `STAMP_PEER_EVENT_RETENTION_DAYS` and
+     `STAMP_SERVER_VERDICT_RETENTION_DAYS`: how long peer events and cached
+     server-side verdict prose are kept (default 30 days, `0` keeps).
+   - A new variable that the HTTP listener or workers must read has to be
+     added to `server/lib/allowlisted-env.sh`, or it won't reach them.
+6. **Tell peer listeners** that each repo must opt in before they review
+   it: land `data_flow: { peer_review_endpoints: [api.anthropic.com] }`
+   (or the listener's gateway host) in the repo's `.stamp/config.yml`, and
+   run `git remote set-head origin --auto` in each mapped clone. Until then
+   every event is skipped.
+7. **Tooling that reads `/srv/git` directly** as a user other than `git`
+   or root stops working; run it as `git` or root.
+
+**Clients.** Interactive `ssh git@<host>` logins are refused, clone URLs
+must name `/srv/git/<name>.git`, and to clone a trashed repo you restore it
+first. Protected branches and protected tags can no longer be deleted by
+push; delete a protected tag on the server if you really mean it.
+
 ## Updating the hooks
 
 When stamp-cli releases new hook code, redeploy the container — the builder
@@ -879,6 +955,16 @@ Authenticated pushers can:
 - `ssh git@<host> list-trash` (owner/admin)
 - `ssh git@<host> list-stamp-repos` (owner/admin, or a member with no repo grants)
 - `ssh git@<host> resync-mirror <name> [<branch>...]` (owner/admin)
+- `ssh git@<host> stamp-server-pubkey [<owner>/<repo> | --review-signing | --capabilities]`:
+  the mirror deploy key for a repo, the review-signing public key, or one
+  JSON line of what this image supports (`{"approval_repo_id":true}` today;
+  older images refuse the flag). `stamp provision`, `stamp bootstrap` and
+  `stamp init --migrate-to-server-attested` use `--capabilities` to decide
+  whether to declare `repo_id`
+- the verbs the stamp CLI calls for you: `stamp-review` (server-side
+  review), `stamp-users` (`stamp users …`), `stamp-mint-invite`
+  (`stamp invites mint`) and `stamp-pr-opened` (`stamp pr open`; needs your
+  enrolled stamp signing key)
 
 …but cannot get an interactive shell, run arbitrary commands, or read
 the per-deployment env file (`/etc/stamp/env`, which holds the GitHub
@@ -1008,8 +1094,13 @@ the GitHub token, the Anthropic key, the deploy keys, the repos, or the
 the prompts deploy key and the git-owned cache) and the trash sweep (it
 deletes git-owned trashed repos) moved out of the listener into
 `stamp-workers`, which runs as `git` with umask 027, opens no socket, and
-gets its own allowlist (`STAMP_PROMPTS_*` except the webhook secret,
-`GIT_SSH_KNOWN_HOSTS`, `STAMP_TRASH_*`). It has no bot token or API key
+gets its own allowlist: `STAMP_SERVER_DB_PATH`, the retention variables
+`STAMP_PEER_EVENT_RETENTION_DAYS` / `STAMP_SERVER_VERDICT_RETENTION_DAYS`,
+`STAMP_PROMPTS_REPO_URL`, `_REPO_REF`, `_ALLOWED_SIGNERS`, `_CACHE_ROOT`,
+`_DEPLOY_KEY_PATH`, `_POLL_INTERVAL_SEC`, `_REFRESH_TRIGGER`,
+`GIT_SSH_KNOWN_HOSTS` (set from `STAMP_PROMPTS_KNOWN_HOSTS_PATH`),
+`STAMP_TRASH_DIR`, `STAMP_TRASH_TTL_DAYS` and
+`STAMP_TRASH_SWEEP_INTERVAL_SEC` (`server/lib/allowlisted-env.sh`). It has no bot token or API key
 either. The boot-time `stamp-prompts-cache-bootstrap` runs with the same
 allowlist.
 
@@ -1054,8 +1145,11 @@ in-image workaround under current orchestration:
    any port below 1024 requires `CAP_NET_BIND_SERVICE`, which in practice
    means sshd starts as root.
 2. **`entrypoint.sh` manages permissions on persistent state before any
-   service starts.** Each boot it `chown`s `/srv/git/` (the volume comes
-   up root-owned on platform mounts) to the git user, generates/pins SSH
+   service starts.** Each boot it `chown`s the volume root and each
+   `/srv/git/<name>.git` to the git user (the volume comes up root-owned
+   on platform mounts; symlinks are never followed and dot-dirs are left
+   alone), keeps `.stamp-state` at `root:stamp-db` with the review-signing
+   key `root:root 0600` (refusing to boot otherwise), generates/pins SSH
    host keys to `root:root` mode `0600` in `/srv/git/.ssh-host-keys/`,
    writes `/etc/stamp/operator.pub` as `root:root` mode `0444`, writes
    `/etc/stamp/env` (which holds `GITHUB_BOT_TOKEN`) as `root:git` mode
@@ -1076,8 +1170,12 @@ interactive shell, run arbitrary commands, or read `/etc/stamp/env`. The
 hardening in place (sticky bit on `/srv/git`, root-owned per-repo hooks,
 mode `0640 root:git` on the env file, root-owned `.ssh-host-keys/`) is
 defense in depth against the **git user**, not against in-container
-root. A future sshd RCE, a bug in the stamp pre-receive hook, or a
-compromised Alpine package would run with full root in the container —
+root. The hooks and SSH verbs run as `git` and the HTTP listener as
+`stamp-http`; what runs as root is sshd, the entrypoint, and the
+sudo-reached helpers `stamp-sign-approval` and `stamp-ensure-repo-key`
+(plus `stamp-break-glass`, from a root shell only). A future sshd RCE, a
+bug in one of those, or a compromised Alpine package would run with full
+root in the container —
 including read access to `GITHUB_BOT_TOKEN`, every bare repo, and the
 persistent host keys.
 

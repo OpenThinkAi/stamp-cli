@@ -10,6 +10,42 @@ All notable changes to `@openthink/stamp` are documented here. Format follows
 Headless `stamp provision` can finish, and its clone knows about the mirror
 ([#86](https://github.com/OpenThinkAi/stamp-cli/issues/86)).
 
+### Upgrade notes
+
+Read these before deploying this release; details are in the entries below.
+
+- **Order:** (1) redeploy the stamp server image, (2) upgrade every
+  operator's stamp CLI, (3) point CI's `stamp/verify-attestation`
+  `stamp-version` at this release, (4) only then declare `repo_id` in repos
+  that don't have it yet. `server/README.md`, "Upgrading the server to this
+  release", has the operator checklist.
+- **Release step (maintainers):** downstream repos only get the hardened
+  `verify-attestation` action once `VERIFY_ACTION_REF` (and
+  `VERIFY_ACTION_VERSION`) in `src/lib/verifyWorkflow.ts` is bumped to a
+  release commit that contains the new `action.yml` and verifier lockfile.
+  Do that when cutting this release, then repos pick it up when their
+  `stamp-verify.yml` is regenerated or its `uses:` ref is bumped.
+- **Server operators:** after the first boot, re-check `stamp users list`
+  (removed users the old seeder re-imported are back and must be removed
+  again); `AUTHORIZED_KEYS` no longer enrolls keys (use `stamp invites mint`
+  or `stamp-break-glass add`); on servers with members, grant peer
+  listeners and members who use per-repo overrides their repos
+  (`stamp users grant <name> --repo <org>/*`); optionally
+  set `STAMP_PROMPTS_ALLOWED_SIGNERS` (Phase B prompt signatures) and the
+  retention variables `STAMP_PEER_EVENT_RETENTION_DAYS` /
+  `STAMP_SERVER_VERDICT_RETENTION_DAYS` (default 30 days, `0` keeps).
+- **Peer listeners** skip every event until the repo lands
+  `data_flow.peer_review_endpoints`, and need `origin/HEAD` set in each
+  mapped clone (`git remote set-head origin --auto`).
+- **Members without an enrolled stamp key** can no longer `stamp pr open`;
+  they re-enroll through an invite.
+- **Reviewer WebFetch** query strings are capped at 64 characters unless the
+  entry sets `query_param_max_length` or `query_param_allowlist`.
+- **Publishing (maintainers):** create the `npm-publish` GitHub environment
+  and set it on the npm Trusted Publisher before the next release (see
+  CONTRIBUTING). npm has no `legacy-1` dist-tag; the docs now say so and give
+  the manual `npm dist-tag add` step.
+
 ### Added
 
 - **`stamp users grant` / `revoke` / `grants`** — owners and admins scope
@@ -34,6 +70,89 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
 - **`stamp reviewers fetch` warns on trust-on-first-use from a tag or
   branch** with no signed manifest or `--expect-prompt-sha`; docs recommend
   a commit SHA as the ref.
+
+### Changed
+
+- **Per-repo prompt overrides need a repo grant (security).** The `--org` /
+  `--repo` a `stamp review` client sends to the server pick the per-repo
+  prompt override, and were only shape-checked: any enrolled member could
+  review a diff under another repo's (possibly lenient) override and use the
+  signed approval elsewhere. The server now binds the pair to the caller.
+  Owners and admins are unaffected. Members need a grant
+  (`stamp users grant <name> --repo <org>/<repo>` or `<org>/*`) for an
+  override to apply; a member with no grants still reviews under the default
+  prompts, but a review naming a repo that has an override is refused (exit 3).
+  A member with any grant can review only granted repos. **Upgrade note:** if
+  you use per-repo overrides, grant your members their repos, or their reviews
+  of those repos will be refused.
+
+- **The peer-review event stream is bound to repo grants (security).**
+  `GET /peer/events?org=...` (what `stamp pr listen` subscribes to) checked
+  enrollment only, so any member could name another team's org and receive
+  its PR titles, bodies, changed paths and URLs. The `?org=` list is now
+  filtered against the caller's repo grants, and every event is re-checked
+  against the subscriber's current grants at `<org>/<repo>` level (a grant for
+  one repo no longer exposes its siblings; a revoked grant or removed account
+  stops delivery without a reconnect). The PR body is no longer included in
+  streamed events; title and paths still are, and listeners already fetch the
+  real PR with `gh`. Owners and admins are unaffected. **Upgrade note:**
+  unlike reviews, the stream fails closed for members with no grants: their
+  `stamp pr listen` now gets a 403 until an admin runs
+  `stamp users grant <name> --repo <org>/*` (or a specific repo).
+  Single-operator servers, where the listener is an owner or admin, need no
+  change. `stamp pr listen` now prints a `warning:` naming any `--org` the
+  server dropped for lack of a grant, and exits 1 when a reconnect is refused
+  with 401/403 instead of retrying forever.
+- **`stamp-review` caps `--org` / `--repo` at 100 characters**, the same shape
+  `stamp users grant --repo` accepts. The "not granted" error for a per-repo
+  override now names the caller instead of a `<your-short-name>` placeholder,
+  and `stamp users grant` / `revoke` / `grants` errors describe the grant rules
+  instead of the role-management ones (which mentioned `--to`).
+
+- **A headless provision without `--yes` now stops before any remote work.**
+  With no TTY and no opt-out (`--yes` or `STAMP_REQUIRE_HUMAN_MERGE=0`),
+  provision exits with a hint to pass `--yes` before it creates the server
+  repo, clone, mirror, deploy key or Ruleset. Previously it did all of that
+  and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
+  and its plan now says how the bootstrap merge will be confirmed.
+
+- **`retention.auto_prune` honours each threshold separately** (AGT-2270).
+  It used to prune review rows and spools together under each duration, so
+  the shorter of `retention.reviews` / `retention.spools` applied to both.
+- **`stamp reviewers add` / `remove` and `stamp bootstrap` keep
+  `.stamp/config.yml` comments** (including the commented-out `retention:`
+  block `stamp init` writes) and the top-level keys they don't change;
+  bootstrap no longer drops keys such as `data_flow`.
+- **`stamp peer drafts delete --all --older-than <duration> --yes`** prunes
+  drafts by age.
+- **The SSH session gate:** an unknown command is refused with a list of
+  what the gate serves; a malformed forced command exits 2 (was 1); exit 3
+  is documented as "denied, or no such repo". `stamp server-repos` and
+  `stamp push --resync-mirror` explain an exit 3 as a role refusal instead
+  of a bare "failed (exit 3)".
+- **`stamp pr listen`:** the per-event reason for a cloud-routed endpoint is
+  shorter (the startup warning carries the fix), as is the data-flow bullet
+  in `--help`. The CLI help for `invites accept --short-name` describes the
+  new default.
+- **`stamp bootstrap` / `stamp provision` / `stamp init
+  --migrate-to-server-attested` print `repo_id already declared: <id>`**
+  when the config already declares one, instead of printing nothing
+  (AGT-2243). The capability probe keeps ssh's normal prompting, like
+  every other stamp ssh call (no `BatchMode`); headless, it fails and
+  leaves `repo_id` undeclared.
+- **Docs sweep** (AGT-2243): new troubleshooting entries for peer-listener
+  skip reasons, `stamp pr open` without an enrolled stamp key, an undeclared
+  `repo_id`, renaming a repo that declares `repo_id`, and a boot halted by
+  `refresh-repo-hooks`; a README section on `repo_id` with the upgrade order;
+  `server/README.md` "Upgrading the server to this release"; the README's
+  2.x config example now shows `review_server` and `path_rules` in their real
+  shape; the peer-review runbook no longer says `post_mode: dry-run` posts;
+  the default 64-character WebFetch query cap in DESIGN and the threat
+  model; a peer-review attacker position in the threat model; peer-review
+  commands in the README command list; the `legacy-1` dist-tag claim
+  corrected (npm has only `latest`; 1.x users install `@openthink/stamp@1`).
+  `stamp pr open --help` names the enrolled-stamp-key prerequisite and
+  `stamp reviewers fetch --help` recommends a commit SHA as the ref.
 
 ### Security
 
@@ -233,85 +352,6 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   review disclosure, backup retention guidance, and a note to gate
   tag-triggered publish jobs on a protected environment.
 
-### Changed
-
-- **Per-repo prompt overrides need a repo grant (security).** The `--org` /
-  `--repo` a `stamp review` client sends to the server pick the per-repo
-  prompt override, and were only shape-checked: any enrolled member could
-  review a diff under another repo's (possibly lenient) override and use the
-  signed approval elsewhere. The server now binds the pair to the caller.
-  Owners and admins are unaffected. Members need a grant
-  (`stamp users grant <name> --repo <org>/<repo>` or `<org>/*`) for an
-  override to apply; a member with no grants still reviews under the default
-  prompts, but a review naming a repo that has an override is refused (exit 3).
-  A member with any grant can review only granted repos. **Upgrade note:** if
-  you use per-repo overrides, grant your members their repos, or their reviews
-  of those repos will be refused.
-
-- **The peer-review event stream is bound to repo grants (security).**
-  `GET /peer/events?org=...` (what `stamp pr listen` subscribes to) checked
-  enrollment only, so any member could name another team's org and receive
-  its PR titles, bodies, changed paths and URLs. The `?org=` list is now
-  filtered against the caller's repo grants, and every event is re-checked
-  against the subscriber's current grants at `<org>/<repo>` level (a grant for
-  one repo no longer exposes its siblings; a revoked grant or removed account
-  stops delivery without a reconnect). The PR body is no longer included in
-  streamed events; title and paths still are, and listeners already fetch the
-  real PR with `gh`. Owners and admins are unaffected. **Upgrade note:**
-  unlike reviews, the stream fails closed for members with no grants: their
-  `stamp pr listen` now gets a 403 until an admin runs
-  `stamp users grant <name> --repo <org>/*` (or a specific repo).
-  Single-operator servers, where the listener is an owner or admin, need no
-  change. `stamp pr listen` now prints a `warning:` naming any `--org` the
-  server dropped for lack of a grant, and exits 1 when a reconnect is refused
-  with 401/403 instead of retrying forever.
-- **`stamp-review` caps `--org` / `--repo` at 100 characters**, the same shape
-  `stamp users grant --repo` accepts. The "not granted" error for a per-repo
-  override now names the caller instead of a `<your-short-name>` placeholder,
-  and `stamp users grant` / `revoke` / `grants` errors describe the grant rules
-  instead of the role-management ones (which mentioned `--to`).
-
-- **A headless provision without `--yes` now stops before any remote work.**
-  With no TTY and no opt-out (`--yes` or `STAMP_REQUIRE_HUMAN_MERGE=0`),
-  provision exits with a hint to pass `--yes` before it creates the server
-  repo, clone, mirror, deploy key or Ruleset. Previously it did all of that
-  and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
-  and its plan now says how the bootstrap merge will be confirmed.
-
-- **`retention.auto_prune` honours each threshold separately** (AGT-2270).
-  It used to prune review rows and spools together under each duration, so
-  the shorter of `retention.reviews` / `retention.spools` applied to both.
-- **`stamp reviewers add` / `remove` and `stamp bootstrap` keep
-  `.stamp/config.yml` comments** (including the commented-out `retention:`
-  block `stamp init` writes) and the top-level keys they don't change;
-  bootstrap no longer drops keys such as `data_flow`.
-- **`stamp peer drafts delete --all --older-than <duration> --yes`** prunes
-  drafts by age.
-- **The SSH session gate:** an unknown command is refused with a list of
-  what the gate serves; a malformed forced command exits 2 (was 1); exit 3
-  is documented as "denied, or no such repo". `stamp server-repos` and
-  `stamp push --resync-mirror` explain an exit 3 as a role refusal instead
-  of a bare "failed (exit 3)".
-- **`stamp pr listen`:** the per-event reason for a cloud-routed endpoint is
-  shorter (the startup warning carries the fix), as is the data-flow bullet
-  in `--help`. The CLI help for `invites accept --short-name` describes the
-  new default.
-
-### Security
-
-- **Brownfield `--from-tarball` imports no longer keep the tarball's git
-  config or hooks.** `setup-repo.sh` used to extract the uploaded bare clone
-  in place, so a `core.hooksPath` in its config made git skip the stamp-verify
-  pre-receive, and hooks it shipped (`update`, `reference-transaction`, ...)
-  ran as the server's git user on every push. The import now builds a fresh
-  bare repo and fetches only refs and objects into it, rejects tarballs
-  containing symlinks, sets `receive.denyNonFastForwards true` on this path
-  too. Brownfield import of a shallow clone now fails with a clear message.
-- **`setup-repo.sh` refuses to finish if `core.hooksPath` is set from any
-  config source**, on both the fresh and brownfield paths. A server whose git
-  user has a global or system `core.hooksPath` used to get repos where git
-  never ran the stamp-verify hook; `new-stamp-repo` now fails instead, removes
-  the half-built repo, and says how to find and unset the setting.
 - **Repo create, delete, purge and restore need owner or admin.**
   `new-stamp-repo`, `delete-stamp-repo` (soft delete and `--purge`) and
   `restore-stamp-repo` did no role check, so any enrolled key, a `member`
