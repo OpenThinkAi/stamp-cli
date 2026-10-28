@@ -591,7 +591,7 @@ export function selectServerNotices(stderr: string): string[] {
   }
   const suppressed = notices.length - out.length;
   if (suppressed > 0) {
-    out.push(`… ${suppressed} more server line${suppressed === 1 ? "" : "s"} suppressed`);
+    out.push(`… ${suppressed} more server notice${suppressed === 1 ? "" : "s"} suppressed`);
   }
   return out;
 }
@@ -654,7 +654,7 @@ export async function requestServerReview(
   // `note:` lines, sanitized and capped; the rest stays hidden.
   const notices = selectServerNotices(result.stderr);
   if (notices.length > 0) {
-    const write = input._writeStderrForTest ?? ((t: string) => void process.stderr.write(t));
+    const write = input._writeStderrForTest ?? ((t: string) => { process.stderr.write(t); });
     write(notices.map((line) => `review_server (${input.reviewer}): ${line}\n`).join(""));
   }
 

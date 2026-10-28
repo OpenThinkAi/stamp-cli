@@ -213,8 +213,8 @@ Read these before deploying this release; details are in the entries below.
   seen. Lines starting with `warning:` or `note:` are now printed to stderr
   as `review_server (<reviewer>): ...`, with terminal escape sequences
   removed and at most 20 lines / 4 KB per reviewer (a final line says how
-  many more were dropped). Other server stderr stays hidden; failures are
-  reported as before.
+  many more notices were dropped). Other server stderr stays hidden;
+  failures are reported as before.
 
 ### Security
 

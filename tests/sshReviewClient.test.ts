@@ -901,7 +901,7 @@ describe("requestServerReview — server notices on success (AGT-2278)", () => {
     assert.equal(out.length, SERVER_NOTICE_MAX_LINES + 1);
     assert.equal(out[0], "review_server (security): warning: w0");
     assert.equal(out[SERVER_NOTICE_MAX_LINES - 1], `review_server (security): warning: w${SERVER_NOTICE_MAX_LINES - 1}`);
-    assert.equal(out[SERVER_NOTICE_MAX_LINES], "review_server (security): … 7 more server lines suppressed");
+    assert.equal(out[SERVER_NOTICE_MAX_LINES], "review_server (security): … 7 more server notices suppressed");
   });
 
   it("caps the forwarded characters, truncating an oversized line", () => {
@@ -910,7 +910,7 @@ describe("requestServerReview — server notices on success (AGT-2278)", () => {
     assert.equal(out.length, 2);
     assert.equal(out[0]!.length, SERVER_NOTICE_MAX_CHARS);
     assert.ok(out[0]!.endsWith("…"));
-    assert.equal(out[1], "… 1 more server line suppressed");
+    assert.equal(out[1], "… 1 more server notice suppressed");
   });
 
   it("leaves the failure path unchanged: stderr in the error, nothing forwarded", async () => {
