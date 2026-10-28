@@ -233,6 +233,9 @@ describe("HTTP server: POST /invite/accept — success", () => {
         assert.equal(user.role, "member");
         assert.equal(user.source, "invite");
         assert.equal(user.ssh_fp, INVITEE_SSH_FP);
+        // AGT-2249: the key comment (user@host PII) is stripped on accept,
+        // same as the AUTHORIZED_KEYS seed path.
+        assert.equal(user.ssh_pubkey, INVITEE_SSH_LINE.split(" ").slice(0, 2).join(" "));
         assert.equal(user.stamp_pubkey, VALID_STAMP_PEM);
         assert.equal(user.invited_by, h.adminId);
       } finally {

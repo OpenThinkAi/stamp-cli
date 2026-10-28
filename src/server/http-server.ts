@@ -83,7 +83,7 @@ import {
   type PeerReviewPatchRow,
   type UserRow,
 } from "../lib/serverDb.js";
-import { parseSshPubkey } from "../lib/sshKeys.js";
+import { parseSshPubkey, sshPubkeyBody } from "../lib/sshKeys.js";
 import { isCallerAuthorizedForOrg, mayReceiveRepoEvents } from "../lib/repoAccess.js";
 import { verifyBytes } from "../lib/signing.js";
 import { fingerprintFromPem } from "../lib/keys.js";
@@ -255,7 +255,10 @@ function validateAcceptBody(body: AcceptBody):
     ok: true,
     data: {
       token: body.token,
-      ssh_pubkey: parsed.full,
+      // AGT-2249: store the comment-stripped key, like the AUTHORIZED_KEYS
+      // seed path (AGT-422). The comment is conventionally user@host (PII)
+      // and sshd matches on the blob, not the comment.
+      ssh_pubkey: sshPubkeyBody(parsed),
       ssh_fp: parsed.fingerprint,
       short_name: body.short_name,
       stamp_pubkey,
