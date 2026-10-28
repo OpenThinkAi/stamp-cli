@@ -27,7 +27,7 @@ import {
   DEFAULT_STANDARDS_PROMPT,
   EXAMPLE_REVIEWER_PROMPT,
   MINIMAL_CONFIG,
-  stringifyConfig,
+  renderInitialConfig,
 } from "../lib/config.js";
 import { openDb } from "../lib/db.js";
 import {
@@ -191,6 +191,9 @@ function printProseRetentionSnippet(repoRoot: string): void {
     "  Or set STAMP_REVIEW_PROSE_TTL_DAYS (prune then nulls old prose), or run",
   );
   console.log("  `stamp review --no-prose` to never record prose for a repo.");
+  console.log(
+    "  Or uncomment the `retention:` block in .stamp/config.yml to auto-prune.",
+  );
 }
 
 export function runInit(opts: InitOptions = {}): void {
@@ -238,10 +241,10 @@ export function runInit(opts: InitOptions = {}): void {
 
   if (!alreadyHasConfig) {
     if (opts.minimal) {
-      writeFileSync(configFile, stringifyConfig(MINIMAL_CONFIG));
+      writeFileSync(configFile, renderInitialConfig(MINIMAL_CONFIG));
       writeFileSync(join(reviewersDir, "example.md"), EXAMPLE_REVIEWER_PROMPT);
     } else {
-      writeFileSync(configFile, stringifyConfig(DEFAULT_CONFIG));
+      writeFileSync(configFile, renderInitialConfig(DEFAULT_CONFIG));
       writeFileSync(
         join(reviewersDir, "security.md"),
         DEFAULT_SECURITY_PROMPT,
