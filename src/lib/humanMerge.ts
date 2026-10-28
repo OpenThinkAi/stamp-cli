@@ -68,8 +68,8 @@ export interface RequireHumanMergeArgs {
 }
 
 export function requireHumanMerge(args: RequireHumanMergeArgs): void {
-  // Any of these three opts out; check order is incidental — all three
-  // are operator-declared intent and return silently.
+  // Any of these three opts out. The committed config opt-out returns
+  // silently; --yes and the env var print a note first (below).
   // IMPORTANT: use strict equality (=== false, not falsy) so that the
   // string value "strict" is never truthy-coerced into bypassing the gate.
   if (args.branchRule.require_human_merge === false) return;

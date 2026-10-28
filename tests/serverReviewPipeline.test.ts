@@ -843,7 +843,7 @@ describe("runReviewPipeline — env-var caps", () => {
     }
   });
 
-  it("AGT-2238: an invalid MAX_DIFF_BYTES / REVIEW_TIMEOUT_MS warns once on stderr; unset or valid is silent", async () => {
+  it("AGT-2238: an invalid MAX_DIFF_BYTES / REVIEW_TIMEOUT_MS warns on stderr (one line per call); unset or valid is silent", async () => {
     const { resolveMaxDiffBytes, resolveReviewTimeoutMs, DEFAULT_MAX_DIFF_BYTES, DEFAULT_REVIEW_TIMEOUT_MS } =
       await import("../src/server/reviewPipeline.ts");
     const savedMax = process.env.MAX_DIFF_BYTES;
