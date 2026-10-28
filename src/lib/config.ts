@@ -1144,11 +1144,12 @@ export const RETENTION_CONFIG_SCAFFOLD = `
 # until you run \`stamp prune\`. To bound it, uncomment this block:
 #
 # retention:
-#   reviews: 90d       # review rows older than this are flagged (<n>d, <n>h, <n>m)
-#   spools: 90d        # failed-parse / failed-run spool files, same format
-#   auto_prune: true   # prune after each \`stamp review\` (omit or false =
-#                      # advise only, never delete). Each prune pass sweeps
-#                      # rows AND spools, so the shorter value applies to both.
+#   reviews: 60d       # age limit for review rows (<n>d, <n>h or <n>m)
+#   spools: 60d        # age limit for failed-parse / failed-run spool files
+#   auto_prune: true   # delete past-limit items after each \`stamp review\`;
+#                      # omit or false = only report them, never delete.
+#                      # Each prune uses the shorter of the two limits for
+#                      # both rows and spools.
 `;
 
 /**

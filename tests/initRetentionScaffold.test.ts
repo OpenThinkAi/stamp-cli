@@ -61,8 +61,8 @@ describe("stamp init retention scaffold (AGT-2247)", () => {
       uncommentRetention(renderInitialConfig(DEFAULT_CONFIG)),
     );
     assert.deepEqual(parsed.retention, {
-      reviews: "90d",
-      spools: "90d",
+      reviews: "60d",
+      spools: "60d",
       auto_prune: true,
     });
   });
