@@ -75,7 +75,7 @@ interface RunResult {
   sdkDiffs: string[];
   diffArgs: string[][];
   posts: number;
-  dataFlowReads: Array<{ path: string; baseSha: string }>;
+  dataFlowReads: Array<{ path: string; ref: string }>;
 }
 
 async function runListener(
@@ -121,11 +121,11 @@ async function runListener(
     _operatorVerifyForTest: () => ({ ok: true as const }),
     ...extra,
   };
-  if (opts._dataFlowAtBaseForTest) {
-    const inner = opts._dataFlowAtBaseForTest;
-    opts._dataFlowAtBaseForTest = (path, baseSha) => {
-      out.dataFlowReads.push({ path, baseSha });
-      return inner(path, baseSha);
+  if (opts._dataFlowAtRefForTest) {
+    const inner = opts._dataFlowAtRefForTest;
+    opts._dataFlowAtRefForTest = (path, ref) => {
+      out.dataFlowReads.push({ path, ref });
+      return inner(path, ref);
     };
   }
 
@@ -285,15 +285,31 @@ describe("AGT-2248: checkPeerDataFlow fails closed", () => {
 
 describe("AGT-2248: listener refuses without consent for its endpoint", () => {
   it("skips before triage when the repo's data_flow lists no endpoints", async () => {
-    const r = await runListener([prOpened()], { _dataFlowAtBaseForTest: () => undefined });
+    const r = await runListener([prOpened()], { _dataFlowAtRefForTest: () => undefined });
     assertNothingLeft(r);
-    assert.match(r.stderr, /data-flow gate: the repo has not consented to peer LLM review at api\.anthropic\.com/);
-    assert.deepEqual(r.dataFlowReads, [{ path: "/tmp/fake-acme-widget", baseSha: BASE_SHA }]);
+    assert.match(
+      r.stderr,
+      /skipping event for acme\/widget PR #42 — data-flow gate: at base_sha: the repo has not consented to peer LLM review at api\.anthropic\.com/,
+    );
+    assert.deepEqual(r.dataFlowReads, [{ path: "/tmp/fake-acme-widget", ref: BASE_SHA }]);
+  });
+
+  it("skips when base_sha consents but the protected tip has withdrawn consent", async () => {
+    const r = await runListener([prOpened()], {
+      _dataFlowAtRefForTest: (_p, ref) =>
+        ref === BASE_SHA ? { peer_review_endpoints: ["api.anthropic.com"] } : undefined,
+    });
+    assertNothingLeft(r);
+    assert.match(r.stderr, /data-flow gate: at protected tip: the repo has not consented/);
+    assert.deepEqual(
+      r.dataFlowReads.map((x) => x.ref),
+      [BASE_SHA, "refs/remotes/origin/HEAD"],
+    );
   });
 
   it("skips when the repo consents to a different endpoint than the listener's", async () => {
     const r = await runListener([prOpened()], {
-      _dataFlowAtBaseForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
+      _dataFlowAtRefForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
       _llmEnvForTest: { ANTHROPIC_BASE_URL: "https://gateway.corp.test" },
     });
     assertNothingLeft(r);
@@ -302,7 +318,7 @@ describe("AGT-2248: listener refuses without consent for its endpoint", () => {
 
   it("skips when require_confirmation is armed without confirmed", async () => {
     const r = await runListener([prOpened()], {
-      _dataFlowAtBaseForTest: () => ({ require_confirmation: true, peer_review_endpoints: ["api.anthropic.com"] }),
+      _dataFlowAtRefForTest: () => ({ require_confirmation: true, peer_review_endpoints: ["api.anthropic.com"] }),
     });
     assertNothingLeft(r);
     assert.match(r.stderr, /require_confirmation is set/);
@@ -310,15 +326,15 @@ describe("AGT-2248: listener refuses without consent for its endpoint", () => {
 
   it("skips when .stamp/config.yml at base_sha cannot be read", async () => {
     const r = await runListener([prOpened()], {
-      _dataFlowAtBaseForTest: () => { throw new Error("fatal: path '.stamp/config.yml' does not exist"); },
+      _dataFlowAtRefForTest: () => { throw new Error("fatal: path '.stamp/config.yml' does not exist"); },
     });
     assertNothingLeft(r);
-    assert.match(r.stderr, /data-flow gate: cannot read \.stamp\/config\.yml at base_sha bbbbbbbb/);
+    assert.match(r.stderr, /data-flow gate: cannot read or parse \.stamp\/config\.yml at base_sha bbbbbbbbbbbb/);
   });
 
   it("re-review-requested events are gated too", async () => {
     const ev = { ...prOpened(), event_type: "re-review-requested" } as PeerReviewEvent;
-    const r = await runListener([ev], { _dataFlowAtBaseForTest: () => undefined });
+    const r = await runListener([ev], { _dataFlowAtRefForTest: () => undefined });
     assertNothingLeft(r);
   });
 });
@@ -326,7 +342,7 @@ describe("AGT-2248: listener refuses without consent for its endpoint", () => {
 describe("AGT-2248: listener proceeds with consent", () => {
   it("triages, reviews and posts when the endpoint is listed, printing the marker", async () => {
     const r = await runListener([prOpened()], {
-      _dataFlowAtBaseForTest: () => ({
+      _dataFlowAtRefForTest: () => ({
         disclosure: "Peer reviews go to Anthropic.",
         peer_review_endpoints: ["api.anthropic.com"],
       }),
@@ -341,7 +357,7 @@ describe("AGT-2248: listener proceeds with consent", () => {
 
   it("proceeds with no consent when the model is on this host", async () => {
     const r = await runListener([prOpened()], {
-      _dataFlowAtBaseForTest: () => undefined,
+      _dataFlowAtRefForTest: () => undefined,
       _llmEnvForTest: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8000" },
     });
     assert.equal(r.posts, 1, r.stderr);
@@ -357,10 +373,12 @@ function git(cwd: string, ...args: string[]): string {
   return r.stdout.trim();
 }
 
-describe("AGT-2248: data_flow is read from the mapped clone at base_sha", () => {
+describe("AGT-2248: data_flow is read from the mapped clone at base_sha and the protected tip", () => {
   let dir: string;
   let noConsent: string;
   let consent: string;
+  let revoked: string;
+  const setTip = (sha: string) => git(dir, "update-ref", "refs/remotes/origin/main", sha);
   before(() => {
     dir = mkdtempSync(join(os.tmpdir(), "peer-data-flow-"));
     git(dir, "init", "-q", "-b", "main");
@@ -378,26 +396,60 @@ describe("AGT-2248: data_flow is read from the mapped clone at base_sha", () => 
     );
     git(dir, "commit", "-q", "-am", "consent");
     consent = git(dir, "rev-parse", "HEAD");
-    // Working tree claims consent too; the gate must ignore it and read base_sha.
+    writeFileSync(join(dir, ".stamp", "config.yml"), MIN_CONFIG);
+    git(dir, "commit", "-q", "-am", "withdraw consent");
+    revoked = git(dir, "rev-parse", "HEAD");
+    // The working tree claims consent; the gate must ignore it.
+    writeFileSync(
+      join(dir, ".stamp", "config.yml"),
+      MIN_CONFIG + "data_flow:\n  peer_review_endpoints: [api.anthropic.com]\n",
+    );
+    setTip(consent);
+    git(dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
   });
   after(() => rmSync(dir, { recursive: true, force: true }));
 
   it("refuses an event whose base_sha predates the consent commit", async () => {
+    setTip(consent);
     const r = await runListener([prOpened(noConsent)], { _peerReposMapForTest: new Map([[REPO, dir]]) });
     assertNothingLeft(r);
-    assert.match(r.stderr, /not consented to peer LLM review at api\.anthropic\.com/);
+    assert.match(r.stderr, /at base_sha: the repo has not consented to peer LLM review at api\.anthropic\.com/);
   });
 
-  it("proceeds for an event whose base_sha carries the consent", async () => {
+  it("proceeds when base_sha and the protected tip both carry the consent", async () => {
+    setTip(consent);
     const r = await runListener([prOpened(consent)], { _peerReposMapForTest: new Map([[REPO, dir]]) });
     assert.equal(r.posts, 1, r.stderr);
+  });
+
+  it("refuses an old consenting base_sha once the protected tip withdrew consent", async () => {
+    setTip(revoked);
+    try {
+      const r = await runListener([prOpened(consent)], { _peerReposMapForTest: new Map([[REPO, dir]]) });
+      assertNothingLeft(r);
+      assert.match(r.stderr, /at protected tip: the repo has not consented/);
+    } finally {
+      setTip(consent);
+    }
+  });
+
+  it("refuses when origin/HEAD does not resolve", async () => {
+    const bare = mkdtempSync(join(os.tmpdir(), "peer-data-flow-nohead-"));
+    try {
+      git(bare, "init", "-q", "-b", "main");
+      const r = await runListener([prOpened(consent)], { _peerReposMapForTest: new Map([[REPO, bare]]) });
+      assertNothingLeft(r);
+      assert.match(r.stderr, /data-flow gate: refs\/remotes\/origin\/HEAD does not resolve/);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
   });
 });
 
 // ─── diff at base...head ──────────────────────────────────────────────
 
 describe("AGT-2248: the diff is fetched at base_sha...head_sha", () => {
-  const consent = { _dataFlowAtBaseForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }) };
+  const consent = { _dataFlowAtRefForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }) };
 
   it("buildPeerDiffFetchArgs uses the compare API with both SHAs", () => {
     assert.deepEqual(

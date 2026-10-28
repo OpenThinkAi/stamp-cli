@@ -68,8 +68,10 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   paths to a Haiku triage call and the full diff to a review call, under the
   listener operator's provider account, without checking the repo's
   committed `data_flow` block the way `stamp review` does. It now reads
-  `.stamp/config.yml` at the event's `base_sha` from the mapped clone and
-  skips the event, before triage, unless a new
+  `.stamp/config.yml` from the mapped clone at the event's `base_sha` and at
+  the protected tip (`origin/HEAD`, so an author can't cite a commit from
+  before consent was withdrawn). It skips the event, before triage, unless
+  in both places a new
   `data_flow.peer_review_endpoints` list names the host its LLM endpoint
   resolves to (`api.anthropic.com` by default, or the host of
   `ANTHROPIC_BASE_URL`). An armed `require_confirmation` without `confirmed`

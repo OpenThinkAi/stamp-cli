@@ -168,10 +168,10 @@ $ stamp pr listen \
 When the `pr-opened` event arrives:
 
 0. **Data-flow gate (AGT-2248).** Before any LLM call, the listener reads
-   `.stamp/config.yml` at `base_sha` from its mapped clone (after the
-   operator check has bound `base_sha` to the protected branch) and skips
-   the event unless `data_flow.peer_review_endpoints` lists the host its
-   LLM endpoint resolves to. See [Data flow and consent](#data-flow-and-consent).
+   `.stamp/config.yml` from its mapped clone at `base_sha` and at the
+   protected tip. It skips the event unless both copies of
+   `data_flow.peer_review_endpoints` list the host its LLM endpoint
+   resolves to. See [Data flow and consent](#data-flow-and-consent).
 1. Listener reads `~/.stamp/peer-watch.md` + composes
    `[rules + event-payload + triage-schema-prompt]` for a Haiku call.
 2. Haiku returns a **triage decision**:
@@ -368,8 +368,13 @@ data_flow:
   missing block or list, a host that isn't listed, an unreadable config at
   `base_sha`, or `require_confirmation` without `confirmed` all skip the
   event before triage. Nothing is sent.
-- **Read at `base_sha`**, which the operator check has already bound to
-  the protected branch, so a feature branch cannot grant itself consent.
+- **Read at `base_sha` and at the protected tip.** The operator check has
+  already bound `base_sha` to the protected branch, so a feature branch
+  cannot grant itself consent. `base_sha` is chosen by the author, though,
+  and the compare diff runs from it. Reading it alone would let an author
+  cite a commit from before consent was withdrawn and ship everything that
+  landed since. So consent must also hold at `origin/HEAD`, which is the
+  same revocation rule the operator check applies to keys.
 - **Disclosure.** Each event that passes prints a per-event off-host marker
   and the repo's `data_flow.disclosure` (both silenced by
   `STAMP_SUPPRESS_LLM_NOTICE=1`). A listener with an off-host endpoint

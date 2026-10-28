@@ -140,7 +140,7 @@ export function printNoRetainWarning(): void {
 // ─── AGT-2248: peer listener (`stamp pr listen`) data-flow gate ─────────
 
 /** The Anthropic API origin the Agent SDK calls when nothing overrides it. */
-export const DEFAULT_ANTHROPIC_ENDPOINT = "https://api.anthropic.com";
+const DEFAULT_ANTHROPIC_ENDPOINT = "https://api.anthropic.com";
 
 /**
  * Where the listener's Agent SDK calls (Haiku triage + Sonnet review) will

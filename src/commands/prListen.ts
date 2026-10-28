@@ -89,7 +89,12 @@ import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
 import { firePeerNotification } from "../lib/peerNotify.js";
 import { draftsDir } from "../lib/paths.js";
 import { loadPeerReposConfig, resolveLocalRepoPath } from "../lib/peerReposConfig.js";
-import { FULL_SHA_RE, verifyPeerAuthorLocal } from "../lib/peerOperatorVerify.js";
+import {
+  FULL_SHA_RE,
+  PROTECTED_TIP_REF,
+  resolveProtectedTip,
+  verifyPeerAuthorLocal,
+} from "../lib/peerOperatorVerify.js";
 import { detectClaudeSession } from "../lib/claudeSession.js";
 import { checkPrUrlBinding, type ParsedPrUrl } from "../lib/prUrlBinding.js";
 import { parseConfigFromYaml, type DataFlowConfig } from "../lib/config.js";
@@ -146,13 +151,15 @@ export interface PrListenOptions {
     ghArgs: string[],
   ) => { status: number; stdout: string; stderr: string };
   /**
-   * Test-only: replace reading `.stamp/config.yml` at `base_sha` from the
-   * mapped clone (AGT-2248). Return the repo's `data_flow` block (or
-   * undefined for none); throw to simulate an unreadable/invalid config.
+   * Test-only: replace reading `.stamp/config.yml` from the mapped clone
+   * (AGT-2248). Called once with `base_sha` and once with
+   * `PROTECTED_TIP_REF` (the tip is not resolved through git when this seam
+   * is set). Return the repo's `data_flow` block (or undefined for none);
+   * throw to simulate an unreadable/invalid config.
    */
-  _dataFlowAtBaseForTest?: (
+  _dataFlowAtRefForTest?: (
     localRepoPath: string,
-    baseSha: string,
+    ref: string,
   ) => DataFlowConfig | undefined;
   /**
    * Test-only: env used to resolve the listener's LLM endpoint
@@ -673,11 +680,17 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
   // the endpoint. Resolved once; every event is gated against its repo's
   // committed consent for this endpoint before any LLM call.
   const llmEndpoint = resolvePeerLlmEndpoint(opts._llmEnvForTest ?? process.env);
-  if (llmEndpoint.offHost) {
+  if (llmEndpoint.offHost && llmEndpoint.host === null) {
     process.stderr.write(
-      `note: peer reviews send PR content to ${llmEndpoint.host ?? llmEndpoint.label}; ` +
+      `warning: this listener's LLM endpoint (${llmEndpoint.label}) cannot be pinned to a host, ` +
+        `so no repo can consent to it via data_flow.peer_review_endpoints — every event will be ` +
+        `skipped. Point ANTHROPIC_BASE_URL at a listed endpoint or a model on this host.\n`,
+    );
+  } else if (llmEndpoint.offHost) {
+    process.stderr.write(
+      `note: peer reviews send PR content to ${llmEndpoint.host}; ` +
         `events are skipped unless the PR's repo lists that host in ` +
-        `data_flow.peer_review_endpoints at base_sha\n`,
+        `data_flow.peer_review_endpoints at base_sha and at the protected tip\n`,
     );
     printNoRetainWarning();
   }
@@ -1029,37 +1042,63 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // Triage sends the title + changed paths, review sends the full diff —
     // another author's content, under THIS operator's provider account. The
     // listener is unattended and cannot prompt, so fail closed: proceed only
-    // when the repo's committed data_flow (read at base_sha, which the
-    // operator check above already bound to the protected branch, so a
-    // feature branch cannot grant itself consent) lists this endpoint.
-    {
-      let dataFlow: DataFlowConfig | undefined;
-      try {
-        dataFlow = opts._dataFlowAtBaseForTest
-          ? opts._dataFlowAtBaseForTest(localRepoPath, baseSha)
-          : parseConfigFromYaml(
-              showAtRef(baseSha, ".stamp/config.yml", localRepoPath),
-            ).data_flow;
-      } catch (err) {
-        if (llmEndpoint.offHost) {
-          const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(
-            `note: skipping event for PR #${prNumber} — data-flow gate: cannot read ` +
-              `.stamp/config.yml at base_sha ${baseSha.slice(0, 8)} (${msg})\n`,
-          );
-          continue;
-        }
-        dataFlow = undefined;
-      }
-      const gate = checkPeerDataFlow(dataFlow, llmEndpoint);
-      if (!gate.ok) {
+    // when the repo's committed data_flow lists this endpoint BOTH at
+    // base_sha (bound to the protected branch by the operator check above,
+    // so a feature branch cannot grant itself consent) AND at the protected
+    // tip. base_sha is author-chosen, so reading it alone would let an
+    // author cite a commit from before consent was withdrawn and have the
+    // base...head diff ship everything landed since — the same revocation
+    // rule the operator check applies to keys. A loopback endpoint sends
+    // nothing off-host and needs no consent.
+    if (llmEndpoint.offHost) {
+      const skip = (why: string) =>
         process.stderr.write(
-          `note: skipping event for PR #${prNumber} — data-flow gate: ${gate.reason}\n`,
+          `note: skipping event for ${repo} PR #${prNumber} — data-flow gate: ${why}\n`,
         );
+      const readAt = (ref: string): DataFlowConfig | undefined =>
+        opts._dataFlowAtRefForTest
+          ? opts._dataFlowAtRefForTest(localRepoPath, ref)
+          : parseConfigFromYaml(showAtRef(ref, ".stamp/config.yml", localRepoPath)).data_flow;
+
+      const tipRef = opts._dataFlowAtRefForTest
+        ? PROTECTED_TIP_REF
+        : resolveProtectedTip(localRepoPath);
+      if (tipRef === null) {
+        skip(`${PROTECTED_TIP_REF} does not resolve in ${localRepoPath}; run 'git fetch origin'`);
         continue;
       }
+      const refs: Array<[label: string, ref: string]> =
+        tipRef === baseSha
+          ? [["base_sha", baseSha]]
+          : [["base_sha", baseSha], ["protected tip", tipRef]];
+      let baseDataFlow: DataFlowConfig | undefined;
+      let refused = false;
+      for (const [label, ref] of refs) {
+        let dataFlow: DataFlowConfig | undefined;
+        try {
+          dataFlow = readAt(ref);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          skip(
+            `cannot read or parse .stamp/config.yml at ${label} ${ref.slice(0, 12)} (${msg}); ` +
+              `check the mapped clone is fetched and the config is valid`,
+          );
+          refused = true;
+          break;
+        }
+        const gate = checkPeerDataFlow(dataFlow, llmEndpoint);
+        if (!gate.ok) {
+          skip(`at ${label}: ${gate.reason}`);
+          refused = true;
+          break;
+        }
+        if (label === "base_sha") baseDataFlow = dataFlow;
+      }
+      if (refused) continue;
       printPeerEgressMarker(`PR #${prNumber}`, repo, llmEndpoint);
-      if (llmEndpoint.offHost) printDataFlowDisclosure(dataFlow);
+      printDataFlowDisclosure(baseDataFlow);
+    } else {
+      printPeerEgressMarker(`PR #${prNumber}`, repo, llmEndpoint);
     }
 
     // ─── AGT-430: Haiku triage call ──────────────────────────────
@@ -1604,6 +1643,8 @@ export function buildPeerDiffFetchArgs(
   baseSha: string,
   headSha: string,
 ): string[] {
+  // Defence in depth for this exported helper: runPrListen has already
+  // checked both SHAs before claiming a seat, so this cannot throw there.
   for (const [name, sha] of [["base_sha", baseSha], ["head_sha", headSha]] as const) {
     if (!FULL_SHA_RE.test(sha)) {
       throw new Error(`${name} ${JSON.stringify(sha)} is not a full 40-char lowercase hex SHA`);

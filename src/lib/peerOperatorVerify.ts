@@ -212,6 +212,16 @@ export function verifyPeerAuthorLocal(
   return { ok: true };
 }
 
+/**
+ * The protected-branch tip (`PROTECTED_TIP_REF`) of the listener's local
+ * clone, or null when it does not resolve. Used by the AGT-2248 data-flow
+ * gate so revocable repo policy is read at the tip as well as at the
+ * author-chosen `base_sha`.
+ */
+export function resolveProtectedTip(localRepoPath: string): string | null {
+  return resolveCommit(localRepoPath, PROTECTED_TIP_REF);
+}
+
 /** Resolve `ref` to a commit SHA in `cwd`, or null when it does not resolve. */
 function resolveCommit(cwd: string, ref: string): string | null {
   const r = spawnSync(

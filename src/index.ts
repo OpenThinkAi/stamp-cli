@@ -988,10 +988,11 @@ admin), and a member with no grants is refused (403).
 
   - Receives pr-opened events over the SSE transport (the sole listen transport)
   - Applies author-exclusion (skips own PRs)
-  - Data-flow gate: reads the PR repo's .stamp/config.yml at base_sha from the
-    mapped clone and skips the event, before any LLM call, unless
-    data_flow.peer_review_endpoints lists this listener's LLM endpoint host
-    (api.anthropic.com, or the host of ANTHROPIC_BASE_URL); an armed
+  - Data-flow gate: reads the PR repo's .stamp/config.yml from the mapped
+    clone at base_sha AND at the protected tip (origin/HEAD) and skips the
+    event, before any LLM call, unless data_flow.peer_review_endpoints lists
+    this listener's LLM endpoint host in both (api.anthropic.com, or the
+    host of ANTHROPIC_BASE_URL); an armed
     require_confirmation must also be confirmed. A model on this host
     (loopback ANTHROPIC_BASE_URL) needs no entry. Unattended, so it never
     prompts: no consent, no egress.

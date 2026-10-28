@@ -90,7 +90,7 @@ async function runAndCapture(opts: PrListenOptions): Promise<{ stderr: string; e
 
   try {
     await runPrListen({
-      _dataFlowAtBaseForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
+      _dataFlowAtRefForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
       _llmEnvForTest: {},
       ...opts,
     });

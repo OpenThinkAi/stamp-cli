@@ -1169,9 +1169,10 @@ data_flow:
 
 **Peer listeners (`stamp pr listen`).** A peer listener reviews *someone
 else's* PR, under its own operator's provider account. It runs unattended,
-so it fails closed: it skips any event unless the PR's repo, at the
-event's `base_sha`, lists the host the listener's LLM endpoint resolves to
-(`api.anthropic.com`, or the host of `ANTHROPIC_BASE_URL`):
+so it fails closed. It skips any event unless the PR's repo lists, at
+both the event's `base_sha` and the protected tip, the host the
+listener's LLM endpoint resolves to (`api.anthropic.com`, or the host of
+`ANTHROPIC_BASE_URL`):
 
 ```yaml
 data_flow:
