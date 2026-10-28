@@ -30,6 +30,17 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
   and its plan now says how the bootstrap merge will be confirmed.
 
+### Security
+
+- **The npm publish workflow no longer runs dependency code while it holds
+  the OIDC token.** `publish.yml` is split into three jobs. `build`
+  (`contents: read`) installs with `npm ci --ignore-scripts`, typechecks,
+  builds and packs the tarball. `publish` (`id-token: write` only) downloads
+  that tarball and publishes it with `--ignore-scripts --provenance`, with no
+  checkout and no install. `tag` (`contents: write`) pushes the release tag
+  and runs only git. The build checkout no longer persists the
+  `GITHUB_TOKEN` in `.git/config`.
+
 ---
 
 ## 3.6.2 — 2026-10-19
