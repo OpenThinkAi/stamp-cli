@@ -636,8 +636,9 @@ export async function requestServerReview(
     // 1=server-config, 2=usage, 3=role-permission, 4=request-validation)
     // to operator-readable prose. Always surface the server's stderr —
     // it carries the structured `error: ...` line the verb writes,
-    // which is the most actionable hint for the operator.
-    const stderr = result.stderr.trim();
+    // which is the most actionable hint for the operator. The stderr is
+    // server-controlled, so strip terminal escapes first (AGT-2278).
+    const stderr = stripTerminalControls(result.stderr).trim();
     const hint = exitCodeHint(result.exitCode);
     const signalNote = result.signal ? ` (killed by signal ${result.signal})` : "";
     throw new Error(

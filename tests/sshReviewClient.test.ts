@@ -913,6 +913,20 @@ describe("requestServerReview — server notices on success (AGT-2278)", () => {
     assert.equal(out[1], "… 1 more server notice suppressed");
   });
 
+  it("strips escape sequences from a failing server's stderr in the error", async () => {
+    const r = await runWith(
+      "error: \u001b[31mdenied\u001b[0m\u001b]8;;https://evil.example\u0007click\u001b]8;;\u0007\r\n" +
+        "\u001b[1A\u001b[2Kerror: rewritten\u0007",
+      3,
+    );
+    assert.ok(r.error instanceof Error);
+    assert.match(r.error.message, /exit 3/);
+    assert.match(r.error.message, /server stderr:\n    error: deniedclick\n    error: rewritten$/);
+    // eslint-disable-next-line no-control-regex
+    assert.doesNotMatch(r.error.message, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    assert.deepEqual(r.written, []);
+  });
+
   it("leaves the failure path unchanged: stderr in the error, nothing forwarded", async () => {
     const r = await runWith("warning: STAMP_REVIEWER_MODEL is not valid\nerror: role member is not permitted", 3);
     assert.ok(r.error instanceof Error);
