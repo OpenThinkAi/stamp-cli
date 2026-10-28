@@ -66,12 +66,14 @@ import {
   verifyV4ManifestSnapshot,
   verifyV4MergeStructure,
   verifyV4OuterSignature,
+  verifyV4RepoBinding,
   verifyV4SignerTrust,
   verifyV4StampPathsGuard,
   verifyV4TargetBranch,
   verifyV4TrustAnchorSignatures,
   type PhaseInputV4,
 } from "../src/hooks/pre-receive.ts";
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 
 // Schema version constant used when building test payloads. The
 // dispatch-threshold test imports the real constants from
@@ -326,6 +328,7 @@ function buildPhaseInput(args: {
     pubkeyByFingerprint,
     pathRules: args.pathRules ?? [],
     changedFiles,
+    repoBinding: UNBOUND,
   };
 }
 
@@ -404,6 +407,7 @@ function runAllPhases(input: PhaseInputV4): string | null {
     verifyV4Approvals,
     verifyV4DiffHash,
     verifyV4ApprovalSignatures,
+    verifyV4RepoBinding,
     verifyV4Checks,
     verifyV4TrustAnchorSignatures,
     verifyV4StampPathsGuard,

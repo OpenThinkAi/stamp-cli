@@ -172,7 +172,7 @@ stamp init --migrate-to-server-attested
 2. Appends a default `path_rules: ".stamp/**":` block to `.stamp/config.yml` with `require_capability: admin`, `minimum_signatures: 2`, `bypass_review_cycle: true`.
 3. From a TTY, prompts you to pick which existing operator keys should also gain `admin` capability for trust-anchor changes. **From non-interactive stdin (agent migrations), no keys are promoted** — a `warning:` line surfaces this; you must hand-edit the manifest before any `.stamp/**` change can land.
 
-Two follow-up edits the command does NOT do for you (it can't infer the
+Follow-up edits the command does NOT do for you (it can't infer the
 values) — you make them by hand before the migration commit lands:
 
 - **Promote the review-server entry to `[server]`.** Edit
@@ -181,6 +181,11 @@ values) — you make them by hand before the migration commit lands:
 - **Add `review_server` to `.stamp/config.yml`.** Under your branch rule
   (e.g. `branches.main`), add `review_server: ssh://git@<host>:<port>`
   pointing at your stamp-server.
+- **Declare the repo's id: `repo_id: <org>/<repo>`** at the top level of
+  `.stamp/config.yml` — the pair this repo's prompts live under on the
+  server (`stamp review` prints the one it is using). Verifiers then refuse
+  approvals the server signed for any other repo (AGT-2272). Needs a stamp
+  server new enough to sign `repo_id`; see the CHANGELOG for the order.
 
 **Single-trusted-key repos:** if your `.stamp/trusted-keys/` has only one
 pubkey, `minimum_signatures: 2` will block every future `.stamp/**` change

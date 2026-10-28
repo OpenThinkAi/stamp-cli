@@ -74,6 +74,7 @@ import {
   type PathRule,
   type PhaseInputV4,
 } from "../src/lib/v4Trust.ts";
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 
 // runAttest doesn't call requireHumanMerge but be defensive in case a
 // future change pulls it in (matches the sibling tests' posture).
@@ -495,6 +496,7 @@ function buildPhaseInputForEnvelope(args: {
     pubkeyByFingerprint,
     pathRules,
     changedFiles,
+    repoBinding: UNBOUND,
   };
 }
 

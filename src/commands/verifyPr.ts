@@ -64,6 +64,7 @@ import { findBranchRule, parseConfigFromYaml } from "../lib/config.js";
 import { resolveDiff, runGit, showAtRef } from "../lib/git.js";
 import { findRepoRoot } from "../lib/paths.js";
 import { patchIdForSpan } from "../lib/patchId.js";
+import { repoIdRawFromConfigYaml, resolveRepoBinding } from "../lib/repoBinding.js";
 import {
   MIN_ACCEPTED_PR_ATTESTATION_VERSION,
   parseEnvelope,
@@ -375,6 +376,16 @@ function verifyV3Envelope(
     "utf8",
   );
 
+  // AGT-2272: repo-id binding, from `repo_id:` at the PR's base ref
+  // (CI passes the target branch's tip as --base) and at base_sha.
+  // Reading the tip as well as the merge base means a PR branched off
+  // before the repo declared its id still has to carry bound approvals.
+  const tipSha = runGit(["rev-parse", "--verify", `${opts.base}^{commit}`], repoRoot).trim();
+  const repoBinding = resolveRepoBinding([
+    { where: tipSha.slice(0, 8), raw: repoIdRawFromConfigYaml(readConfigYamlAt(tipSha, repoRoot)) },
+    { where: payload.base_sha.slice(0, 8), raw: repoIdRawFromConfigYaml(configYaml) },
+  ]);
+
   const input: PhaseInputV4 = {
     sha: patch_id, // PR-mode: no merge commit; we use the patch-id as the
     //               identity for error-message prefixes. The v4 phases use
@@ -390,6 +401,7 @@ function verifyV3Envelope(
     pubkeyByFingerprint,
     pathRules,
     changedFiles,
+    repoBinding,
   };
 
   // PR-mode pipeline. Reuses the PR_MODE_PHASES_V4 constant from
@@ -963,6 +975,15 @@ function loadPathRulesAtBase(
     process.stderr.write(`stamp-verify: ${warning}\n`);
   }
   return parsedRules.rules;
+}
+
+/** `.stamp/config.yml` text at `ref`, or null when absent/unreadable. */
+function readConfigYamlAt(ref: string, repoRoot: string): string | null {
+  try {
+    return showAtRef(ref, ".stamp/config.yml", repoRoot);
+  } catch {
+    return null;
+  }
 }
 
 /**

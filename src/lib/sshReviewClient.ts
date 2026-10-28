@@ -67,6 +67,7 @@ import {
   type ApprovalV4,
 } from "./attestationV4.js";
 import { fingerprintFromPem } from "./keys.js";
+import { formatRepoId } from "./repoBinding.js";
 import {
   parseManifest,
   resolveCapability,
@@ -637,6 +638,17 @@ export async function requestServerReview(
     throw new Error(
       `review_server returned a signed approval for diff_sha256 ${parsed.approval.diff_sha256} ` +
         `but we sent diff_sha256 ${diffSha256} — refusing.`,
+    );
+  }
+  // AGT-2272: a server that binds approvals to a repo id must have bound
+  // this one to the org/repo we asked for. An approval with no repo_id
+  // comes from a pre-AGT-2272 server; it is accepted here and the
+  // verifier decides (it refuses it when the repo declares repo_id).
+  const requestedRepoId = formatRepoId(input.org, input.repo);
+  if (parsed.approval.repo_id !== undefined && parsed.approval.repo_id !== requestedRepoId) {
+    throw new Error(
+      `review_server returned a signed approval for repo ${JSON.stringify(parsed.approval.repo_id)} ` +
+        `but we asked for ${JSON.stringify(requestedRepoId)} — refusing.`,
     );
   }
 

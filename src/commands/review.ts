@@ -56,6 +56,11 @@ import {
 } from "../lib/headlessReviewer.js";
 import { deriveOrgRepoFromRemote } from "../lib/remote.js";
 import {
+  repoIdRawFromConfigYaml,
+  resolveRepoBinding,
+  splitRepoId,
+} from "../lib/repoBinding.js";
+import {
   buildPubkeyMap,
   requestServerReview,
   type ServerReviewResult,
@@ -1284,6 +1289,15 @@ function printError(reviewer: string, err: unknown): void {
   console.error();
 }
 
+/** `.stamp/config.yml` text at `ref`, or null when the ref or file is absent. */
+function readConfigYamlAtRef(ref: string, repoRoot: string): string | null {
+  try {
+    return showAtRef(ref, ".stamp/config.yml", repoRoot);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Extract the left-hand side of a `<base>..<head>` revspec — the
  * documented "target branch" convention `stamp status` already uses
@@ -1337,20 +1351,37 @@ async function runServerAttestedReviews(input: {
     targetBranch,
   } = input;
 
-  // Derive `{ org, repo }` from `git remote get-url origin`. The server's
-  // `--org` / `--repo` flags identify which bare repo on disk the prompt
-  // fetch should target; we use the origin URL as the source of truth
-  // because that's the operator's declared "where this repo lives." A
-  // mismatch (operator pointed at the wrong remote) surfaces server-side
-  // as a clean "promptFetch: no such repo" error rather than a silent
-  // wrong-repo verdict.
-  const orgRepo = deriveOrgRepoFromRemote("origin", repoRoot);
-  if (!orgRepo) {
-    throw new UsageError(
-      `review_server is configured for branch "${targetBranch}" but the origin remote ` +
-        `URL doesn't have a recognizable <org>/<repo> shape. Set the origin remote with ` +
-        `\`git remote add origin <url>\` or \`git remote set-url origin <url>\` first.`,
-    );
+  // `{ org, repo }` for the server's `--org` / `--repo`: the pair picks
+  // the reviewer prompt (per-repo override when one exists) and, since
+  // AGT-2272, is signed into each approval as `repo_id`. When the repo
+  // declares `repo_id:` in .stamp/config.yml (at the target branch's tip
+  // or at base — the same declarations the verifiers enforce), use it:
+  // it is the canonical id the verifier will demand. Otherwise fall back
+  // to the pre-AGT-2272 heuristic, the last two segments of the origin
+  // URL, and say the approvals are unbound.
+  const repoBinding = resolveRepoBinding([
+    {
+      where: targetBranch,
+      raw: repoIdRawFromConfigYaml(readConfigYamlAtRef(targetBranch, repoRoot)),
+    },
+    { where: resolved.base_sha.slice(0, 8), raw: config.repo_id },
+  ]);
+  if (repoBinding.kind === "invalid") {
+    throw new UsageError(repoBinding.reason);
+  }
+  let orgRepo: { org: string; repo: string } | null;
+  if (repoBinding.kind === "bound") {
+    orgRepo = splitRepoId(repoBinding.preferred);
+  } else {
+    orgRepo = deriveOrgRepoFromRemote("origin", repoRoot);
+    if (!orgRepo) {
+      throw new UsageError(
+        `review_server is configured for branch "${targetBranch}" but .stamp/config.yml declares no ` +
+          `\`repo_id:\` and the origin remote URL doesn't have a recognizable <org>/<repo> shape. ` +
+          `Add \`repo_id: <org>/<repo>\` to .stamp/config.yml (the id this repo's prompts live ` +
+          `under on the review server), or set the origin remote with \`git remote set-url origin <url>\`.`,
+      );
+    }
   }
 
   // Source the manifest + .pub files from the merge-base tree, NOT the
@@ -1398,6 +1429,13 @@ async function runServerAttestedReviews(input: {
   );
   console.log(`  review_server: ${reviewServerUrl}`);
   console.log(`  org/repo: ${orgRepo.org}/${orgRepo.repo}`);
+  if (repoBinding.kind === "unbound") {
+    console.log(
+      `  note: .stamp/config.yml declares no repo_id, so verifiers do not bind these approvals ` +
+        `to this repo. Add \`repo_id: ${orgRepo.org}/${orgRepo.repo}\` (an admin-signed .stamp/ ` +
+        `change) to refuse approvals minted for another repo.`,
+    );
+  }
   console.log();
 
   // `config` is destructured for symmetry with the local-LLM path and as

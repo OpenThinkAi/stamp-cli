@@ -217,6 +217,31 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `commit_id=<head_sha>` instead of `gh pr review`, which has no commit
   option and attached the review to whatever the PR head was when the post
   landed, including commits pushed after the review started.
+- **Server-signed approvals are bound to the repo they were reviewed for**
+  (AGT-2272, closing the AGT-2252 residual). The approval did not record
+  which `--org`/`--repo` the server reviewed under, and that pair picks the
+  per-repo prompt override, so a member granted a lenient repo and a
+  protected one (or `<org>/*`) could review a protected-repo diff under the
+  lenient repo's override and present the approval on the protected repo.
+  The server now signs `repo_id: <org>/<repo>` into every approval. A repo
+  opts in by declaring its id as top-level `repo_id: <org>/<repo>` in
+  `.stamp/config.yml` (the id its prompts live under on the server; until
+  you set it, `stamp review` prints the value it is using today). Once
+  declared at the target branch's tip or the merge base, the pre-receive
+  hook, `stamp verify-pr` and `stamp merge` refuse any approval signed for
+  another id, and any approval with no `repo_id`. No schema bump: v5
+  envelopes, existing history and repos that declare no id verify as
+  before. Upgrade order: (1) stamp server image, so approvals carry
+  `repo_id`; (2) operators' stamp CLI, so `stamp review` sends the declared
+  id and `stamp merge` checks it; (3) CI: point `stamp/verify-attestation`'s
+  `stamp-version` at this release (the hook upgrades with step 1); (4)
+  only then land `repo_id:` in each repo's `.stamp/config.yml` as an
+  admin-signed change, and re-run `stamp review` on open branches, since
+  approvals minted before step 1 carry no `repo_id` and are refused once
+  the id is declared. Declaring it before step 1 blocks every merge;
+  declaring it before step 3 leaves CI unenforced. A malformed `repo_id` (anything
+  but `<org>/<repo>`) is now a config error in the CLI, where an unknown
+  key used to be ignored.
 
 ---
 

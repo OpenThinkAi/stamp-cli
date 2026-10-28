@@ -61,6 +61,7 @@ import {
   readReviewersFromYaml,
 } from "../lib/reviewerHash.js";
 import { verifyBytes } from "../lib/signing.js";
+import { REPO_ID_CONFIG_KEY, resolveRepoBinding } from "../lib/repoBinding.js";
 import { parseManifest } from "../lib/trustedKeysManifest.js";
 // V4-trust-level verification pipeline lives in src/lib/v4Trust.ts so
 // both this hook and the PR-mode verifier (src/commands/verifyPr.ts)
@@ -91,6 +92,7 @@ export {
   verifyV4Approvals,
   verifyV4DiffHash,
   verifyV4ApprovalSignatures,
+  verifyV4RepoBinding,
   verifyV4Checks,
   verifyV4TrustAnchorSignatures,
   verifyV4StampPathsGuard,
@@ -254,7 +256,10 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
   // Verify every new commit introduced by this push.
   const newCommits = listNewCommits(oldSha, newSha);
   for (const sha of newCommits) {
-    verifyCommit(sha, branch, rule, trustedKeys, refname);
+    verifyCommit(sha, branch, rule, trustedKeys, refname, {
+      where: oldSha.slice(0, 8),
+      raw: config.raw[REPO_ID_CONFIG_KEY],
+    });
   }
 }
 
@@ -430,6 +435,8 @@ function verifyCommit(
   rule: BranchRule,
   trustedKeys: Map<string, string>,
   refname: string,
+  /** AGT-2272: `repo_id` as declared at the branch's pre-push tip. */
+  tipRepoId: { where: string; raw: unknown },
 ): void {
   // commit message body is everything after the first blank-line separator
   // in `git cat-file -p <commit>` output (headers then blank line then body)
@@ -456,7 +463,15 @@ function verifyCommit(
   const rawSchemaVersion = (parsed.payload as { schema_version?: unknown })
     .schema_version;
   if (typeof rawSchemaVersion === "number" && rawSchemaVersion >= MIN_ACCEPTED_V4_SCHEMA_VERSION) {
-    verifyCommitV4(sha, branch, rule, parsed.payloadBytes, parsed.signatureBase64, refname);
+    verifyCommitV4(
+      sha,
+      branch,
+      rule,
+      parsed.payloadBytes,
+      parsed.signatureBase64,
+      refname,
+      tipRepoId,
+    );
     return;
   }
 
@@ -740,6 +755,7 @@ function verifyCommitV4(
   payloadBytes: Buffer,
   signatureBase64: string,
   refname: string,
+  tipRepoId: { where: string; raw: unknown },
 ): void {
   // Re-parse payload bytes into the v4 shape. We DON'T re-derive bytes
   // via canonicalSerializePayload here — the operator signed the exact
@@ -826,6 +842,16 @@ function verifyCommitV4(
   const configAtBase = readConfigAt(payload.base_sha);
   const pathRules = configAtBase?.path_rules ?? [];
 
+  // AGT-2272: repo-id binding. Declarations are read from the branch's
+  // pre-push tip (so a branch forked before the repo declared its id
+  // cannot dodge the binding by its fork point) and from base_sha (the
+  // usual trust-artifact source). Either declaring makes binding
+  // mandatory; see resolveRepoBinding.
+  const repoBinding = resolveRepoBinding([
+    tipRepoId,
+    { where: payload.base_sha.slice(0, 8), raw: configAtBase?.raw[REPO_ID_CONFIG_KEY] },
+  ]);
+
   // Changed files: 3-dot diff (`base...head`) — same diff form used by
   // verifyV4DiffHash, so a rule that matches here matches what the
   // hash binding covers. Reading via `git diff --name-only` keeps us
@@ -859,6 +885,7 @@ function verifyCommitV4(
     pubkeyByFingerprint,
     pathRules,
     changedFiles,
+    repoBinding,
   };
 
   for (const phase of COMMIT_PHASES_V4) {

@@ -82,6 +82,7 @@ import {
   verifyV4TrustAnchorSignatures,
   type PhaseInputV4,
 } from "../src/hooks/pre-receive.ts";
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -220,6 +221,7 @@ function buildPhaseInput(args: {
     pubkeyByFingerprint,
     pathRules: [],
     changedFiles,
+    repoBinding: UNBOUND,
   };
 }
 

@@ -63,6 +63,15 @@
  *        signed approval. Server no longer reads the manifest at all.
  *        Breaking shape: v4 envelopes are rejected with a clear
  *        "schema too old, re-attest with stamp ≥ 2.1" error.
+ *
+ *   (no bump) AGT-2272 adds the server-signed `ApprovalV4.repo_id`.
+ *        Deliberately NOT a schema bump: the outer `schema_version` is
+ *        operator-signed, so it cannot be the trigger for a check the
+ *        operator must not be able to skip. Enforcement is keyed on the
+ *        repo's `repo_id:` declaration in `.stamp/config.yml` (a trust
+ *        anchor) instead — see `src/lib/repoBinding.ts`. The field is
+ *        additive and inside the server-signed bytes, so existing v5
+ *        envelopes and older verifiers are unaffected.
  */
 export const CURRENT_V4_SCHEMA_VERSION = 5;
 
@@ -129,6 +138,16 @@ export interface ApprovalV4 {
    *  time to find the matching pubkey + confirm its `server`
    *  capability. */
   server_key_id: string;
+  /** AGT-2272: the canonical repo id (`<org>/<repo>`) the server
+   *  reviewed under — the exact pair it used to pick the reviewer
+   *  prompt. Part of the signed bytes. Optional on the type because
+   *  approvals signed by pre-AGT-2272 servers lack it; verifiers
+   *  REQUIRE it (and require it to match) whenever the repo declares
+   *  `repo_id:` in `.stamp/config.yml` — see `src/lib/repoBinding.ts`.
+   *  Additive: `canonicalSerializeApproval` signs whatever fields the
+   *  approval carries, so verifiers that predate the field still check
+   *  the signature over it (they just don't compare it). */
+  repo_id?: string;
 }
 
 /**
@@ -518,7 +537,8 @@ function isApprovalEntry(value: unknown): value is ApprovalEntryV4 {
     typeof a.base_sha !== "string" ||
     typeof a.head_sha !== "string" ||
     typeof a.issued_at !== "string" ||
-    typeof a.server_key_id !== "string"
+    typeof a.server_key_id !== "string" ||
+    (a.repo_id !== undefined && typeof a.repo_id !== "string")
   ) {
     return false;
   }

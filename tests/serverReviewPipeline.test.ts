@@ -245,6 +245,11 @@ describe("runReviewPipeline — happy path (submit_verdict tool_use)", () => {
       assert.equal(r.approval.base_sha, fixtureParams(diff).baseSha);
       assert.equal(r.approval.head_sha, fixtureParams(diff).headSha);
       assert.equal(r.approval.diff_sha256, sha256Hex(diff));
+      // AGT-2272: the requested org/repo is signed into the approval.
+      assert.equal(
+        r.approval.repo_id,
+        `${fixtureParams(diff).org}/${fixtureParams(diff).repo}`,
+      );
 
       // Crucial property: prompt_sha256 matches the bytes the
       // filesystem-cache resolver returned. Drift here is a security

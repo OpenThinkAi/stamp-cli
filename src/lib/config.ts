@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse, stringify } from "yaml";
 import { globToRegex, isGlobPattern } from "./refPatterns.js";
+import { parseRepoIdDeclaration } from "./repoBinding.js";
 import { SAFE_TOOLS } from "./toolAllowlist.js";
 
 /**
@@ -450,6 +451,14 @@ export interface StampConfig {
   data_flow?: DataFlowConfig;
   /** Optional retention advisory / auto-prune config (AGT-112). */
   retention?: RetentionConfig;
+  /**
+   * AGT-2272: the repo's canonical id on its review server,
+   * `<org>/<repo>` — the pair `stamp review` sends as `--org`/`--repo`
+   * and the server signs into every approval. When declared, verifiers
+   * reject any approval not signed for exactly this id. See
+   * `src/lib/repoBinding.ts`.
+   */
+  repo_id?: string;
 }
 
 export function loadConfig(path: string): StampConfig {
@@ -618,8 +627,11 @@ function validateConfig(input: unknown): StampConfig {
 
   const data_flow = parseDataFlow(obj.data_flow);
   const retention = parseRetention(obj.retention);
+  const repoId = parseRepoIdDeclaration(obj.repo_id);
+  if (!repoId.ok) throw new Error(`config.${repoId.reason}`);
 
   return {
+    ...(repoId.value !== null ? { repo_id: repoId.value } : {}),
     branches,
     reviewers,
     ...(data_flow ? { data_flow } : {}),
