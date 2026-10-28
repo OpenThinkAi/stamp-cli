@@ -184,9 +184,11 @@ function runVersionStep(ref: string, version: string): { status: number | null; 
 
 describe("publish.yml dist-tag selection (AGT-2236)", () => {
   it("keeps main's behaviour: bare versions go to latest, prereleases to their label", () => {
-    assert.deepEqual(runVersionStep("refs/heads/main", "3.7.0").distTag, "latest");
-    assert.deepEqual(runVersionStep("refs/heads/main", "4.0.0-rc.1").distTag, "rc");
-    assert.deepEqual(runVersionStep("refs/heads/main", "4.0.0-alpha.3").distTag, "alpha");
+    for (const [version, tag] of [["3.7.0", "latest"], ["4.0.0-rc.1", "rc"], ["4.0.0-alpha.3", "alpha"]]) {
+      const r = runVersionStep("refs/heads/main", version);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.distTag, tag, version);
+    }
   });
 
   it("never tags a release/1.x publish latest: it goes to legacy-1", () => {
@@ -196,7 +198,9 @@ describe("publish.yml dist-tag selection (AGT-2236)", () => {
   });
 
   it("keeps release-line prereleases off the shared prerelease tags", () => {
-    assert.equal(runVersionStep("refs/heads/release/1.x", "1.12.0-rc.1").distTag, "legacy-1");
+    const r = runVersionStep("refs/heads/release/1.x", "1.12.0-rc.1");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.distTag, "legacy-1");
   });
 
   it("refuses a release line publishing another major's version", () => {

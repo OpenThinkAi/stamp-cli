@@ -1,9 +1,9 @@
 name: publish
 
-# Fires when commits land on main (including via the stamp server's
-# post-receive mirror). Publishes to npm only when package.json declares
-# a version that isn't already on the registry — every non-bump merge
-# no-ops safely.
+# Fires when commits land on main or a release/<N>.x maintenance line
+# (including via the stamp server's post-receive mirror). Publishes to
+# npm only when package.json declares a version that isn't already on
+# the registry — every non-bump merge no-ops safely.
 #
 # Auth: Trusted Publishing via OIDC. No NPM_TOKEN secret; the npm package
 # must have a Trusted Publisher configured on the npm side pointing at
@@ -128,12 +128,12 @@ jobs:
           elif [[ "$GITHUB_REF" =~ ^refs/heads/release/([0-9]+)\.x$ ]]; then
             LINE_MAJOR="${BASH_REMATCH[1]}"
             if [ "${VERSION%%.*}" != "$LINE_MAJOR" ]; then
-              echo "refusing to publish $VERSION from $GITHUB_REF: not a $LINE_MAJOR.x version" >&2
+              echo "::error::refusing to publish $VERSION from $GITHUB_REF: not a $LINE_MAJOR.x version" >&2
               exit 1
             fi
             DIST_TAG="legacy-$LINE_MAJOR"
           else
-            echo "refusing to publish from $GITHUB_REF: only main and release/<N>.x publish" >&2
+            echo "::error::refusing to publish from $GITHUB_REF: only main and release/<N>.x publish" >&2
             exit 1
           fi
           # Heredoc form so a newline in any value can't terminate the
