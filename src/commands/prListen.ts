@@ -1311,6 +1311,11 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
             `note: cannot claim own PR #${prNumber} (author_cannot_claim_own_pr); skipping\n`,
           );
           continue;
+        } else if (claimRejectionReason === "patch_not_found") {
+          process.stderr.write(
+            `note: the server has no record of PR #${prNumber}'s patch (patch_not_found); skipping\n`,
+          );
+          continue;
         } else if (claimRejectionReason === "already_holds_other_seat") {
           process.stderr.write(
             `note: already holding another seat (already_holds_other_seat); skipping PR #${prNumber}\n`,

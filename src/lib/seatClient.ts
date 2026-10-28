@@ -155,6 +155,7 @@ export type ClaimRejectionReason =
   | "seats_full"
   | "author_cannot_claim_own_pr"
   | "already_holds_other_seat"
+  | "patch_not_found"
   | "unknown";
 
 export interface ClaimSeatSuccess {
@@ -204,6 +205,9 @@ function parseClaimRejectionReason(error: string): ClaimRejectionReason {
   if (error === "seats_full") return "seats_full";
   if (error === "author_cannot_claim_own_pr") return "author_cannot_claim_own_pr";
   if (error === "already_holds_other_seat") return "already_holds_other_seat";
+  // AGT-2270: the server answers 409 for a patch it has no row for (the
+  // broadcast was pruned or never landed). Not retryable: skip the event.
+  if (error === "patch_not_found") return "patch_not_found";
   return "unknown";
 }
 

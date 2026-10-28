@@ -755,6 +755,38 @@ describe("POST /peer/claim-seat: auth + success path (AGT-453)", () => {
   });
 });
 
+describe("POST /peer/claim-seat: unknown or malformed patch (AGT-2270)", () => {
+  it("returns 409 patch_not_found for a patch the server has no row for", async () => {
+    const h = await startPeer();
+    const kp = genTestKeypair();
+    seedPeerUser(h.dbPath, kp, "reviewer-unknown");
+    try {
+      const bodyPayload = { patch_id: "d".repeat(40), claimant_fp: kp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: kp.publicKeyPem };
+      const bodyJson = JSON.stringify({ ...bodyPayload, signature: signBytes(kp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)) });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson), buildPeerPostHeaders(kp, "claim-seat", bodyJson));
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, "patch_not_found");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 400 patch_id_invalid for a patch_id that is not 40 hex", async () => {
+    const h = await startPeer();
+    const kp = genTestKeypair();
+    seedPeerUser(h.dbPath, kp, "reviewer-badid");
+    try {
+      const bodyPayload = { patch_id: "x\nforged log line", claimant_fp: kp.fingerprint, base_sha: "0".repeat(40), repo: "acme/widget", pubkey: kp.publicKeyPem };
+      const bodyJson = JSON.stringify({ ...bodyPayload, signature: signBytes(kp.privateKeyPem, canonicalSerializePeerPayload(bodyPayload)) });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson), buildPeerPostHeaders(kp, "claim-seat", bodyJson));
+      assert.equal(r.status, 400);
+      assert.equal(r.body.error, "patch_id_invalid");
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
 // ─── POST /peer/heartbeat ─────────────────────────────────────────────
 
 describe("POST /peer/heartbeat: success + 404 no-seat (AGT-453)", () => {

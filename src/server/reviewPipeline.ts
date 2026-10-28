@@ -765,9 +765,16 @@ export class ServerMissingApiKeyError extends Error {
  */
 export class PromptFetchFailedError extends Error {
   readonly kind: string;
-  constructor(kind: string, detail: string) {
-    super(`canonical prompt fetch failed (${kind}): ${detail}`);
+  /** Server-side detail (cache paths, fs errors). Never sent to the
+   *  client: `message` carries only the category and reviewer (AGT-2270). */
+  readonly detail: string;
+  constructor(kind: string, detail: string, reviewer?: string) {
+    super(
+      `canonical prompt fetch failed (${kind})` +
+        (reviewer !== undefined ? ` for reviewer ${JSON.stringify(reviewer)}` : ""),
+    );
     this.kind = kind;
+    this.detail = detail;
     this.name = "PromptFetchFailedError";
   }
 }
@@ -929,7 +936,7 @@ export async function runReviewPipeline(
     // top-level handler can map it to stderr+exit. The verb's logs
     // will carry the detail; the operator's terminal only sees the
     // category (to avoid leaking server filesystem layout).
-    throw new PromptFetchFailedError(prompt.kind, prompt.detail);
+    throw new PromptFetchFailedError(prompt.kind, prompt.detail, input.params.reviewer);
   }
 
   // Stage 2: resolve the signer (public key + root helper, AGT-2263).
