@@ -169,7 +169,7 @@ describe("listener / worker allowlists (AGT-2264)", () => {
       const src = readFileSync(path.join(ROOT, f), "utf8");
       for (const m of src.matchAll(/process\.env\[\s*"([A-Z0-9_]+)"\s*\]/g)) read.add(m[1]!);
       for (const m of src.matchAll(/process\.env\.([A-Z0-9_]+)/g)) read.add(m[1]!);
-      for (const m of src.matchAll(/(?:resolvePeerReviewLimit|positiveIntEnv)\(\s*"([A-Z0-9_]+)"/g)) {
+      for (const m of src.matchAll(/(?:resolvePeerReviewLimit|positiveIntEnv|resolveRetentionDays)\(\s*"([A-Z0-9_]+)"/g)) {
         read.add(m[1]!);
       }
     }

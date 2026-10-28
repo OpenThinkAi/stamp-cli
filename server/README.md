@@ -392,6 +392,19 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
    - `STAMP_TRASH_SWEEP_INTERVAL_SEC` — **optional** (default `21600`, i.e.
      6h). How often the in-process trash sweep runs; `0` disables it (rely on
      the on-demand purge instead).
+   - `STAMP_PEER_EVENT_RETENTION_DAYS` — **optional** (default `30`). Peer
+     review events and patches in `users.db` older than this are deleted by
+     the hourly retention sweep in `stamp-workers` (AGT-2249). Independently,
+     an event's PR content (title, body, changed paths, signing key and
+     signature) is dropped from its row an hour after it was broadcast — it
+     is only needed until the listener has delivered it. `0` keeps the rows
+     forever (content is still dropped). A bad value falls back to the
+     default.
+   - `STAMP_SERVER_VERDICT_RETENTION_DAYS` — **optional** (default `30`).
+     Cached server-side verdicts — including the reviewer prose, which quotes
+     the reviewed diff — older than this are deleted by the same sweep. The
+     table is only a cache: an expired entry costs one re-review of an
+     identical diff. `0` keeps them forever.
 6. **Expose port 22** via Railway's TCP proxy:
    - Settings → Networking → Public Networking → TCP Proxy → create one
      pointing at container port 22. Railway gives you a public host +
