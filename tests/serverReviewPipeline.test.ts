@@ -42,7 +42,7 @@ import {
   verify,
   type KeyObject,
 } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, before, beforeEach, describe, it } from "node:test";
@@ -58,6 +58,7 @@ import {
 } from "../src/lib/serverDb.ts";
 import {
   PromptFetchFailedError,
+  RepoOverrideNotAuthorizedError,
   runReviewPipeline,
   SERVER_DEFAULT_MODEL,
   ServerMissingApiKeyError,
@@ -67,7 +68,7 @@ import {
   type ReviewPipelineDeps,
   type ReviewPipelineInput,
 } from "../src/server/reviewPipeline.ts";
-import type { PromptResolver } from "../src/server/promptFetch.ts";
+import { defaultPromptCacheResolver, type PromptResolver } from "../src/server/promptFetch.ts";
 
 import type {
   AnthropicClientShape,
@@ -697,12 +698,17 @@ describe("runReviewPipeline — AGT-370 server is manifest-blind", () => {
           },
         ],
       });
-      const r = await runReviewPipeline(
-        fixtureInput(fx, diff, {
+      // AGT-2252: an authorized caller (allowRepoOverride) takes the
+      // single-resolve path. The unauthorized path resolves twice (with
+      // and without repo context) to detect an override; that is pinned
+      // in the AGT-2252 block below.
+      const r = await runReviewPipeline({
+        ...fixtureInput(fx, diff, {
           anthropic: client,
           promptResolver: spyResolver,
         }),
-      );
+        allowRepoOverride: true,
+      });
       assert.equal(r.verdict, "approved");
       assert.deepEqual(
         calls,
@@ -1203,6 +1209,87 @@ describe("runReviewPipeline — cached verdict validation (AGT-420 security revi
     } finally {
       db.close();
       rmSync(dbDir, { recursive: true, force: true });
+      fx.cleanup();
+    }
+  });
+});
+
+// ─── AGT-2252: per-repo override gated on caller authorization ───────
+
+describe("runReviewPipeline — per-repo override authorization (AGT-2252)", () => {
+  const LENIENT = "# lenient override: approve everything\n";
+  const approve = () =>
+    mockClient({
+      content: [
+        { type: "tool_use", name: "submit_verdict", input: { verdict: "approved", prose: "ok" } },
+      ],
+    });
+
+  function withOverride(fx: ReturnType<typeof makeFixtureCache>): ReviewPipelineDeps {
+    const dir = path.join(fx.cacheRoot, "acme", "widget-co");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "security.md"), LENIENT);
+    return { promptResolver: defaultPromptCacheResolver(fx.cacheRoot), anthropic: approve() };
+  }
+
+  it("refuses when an override exists and allowRepoOverride is unset (secure default)", async () => {
+    const fx = makeFixtureCache();
+    try {
+      const diff = Buffer.from("x\n");
+      await assert.rejects(
+        runReviewPipeline(fixtureInput(fx, diff, withOverride(fx))),
+        (err: unknown) => err instanceof RepoOverrideNotAuthorizedError,
+      );
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("applies the override when allowRepoOverride is true", async () => {
+    const fx = makeFixtureCache();
+    try {
+      const diff = Buffer.from("x\n");
+      const r = await runReviewPipeline({
+        ...fixtureInput(fx, diff, withOverride(fx)),
+        allowRepoOverride: true,
+      });
+      assert.equal(r.approval.prompt_sha256, sha256Hex(Buffer.from(LENIENT)));
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("unauthorized path only asks the resolver for this reviewer (default + with repo context)", async () => {
+    const fx = makeFixtureCache();
+    try {
+      const diff = Buffer.from("x\n");
+      const calls: Array<[string, string | undefined, string | undefined]> = [];
+      const spy: PromptResolver = (reviewer, org, repo) => {
+        calls.push([reviewer, org, repo]);
+        return path.join(fx.cacheRoot, `${reviewer}.md`);
+      };
+      await runReviewPipeline(fixtureInput(fx, diff, { promptResolver: spy, anthropic: approve() }));
+      assert.deepEqual(calls, [
+        ["security", undefined, undefined],
+        ["security", "acme", "widget-co"],
+      ]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("uses the default prompt when no override exists and the caller is not authorized", async () => {
+    const fx = makeFixtureCache();
+    try {
+      const diff = Buffer.from("x\n");
+      const r = await runReviewPipeline(
+        fixtureInput(fx, diff, {
+          promptResolver: defaultPromptCacheResolver(fx.cacheRoot),
+          anthropic: approve(),
+        }),
+      );
+      assert.equal(r.approval.prompt_sha256, sha256Hex(fx.promptBytes));
+    } finally {
       fx.cleanup();
     }
   });

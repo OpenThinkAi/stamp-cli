@@ -418,6 +418,17 @@ export interface ReviewPipelineInput {
    *  circuits the Anthropic call and reuses the saved verdict (re-signed
    *  fresh). Optional so cache-less callers / tests still run. */
   db?: DatabaseSync;
+  /** AGT-2252: whether a per-repo prompt override
+   *  (`<cacheRoot>/<org>/<repo>/<reviewer>.md`) may be applied for this
+   *  request. The verb sets it from the caller's repo authorization
+   *  (`resolveRepoAccess` in `src/lib/repoAccess.ts`): true only for
+   *  operators and members granted the requested `<org>/<repo>`.
+   *  Defaults to false — an unauthorized caller must not be able to pick
+   *  another repo's override by naming it. When false and an override
+   *  exists for the requested pair, the pipeline throws
+   *  `RepoOverrideNotAuthorizedError` rather than silently reviewing
+   *  under the default prompt. */
+  allowRepoOverride?: boolean;
   /** Optional dependency injection for tests. Production callers leave
    *  unset and the pipeline uses the on-disk bare-repo resolver +
    *  process-env-derived Anthropic client. */
@@ -572,6 +583,23 @@ export class PromptFetchFailedError extends Error {
 }
 
 /**
+ * AGT-2252: the requested `<org>/<repo>` has a per-repo prompt override
+ * but the caller is not authorized for that pair. The verb maps this to
+ * exit 3 (authorization) with prose naming `stamp users grant`.
+ */
+export class RepoOverrideNotAuthorizedError extends Error {
+  constructor(org: string, repo: string, reviewer: string) {
+    super(
+      `${org}/${repo} has a per-repo prompt override for reviewer ` +
+        `${JSON.stringify(reviewer)}, and you are not granted access to ` +
+        `${org}/${repo} on this server. Ask an admin to run ` +
+        `'stamp users grant <your-short-name> --repo ${org}/${repo}'.`,
+    );
+    this.name = "RepoOverrideNotAuthorizedError";
+  }
+}
+
+/**
  * Typed error for failures loading the server's Ed25519 signing key at
  * request time. Wraps `ReviewSigningKeyError` so the SSH verb's
  * top-level handler can match on a single class while preserving the
@@ -662,12 +690,49 @@ export async function runReviewPipeline(
   // a `<cacheRoot>/<org>/<repo>/<reviewer>.md` per-repo override when
   // one exists. The SSH verb already validates `org`/`repo` shape
   // upstream; here we just forward.
-  const prompt = await fetchCanonicalPrompt(
-    resolver,
-    input.params.reviewer,
-    input.params.org,
-    input.params.repo,
-  );
+  //
+  // AGT-2252: only forward org/repo — and so only let an override win —
+  // when the verb has established the caller is authorized for that
+  // pair. Otherwise detect whether an override would have been picked
+  // (the resolver returns a different path with repo context than
+  // without) and refuse: silently falling back to the default prompt
+  // could swap a repo's stricter override for a weaker default.
+  let prompt: Awaited<ReturnType<typeof fetchCanonicalPrompt>>;
+  if (input.allowRepoOverride === true) {
+    prompt = await fetchCanonicalPrompt(
+      resolver,
+      input.params.reviewer,
+      input.params.org,
+      input.params.repo,
+    );
+  } else {
+    let defaultPath: string | undefined;
+    let overridePicked = false;
+    try {
+      defaultPath = resolver(input.params.reviewer);
+      overridePicked =
+        resolver(input.params.reviewer, input.params.org, input.params.repo) !==
+        defaultPath;
+    } catch {
+      // A resolver rejection surfaces below as `invalid_input`.
+      defaultPath = undefined;
+    }
+    if (overridePicked) {
+      throw new RepoOverrideNotAuthorizedError(
+        input.params.org,
+        input.params.repo,
+        input.params.reviewer,
+      );
+    }
+    // Read the default path already resolved above rather than asking
+    // the resolver a third time; fall back to the resolver itself when
+    // it rejected so its error is reported verbatim.
+    const fixed = defaultPath;
+    prompt = await fetchCanonicalPrompt(
+      fixed !== undefined ? () => fixed : resolver,
+      input.params.reviewer,
+    );
+  }
   if (prompt.kind !== "ok") {
     // Convert the typed error result to a throw so the verb's
     // top-level handler can map it to stderr+exit. The verb's logs

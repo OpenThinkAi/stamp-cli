@@ -71,6 +71,8 @@ your-org/your-repo/standards.md      # optional per-repo override
 
 `default/<reviewer>.md` is the canonical fallback for any reviewed repo. The optional per-repo path is consulted first when the SSH verb carries `(org, repo)` context: `getPromptPath` in `src/server/prompts-cache.ts` looks for `<cacheRoot>/<org>/<repo>/<reviewer>.md`, and falls through to `<cacheRoot>/<reviewer>.md` if the override doesn't exist. Per-repo overrides are entirely optional; many deployments will only ever ship the `default/` tree.
 
+> **Per-repo overrides need a repo grant.** The `--org`/`--repo` a client sends are chosen by the caller, and the signed approval does not record them. So the server applies an override only to callers authorized for that pair: owners and admins always, members only when granted it with `stamp users grant <name> --repo <org>/<repo>` (or `<org>/*` for the whole org). A member with no grants can still review under the default prompts, but a review that names a repo with an override is refused (exit 3) rather than run under a different prompt. Once a member has any grant, they can review only the repos they are granted. See "Manage members" below.
+
 > **Note on the `default/` prefix.** The path inside the cache is determined by `getPromptPath`'s fallback logic, which reads `<cacheRoot>/<reviewer>.md` when no per-repo override is present. The `default/` directory convention in the prompts repo therefore needs to be flattened into the cache root at populate time — see "Migrating bundled prompts" below for the recommended layout if you're seeding the repo from `server/reviewers/`.
 
 ### Webhook configuration (on the prompts repo)
@@ -627,7 +629,17 @@ stamp users promote <name> --to admin     # owner only
 stamp users promote <name> --to owner     # owner only
 stamp users demote <name> --to member     # owner only; refuses if it'd zero out ownership
 stamp users remove <name>                 # admin removes members; owner removes anyone
+stamp users grant <name> --repo acme/prod # admin/owner: allow a member to review acme/prod
+stamp users grant <name> --repo acme/*    # ... or every repo in the acme org
+stamp users revoke <name> --repo acme/prod
+stamp users grants <name>                 # admins: anyone; members: themselves
 ```
+
+Repo grants scope members only; owners and admins can review any repo.
+A member with no grants can review under the default prompts but never
+under a per-repo prompt override. A member with one or more grants can
+review only the granted `<org>/<repo>` pairs, and per-repo overrides
+apply to them for those pairs. Org and repo names are case-insensitive.
 
 `stamp users` reads/writes the sqlite directly via SSH; no env-var
 shuffle, no service restart.

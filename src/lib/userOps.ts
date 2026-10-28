@@ -11,7 +11,11 @@
  *     when no owners exist anywhere in the table, an admin may promote
  *     THEMSELVES to owner — exactly once per server lifetime, since
  *     after that promotion the no-owners precondition no longer holds.
- *   - Member: no user-management surface at all.
+ *   - Member: no user-management surface at all (beyond listing their
+ *     own repo grants).
+ *
+ * Repo grants (AGT-2252): owners and admins may grant/revoke a member's
+ * `<org>/<repo>` access (see `src/lib/repoAccess.ts`).
  *
  * Last-owner guard: any operation that would leave zero owners (demoting
  * the last owner, or removing the last owner) is refused with a
@@ -25,6 +29,13 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
+import {
+  addRepoGrant,
+  listRepoGrants,
+  parseRepoSpec,
+  removeRepoGrant,
+  type RepoGrant,
+} from "./repoAccess.js";
 import {
   countByRole,
   findUserByShortName,
@@ -310,4 +321,72 @@ export function pruneIdleUsers(
   const del = db.prepare(`DELETE FROM users WHERE id = ?`);
   for (const r of eligible) del.run(r.id);
   return { ok: true, removed: eligible };
+}
+
+// ─── Repo grants (AGT-2252) ──────────────────────────────────────────
+
+export type RepoGrantDenial =
+  | "target_not_found"
+  | "caller_lacks_authority"
+  | "invalid_repo_spec"
+  | "target_not_member";
+
+export type RepoGrantResult =
+  | { ok: true; org: string; repo: string; changed: boolean }
+  | { ok: false; reason: RepoGrantDenial };
+
+/**
+ * Grant (`op: "grant"`) or revoke (`op: "revoke"`) a member's access to
+ * `<org>/<repo>` (repo may be `*` for the whole org). Owners and admins
+ * may manage grants; members may not. Grants only scope members —
+ * owners/admins are unrestricted operators, so granting them is
+ * refused as `target_not_member` rather than silently recorded.
+ */
+export function setRepoGrant(
+  db: DatabaseSync,
+  caller: UserRow,
+  targetShortName: string,
+  spec: string,
+  op: "grant" | "revoke",
+): RepoGrantResult {
+  if (caller.role !== "owner" && caller.role !== "admin") {
+    return { ok: false, reason: "caller_lacks_authority" };
+  }
+  const parsed = parseRepoSpec(spec);
+  if (!parsed) return { ok: false, reason: "invalid_repo_spec" };
+  const target = findUserByShortName(db, targetShortName);
+  if (!target) return { ok: false, reason: "target_not_found" };
+  if (op === "grant") {
+    if (target.role !== "member") return { ok: false, reason: "target_not_member" };
+    const changed = addRepoGrant(db, target.id, parsed.org, parsed.repo, caller.id);
+    return { ok: true, ...parsed, changed };
+  }
+  const changed = removeRepoGrant(db, target.id, parsed.org, parsed.repo);
+  return { ok: true, ...parsed, changed };
+}
+
+export type ListGrantsResult =
+  | { ok: true; short_name: string; role: Role; grants: RepoGrant[] }
+  | { ok: false; reason: "target_not_found" | "caller_lacks_authority" };
+
+/**
+ * List a user's repo grants. Owners/admins may list anyone's; a member
+ * may list only their own.
+ */
+export function listRepoGrantsForCaller(
+  db: DatabaseSync,
+  caller: UserRow,
+  targetShortName: string,
+): ListGrantsResult {
+  const target = findUserByShortName(db, targetShortName);
+  if (caller.role === "member" && (!target || target.id !== caller.id)) {
+    return { ok: false, reason: "caller_lacks_authority" };
+  }
+  if (!target) return { ok: false, reason: "target_not_found" };
+  return {
+    ok: true,
+    short_name: target.short_name,
+    role: target.role,
+    grants: listRepoGrants(db, target.id),
+  };
 }

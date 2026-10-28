@@ -13,7 +13,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { ownerlessWarning } from "../src/commands/users.ts";
+import { formatGrants, ownerlessWarning } from "../src/commands/users.ts";
 
 type Row = Parameters<typeof ownerlessWarning>[0][number];
 
@@ -78,6 +78,21 @@ describe("ownerlessWarning", () => {
     assert.ok(
       w.includes("stamp users promote <your-short-name> --to owner"),
       `recovery command not present verbatim: ${JSON.stringify(w)}`,
+    );
+  });
+});
+
+describe("formatGrants (AGT-2252)", () => {
+  it("explains operators are unscoped", () => {
+    assert.match(formatGrants({ short_name: "a", role: "admin", grants: [] }), /every repo/);
+  });
+  it("explains a member with no grants gets defaults only", () => {
+    assert.match(formatGrants({ short_name: "m", role: "member", grants: [] }), /never under a per-repo prompt override/);
+  });
+  it("lists grants one per line", () => {
+    assert.equal(
+      formatGrants({ short_name: "m", role: "member", grants: [{ org: "acme", repo: "*" }, { org: "x", repo: "y" }] }),
+      "acme/*\nx/y\n",
     );
   });
 });

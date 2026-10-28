@@ -234,6 +234,22 @@ function initSchema(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_pr_events_patch_id
       ON peer_review_events(patch_id);
+
+    -- AGT-2252: per-user repo authorization. A member may only have a
+    -- per-repo prompt override applied to their review (and, once any
+    -- grant exists for them, may only request reviews) for the
+    -- <org>/<repo> pairs granted here. repo = '*' grants the whole org.
+    -- org/repo are stored lowercased (GitHub slugs are case-insensitive).
+    -- Owners/admins are the server operators and are never scoped.
+    -- Brand-new table; additive, never ALTERed here.
+    CREATE TABLE IF NOT EXISTS user_repo_grants (
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      org         TEXT NOT NULL,
+      repo        TEXT NOT NULL,
+      granted_by  INTEGER,
+      created_at  INTEGER NOT NULL,
+      PRIMARY KEY (user_id, org, repo)
+    );
   `);
 
   // AGT-431: additive boot-safe column — pr_url on peer_review_patches.

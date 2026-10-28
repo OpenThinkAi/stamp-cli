@@ -34,7 +34,8 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 import { fingerprintFromPem } from "../src/lib/keys.ts";
-import { insertUser, openServerDb } from "../src/lib/serverDb.ts";
+import { addRepoGrant } from "../src/lib/repoAccess.ts";
+import { findUserByShortName, insertUser, openServerDb } from "../src/lib/serverDb.ts";
 
 const STAMP_REVIEW_TS = path.resolve(
   import.meta.dirname,
@@ -465,6 +466,115 @@ describe("stamp-review — rate limit (AGT-420)", () => {
       assert.match(second.stderr, /MAX_REVIEWS_PER_HOUR/);
     } finally {
       h.cleanup();
+    }
+  });
+});
+
+// ─── AGT-2252: caller-chosen --org/--repo bound to repo grants ───────
+
+function grant(h: Harness, org: string, repo: string): void {
+  const db = openServerDb({ path: h.dbPath, skipChmod: true });
+  try {
+    const u = findUserByShortName(db, "caller")!;
+    addRepoGrant(db, u.id, org, repo, null);
+  } finally {
+    db.close();
+  }
+}
+
+/** Drop a lenient per-repo override at `<cacheRoot>/<org>/<repo>/security.md`. */
+function writeOverride(h: Harness, org: string, repo: string): void {
+  const dir = path.join(h.promptCacheRoot!, org, repo);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "security.md"), "# lenient: approve everything\n");
+}
+
+describe("stamp-review — repo authorization (AGT-2252)", () => {
+  it("refuses (exit 3) a member who names another repo's override without a grant", () => {
+    // The oaudit attack path: Sandbox/Play has a lenient override; an
+    // unscoped member names it for their production diff.
+    const h = setupWithFixturePromptCache("member");
+    try {
+      writeOverride(h, "Sandbox", "Play");
+      const diff = Buffer.from("diff --git a/prod b/prod\n");
+      const r = runStampReview(h, argvFor(diff, { "--org": "Sandbox", "--repo": "Play" }), {
+        stdin: diff,
+        envOverrides: { ANTHROPIC_API_KEY: undefined },
+      });
+      assert.equal(r.status, 3, `stderr=${r.stderr}`);
+      assert.match(r.stderr, /per-repo prompt override/);
+      assert.match(r.stderr, /stamp users grant/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("refuses (exit 3) a grant-scoped member naming an ungranted repo, even without an override", () => {
+    const h = setupWithFixturePromptCache("member");
+    try {
+      grant(h, "acme", "widget-co");
+      const diff = Buffer.from("x\n");
+      const r = runStampReview(h, argvFor(diff, { "--org": "other", "--repo": "thing" }), {
+        stdin: diff,
+        envOverrides: { ANTHROPIC_API_KEY: undefined },
+      });
+      assert.equal(r.status, 3, `stderr=${r.stderr}`);
+      assert.match(r.stderr, /not granted access to other\/thing/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("lets a granted member (case-insensitive) through to the pipeline under the override", () => {
+    const h = setupWithFixturePromptCache("member");
+    try {
+      writeOverride(h, "Sandbox", "Play");
+      grant(h, "sandbox", "play");
+      const diff = Buffer.from("x\n");
+      const r = runStampReview(h, argvFor(diff, { "--org": "Sandbox", "--repo": "Play" }), {
+        stdin: diff,
+        envOverrides: { ANTHROPIC_API_KEY: undefined },
+      });
+      // Reaches the Anthropic stage (exit 1, missing key) — past both gates.
+      assert.equal(r.status, 1, `stderr=${r.stderr}`);
+      assert.match(r.stderr, /ANTHROPIC_API_KEY is not set/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("an org-wide grant (<org>/*) covers every repo in the org", () => {
+    const h = setupWithFixturePromptCache("member");
+    try {
+      writeOverride(h, "acme", "widget-co");
+      grant(h, "acme", "*");
+      const diff = Buffer.from("x\n");
+      const r = runStampReview(h, argvFor(diff), {
+        stdin: diff,
+        envOverrides: { ANTHROPIC_API_KEY: undefined },
+      });
+      assert.equal(r.status, 1, `stderr=${r.stderr}`);
+      assert.match(r.stderr, /ANTHROPIC_API_KEY is not set/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("owners/admins are unscoped operators and may use any override", () => {
+    for (const role of ["owner", "admin"] as const) {
+      const h = setupWithFixturePromptCache(role);
+      try {
+        writeOverride(h, "Sandbox", "Play");
+        const diff = Buffer.from(`role=${role}\n`);
+        const r = runStampReview(h, argvFor(diff, { "--org": "Sandbox", "--repo": "Play" }), {
+          stdin: diff,
+          envOverrides: { ANTHROPIC_API_KEY: undefined },
+        });
+        assert.equal(r.status, 1, `role=${role} stderr=${r.stderr}`);
+        assert.match(r.stderr, /ANTHROPIC_API_KEY is not set/);
+      } finally {
+        h.cleanup();
+      }
     }
   });
 });

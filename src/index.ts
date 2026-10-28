@@ -27,6 +27,9 @@ import {
   runUsersRemove,
   runUsersSetName,
   runUsersPrune,
+  runUsersGrant,
+  runUsersGrants,
+  runUsersRevoke,
 } from "./commands/users.js";
 import {
   runServerRepoDelete,
@@ -1528,7 +1531,7 @@ invites
 
 const users = program
   .command("users")
-  .description("list, promote, demote, and remove enrolled users on the stamp server");
+  .description("list, promote, demote, and remove enrolled users, and manage their repo grants, on the stamp server");
 
 users
   .command("list")
@@ -1610,6 +1613,44 @@ users
   .action((opts: { idleFor: string }) => {
     try {
       runUsersPrune({ idleFor: opts.idleFor });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("grant <short-name>")
+  .description(
+    "grant a member access to <org>/<repo> (or <org>/* for the whole org) on the stamp server. Per-repo prompt overrides apply only to granted members, and a member with any grant may review only granted repos. Owners/admins only.",
+  )
+  .requiredOption("--repo <org/repo>", "the <org>/<repo> pair, or <org>/* for every repo in the org")
+  .action((shortName: string, opts: { repo: string }) => {
+    try {
+      runUsersGrant({ shortName, repo: opts.repo });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("revoke <short-name>")
+  .description("revoke a member's <org>/<repo> (or <org>/*) grant on the stamp server. Owners/admins only.")
+  .requiredOption("--repo <org/repo>", "the exact <org>/<repo> or <org>/* grant to remove")
+  .action((shortName: string, opts: { repo: string }) => {
+    try {
+      runUsersRevoke({ shortName, repo: opts.repo });
+    } catch (err) {
+      handleCliError(err);
+    }
+  });
+
+users
+  .command("grants <short-name>")
+  .description("list a user's repo grants (owners/admins: anyone; members: themselves)")
+  .option("--json", "emit the raw server JSON")
+  .action((shortName: string, opts: { json?: boolean }) => {
+    try {
+      runUsersGrants({ shortName, json: opts.json });
     } catch (err) {
       handleCliError(err);
     }

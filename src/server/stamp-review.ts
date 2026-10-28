@@ -32,6 +32,9 @@
  *   - any required flag is missing / malformed
  *   - the diff content on stdin exceeds MAX_DIFF_BYTES (default 5MB)
  *   - the streamed diff's sha256 doesn't match `--diff-sha256`
+ *   - (AGT-2252) the caller is a member scoped by repo grants and holds
+ *     none for `--org`/`--repo`, or the pair has a per-repo prompt
+ *     override and the caller isn't granted it (exit 3)
  *
  * On success, prints the JSON response to stdout:
  *
@@ -49,7 +52,8 @@
  *   0 — success; JSON response on stdout
  *   1 — server-side config error (ExposeAuthInfo missing, etc.)
  *   2 — usage error (missing/bad argv)
- *   3 — caller's role doesn't permit reviews (below member)
+ *   3 — caller's role doesn't permit reviews (below member), or the
+ *       caller isn't authorized for the requested org/repo (AGT-2252)
  *   4 — request validation failure (diff size cap, sha mismatch)
  *   5 — rate limited: caller is over the per-hour review cap (AGT-420);
  *       client should back off and retry later
@@ -66,11 +70,13 @@ import {
   type Role,
   type UserRow,
 } from "../lib/serverDb.js";
+import { resolveRepoAccess } from "../lib/repoAccess.js";
 import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 
 import {
   type ParsedReviewRequest,
+  RepoOverrideNotAuthorizedError,
   resolveMaxDiffBytes,
   type ReviewPipelineResult,
   runReviewPipeline,
@@ -358,6 +364,24 @@ async function main(): Promise<void> {
   const params = parseRequest(process.argv.slice(2));
   const { caller, db } = resolveAuth();
 
+  // AGT-2252: bind the caller-chosen --org/--repo to the caller's
+  // authorization. `--org`/`--repo` select the per-repo prompt override
+  // and are NOT part of the signed approval, so an unchecked pair would
+  // let any member review under another repo's (lenient) override. A
+  // member scoped by grants may only name a granted pair; a member with
+  // no grants ("unscoped") may review under the default prompts only —
+  // the pipeline refuses if the pair has an override.
+  const access = resolveRepoAccess(db, caller, params.org, params.repo);
+  if (access === "denied") {
+    db.close();
+    fail(
+      `${caller.short_name} is not granted access to ${params.org}/${params.repo} ` +
+        `on this server. Ask an admin to run ` +
+        `'stamp users grant ${caller.short_name} --repo ${params.org}/${params.repo}'.`,
+      3,
+    );
+  }
+
   // AGT-420: per-caller token-bucket rate limit. Checked BEFORE reading the
   // (up to 5MB) diff stdin and BEFORE any Anthropic call, so a throttled
   // caller can't amplify the operator's API spend. Exit 5 = back off.
@@ -392,12 +416,19 @@ async function main(): Promise<void> {
       );
     }
 
-    const result: StampReviewResponse = await runReviewPipeline({
-      diff,
-      params,
-      caller,
-      db, // AGT-420: enables the server-side verdict cache
-    });
+    let result: StampReviewResponse;
+    try {
+      result = await runReviewPipeline({
+        diff,
+        params,
+        caller,
+        db, // AGT-420: enables the server-side verdict cache
+        allowRepoOverride: access === "operator" || access === "granted",
+      });
+    } catch (err) {
+      if (err instanceof RepoOverrideNotAuthorizedError) fail(err.message, 3);
+      throw err;
+    }
     process.stdout.write(JSON.stringify(result) + "\n");
   } finally {
     db.close();
