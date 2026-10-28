@@ -372,6 +372,22 @@ See `docs/personas.md` for the full design discussion (operator-env vs. per-conf
 
 ---
 
+## `review_server (<name>): warning: ...` lines from `stamp review`
+
+When `.stamp/config.yml` sets a `review_server`, `stamp review` passes on the server's own `warning:` and `note:` lines to stderr even when the review succeeds (AGT-2278). Each relayed line starts with the source and reviewer name, then the server's original text:
+
+```
+review_server (security): warning: MAX_DIFF_BYTES="5MB" is not a positive integer; using the default 1048576
+```
+
+These lines describe the **server's** configuration (for example an invalid `MAX_DIFF_BYTES`, `REVIEW_TIMEOUT_MS` or `STAMP_REVIEWER_MODEL`), so the fix belongs in the server's environment, not your repo. The review result is still valid.
+
+- Because of the `review_server (<name>): ` prefix, these lines don't start with `warning:`. To find them, grep for `review_server (` rather than `^warning:`.
+- Terminal escape sequences are removed. At most 20 lines / 4 KB are shown per reviewer, and a final `… N more server notices suppressed` line counts the rest. Other server stderr stays hidden.
+- When a review fails, the server's whole stderr, also with escape sequences removed, is in the error under `server stderr:`.
+
+---
+
 ## Showing verbatim MCP server names in the public mirror (`STAMP_HASH_MCP_NAMES`)
 
 The `Stamp-Payload` trailer's `tool_calls[]` audit trace records each tool the reviewer's agent invoked. Tool *inputs* are SHA-256 hashed (so file paths, search terms, and MCP arguments stay out of the mirror); tool *names* are **also hashed by default** for MCP-hosted tools — `mcp__<server>__<tool>` becomes `mcp__sha256:<hex8>__sha256:<hex8>`. Built-in SDK tools (`Read`, `Grep`, `Bash`, …) are unaffected. The local `state.db` rows used by `stamp reviewers show` always carry verbatim names regardless of the flag, so operators retain full local visibility — only the mirrored attestation is redacted.

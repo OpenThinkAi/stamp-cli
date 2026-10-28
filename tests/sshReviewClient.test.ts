@@ -26,6 +26,9 @@ import {
   buildPubkeyMap,
   parseReviewServerUrl,
   requestServerReview,
+  selectServerNotices,
+  SERVER_NOTICE_MAX_CHARS,
+  SERVER_NOTICE_MAX_LINES,
   type SshSpawnFn,
 } from "../src/lib/sshReviewClient.ts";
 import {
@@ -811,5 +814,124 @@ describe("requestServerReview — repo binding (AGT-2272)", () => {
   it("accepts an unbound approval from a pre-AGT-2272 server (the verifier decides)", async () => {
     const r = await run(undefined);
     assert.equal(r.approval.repo_id, undefined);
+  });
+});
+
+describe("requestServerReview — server notices on success (AGT-2278)", () => {
+  async function runWith(stderr: string, exitCode = 0): Promise<{ written: string[]; error?: Error }> {
+    const fx = buildSignedFixture({
+      reviewer: "security",
+      org: "acme",
+      repo: "widget",
+      baseSha: BASE,
+      headSha: HEAD,
+      diff: DIFF,
+      verdict: "approved",
+      prose: "ok",
+    });
+    const written: string[] = [];
+    try {
+      await requestServerReview({
+        reviewServerUrl: "ssh://git@stamp.example.com:22",
+        reviewer: "security",
+        org: "acme",
+        repo: "widget",
+        baseSha: BASE,
+        headSha: HEAD,
+        diff: DIFF,
+        manifestYaml: fx.manifestYaml,
+        pubkeyByFingerprint: fx.pubkeyByFingerprint,
+        _sshSpawnForTest: async () => ({
+          stdout: exitCode === 0 ? fx.responseJson : "",
+          stderr,
+          exitCode,
+          signal: null,
+        }),
+        _writeStderrForTest: (t) => written.push(t),
+      });
+      return { written };
+    } catch (err) {
+      return { written, error: err as Error };
+    }
+  }
+
+  it("forwards warning: and note: lines on a successful review", async () => {
+    const r = await runWith(
+      'warning: MAX_DIFF_BYTES="5MB" is not a positive integer; using the default 1048576\n' +
+        "note: something the operator should know\n",
+    );
+    assert.equal(r.error, undefined);
+    assert.equal(
+      r.written.join(""),
+      'review_server (security): warning: MAX_DIFF_BYTES="5MB" is not a positive integer; using the default 1048576\n' +
+        "review_server (security): note: something the operator should know\n",
+    );
+  });
+
+  it("keeps all other server stderr hidden", async () => {
+    const r = await runWith("debug: loaded 3 reviewers\nsome model chatter\n  warning: indented, not a notice\n");
+    assert.equal(r.error, undefined);
+    assert.deepEqual(r.written, []);
+  });
+
+  it("writes nothing when the server stderr is empty", async () => {
+    const r = await runWith("");
+    assert.deepEqual(r.written, []);
+  });
+
+  it("strips escape sequences and control characters from forwarded lines", async () => {
+    const r = await runWith(
+      "warning: bad \u001b[31mred\u001b[0m \u001b]0;pwned\u0007value\r\n" +
+        "\u001b[2Knote: cleared line\u0008\n",
+    );
+    const out = r.written.join("");
+    assert.equal(
+      out,
+      "review_server (security): warning: bad red value\n" +
+        "review_server (security): note: cleared line\n",
+    );
+    // eslint-disable-next-line no-control-regex
+    assert.doesNotMatch(out, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+  });
+
+  it("caps the number of forwarded lines and says how many were dropped", async () => {
+    const lines = Array.from({ length: SERVER_NOTICE_MAX_LINES + 7 }, (_, i) => `warning: w${i}`);
+    const r = await runWith(lines.join("\n") + "\n");
+    const out = r.written.join("").trimEnd().split("\n");
+    assert.equal(out.length, SERVER_NOTICE_MAX_LINES + 1);
+    assert.equal(out[0], "review_server (security): warning: w0");
+    assert.equal(out[SERVER_NOTICE_MAX_LINES - 1], `review_server (security): warning: w${SERVER_NOTICE_MAX_LINES - 1}`);
+    assert.equal(out[SERVER_NOTICE_MAX_LINES], "review_server (security): … 7 more server notices suppressed");
+  });
+
+  it("caps the forwarded characters, truncating an oversized line", () => {
+    const huge = `warning: ${"x".repeat(SERVER_NOTICE_MAX_CHARS * 3)}`;
+    const out = selectServerNotices(`${huge}\nwarning: after\n`);
+    assert.equal(out.length, 2);
+    assert.equal(out[0]!.length, SERVER_NOTICE_MAX_CHARS);
+    assert.ok(out[0]!.endsWith("…"));
+    assert.equal(out[1], "… 1 more server notice suppressed");
+  });
+
+  it("strips escape sequences from a failing server's stderr in the error", async () => {
+    const r = await runWith(
+      "error: \u001b[31mdenied\u001b[0m\u001b]8;;https://evil.example\u0007click\u001b]8;;\u0007\r\n" +
+        "\u001b[1A\u001b[2Kerror: rewritten\u0007",
+      3,
+    );
+    assert.ok(r.error instanceof Error);
+    assert.match(r.error.message, /exit 3/);
+    assert.match(r.error.message, /server stderr:\n    error: deniedclick\n    error: rewritten$/);
+    // eslint-disable-next-line no-control-regex
+    assert.doesNotMatch(r.error.message, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    assert.deepEqual(r.written, []);
+  });
+
+  it("leaves the failure path unchanged: stderr in the error, nothing forwarded", async () => {
+    const r = await runWith("warning: STAMP_REVIEWER_MODEL is not valid\nerror: role member is not permitted", 3);
+    assert.ok(r.error instanceof Error);
+    assert.match(r.error.message, /exit 3/);
+    assert.match(r.error.message, /server stderr:\n    warning: STAMP_REVIEWER_MODEL is not valid\n    error: role member/);
+    assert.deepEqual(r.written, []);
   });
 });

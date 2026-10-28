@@ -68,6 +68,7 @@ import {
 } from "./attestationV4.js";
 import { fingerprintFromPem } from "./keys.js";
 import { formatRepoId } from "./repoBinding.js";
+import { stripTerminalControls } from "./terminalText.js";
 import {
   parseManifest,
   resolveCapability,
@@ -548,6 +549,51 @@ export interface RequestServerReviewInput {
   /** Test-only injection seam. Production callers leave this
    *  `undefined` and the system `ssh` binary runs. */
   _sshSpawnForTest?: SshSpawnFn;
+  /** Test-only sink for the server `warning:` / `note:` lines forwarded
+   *  on a successful review (AGT-2278). Defaults to `process.stderr`. */
+  _writeStderrForTest?: (text: string) => void;
+}
+
+// ─── Server notices on success (AGT-2278) ──────────────────────────
+
+/** At most this many server notice lines are forwarded per review. */
+export const SERVER_NOTICE_MAX_LINES = 20;
+/** At most this many characters of server notices are forwarded per review. */
+export const SERVER_NOTICE_MAX_CHARS = 4096;
+
+/**
+ * Pick the lines of a successful review's server stderr worth showing the
+ * operator: the ones that start with `warning:` or `note:` (the server's
+ * diagnostic prefix convention, e.g. an invalid MAX_DIFF_BYTES or
+ * STAMP_REVIEWER_MODEL). Every other line stays hidden, as before.
+ *
+ * The stderr is server-controlled, so each line is passed through
+ * `stripTerminalControls` (AGT-2270) before it is matched or printed, and
+ * the output is capped at SERVER_NOTICE_MAX_LINES lines and
+ * SERVER_NOTICE_MAX_CHARS characters so a server cannot flood the
+ * terminal. When the cap drops lines, a final marker line says how many.
+ */
+export function selectServerNotices(stderr: string): string[] {
+  const notices = stderr
+    .split("\n")
+    .map((line) => stripTerminalControls(line).trimEnd())
+    .filter((line) => /^(warning|note):/.test(line));
+  const out: string[] = [];
+  let chars = 0;
+  for (const line of notices) {
+    if (out.length >= SERVER_NOTICE_MAX_LINES) break;
+    const room = SERVER_NOTICE_MAX_CHARS - chars;
+    if (room <= 0) break;
+    const shown = line.length > room ? `${line.slice(0, Math.max(0, room - 1))}…` : line;
+    out.push(shown);
+    chars += shown.length;
+    if (shown !== line) break;
+  }
+  const suppressed = notices.length - out.length;
+  if (suppressed > 0) {
+    out.push(`… ${suppressed} more server notice${suppressed === 1 ? "" : "s"} suppressed`);
+  }
+  return out;
 }
 
 /**
@@ -590,8 +636,9 @@ export async function requestServerReview(
     // 1=server-config, 2=usage, 3=role-permission, 4=request-validation)
     // to operator-readable prose. Always surface the server's stderr —
     // it carries the structured `error: ...` line the verb writes,
-    // which is the most actionable hint for the operator.
-    const stderr = result.stderr.trim();
+    // which is the most actionable hint for the operator. The stderr is
+    // server-controlled, so strip terminal escapes first (AGT-2278).
+    const stderr = stripTerminalControls(result.stderr).trim();
     const hint = exitCodeHint(result.exitCode);
     const signalNote = result.signal ? ` (killed by signal ${result.signal})` : "";
     throw new Error(
@@ -600,6 +647,16 @@ export async function requestServerReview(
         `  hint: ${hint}\n` +
         (stderr ? `  server stderr:\n    ${stderr.split("\n").join("\n    ")}` : "  (no stderr)"),
     );
+  }
+
+  // AGT-2278: a successful review used to drop the server's stderr
+  // entirely, so a misconfigured server (bad MAX_DIFF_BYTES, invalid
+  // STAMP_REVIEWER_MODEL, ...) was silent. Forward its `warning:` /
+  // `note:` lines, sanitized and capped; the rest stays hidden.
+  const notices = selectServerNotices(result.stderr);
+  if (notices.length > 0) {
+    const write = input._writeStderrForTest ?? ((t: string) => { process.stderr.write(t); });
+    write(notices.map((line) => `review_server (${input.reviewer}): ${line}\n`).join(""));
   }
 
   const parsed = parseResponseJson(result.stdout);
