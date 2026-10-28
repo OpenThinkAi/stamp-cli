@@ -393,5 +393,58 @@ describe("setup-repo.sh --from-tarball does not trust the tarball's config or ho
     assert.notStrictEqual(res.status, 0);
     assert.match(res.stderr, /core\.hooksPath is set/);
     assert.doesNotMatch(res.stdout, /repo ready/);
+    assert.ok(!existsSync(join(tmp, "out-global.git")), "half-built REPO_DIR must be removed");
+  });
+
+  it("ignores a `.git` gitfile that would redirect the import to another repo on the host", () => {
+    // upload-pack's non-strict path discovery tries `<path>/.git` first and
+    // follows gitfiles, so a tarball shipping `.git: gitdir: <victim>` could
+    // make the import copy another tenant's history. The allowlist copy (and
+    // `upload-pack --strict`) must keep that from happening.
+    const victimWork = join(tmp, "victim-work");
+    mkdirSync(victimWork);
+    git(["init", "-q", "--initial-branch=main"], victimWork);
+    git(["config", "user.email", "v@example.com"], victimWork);
+    git(["config", "user.name", "v"], victimWork);
+    writeFileSync(join(victimWork, "secret.txt"), "secret\n");
+    git(["add", "."], victimWork);
+    git(["commit", "-q", "-m", "secret"], victimWork);
+    git(["branch", "victim-secret"], victimWork);
+    const victim = join(tmp, "victim.git");
+    git(["clone", "-q", "--bare", victimWork, victim]);
+    const victimSha = git(["--git-dir", victim, "rev-parse", "refs/heads/victim-secret"]);
+
+    const work = makeWorkRepo();
+    const stage = join(tmp, "stage-gitfile");
+    mkdirSync(stage);
+    const bare = join(stage, "proj.git");
+    git(["clone", "-q", "--bare", work, bare]);
+    writeFileSync(join(bare, ".git"), `gitdir: ${victim}\n`);
+    const tarball = join(tmp, "gitfile.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", stage, "proj.git"], { stdio: "pipe" });
+
+    const { hook } = makeRejectingHook();
+    const repo = join(tmp, "out-gitfile.git");
+    const res = runSetup(repo, hook, tarball);
+    assert.strictEqual(res.status, 0, `setup-repo.sh failed: ${res.stderr}`);
+    const refs = git(["--git-dir", repo, "for-each-ref", "--format=%(refname)"]);
+    assert.doesNotMatch(refs, /victim-secret/, "victim refs must not be imported");
+    const has = spawnSync("git", ["--git-dir", repo, "cat-file", "-e", victimSha], { encoding: "utf8" });
+    assert.notStrictEqual(has.status, 0, "victim objects must not be imported");
+    assert.strictEqual(git(["--git-dir", repo, "rev-parse", "refs/heads/trunk"]), git(["rev-parse", "trunk"], work));
+  });
+
+  it("rejects a shallow clone with a clear message", () => {
+    const work = makeWorkRepo();
+    const stage = join(tmp, "stage-shallow");
+    mkdirSync(stage);
+    const bare = join(stage, "proj.git");
+    git(["clone", "-q", "--bare", "--depth=1", `file://${work}`, bare]);
+    const tarball = join(tmp, "shallow.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", stage, "proj.git"], { stdio: "pipe" });
+    const { hook } = makeRejectingHook();
+    const res = runSetup(join(tmp, "out-shallow.git"), hook, tarball);
+    assert.notStrictEqual(res.status, 0);
+    assert.match(res.stderr, /shallow clone/);
   });
 });

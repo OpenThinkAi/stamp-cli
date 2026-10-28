@@ -30,7 +30,12 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   ran as the server's git user on every push. The import now builds a fresh
   bare repo and fetches only refs and objects into it, rejects tarballs
   containing symlinks, sets `receive.denyNonFastForwards true` on this path
-  too, and refuses to finish if `core.hooksPath` is set from any config source.
+  too. Brownfield import of a shallow clone now fails with a clear message.
+- **`setup-repo.sh` refuses to finish if `core.hooksPath` is set from any
+  config source**, on both the fresh and brownfield paths. A server whose git
+  user has a global or system `core.hooksPath` used to get repos where git
+  never ran the stamp-verify hook; `new-stamp-repo` now fails instead, removes
+  the half-built repo, and says how to find and unset the setting.
 
 ### Changed
 

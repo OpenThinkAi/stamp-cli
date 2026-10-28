@@ -202,7 +202,7 @@ if [[ -n "$FROM_TARBALL" ]]; then
   # file and does not follow include.* directives. Only sha1/sha256 are
   # accepted; anything else is rejected rather than passed to git init.
   OBJECT_FORMAT=sha1
-  if [[ -f "$IMPORT_DIR/config" && ! -L "$IMPORT_DIR/config" ]]; then
+  if [[ -f "$IMPORT_DIR/config" ]]; then
     OBJECT_FORMAT=$(git config --file "$IMPORT_DIR/config" --get extensions.objectformat 2>/dev/null || echo sha1)
   fi
   case "$OBJECT_FORMAT" in
@@ -213,20 +213,38 @@ if [[ -n "$FROM_TARBALL" ]]; then
       ;;
   esac
 
-  # Strip the scratch copy before ANY git command runs against it as a
-  # repository (the fetch below runs upload-pack inside it). Its config is
-  # replaced by a minimal known-good one; everything that could redirect
-  # object/ref lookup or run code is removed.
-  rm -rf "$IMPORT_DIR/config" "$IMPORT_DIR/hooks" "$IMPORT_DIR/commondir" \
-         "$IMPORT_DIR/info/grafts" "$IMPORT_DIR/objects/info/alternates" \
-         "$IMPORT_DIR/objects/info/http-alternates"
+  # A shallow source can't be imported whole (its history is cut off), so
+  # say that plainly instead of failing later with a generic fetch error.
+  if [[ -e "$IMPORT_DIR/shallow" ]]; then
+    echo "error: $FROM_TARBALL is a shallow clone; brownfield import needs full history (git fetch --unshallow, then re-run)" >&2
+    exit 1
+  fi
+
+  # Allowlist, not denylist: copy ONLY what a bare repo's history lives in
+  # (HEAD, refs/, packed-refs, objects/) into a second scratch dir, and give
+  # it a minimal known-good config. Everything else the tarball shipped
+  # (config, hooks/, commondir, info/grafts, a stray `.git` gitfile or dir
+  # that upload-pack's path discovery would follow into another repo, ...)
+  # never reaches a directory git treats as a repository. Alternates inside
+  # objects/ are dropped too: they would point object lookup at other repos.
+  CLEAN_DIR="$SCRATCH/clean.git"
+  mkdir -p "$CLEAN_DIR"
+  for entry in HEAD refs packed-refs objects; do
+    if [[ -e "$IMPORT_DIR/$entry" ]]; then
+      mv "$IMPORT_DIR/$entry" "$CLEAN_DIR/$entry"
+    fi
+  done
+  rm -rf "$IMPORT_DIR"
+  mkdir -p "$CLEAN_DIR/refs" "$CLEAN_DIR/objects"
+  rm -f "$CLEAN_DIR/objects/info/alternates" "$CLEAN_DIR/objects/info/http-alternates"
   {
     printf '[core]\n\trepositoryformatversion = %s\n\tbare = true\n' \
       "$([[ "$OBJECT_FORMAT" == sha256 ]] && echo 1 || echo 0)"
     if [[ "$OBJECT_FORMAT" == sha256 ]]; then
       printf '[extensions]\n\tobjectformat = sha256\n'
     fi
-  } > "$IMPORT_DIR/config"
+  } > "$CLEAN_DIR/config"
+  IMPORT_DIR="$CLEAN_DIR"
 
   # Verify it really is a bare repo. `git rev-parse --is-bare-repository`
   # exits 0 only inside a bare repo with the right layout.
@@ -244,9 +262,14 @@ if [[ -n "$FROM_TARBALL" ]]; then
   echo "→ importing refs and objects from tarball into $REPO_DIR"
   # Hooks are not installed yet, and fetch never runs receive hooks anyway:
   # the existing history predates server gating (DESIGN.md "Bootstrap").
+  # `upload-pack --strict` serves exactly $IMPORT_DIR, with no `.git` /
+  # `.git`-suffix discovery on the source path (defense in depth on top of
+  # the allowlist copy above).
   if ! git --git-dir="$REPO_DIR" fetch --quiet --no-tags --update-head-ok \
+      --upload-pack='git-upload-pack --strict' \
       "$IMPORT_DIR" '+refs/*:refs/*'; then
-    echo "error: could not import refs/objects from $FROM_TARBALL" >&2
+    rm -rf "$REPO_DIR"
+    echo "error: could not import refs/objects from $FROM_TARBALL (removed partial $REPO_DIR)" >&2
     exit 1
   fi
   if [[ "$IMPORT_HEAD" == refs/heads/* ]] && \
@@ -358,7 +381,9 @@ fi
 # core.hooksPath, git would consult that directory instead and every push
 # would skip stamp verification. Refuse to report the repo ready.
 if HOOKS_PATH=$(git --git-dir="$REPO_DIR" config --get core.hooksPath 2>/dev/null) && [[ -n "$HOOKS_PATH" ]]; then
+  rm -rf "$REPO_DIR"
   echo "error: core.hooksPath is set ('$HOOKS_PATH') for $REPO_DIR; git would ignore the stamp pre-receive hook" >&2
+  echo "       find it with \`git config --show-origin --get core.hooksPath\`, unset it, and re-run (partial $REPO_DIR removed)" >&2
   exit 1
 fi
 

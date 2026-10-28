@@ -126,9 +126,12 @@ exploit the server-side scripts to disrupt other tenants.
   the installed stamp-verify pre-receive) and `hooks/` (an `update` or
   `reference-transaction` hook would run as `git` on every push).
   Closed by AGT-2266: `setup-repo.sh` extracts into a scratch dir,
-  refuses symlinks, strips config/hooks/alternates/commondir/grafts,
-  then `git init --bare`s a fresh repo and fetches only the refs and
-  the objects they reach. It refuses to finish if `core.hooksPath` is
+  refuses symlinks, copies only `HEAD`, `refs/`, `packed-refs` and
+  `objects/` (minus alternates) into a clean scratch repo with a minimal
+  config, then `git init --bare`s a fresh repo and fetches (with
+  `upload-pack --strict`) only the refs and the objects they reach. A
+  stray `.git` gitfile, `commondir`, grafts or hooks never reach a
+  directory git reads as a repository. It refuses to finish if `core.hooksPath` is
   set from any config source.
 
 **Effective?** Push paths are closed. Server-side scripts are bounded
