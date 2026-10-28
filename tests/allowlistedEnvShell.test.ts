@@ -157,6 +157,7 @@ describe("listener / worker allowlists (AGT-2264)", () => {
       "src/server/http-server.ts",
       "src/server/peerReviews.ts",
       "src/server/prompts-cache.ts",
+      "src/server/promptsCachePaths.ts",
       "src/server/trashPurge.ts",
       "src/lib/serverDb.ts",
       "src/lib/invites.ts",
@@ -169,6 +170,9 @@ describe("listener / worker allowlists (AGT-2264)", () => {
       const src = readFileSync(path.join(ROOT, f), "utf8");
       for (const m of src.matchAll(/process\.env\[\s*"([A-Z0-9_]+)"\s*\]/g)) read.add(m[1]!);
       for (const m of src.matchAll(/process\.env\.([A-Z0-9_]+)/g)) read.add(m[1]!);
+      // promptsCachePaths.ts reads an injected `env` bag (AGT-2277); skip
+      // assignments (prompts-cache.ts builds its git child's env that way).
+      for (const m of src.matchAll(/\benv\[\s*"([A-Z0-9_]+)"\s*\](?!\s*=[^=])/g)) read.add(m[1]!);
       for (const m of src.matchAll(/(?:resolvePeerReviewLimit|positiveIntEnv|resolveRetentionDays)\(\s*"([A-Z0-9_]+)"/g)) {
         read.add(m[1]!);
       }

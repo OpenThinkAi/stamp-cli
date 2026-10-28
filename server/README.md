@@ -123,7 +123,7 @@ If the prompts repo is private, the stamp-server needs SSH access via a github d
    ```
 2. **Register the public half** as a deploy key on the prompts repo (Settings → Deploy keys → Add deploy key). **Read-only access is sufficient** — the stamp-server only ever fetches; it never pushes back.
 3. **Drop the private half into the stamp-server's volume.** The default path the server checks is `/srv/git/.ssh-client-keys/prompts_repo_key`. The directory is created at boot (`server/entrypoint.sh`), owned `root:git` mode `0750`, so the git user can READ + traverse but cannot CREATE or DELETE entries. Upload the file via your platform's volume-mount mechanism (Railway: web console shell into the container; Fly: `fly ssh console`; self-hosted Docker: `docker cp`). The file itself should be mode `0600` git-owned, matching the existing `github_ed25519` mirror-push key alongside it.
-4. **Set `STAMP_PROMPTS_DEPLOY_KEY_PATH`** on the server pointing at the file, even when it is the default path. Only runtime refreshes fall back to the default when the variable is unset; the boot-time clone and the entrypoint's `0600` re-pin of the key use it only when it is set.
+4. **Leave `STAMP_PROMPTS_DEPLOY_KEY_PATH` unset** if the key is at the default path: the boot-time clone, the entrypoint's `git:git 0600` re-pin of the key, and the runtime refreshes all use the default when a key is there. Set it only if you stored the key somewhere else.
 
 If `STAMP_PROMPTS_DEPLOY_KEY_PATH` is set but the file is missing at boot, `entrypoint.sh` aborts startup with:
 
@@ -143,8 +143,8 @@ All Phase B configuration is via env vars on the stamp-server deployment (Railwa
 | `STAMP_PROMPTS_REPO_REF` | No | `main` | Branch or tag to track on the prompts repo. |
 | `STAMP_PROMPTS_ALLOWED_SIGNERS` | No (strongly recommended) | unset | OpenSSH `allowed_signers` file. When set, a fetched tip is accepted only if `git verify-commit` finds an SSH signature by a listed key; otherwise the cache keeps its last verified commit (AGT-2249). Unset logs a boot warning. |
 | `STAMP_PROMPTS_WEBHOOK_SECRET` | Yes (to accept webhook deliveries) | unset | HMAC-SHA256 shared secret. Must match the github webhook config. Missing = `503 webhook_secret_unconfigured` on every delivery. |
-| `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Conditional | `/srv/git/.ssh-client-keys/prompts_repo_key` | Private SSH key for SSH URLs to private repos. Ignored for HTTPS URLs. Path must exist at boot when set explicitly. |
-| `STAMP_PROMPTS_CACHE_ROOT` | No | `/srv/git/.prompts-cache` | Absolute directory path for the local cache. The default is on the persistent volume so the cache survives container redeploys. Leave it at the default: the boot step and `stamp-workers` honour it, but `stamp-review` always reads `/srv/git/.prompts-cache`. |
+| `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Conditional | `/srv/git/.ssh-client-keys/prompts_repo_key` (used when a key is there) | Private SSH key for SSH URLs to private repos. Unset: boot and runtime refreshes use the default path if a key exists there, else no key. Path must exist at boot when set explicitly. |
+| `STAMP_PROMPTS_CACHE_ROOT` | No | `/srv/git/.prompts-cache` | Directory for the local cache. The boot-time clone, `stamp-workers` and `stamp-review` all use it. It must be a dot-dir directly under `/srv/git` (on the persistent volume, so the cache survives redeploys, and never served by the SSH gate) other than the server's own `.ssh-host-keys`, `.ssh-client-keys`, `.stamp-state` and `.trash`; any other value fails the boot. |
 | `STAMP_PROMPTS_POLL_INTERVAL_SEC` | No | `3600` (1 hour) | Periodic-poll backstop interval in seconds. Floor `5` (values 1–4 are clamped up with a warn line). Literal `"0"` disables polling entirely. Non-integer / negative / whitespace values fall back to the default with a warn line — see "Periodic-poll backstop" below. |
 | `STAMP_PROMPTS_KNOWN_HOSTS_PATH` | No | `/etc/ssh/ssh_known_hosts` (bundled `server/github-known-hosts`) | Override for self-hosted github enterprise. Standard github.com deployments don't need this. |
 | `STAMP_PROMPTS_DIR` | No (Phase A only) | `/etc/stamp/reviewers` | Phase A bundled-prompts fallback path. **IGNORED when `STAMP_PROMPTS_REPO_URL` is set** — Phase B mode reads from the cache root above. **Setting a non-default value fails the boot in production** (AGT-411). |
@@ -161,7 +161,7 @@ After setting the env vars and triggering a redeploy, container logs should show
    ```
    reviewer prompts available: product.md,security.md,standards.md
    ```
-2. **Deploy-key gate** (if `STAMP_PROMPTS_DEPLOY_KEY_PATH` is set): silent on success; if the file is missing, the boot aborts with the `error: STAMP_PROMPTS_DEPLOY_KEY_PATH=... does not exist on the volume` message documented above.
+2. **Cache-root and deploy-key checks**: a `STAMP_PROMPTS_CACHE_ROOT` that isn't an allowed dot-dir aborts the boot with `error: STAMP_PROMPTS_CACHE_ROOT=... is not allowed`. If `STAMP_PROMPTS_DEPLOY_KEY_PATH` is set: silent on success; if the file is missing, the boot aborts with the `error: STAMP_PROMPTS_DEPLOY_KEY_PATH=... does not exist on the volume` message documented above.
 3. **Cache populate pre-flight** (`prompts-cache:` prefix):
    ```
    prompts-cache: populating cache at /srv/git/.prompts-cache from git@github.com:your-org/stamp-reviewers.git@main (deploy key: /srv/git/.ssh-client-keys/prompts_repo_key)
@@ -381,6 +381,17 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      adaptive-only models such as `claude-opus-5-5`). Set `1` to send
      nothing and let the model think by its own default. See the README's
      "Extended thinking" section.
+   - `MAX_DIFF_BYTES` — **optional** (default `5000000`). Largest diff, in
+     bytes, the `stamp-review` verb accepts; a bigger one exits 4. A
+     non-positive or non-integer value falls back to the default.
+   - `REVIEW_TIMEOUT_MS` — **optional** (default `300000`). Per-review
+     timeout on the Anthropic call. A bad value falls back to the default.
+
+   These reviewer settings, like the API key and the rate caps, reach the
+   SSH-invoked `stamp-review` through `/etc/stamp/env`, which the entrypoint
+   writes at boot (sshd strips the container env from SSH sessions). A
+   value containing a newline is not written (a `warning:` line says so) and
+   the verb uses its default. Change one by redeploying the container.
    - `MAX_REVIEWS_PER_HOUR` — **optional** (default `30`). Per-caller
      token-bucket cap on the `stamp-review` SSH verb (AGT-420), bounding
      the Anthropic spend any one enrolled member can drive. `admin`/`owner`
@@ -1111,6 +1122,13 @@ source reads a variable that neither list carries. It scans a fixed list of
 files for `process.env["X"]`, `process.env.X` and the two env-helper call
 shapes, so add a new module the listener or workers import to that list, and
 read env in one of those shapes.
+
+The SSH verbs are the other half. sshd strips the container env from SSH
+sessions, so a variable `stamp-review` (or the signing helper it runs)
+reads must be persisted to `/etc/stamp/env` with `write_env_var` in
+`server/entrypoint.sh`. `tests/serverEnvFileCoverage.test.ts` walks the
+verb's import closure and fails on any variable that is neither written
+there nor listed in the test as deliberately not passed, with the reason.
 
 ### Upgrading to this layout
 

@@ -83,13 +83,6 @@ import {
   runReviewPipeline,
 } from "./reviewPipeline.js";
 
-// Read the diff-size cap once at module load so a hypothetical
-// future HTTP entrypoint that imports this file shares one constant
-// across all requests (operators tune via restart, never per-call).
-// Today's SSH verb is one process per invocation, so the distinction
-// is forward-looking — pinned at module scope to enforce the contract
-// by call-site placement rather than by comment.
-const MAX_DIFF_BYTES = resolveMaxDiffBytes();
 
 // ─── Shape validators ───────────────────────────────────────────────
 //
@@ -361,6 +354,11 @@ async function main(): Promise<void> {
   // sshd_config's SetEnv (rare) win — the loader only fills unset keys.
   loadServerEnvFile();
 
+  // Resolve the diff-size cap AFTER the env-file merge (AGT-2277): it used
+  // to be read at module load, before loadServerEnvFile(), so an operator's
+  // MAX_DIFF_BYTES could never reach the SSH verb even once persisted.
+  const maxDiffBytes = resolveMaxDiffBytes();
+
   // parseRequest → resolveAuth → runReviewPipeline (stubbed) →
   // emit JSON to stdout. The flow is intentionally linear so a
   // future HTTP entrypoint can fold the same steps into a request
@@ -402,7 +400,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    const diff = await readBoundedStdin(MAX_DIFF_BYTES);
+    const diff = await readBoundedStdin(maxDiffBytes);
 
     // Cross-check the streamed diff against the client's claimed
     // sha256 BEFORE invoking the pipeline. A mismatch here is either

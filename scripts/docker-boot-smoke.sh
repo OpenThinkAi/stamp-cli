@@ -34,6 +34,8 @@ SIGN_KEYS=""
 HOOKS_CONTAINER="stamp-smoke-hooks-$$"
 HOOKS_TMP=""
 LISTEN_CONTAINER="stamp-smoke-listen-$$"
+PENV_CONTAINER="stamp-smoke-penv-$$"
+PENV_BAD_CONTAINER="stamp-smoke-penv-bad-$$"
 BOOT_WAIT_SECS="${STAMP_SMOKE_BOOT_WAIT:-10}"
 
 # Files that affect how the image BUILDS or BOOTS. AGT-2270 added
@@ -82,6 +84,8 @@ cleanup() {
   docker rm -f "$SIGN_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$HOOKS_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$LISTEN_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$PENV_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$PENV_BAD_CONTAINER" >/dev/null 2>&1 || true
   [ -n "${HOOKS_TMP:-}" ] && rm -rf "$HOOKS_TMP"
   [ -n "${REVOKE_KEYS:-}" ] && rm -rf "$REVOKE_KEYS"
   [ -n "${SIGN_KEYS:-}" ] && rm -rf "$SIGN_KEYS"
@@ -886,6 +890,118 @@ if ! docker exec "$LISTEN_CONTAINER" sh -c "$listen_boot2"; then
 fi
 docker rm -f "$LISTEN_CONTAINER" >/dev/null 2>&1 || true
 echo "docker-boot-smoke: listener runs as stamp-http with only its allowlisted env; secrets, keys and repos unreachable; invite/webhook/peer endpoints work ✓"
+
+# AGT-2277: settings set on the container reach the SSH-invoked stamp-review
+# (sshd strips the session env; the entrypoint persists them to
+# /etc/stamp/env), a non-default STAMP_PROMPTS_CACHE_ROOT is honoured end to
+# end (boot clone -> stamp-review), and with STAMP_PROMPTS_DEPLOY_KEY_PATH
+# unset the boot clone uses a key at the default path. No ANTHROPIC_API_KEY:
+# nothing ever calls the model. The prompts repo is a local file:// one.
+#   - MAX_DIFF_BYTES=64: a 200-byte diff is refused by stamp-review with
+#     the 64-byte cap (the verb used to read it before loading the env file);
+#   - reviewer "smokeonly" exists only in the custom cache root: the verb
+#     resolves its prompt and gets past the fetch (to the missing signing
+#     key / API key — no model call), while an
+#     unknown reviewer fails the prompt fetch (the verb used to read the
+#     default root, where smokeonly isn't);
+#   - the custom root is git-owned, closed to other, and refused by the gate;
+#   - a cache root the gate could serve stops the boot.
+echo "docker-boot-smoke: asserting reviewer settings, a custom prompts cache root and the default deploy key reach stamp-review (AGT-2277)…"
+penv_pre='set -e
+mkdir -p /opt/psrc && cd /opt/psrc && git init -q -b main w && cd w
+printf "smoke prompt\n" > security.md
+printf "smoke-only prompt\n" > smokeonly.md
+git add -A && git -c user.email=s@x.invalid -c user.name=s commit -qm init
+git clone -q --bare /opt/psrc/w /opt/prompts.git && chown -R git:git /opt/prompts.git
+mkdir -p /srv/git/.ssh-client-keys
+ssh-keygen -q -t ed25519 -N "" -C smoke-prompts -f /srv/git/.ssh-client-keys/prompts_repo_key
+chown root:root /srv/git/.ssh-client-keys/prompts_repo_key
+chmod 0644 /srv/git/.ssh-client-keys/prompts_repo_key
+exec /entrypoint.sh'
+docker run -d --name "$PENV_CONTAINER" --entrypoint sh \
+  -e STAMP_PROMPTS_REPO_URL=file:///opt/prompts.git \
+  -e STAMP_PROMPTS_CACHE_ROOT=/srv/git/.prompts-alt \
+  -e STAMP_REVIEWER_MODEL=claude-opus-5 \
+  -e STAMP_REVIEWER_THINKING=1 \
+  -e REVIEW_TIMEOUT_MS=1234 \
+  -e MAX_DIFF_BYTES=64 \
+  "$IMAGE_TAG" -c "$penv_pre" >/dev/null
+wait_sshd "$PENV_CONTAINER"
+penv_logs=$(docker logs "$PENV_CONTAINER" 2>&1)
+for want_line in \
+  "prompts-cache: populating cache at /srv/git/.prompts-alt from file:///opt/prompts.git@main (deploy key: /srv/git/.ssh-client-keys/prompts_repo_key)" \
+  "prompts-cache: ready (cacheRoot=/srv/git/.prompts-alt "; do
+  printf '%s\n' "$penv_logs" | grep -F "$want_line" >/dev/null || {
+    echo "error: boot log is missing '$want_line' (AGT-2277)." >&2
+    printf '%s\n' "$penv_logs" | tail -30 >&2
+    exit 1
+  }
+done
+penv_check='set -e
+fail() { echo "$*" >&2; [ -f "$k/out" ] && cat "$k/out" >&2; exit 1; }
+k=$(mktemp -d)
+# --- boot side ------------------------------------------------------------
+[ -f /srv/git/.prompts-alt/smokeonly.md ] || fail "custom cache root was not populated"
+[ -e /srv/git/.prompts-cache ] && fail "default cache root was populated although STAMP_PROMPTS_CACHE_ROOT is set"
+[ "$(stat -c "%U:%G" /srv/git/.prompts-alt)" = "git:git" ] || fail "custom cache root is $(stat -c "%U:%G" /srv/git/.prompts-alt)"
+case "$(stat -c "%A" /srv/git/.prompts-alt)" in *---) ;; *) fail "custom cache root is open to other: $(stat -c "%A" /srv/git/.prompts-alt)" ;; esac
+[ "$(stat -c "%U:%G %a" /srv/git/.ssh-client-keys/prompts_repo_key)" = "git:git 600" ] || fail "default deploy key not re-pinned: $(stat -c "%U:%G %a" /srv/git/.ssh-client-keys/prompts_repo_key)"
+for l in STAMP_REVIEWER_MODEL=claude-opus-5 STAMP_REVIEWER_THINKING=1 REVIEW_TIMEOUT_MS=1234 MAX_DIFF_BYTES=64 STAMP_PROMPTS_CACHE_ROOT=/srv/git/.prompts-alt; do
+  grep -qx "$l" /etc/stamp/env || fail "/etc/stamp/env lacks $l"
+done
+# --- stamp-review over SSH -------------------------------------------------
+ssh-keygen -q -t ed25519 -N "" -C smoke-op -f "$k/op" >/dev/null
+/usr/local/sbin/stamp-break-glass add "$k/op.pub" >/dev/null
+OPTS="-o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+Z=0000000000000000000000000000000000000000
+review() { # reviewer difffile
+  sha=$(sha256sum "$2" | cut -d" " -f1)
+  set +e
+  ssh $OPTS -i "$k/op" git@127.0.0.1 stamp-review --reviewer "$1" --org smoke --repo penv --base-sha $Z --head-sha $Z --diff-sha256 "$sha" <"$2" >"$k/out" 2>&1
+  rc=$?
+  set -e
+}
+head -c 200 /dev/zero | tr "\0" a > "$k/big"
+review smokeonly "$k/big"
+[ $rc -eq 4 ] || fail "200-byte diff: expected exit 4 from the MAX_DIFF_BYTES=64 cap, got $rc"
+grep -q "exceeds MAX_DIFF_BYTES (64 bytes)" "$k/out" || fail "stamp-review did not apply MAX_DIFF_BYTES=64"
+printf "diff --git a/x b/x\n" > "$k/small"
+review smokeonly "$k/small"
+grep -q "canonical prompt fetch failed" "$k/out" && fail "stamp-review did not read the prompt from STAMP_PROMPTS_CACHE_ROOT"
+# Past the prompt fetch (stage 1), the verb stops at the signer (no review
+# key without ANTHROPIC_API_KEY) or the API-key check — never the model.
+grep -Eq "SigningKeyUnavailableError|ANTHROPIC_API_KEY is not set" "$k/out" || fail "stamp-review with a cached prompt: expected to get past the prompt fetch (rc=$rc)"
+review nosuchreviewer "$k/small"
+grep -q "canonical prompt fetch failed" "$k/out" || fail "unknown reviewer: expected a prompt fetch failure (rc=$rc)"
+# --- the gate never serves the custom root ---------------------------------
+rm -rf "$k/c"
+if GIT_SSH_COMMAND="ssh $OPTS -i $k/op" git clone -q git@127.0.0.1:/srv/git/.prompts-alt "$k/c" >"$k/out" 2>&1; then fail "cloned the custom cache root through the gate"; fi
+grep -q "not allowed" "$k/out" || fail "clone of the custom cache root failed, but not with: not allowed"
+rm -rf "$k"
+'
+if ! docker exec "$PENV_CONTAINER" sh -c "$penv_check"; then
+  echo "error: stamp-review env / prompts cache root assertion failed (AGT-2277) — see above." >&2
+  docker logs "$PENV_CONTAINER" 2>&1 | tail -30 >&2 || true
+  exit 1
+fi
+docker rm -f "$PENV_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$PENV_BAD_CONTAINER" \
+  -e STAMP_PROMPTS_CACHE_ROOT=/srv/git/prompts.git \
+  "$IMAGE_TAG" >/dev/null
+penv_bad_status=""
+for _ in $(seq 1 60); do
+  penv_bad_status=$(docker inspect -f '{{.State.Status}}' "$PENV_BAD_CONTAINER" 2>/dev/null || echo gone)
+  [ "$penv_bad_status" = "exited" ] && break
+  sleep 0.25
+done
+penv_bad_logs=$(docker logs "$PENV_BAD_CONTAINER" 2>&1)
+if [ "$penv_bad_status" != "exited" ] || ! printf '%s\n' "$penv_bad_logs" | grep -F "error: STAMP_PROMPTS_CACHE_ROOT='/srv/git/prompts.git' is not allowed" >/dev/null; then
+  echo "error: a servable STAMP_PROMPTS_CACHE_ROOT did not stop the boot (status=$penv_bad_status) (AGT-2277)." >&2
+  printf '%s\n' "$penv_bad_logs" | tail -20 >&2
+  exit 1
+fi
+docker rm -f "$PENV_BAD_CONTAINER" >/dev/null 2>&1 || true
+echo "docker-boot-smoke: reviewer settings and STAMP_PROMPTS_CACHE_ROOT reach stamp-review; boot clones with the default deploy key; a servable cache root stops the boot ✓"
 
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"
