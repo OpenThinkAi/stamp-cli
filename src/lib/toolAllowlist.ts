@@ -134,3 +134,45 @@ export function checkMcpCommand(
     `allowlist if it is intentional, or pick one of the safe launchers.`
   );
 }
+
+/**
+ * AGT-2270: `npx <pkg>` resolves the package from the registry at review
+ * time. Without an exact `name@x.y.z` the reviewer host runs whatever the
+ * registry serves that day, with the env vars the server is allowed, and
+ * `mcp_sha256` (which hashes the args string) can't tell. Returns a warning
+ * for an `npx` launch whose package spec is not an exact version, else
+ * null. Not a hard refusal: existing configs keep working, and the warning
+ * names the fix (pin the version, or install it and use
+ * `node_modules/.bin/<name>`, which the lockfile pins).
+ */
+export function npxPinWarning(command: string, args: readonly string[] = []): string | null {
+  if (command !== "npx") return null;
+  const specs: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "-p" || a === "--package") {
+      if (args[i + 1] !== undefined) specs.push(args[++i]!);
+      continue;
+    }
+    if (a.startsWith("--package=")) {
+      specs.push(a.slice("--package=".length));
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    // First positional is the package (or the bin, when --package named it).
+    if (specs.length === 0) specs.push(a);
+    break;
+  }
+  const unpinned = specs.filter((spec) => !EXACT_NPM_SPEC_RE.test(spec));
+  if (specs.length > 0 && unpinned.length === 0) return null;
+  const shown = unpinned[0] ?? "(no package)";
+  return (
+    `npx runs ${JSON.stringify(shown)} from the npm registry at review time without an exact ` +
+    `version, so a later publish of that package runs on this machine unreviewed. Pin it ` +
+    `(e.g. "${shown.replace(/@[^@/]*$/, "")}@1.2.3") or install it and use ` +
+    `node_modules/.bin/<name>.`
+  );
+}
+
+/** `name@1.2.3` or `@scope/name@1.2.3` (prerelease/build suffixes allowed). */
+const EXACT_NPM_SPEC_RE = /^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*@\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/i;
