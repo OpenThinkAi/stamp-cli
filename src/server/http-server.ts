@@ -42,6 +42,7 @@ import {
 } from "node:crypto";
 import { statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { DatabaseSync } from "node:sqlite";
 import { consumeInviteToken, markInviteConsumer } from "../lib/invites.js";
 import {
   appendEvent,
@@ -59,6 +60,7 @@ import {
   sweepExpiredSeats,
   touchHeartbeat,
   touchLastSeen,
+  type PeerReviewPatchRow,
   type UserRow,
 } from "../lib/serverDb.js";
 import { parseSshPubkey } from "../lib/sshKeys.js";
@@ -1955,13 +1957,94 @@ function authenticatePostRequest(
 const PEER_POST_MAX_BODY_BYTES = MAX_BODY_BYTES;
 
 /**
+ * AGT-2253: bind a peer payload's identity field (`claimant_fp`,
+ * `requester_fp`) to the caller the request headers authenticated.
+ *
+ * Header auth proves the caller holds an ENROLLED stamp key. The inner
+ * payload signature only proves possession of `payload.pubkey`, which can
+ * be any throwaway keypair — so without this bind one enrolled member could
+ * claim seats (or register extras, or ping) under fresh unenrolled
+ * identities: squatting both seats on any patch, or holding a reviewer seat
+ * on their own PR past the author-exclusion check. The payload fp must be
+ * the header key's fp, and the carried `payload.pubkey` (when present) must
+ * be the header key itself.
+ */
+function bindPayloadIdentity(
+  auth: { pubkeyPem: string; fingerprint: string },
+  field: string,
+  payloadFp: string,
+  payloadPubkey?: string,
+): { ok: true } | { ok: false; reason: string } {
+  if (payloadFp !== auth.fingerprint) {
+    return {
+      ok: false,
+      reason: `header stamp-fp (${auth.fingerprint}) ≠ body ${field} (${payloadFp})`,
+    };
+  }
+  if (payloadPubkey !== undefined) {
+    let carriedFp: string;
+    try {
+      carriedFp = fingerprintFromPem(payloadPubkey);
+    } catch {
+      return { ok: false, reason: "body pubkey is not a valid SPKI PEM" };
+    }
+    if (carriedFp !== auth.fingerprint) {
+      return {
+        ok: false,
+        reason: `body pubkey (${carriedFp}) is not the header stamp key (${auth.fingerprint})`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * AGT-2253: may the authenticated caller act on (claim a seat on / register
+ * as an extra for) this patch? Mirrors the SSE delivery gate (AGT-2256):
+ * the caller must be allowed to receive the patch repo's events
+ * (`mayReceiveRepoEvents`) — operators always, members only with a matching
+ * grant, unscoped members never. The repo checked is the one stored on the
+ * patch row (from the author's signed pr-opened), not the caller's body;
+ * a body `repo` naming any other repo is refused outright.
+ */
+function authorizePatchAction(
+  db: DatabaseSync,
+  caller: UserRow | null,
+  patch: PeerReviewPatchRow,
+  payloadRepo: string,
+):
+  | { ok: true }
+  | { ok: false; status: number; error: string; reason: string } {
+  if (!caller) {
+    return { ok: false, status: 401, error: "unauthorized", reason: "key is not an enrolled user" };
+  }
+  if (payloadRepo.toLowerCase() !== patch.repo.toLowerCase()) {
+    return {
+      ok: false, status: 400, error: "repo_mismatch",
+      reason: `body repo does not match the patch's repo`,
+    };
+  }
+  const [org, repo] = patch.repo.split("/");
+  if (!org || !repo || !mayReceiveRepoEvents(db, caller, org, repo)) {
+    return {
+      ok: false, status: 403, error: "repo_access_denied",
+      reason: `caller is not authorized for ${patch.repo}`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Handle POST /peer/claim-seat.
  *
  * Body: { patch_id, claimant_fp, base_sha, repo, pubkey, signature }
  *
  * Auth: stamp-key signed-timestamp (authenticatePostRequest) + inner
  * Ed25519 payload signature (verifyPeerPayloadSignatureFromPubkey).
- * Identity is stamp-fp throughout — ssh-fp is not used.
+ * Identity is stamp-fp throughout — ssh-fp is not used. AGT-2253:
+ * `claimant_fp` / `pubkey` must be the header key (bindPayloadIdentity),
+ * and the caller must be allowed to see the patch repo's events
+ * (authorizePatchAction → mayReceiveRepoEvents).
  */
 async function handlePeerClaimSeat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { buf, tooLarge } = await readBody(req, PEER_POST_MAX_BODY_BYTES);
@@ -2022,11 +2105,37 @@ async function handlePeerClaimSeat(req: IncomingMessage, res: ServerResponse): P
     return;
   }
 
+  // AGT-2253: the seat goes to the authenticated caller, never to a
+  // payload-chosen identity.
+  const bind = bindPayloadIdentity(auth, "claimant_fp", payload.claimant_fp, payload.pubkey);
+  if (!bind.ok) {
+    logLine("warn", `POST /peer/claim-seat: identity bind failed: ${bind.reason}`);
+    sendJson(res, 401, { ok: false, error: "fingerprint_mismatch", reason: bind.reason });
+    return;
+  }
+
   const db = openServerDb({ skipChmod: true });
   try {
     // touch last_seen for this user (by stamp-fp = auth.fingerprint).
     const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
     if (userRow) touchLastSeen(db, userRow.id);
+
+    // AGT-2253: the caller must be allowed to see the patch repo's events.
+    // claimSeatTx would report patch_not_found too; refusing here keeps the
+    // repo gate ahead of any seat write. Status stays 500, the code
+    // claimSeatTx's patch_not_found has always mapped to, so clients see
+    // no change for an unknown patch.
+    const patchRow = findPatch(db, payload.patch_id);
+    if (!patchRow) {
+      sendJson(res, 500, { ok: false, error: "patch_not_found" });
+      return;
+    }
+    const access = authorizePatchAction(db, userRow, patchRow, payload.repo);
+    if (!access.ok) {
+      logLine("warn", `POST /peer/claim-seat: fp=${auth.fingerprint} patch=${payload.patch_id} refused: ${access.reason}`);
+      sendJson(res, access.status, { ok: false, error: access.error, reason: access.reason });
+      return;
+    }
 
     // Per-fingerprint rate limit (seat-squat mitigation, same as SSH verb).
     const claimSeatRateCap = resolvePeerReviewLimit("CLAIM_SEAT_RATE_CAP", PR_OPENED_RATE_CAP_DEFAULT);
@@ -2049,7 +2158,7 @@ async function handlePeerClaimSeat(req: IncomingMessage, res: ServerResponse): P
 
     appendEvent(db, payload.patch_id, "claim-seat", payload.claimant_fp, {
       seat: result.seat,
-      repo: payload.repo,
+      repo: patchRow.repo,
     }, now);
 
     logLine("info", `POST /peer/claim-seat: fp=${auth.fingerprint} patch=${payload.patch_id} seat=${result.seat}`);
@@ -2263,6 +2372,15 @@ async function handlePeerReReviewRequest(req: IncomingMessage, res: ServerRespon
     return;
   }
 
+  // AGT-2253: the requester is the authenticated caller — a member may not
+  // ping on the author's behalf with a payload naming the author's fp.
+  const bind = bindPayloadIdentity(auth, "requester_fp", payload.requester_fp, payload.pubkey);
+  if (!bind.ok) {
+    logLine("warn", `POST /peer/re-review-request: identity bind failed: ${bind.reason}`);
+    sendJson(res, 401, { ok: false, error: "fingerprint_mismatch", reason: bind.reason });
+    return;
+  }
+
   const db = openServerDb({ skipChmod: true });
   try {
     const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
@@ -2358,7 +2476,8 @@ async function handlePeerReReviewRequest(req: IncomingMessage, res: ServerRespon
  * Body: { patch_id, claimant_fp, base_sha, repo, pubkey, signature }
  *
  * Invoked when claim_seat: always and seats_full. Records an extras-register
- * event; does NOT allocate a numbered seat slot.
+ * event; does NOT allocate a numbered seat slot. Same AGT-2253 identity bind
+ * and repo-access gate as claim-seat; an unknown patch is refused.
  */
 async function handlePeerRegisterExtra(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { buf, tooLarge } = await readBody(req, PEER_POST_MAX_BODY_BYTES);
@@ -2417,10 +2536,33 @@ async function handlePeerRegisterExtra(req: IncomingMessage, res: ServerResponse
     return;
   }
 
+  // AGT-2253: the extra is the authenticated caller, never a payload-chosen
+  // identity.
+  const bind = bindPayloadIdentity(auth, "claimant_fp", payload.claimant_fp, payload.pubkey);
+  if (!bind.ok) {
+    logLine("warn", `POST /peer/register-extra: identity bind failed: ${bind.reason}`);
+    sendJson(res, 401, { ok: false, error: "fingerprint_mismatch", reason: bind.reason });
+    return;
+  }
+
   const db = openServerDb({ skipChmod: true });
   try {
     const userRow = findUserByStampPubkey(db, auth.pubkeyPem);
     if (userRow) touchLastSeen(db, userRow.id);
+
+    // AGT-2253: the patch must exist and the caller must be allowed to see
+    // its repo's events. (Before, a missing patch was silently accepted.)
+    const patchRow = findPatch(db, payload.patch_id);
+    if (!patchRow) {
+      sendJson(res, 409, { ok: false, error: "patch_not_found" });
+      return;
+    }
+    const access = authorizePatchAction(db, userRow, patchRow, payload.repo);
+    if (!access.ok) {
+      logLine("warn", `POST /peer/register-extra: fp=${auth.fingerprint} patch=${payload.patch_id} refused: ${access.reason}`);
+      sendJson(res, access.status, { ok: false, error: access.error, reason: access.reason });
+      return;
+    }
 
     // Per-fingerprint rate limit (own "register-extra" bucket — preserves existing
     // token-bucket state on deploy, per retro).
@@ -2431,14 +2573,13 @@ async function handlePeerRegisterExtra(req: IncomingMessage, res: ServerResponse
     }
 
     // Author-exclusion: claimant must not be the original PR author.
-    const patchRow = findPatch(db, payload.patch_id);
-    if (patchRow && patchRow.requested_by_fp === payload.claimant_fp) {
+    if (patchRow.requested_by_fp === payload.claimant_fp) {
       sendJson(res, 409, { ok: false, error: "author_cannot_review_own_pr" });
       return;
     }
 
     const now = Date.now();
-    appendEvent(db, payload.patch_id, "extras-register", payload.claimant_fp, { repo: payload.repo }, now);
+    appendEvent(db, payload.patch_id, "extras-register", payload.claimant_fp, { repo: patchRow.repo }, now);
 
     logLine("info", `POST /peer/register-extra: fp=${auth.fingerprint} patch=${payload.patch_id}`);
     sendJson(res, 200, { ok: true, patch_id: payload.patch_id });

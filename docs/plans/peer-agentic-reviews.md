@@ -562,10 +562,25 @@ awkward ops.
 | `subscribe` | client → server (long-lived) | operator pubkey | register for events on N orgs |
 | `event: pr-opened` | server → client | n/a (per-event manifest filter) | deliver event to authorized listener |
 | `event: re-review-requested` | server → client | n/a (only to prior seat-holders) | deliver re-review signal |
-| `claim-seat` | client → server | operator sig + enrolled key | atomic seat claim |
-| `release-seat` | client → server | claimant sig | voluntary release (on cancel / error) |
-| `heartbeat` | client → server | claimant sig | refresh seat TTL during long reviews |
-| `re-review-request` | client → server | author sig + author fingerprint match | trigger fanout to prior seat-holders |
+| `claim-seat` | client → server | operator sig + enrolled key; `claimant_fp` = request key; repo access | atomic seat claim |
+| `register-extra` | client → server | same as `claim-seat` | record an extra reviewer when seats are full |
+| `release-seat` | client → server | claimant sig; `claimant_fp` = request key | voluntary release (on cancel / error) |
+| `heartbeat` | client → server | claimant sig; `claimant_fp` = request key | refresh seat TTL during long reviews |
+| `re-review-request` | client → server | author sig + author fingerprint match; `requester_fp` = request key | trigger fanout to prior seat-holders |
+
+**Identity binding (AGT-2253).** Every seat verb's request headers are
+signed by an enrolled stamp key. The identity field in the body
+(`claimant_fp`, `requester_fp`) and the carried `pubkey` must be that same
+key; the server refuses a mismatch with 401 `fingerprint_mismatch`. The
+inner payload signature alone proves only possession of the carried key,
+which could be a throwaway, so without this bind one member could claim
+both seats under invented identities, or claim a reviewer seat on their
+own PR. `claim-seat` and `register-extra` also require the caller to be
+allowed to see the patch repo's events (`mayReceiveRepoEvents`, the same
+rule the event stream applies since AGT-2256): owners and admins always,
+members only with a grant for the repo or its org. The repo checked is the
+one stored on the patch at `pr-opened` time; a body `repo` naming another
+repo is refused.
 
 **State the server holds:**
 

@@ -31,6 +31,7 @@ import {
   openServerDb,
 } from "../src/lib/serverDb.ts";
 import { signBytes } from "../src/lib/signing.ts";
+import { addRepoGrant } from "../src/lib/repoAccess.ts";
 import { canonicalSerializePeerPayload } from "../src/lib/attestationV4.ts";
 import { clearListenerRegistry, registerListener } from "../src/server/peerReviews.ts";
 import type { PeerReviewEvent } from "../src/lib/peerReviewEvent.ts";
@@ -599,15 +600,21 @@ async function startPeer(): Promise<PeerHarness> {
   };
 }
 
-/** Insert an enrolled user (with stamp_pubkey) and a test patch row. */
+/**
+ * Insert an enrolled member (with stamp_pubkey). By default the member is
+ * granted `acme/*` so it may act on the `acme/widget` test patches
+ * (AGT-2253: claim-seat / register-extra require `mayReceiveRepoEvents`).
+ * Pass `grants: []` for an unscoped member, or explicit `<org>/<repo>` specs.
+ */
 function seedPeerUser(
   dbPath: string,
   kp: TestKeypair,
   shortName: string,
+  grants: string[] = ["acme/*"],
 ): number {
   const db = openServerDb({ path: dbPath, skipChmod: true });
   try {
-    return insertUser(db, {
+    const id = insertUser(db, {
       short_name: shortName,
       ssh_pubkey: `ssh-ed25519 AAAASeed${shortName} ${shortName}@host`,
       ssh_fp: `SHA256:ssh-fp-${shortName}`,
@@ -615,6 +622,11 @@ function seedPeerUser(
       source: "invite",
       stamp_pubkey: kp.publicKeyPem,
     });
+    for (const g of grants) {
+      const [org, repo] = g.split("/") as [string, string];
+      addRepoGrant(db, id, org, repo, null);
+    }
+    return id;
   } finally {
     db.close();
   }
@@ -891,6 +903,8 @@ describe("AGT-453 regression: ssh-fp ≠ stamp-fp identity — HTTP heartbeat us
         source: "invite",
         stamp_pubkey: publicKeyPem,
       });
+      const diverged = findUserByShortName(db, "diverged-user");
+      addRepoGrant(db, diverged!.id, "acme", "*", null);
     } finally {
       db.close();
     }
@@ -968,6 +982,330 @@ describe("POST /peer/re-review-request: re-review payload carries base_sha/head_
       assert.equal(payload["head_sha"], "1".repeat(40));
     } finally {
       clearListenerRegistry();
+      await h.cleanup();
+    }
+  });
+});
+
+// ─── AGT-2253: payload identity bound to the authenticated caller ─────
+//
+// Header auth proves an ENROLLED stamp key; the inner payload signature only
+// proves possession of `payload.pubkey`, which could be any throwaway key.
+// claim-seat / register-extra / re-review-request must refuse a payload
+// identity that is not the header key, and claim-seat / register-extra must
+// refuse a caller who may not see the patch repo's events.
+
+function signedPeerBody(
+  signer: TestKeypair,
+  fields: Record<string, unknown>,
+): string {
+  return JSON.stringify({
+    ...fields,
+    signature: signBytes(signer.privateKeyPem, canonicalSerializePeerPayload(fields)),
+  });
+}
+
+function readSeats(dbPath: string, patchId: string): { s1: string | null; s2: string | null } {
+  const db = openServerDb({ path: dbPath, skipChmod: true });
+  try {
+    const row = db
+      .prepare(`SELECT seat_1_holder AS s1, seat_2_holder AS s2 FROM peer_review_patches WHERE patch_id = ?`)
+      .get(patchId) as { s1: string | null; s2: string | null };
+    return { s1: row.s1, s2: row.s2 };
+  } finally {
+    db.close();
+  }
+}
+
+function countEvents(dbPath: string, patchId: string, eventType: string): number {
+  const db = openServerDb({ path: dbPath, skipChmod: true });
+  try {
+    const row = db
+      .prepare(`SELECT COUNT(*) AS n FROM peer_review_events WHERE patch_id = ? AND event_type = ?`)
+      .get(patchId, eventType) as { n: number };
+    return Number(row.n);
+  } finally {
+    db.close();
+  }
+}
+
+describe("AGT-2253: claim-seat binds claimant_fp to the header key", () => {
+  it("refuses a seat claimed under a throwaway (unenrolled) identity", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const memberKp = genTestKeypair();
+    const throwaway = genTestKeypair(); // never enrolled
+    const patchId = "1".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253a");
+    seedPeerUser(h.dbPath, memberKp, "member2253a");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      // Payload signed by the throwaway key; headers by the enrolled member.
+      const bodyJson = signedPeerBody(throwaway, {
+        patch_id: patchId, claimant_fp: throwaway.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: throwaway.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson),
+        buildPeerPostHeaders(memberKp, "claim-seat", bodyJson));
+      assert.equal(r.status, 401, `expected 401, got ${r.status}: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.error, "fingerprint_mismatch");
+      assert.deepEqual(readSeats(h.dbPath, patchId), { s1: null, s2: null }, "no seat may be written");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("refuses the PR author claiming a seat on their own PR via a throwaway identity", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const throwaway = genTestKeypair();
+    const patchId = "2".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253b");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const bodyJson = signedPeerBody(throwaway, {
+        patch_id: patchId, claimant_fp: throwaway.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: throwaway.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson),
+        buildPeerPostHeaders(authorKp, "claim-seat", bodyJson));
+      assert.equal(r.status, 401);
+      assert.equal(r.body.error, "fingerprint_mismatch");
+      assert.deepEqual(readSeats(h.dbPath, patchId), { s1: null, s2: null });
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("refuses a claim naming ANOTHER enrolled member as claimant", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const aliceKp = genTestKeypair();
+    const malloryKp = genTestKeypair();
+    const patchId = "3".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253c");
+    seedPeerUser(h.dbPath, aliceKp, "alice2253c");
+    seedPeerUser(h.dbPath, malloryKp, "mallory2253c");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      // Mallory replays a body Alice signed, under Mallory's own header key.
+      const bodyJson = signedPeerBody(aliceKp, {
+        patch_id: patchId, claimant_fp: aliceKp.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: aliceKp.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson),
+        buildPeerPostHeaders(malloryKp, "claim-seat", bodyJson));
+      assert.equal(r.status, 401);
+      assert.equal(r.body.error, "fingerprint_mismatch");
+      assert.deepEqual(readSeats(h.dbPath, patchId), { s1: null, s2: null });
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("honest claim (payload identity = header key, granted repo) records the caller's fp", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const reviewerKp = genTestKeypair();
+    const patchId = "4".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253d");
+    seedPeerUser(h.dbPath, reviewerKp, "reviewer2253d", ["acme/widget"]);
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const bodyJson = signedPeerBody(reviewerKp, {
+        patch_id: patchId, claimant_fp: reviewerKp.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: reviewerKp.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/claim-seat", JSON.parse(bodyJson),
+        buildPeerPostHeaders(reviewerKp, "claim-seat", bodyJson));
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(readSeats(h.dbPath, patchId).s1, reviewerKp.fingerprint);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("AGT-2253: claim-seat requires repo access (mayReceiveRepoEvents)", () => {
+  async function claimAs(h: PeerHarness, kp: TestKeypair, patchId: string, repo = "acme/widget") {
+    const bodyJson = signedPeerBody(kp, {
+      patch_id: patchId, claimant_fp: kp.fingerprint, base_sha: "0".repeat(40),
+      repo, pubkey: kp.publicKeyPem,
+    });
+    return post(h.port, "/peer/claim-seat", JSON.parse(bodyJson),
+      buildPeerPostHeaders(kp, "claim-seat", bodyJson));
+  }
+
+  it("refuses a member whose grants do not cover the patch repo", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const outsiderKp = genTestKeypair();
+    const patchId = "5".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253e");
+    seedPeerUser(h.dbPath, outsiderKp, "outsider2253e", ["otherorg/*", "acme/gadget"]);
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const r = await claimAs(h, outsiderKp, patchId);
+      assert.equal(r.status, 403, JSON.stringify(r.body));
+      assert.equal(r.body.error, "repo_access_denied");
+      assert.deepEqual(readSeats(h.dbPath, patchId), { s1: null, s2: null });
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("refuses an unscoped member (no grants) — fails closed like the SSE stream", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const unscopedKp = genTestKeypair();
+    const patchId = "6".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253f");
+    seedPeerUser(h.dbPath, unscopedKp, "unscoped2253f", []);
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const r = await claimAs(h, unscopedKp, patchId);
+      assert.equal(r.status, 403, JSON.stringify(r.body));
+      assert.equal(r.body.error, "repo_access_denied");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("refuses a body repo that does not match the patch's repo (cannot dodge the gate)", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const kp = genTestKeypair();
+    const patchId = "7".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253g");
+    seedPeerUser(h.dbPath, kp, "member2253g", ["otherorg/*"]);
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const r = await claimAs(h, kp, patchId, "otherorg/thing");
+      assert.equal(r.status, 400, JSON.stringify(r.body));
+      assert.equal(r.body.error, "repo_mismatch");
+      assert.deepEqual(readSeats(h.dbPath, patchId), { s1: null, s2: null });
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("allows an operator (admin) with no grants", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const adminKp = genTestKeypair();
+    const patchId = "8".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253h");
+    const db = openServerDb({ path: h.dbPath, skipChmod: true });
+    try {
+      insertUser(db, {
+        short_name: "admin2253h",
+        ssh_pubkey: "ssh-ed25519 AAAASeedadmin2253h admin2253h@host",
+        ssh_fp: "SHA256:ssh-fp-admin2253h",
+        role: "admin",
+        source: "invite",
+        stamp_pubkey: adminKp.publicKeyPem,
+      });
+    } finally {
+      db.close();
+    }
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const r = await claimAs(h, adminKp, patchId);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("AGT-2253: register-extra binds identity and requires repo access", () => {
+  it("refuses an extra registered under a throwaway identity", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const memberKp = genTestKeypair();
+    const throwaway = genTestKeypair();
+    const patchId = "9".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253i");
+    seedPeerUser(h.dbPath, memberKp, "member2253i");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const bodyJson = signedPeerBody(throwaway, {
+        patch_id: patchId, claimant_fp: throwaway.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: throwaway.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/register-extra", JSON.parse(bodyJson),
+        buildPeerPostHeaders(memberKp, "register-extra", bodyJson));
+      assert.equal(r.status, 401, JSON.stringify(r.body));
+      assert.equal(r.body.error, "fingerprint_mismatch");
+      assert.equal(countEvents(h.dbPath, patchId, "extras-register"), 0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("refuses a member without access to the patch repo", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const outsiderKp = genTestKeypair();
+    const patchId = "c".repeat(40);
+    seedPeerUser(h.dbPath, authorKp, "author2253j");
+    seedPeerUser(h.dbPath, outsiderKp, "outsider2253j", ["otherorg/*"]);
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const bodyJson = signedPeerBody(outsiderKp, {
+        patch_id: patchId, claimant_fp: outsiderKp.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: outsiderKp.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/register-extra", JSON.parse(bodyJson),
+        buildPeerPostHeaders(outsiderKp, "register-extra", bodyJson));
+      assert.equal(r.status, 403, JSON.stringify(r.body));
+      assert.equal(r.body.error, "repo_access_denied");
+      assert.equal(countEvents(h.dbPath, patchId, "extras-register"), 0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("refuses an unknown patch instead of recording an orphan extra", async () => {
+    const h = await startPeer();
+    const kp = genTestKeypair();
+    const patchId = "d".repeat(40);
+    seedPeerUser(h.dbPath, kp, "member2253k");
+    try {
+      const bodyJson = signedPeerBody(kp, {
+        patch_id: patchId, claimant_fp: kp.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: kp.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/register-extra", JSON.parse(bodyJson),
+        buildPeerPostHeaders(kp, "register-extra", bodyJson));
+      assert.equal(r.status, 409, JSON.stringify(r.body));
+      assert.equal(r.body.error, "patch_not_found");
+      assert.equal(countEvents(h.dbPath, patchId, "extras-register"), 0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe("AGT-2253: re-review-request binds requester_fp to the header key", () => {
+  it("refuses a member pinging on the author's behalf with a replayed author-signed body", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const malloryKp = genTestKeypair();
+    const patchId = "e".repeat(39) + "0";
+    seedPeerUser(h.dbPath, authorKp, "author2253l");
+    seedPeerUser(h.dbPath, malloryKp, "mallory2253l");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+    try {
+      const bodyJson = signedPeerBody(authorKp, {
+        patch_id: patchId, requester_fp: authorKp.fingerprint, pubkey: authorKp.publicKeyPem,
+      });
+      const r = await post(h.port, "/peer/re-review-request", JSON.parse(bodyJson),
+        buildPeerPostHeaders(malloryKp, "re-review-request", bodyJson));
+      assert.equal(r.status, 401, JSON.stringify(r.body));
+      assert.equal(r.body.error, "fingerprint_mismatch");
+      assert.equal(countEvents(h.dbPath, patchId, "re-review-requested"), 0);
+    } finally {
       await h.cleanup();
     }
   });
