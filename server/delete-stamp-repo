@@ -53,6 +53,17 @@ if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*$'; then
   exit 2
 fi
 
+# Role gate (AGT-2259). Every SSH user runs this script as the one Unix
+# user `git`, so the caller's role comes from SSH_USER_AUTH + users.db via
+# stamp-require-role. Exits 1 (no/unenrolled identity) or 3 (role below
+# admin) before anything under /srv/git is touched. Soft delete is gated
+# too: it takes a live repo offline, and restore is itself admin-only.
+if [ $PURGE -eq 1 ]; then
+  /usr/local/sbin/stamp-require-role admin "purge repos (irreversible)" || exit $?
+else
+  /usr/local/sbin/stamp-require-role admin "delete repos" || exit $?
+fi
+
 GIT_ROOT=/srv/git
 TRASH_DIR="$GIT_ROOT/.trash"
 LIVE_REPO="$GIT_ROOT/${NAME}.git"

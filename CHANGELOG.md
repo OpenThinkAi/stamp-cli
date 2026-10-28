@@ -64,6 +64,15 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
 
 ### Security
 
+- **Repo create, delete, purge and restore need owner or admin.**
+  `new-stamp-repo`, `delete-stamp-repo` (soft delete and `--purge`) and
+  `restore-stamp-repo` did no role check, so any enrolled key, a `member`
+  included, could create repos, take any repo offline, irreversibly purge
+  a repo and its trash copies, or restore a trashed repo under another
+  name. Each verb now resolves the caller from `SSH_USER_AUTH` against the
+  membership DB before touching `/srv/git` and refuses a `member` with
+  exit 3. `stamp provision` and `stamp server-repos` keep working for the
+  operator keys `AUTHORIZED_KEYS` seeds, which are admins.
 - **The server pre-receive hook refuses to delete a protected branch.**
   `git push origin :main` used to pass the hook, and since a protected
   branch can't be recreated by push, the repo stayed broken until an
