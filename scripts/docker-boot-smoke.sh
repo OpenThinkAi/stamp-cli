@@ -200,7 +200,8 @@ echo "docker-boot-smoke: sftp refused; git push/clone + git-shell-commands work 
 # them as the Unix user `git`, so before the fix any enrolled key —
 # including role=member — could create, delete, purge or restore any repo.
 # Enroll two throwaway keys in users.db (added as admin with
-# stamp-break-glass, the second then demoted to member) and drive the verbs over real SSH sessions:
+# stamp-break-glass, the second then demoted to member) and drive the
+# verbs over real SSH sessions:
 #   - member: new / delete / delete --purge / restore are each refused with
 #     exit 3 and leave the repo and its trash copy untouched;
 #   - admin: the same four verbs succeed (create → soft delete → restore →

@@ -73,7 +73,7 @@ function add(argv: string[], io: BreakGlassIo): number {
     }
   }
   if (rest.length !== 1) {
-    io.err(USAGE);
+    io.err(`error: add takes exactly one <pubkey-file | -> argument\n${USAGE}`);
     return 2;
   }
   const src = rest[0]!;
@@ -85,7 +85,7 @@ function add(argv: string[], io: BreakGlassIo): number {
     return 1;
   }
   const { pubkeys, errors } = parseSshPubkeyList(blob);
-  for (const e of errors) io.err(`error: ignoring malformed key on line ${e.lineNumber}: ${e.error}\n`);
+  for (const e of errors) io.err(`warning: ignoring malformed key on line ${e.lineNumber}: ${e.error}\n`);
   if (pubkeys.length === 0) {
     io.err("error: no valid SSH public key given\n");
     return 2;
@@ -128,6 +128,8 @@ function add(argv: string[], io: BreakGlassIo): number {
 }
 
 function list(io: BreakGlassIo): number {
+  // Writable on purpose: a missing users.db is created (empty, with schema)
+  // rather than erroring, and the entry point re-pins its ownership.
   const db = openDb(io);
   try {
     for (const u of listUsers(db)) {
@@ -147,6 +149,10 @@ export function runBreakGlass(argv: string[], io: BreakGlassIo): number {
   const [cmd, ...rest] = argv;
   if (cmd === "add") return add(rest, io);
   if (cmd === "list" && rest.length === 0) return list(io);
-  io.err(USAGE);
+  io.err(
+    cmd === "list"
+      ? `error: list takes no arguments\n${USAGE}`
+      : `error: unknown command '${cmd ?? ""}'\n${USAGE}`,
+  );
   return 2;
 }

@@ -37,6 +37,7 @@
  * new-stamp-repo.
  */
 
+import type { DatabaseSync } from "node:sqlite";
 import {
   countUsers,
   ENV_SEED_MARKER,
@@ -47,7 +48,6 @@ import {
   suggestUniqueShortName,
   upsertUserByFingerprint,
 } from "../lib/serverDb.js";
-import type { DatabaseSync } from "node:sqlite";
 import {
   contentAddressedShortName,
   parseSshPubkeyList,
