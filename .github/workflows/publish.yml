@@ -267,7 +267,7 @@ jobs:
           shopt -s nullglob
           TARBALLS=("$RUNNER_TEMP"/package/*.tgz)
           if [ "${#TARBALLS[@]}" -ne 1 ]; then
-            echo "expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            echo "::error::expected exactly one tarball, found ${#TARBALLS[@]}" >&2
             exit 1
           fi
           npx -y npm@11.13.0 publish "${TARBALLS[0]}" --ignore-scripts --access public --provenance --tag "$DIST_TAG"
