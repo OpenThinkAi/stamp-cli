@@ -68,6 +68,24 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   verified out-of-band. The run proceeds only if the server's key matches it.
   `--expect-fingerprint` alone also pins a first-time registration. See
   docs/github-ruleset-setup.md, "Rotating the `stamp-mirror` key".
+- **`stamp pr listen` binds an event's `base_sha` to the protected branch
+  before trusting the manifest at it.** The listener used to authorize a
+  PR author against `.stamp/trusted-keys/manifest.yml` at whatever
+  `base_sha` the author put in the event, so a revoked key could cite a
+  commit from before its removal, or a commit on another branch where it
+  had added itself, and still get reviewed. Now `base_sha` must be an
+  ancestor of the local clone's `origin/HEAD`, and the author must be an
+  `operator` both at `base_sha` and at that tip. Events missing a full
+  `base_sha` or `head_sha` are skipped, and `re-review-requested` events
+  get the same check (the server now includes the patch's `base_sha` and
+  `head_sha` in them). Listeners need `origin/HEAD` set in each mapped
+  clone (`git remote set-head origin --auto`) and should fetch regularly:
+  a revocation takes effect once the listener has fetched it.
+- **Peer reviews are pinned to the event's `head_sha`.** The listener posts
+  through `gh api repos/<owner>/<repo>/pulls/<n>/reviews` with
+  `commit_id=<head_sha>` instead of `gh pr review`, which has no commit
+  option and attached the review to whatever the PR head was when the post
+  landed, including commits pushed after the review started.
 
 ---
 

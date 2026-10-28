@@ -32,6 +32,8 @@ import {
 } from "../src/lib/serverDb.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import { canonicalSerializePeerPayload } from "../src/lib/attestationV4.ts";
+import { clearListenerRegistry, registerListener } from "../src/server/peerReviews.ts";
+import type { PeerReviewEvent } from "../src/lib/peerReviewEvent.ts";
 
 // Pinned ed25519 fixture (same one tests/sshKeys.test.ts uses — generated
 // once with ssh-keygen, fingerprint cross-verified).
@@ -914,6 +916,58 @@ describe("AGT-453 regression: ssh-fp ≠ stamp-fp identity — HTTP heartbeat us
       assert.equal(r.status, 200, `heartbeat with stamp-fp (ssh-fp ≠ stamp-fp) should succeed: ${JSON.stringify(r.body)}`);
       assert.equal(r.body.ok, true, "heartbeat response should be ok:true");
     } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+// ─── POST /peer/re-review-request: payload carries base/head (AGT-2241) ──
+
+describe("POST /peer/re-review-request: re-review payload carries base_sha/head_sha (AGT-2241)", () => {
+  it("fans out the patch's base_sha and head_sha so the listener can verify + pin", async () => {
+    const h = await startPeer();
+    const authorKp = genTestKeypair();
+    const reviewerKp = genTestKeypair();
+    const patchId = "e".repeat(40);
+
+    seedPeerUser(h.dbPath, authorKp, "author2241");
+    seedPeerUser(h.dbPath, reviewerKp, "reviewer2241");
+    seedPatch(h.dbPath, patchId, authorKp.fingerprint);
+
+    const received: PeerReviewEvent[] = [];
+    clearListenerRegistry();
+    registerListener(reviewerKp.fingerprint, { orgs: ["acme"], onEvent: (e) => received.push(e) });
+
+    try {
+      const claimPayload = {
+        patch_id: patchId, claimant_fp: reviewerKp.fingerprint, base_sha: "0".repeat(40),
+        repo: "acme/widget", pubkey: reviewerKp.publicKeyPem,
+      };
+      const claimJson = JSON.stringify({
+        ...claimPayload,
+        signature: signBytes(reviewerKp.privateKeyPem, canonicalSerializePeerPayload(claimPayload)),
+      });
+      const c = await post(h.port, "/peer/claim-seat", JSON.parse(claimJson),
+        buildPeerPostHeaders(reviewerKp, "claim-seat", claimJson));
+      assert.equal(c.status, 200, `claim failed: ${JSON.stringify(c.body)}`);
+
+      const pingPayload = { patch_id: patchId, requester_fp: authorKp.fingerprint, pubkey: authorKp.publicKeyPem };
+      const pingJson = JSON.stringify({
+        ...pingPayload,
+        signature: signBytes(authorKp.privateKeyPem, canonicalSerializePeerPayload(pingPayload)),
+      });
+      const r = await post(h.port, "/peer/re-review-request", JSON.parse(pingJson),
+        buildPeerPostHeaders(authorKp, "re-review-request", pingJson));
+      assert.equal(r.status, 200, `re-review-request failed: ${JSON.stringify(r.body)}`);
+
+      assert.equal(received.length, 1, "reviewer should receive one re-review-requested event");
+      const ev = received[0]!;
+      assert.equal(ev.event_type, "re-review-requested");
+      const payload = ev.payload as Record<string, unknown>;
+      assert.equal(payload["base_sha"], "0".repeat(40));
+      assert.equal(payload["head_sha"], "1".repeat(40));
+    } finally {
+      clearListenerRegistry();
       await h.cleanup();
     }
   });

@@ -140,9 +140,11 @@ The broadcast payload:
 }
 ```
 
-Server verifies `signature` against the repo's manifest at `base_sha`
-(must be a key with `operator` capability), stores the event, fans out
-to subscribed listeners.
+The server checks `signature` against the carried pubkey and stores and
+fans out the event. It is GitHub-blind and never reads the manifest
+(AGT-454): each listener decides whether the author is authorized,
+against its own local clone (see [Trust anchor for the manifest
+read](#identity--authentication)).
 
 `pr_url` is bound to `repo`: it must be a
 `https://github.com/<owner>/<repo>/pull/<n>` URL whose owner/repo equals
@@ -183,8 +185,12 @@ When the `pr-opened` event arrives:
    SDK against the PR diff using that prompt and B's configured model
    (Sonnet by default).
 7. Per `post_mode`:
-   - `auto-post`: `gh pr review --approve` / `--request-changes` /
-     `--comment` with the body. Posted under B's GitHub identity.
+   - `auto-post`: `gh api --method POST
+     repos/<owner>/<repo>/pulls/<n>/reviews -f commit_id=<head_sha>
+     -f event=APPROVE|REQUEST_CHANGES|COMMENT -f body=<body>`. Posted
+     under B's GitHub identity and pinned to the event's `head_sha`
+     (`gh pr review` has no commit option, so it would attach the review
+     to whatever the PR head is when the post lands).
    - `draft`: save body + decision to `~/.stamp/drafts/<patch-id>.md`,
      fire a desktop notification, do NOT post.
    - `dry-run`: log only.
@@ -215,17 +221,38 @@ piggybacks on what stamp already has.
 
 | Action | Authenticated as | Authorization check |
 |---|---|---|
-| Operator A posts `pr-opened` | A's Ed25519 operator pubkey | Key is in the repo's `manifest.yml` at base_sha with `operator` capability |
+| Operator A posts `pr-opened` | A's Ed25519 operator pubkey | Server: signature matches the carried pubkey. Listener: `base_sha` is on the protected branch and A is an `operator` in `manifest.yml` at both `base_sha` and the protected tip |
 | Operator A posts `pr-ping-reviewers` | A's Ed25519 operator pubkey | A is the original `requested_by_fp` for the patch_id |
 | Listener B subscribes to org events | B's Ed25519 operator pubkey | Per-event: B is in the manifest of the event's repo with `operator` capability |
 | Listener B claims a seat | B's Ed25519 operator pubkey | (a) B is in manifest; (b) B's fingerprint ≠ `requested_by_fp`; (c) B's fingerprint ≠ other seat-holder's fingerprint |
 | Listener B posts the GitHub review | B's GitHub token (via `gh`) | GitHub-native; outside stamp-server's scope |
 
-**Trust anchor for the manifest read.** The server reads
-`.stamp/trusted-keys/manifest.yml` from `base_sha` of the event's
-patch_id. Same security boundary used by `stamp review`: a feature
-branch cannot unilaterally add a "peer reviewer" by editing the
-manifest, because the server reads from base, not from head.
+**Trust anchor for the manifest read.** The listener reads
+`.stamp/trusted-keys/manifest.yml` from its own local clone of the repo
+(mapped in `~/.stamp/peer-repos.yml`); the server never reads it. Same
+security boundary used by `stamp review`: a feature branch cannot
+unilaterally add a "peer reviewer" by editing the manifest, because the
+read is from base, not from head.
+
+`base_sha` comes from the author, so the listener does not trust it on
+its own (AGT-2241). Before it accepts an event (`pr-opened` or
+`re-review-requested`) it requires:
+
+1. `base_sha` and `head_sha` are full SHAs, and `base_sha` is a commit
+   in the local clone (no auto-fetch: the value is attacker-supplied).
+2. `base_sha` is an ancestor of (or equal to) the clone's `origin/HEAD`,
+   the same ref `stamp pr open` computes the base against. A commit on
+   some other branch, where the author may have edited the manifest, is
+   rejected.
+3. The author is an `operator` in the manifest at `base_sha`.
+4. The author is an `operator` in the manifest at the `origin/HEAD` tip.
+
+Check 4 is what makes revocation stick: without it, a removed key could
+keep citing an old `base_sha` from before its removal. A missing
+`origin/HEAD` fails closed (`git remote set-head origin --auto`).
+Revocation takes effect for a listener once it has fetched the commit
+that removes the key.
+
 Onboarding a new teammate to peer-agentic review = adding their pubkey to
 `manifest.yml` with `operator` capability via the normal trust-anchor
 flow (admin-cap-signed PR). Revocation = removing the key via the same
@@ -464,11 +491,11 @@ awkward ops.
 
 | Verb / endpoint | Direction | Auth | Purpose |
 |---|---|---|---|
-| `pr-opened` | client → server | operator sig + manifest@base | broadcast PR-open event |
+| `pr-opened` | client → server | operator sig (manifest checked by the listener) | broadcast PR-open event |
 | `subscribe` | client → server (long-lived) | operator pubkey | register for events on N orgs |
 | `event: pr-opened` | server → client | n/a (per-event manifest filter) | deliver event to authorized listener |
 | `event: re-review-requested` | server → client | n/a (only to prior seat-holders) | deliver re-review signal |
-| `claim-seat` | client → server | operator sig + manifest@base | atomic seat claim |
+| `claim-seat` | client → server | operator sig + enrolled key | atomic seat claim |
 | `release-seat` | client → server | claimant sig | voluntary release (on cancel / error) |
 | `heartbeat` | client → server | claimant sig | refresh seat TTL during long reviews |
 | `re-review-request` | client → server | author sig + author fingerprint match | trigger fanout to prior seat-holders |

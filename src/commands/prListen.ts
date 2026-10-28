@@ -20,9 +20,11 @@
  *   8. Starts a 60-second heartbeat interval while the review runs.
  *   9. Runs the peer review via `runBuiltinReview` over the fetched diff using
  *      the resolved named prompt as the system prompt (AC #4).
- *  10. Posts the result via `gh pr review <pr_url> <flag> -b "<body>"` where
- *      `<flag>` is `--approve`, `--request-changes`, or `--comment` depending
- *      on the verdict returned by the model.
+ *  10. Posts the result via `gh api repos/<o>/<r>/pulls/<n>/reviews` with
+ *      `event` = APPROVE / REQUEST_CHANGES / COMMENT (per the model's verdict)
+ *      and `commit_id` = the event's `head_sha`, so the review is pinned to
+ *      the commit the event names rather than whatever the PR head is when
+ *      the post lands (AGT-2241; `gh pr review` has no commit option).
  *  11. Releases the seat on `gh` failure; loops back to step 1.
  *  12. On SIGINT: emits "note: shutting down", releases any held seat, exits 0.
  *
@@ -78,9 +80,9 @@ import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
 import { firePeerNotification } from "../lib/peerNotify.js";
 import { draftsDir } from "../lib/paths.js";
 import { loadPeerReposConfig, resolveLocalRepoPath } from "../lib/peerReposConfig.js";
-import { verifyOperatorAtBaseLocal } from "../lib/peerOperatorVerify.js";
+import { verifyPeerAuthorLocal } from "../lib/peerOperatorVerify.js";
 import { detectClaudeSession } from "../lib/claudeSession.js";
-import { checkPrUrlBinding } from "../lib/prUrlBinding.js";
+import { checkPrUrlBinding, type ParsedPrUrl } from "../lib/prUrlBinding.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -105,8 +107,17 @@ export interface PrListenOptions {
   _sshSpawnForTest?: SshSpawnFn;
   /** Test-only: inject a fake HTTP fetch function for seat-protocol calls. */
   _fetchForTest?: HttpFetchFn;
-  /** Test-only: inject a fake `gh pr review` spawn result. */
-  _ghReviewForTest?: (prUrl: string, body: string, verdictFlag: string) => { status: number; stderr: string };
+  /**
+   * Test-only: inject a fake review-post spawn result. `ghArgs` is the full
+   * argv the listener would hand to `gh` (`api repos/<o>/<r>/pulls/<n>/reviews
+   * ... -f commit_id=<head_sha>`), so tests can assert the head pin.
+   */
+  _ghReviewForTest?: (
+    prUrl: string,
+    body: string,
+    verdictFlag: string,
+    ghArgs: string[],
+  ) => { status: number; stderr: string };
   /** Test-only: inject a fake `gh pr diff` spawn result. */
   _ghDiffForTest?: (prUrl: string) => { status: number; stdout: string; stderr: string };
   /** Test-only: inject a fake SDK runner for the Sonnet review call. */
@@ -159,7 +170,7 @@ export interface PrListenOptions {
   _initialDailySpendForTest?: number;
   /**
    * Test-only: override the client-side operator verification step (AGT-454).
-   * When provided, `verifyOperatorAtBaseLocal` is NOT called. The function
+   * When provided, `verifyPeerAuthorLocal` is NOT called. The function
    * receives (localRepoPath, baseSha, fingerprint) and returns the same shape
    * as `verifyOperatorAtBaseLocal`. Use `() => ({ ok: true })` to bypass the
    * gate for tests that pre-date AGT-454 and don't need operator verification.
@@ -820,10 +831,11 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       typeof payload["patch_id"] === "string"
         ? payload["patch_id"]
         : event.patch_id;
-    const baseSha =
-      typeof payload["base_sha"] === "string"
-        ? payload["base_sha"]
-        : "0".repeat(40);
+    // AGT-2241: base_sha / head_sha must be real full SHAs. No zero-SHA
+    // fallback — base_sha is what the author is authorized against, and
+    // head_sha is the commit the posted review is pinned to.
+    const baseShaRaw = payload["base_sha"];
+    const headShaRaw = payload["head_sha"];
     const repo =
       typeof payload["repo"] === "string"
         ? payload["repo"]
@@ -851,6 +863,18 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       continue;
     }
     const prUrl = prUrlRaw;
+    const prRef = binding.parsed;
+    if (
+      typeof baseShaRaw !== "string" || !FULL_SHA_RE.test(baseShaRaw) ||
+      typeof headShaRaw !== "string" || !FULL_SHA_RE.test(headShaRaw)
+    ) {
+      process.stderr.write(
+        `note: skipping event for PR #${prNumber} — base_sha/head_sha missing or not full 40-char hex SHAs\n`,
+      );
+      continue;
+    }
+    const baseSha = baseShaRaw;
+    const headSha = headShaRaw;
     // AGT-454: the notification payload is metadata-only — the real unified
     // diff is fetched via `gh pr diff` AFTER a successful seat claim (the
     // per-repo GitHub authorization boundary). No diff/body fallback here.
@@ -869,11 +893,17 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       continue;
     }
 
-    // ─── AGT-454: Client-side operator verification ──────────────
-    // Verify the PR author (requested_by_fp) is an operator in the manifest
-    // at base_sha of this listener's own local clone. Fail-closed: skip if
-    // the repo is unmapped in peer-repos.yml or if the sha is not present.
-    if (event.event_type === "pr-opened") {
+    // ─── AGT-454 / AGT-2241: Client-side author verification ────
+    // Verify the PR author (requested_by_fp) is an operator in this
+    // listener's own local clone, with base_sha bound to the protected
+    // branch: base_sha must be an ancestor of origin/HEAD, and the author
+    // must be an operator in the manifest both at base_sha and at the
+    // protected tip (so a revoked key cannot cite an old base_sha).
+    // Fail-closed: skip if the repo is unmapped in peer-repos.yml or any
+    // check fails. Applies to re-review-requested too — the server only
+    // checks that the pinger is the original author, which says nothing
+    // about whether that author has since been revoked.
+    {
       const localRepoPath = resolveLocalRepoPath(repo, peerReposMap);
       if (localRepoPath === null) {
         process.stderr.write(
@@ -882,7 +912,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
         );
         continue;
       }
-      const verifyFn = opts._operatorVerifyForTest ?? verifyOperatorAtBaseLocal;
+      const verifyFn = opts._operatorVerifyForTest ?? verifyPeerAuthorLocal;
       const opResult = verifyFn(localRepoPath, baseSha, requestedByFp);
       if (!opResult.ok) {
         process.stderr.write(
@@ -1343,23 +1373,26 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 
     // ─── Post review via gh (AC #5 / AC #7) ─────────────────────
     // Identical body/verb regardless of seat vs extra (AC #5).
+    // AGT-2241: posted through the REST endpoint so it can carry
+    // commit_id = head_sha (`gh pr review` has no commit option).
     const ghVerdictFlag = ({
       "approve": "--approve",
       "request-changes": "--request-changes",
       "comment": "--comment",
     } as const)[reviewVerdict];
+    const ghArgs = buildPeerReviewPostArgs(prRef, headSha, reviewVerdict, reviewBody);
 
     let ghStatus: number;
     let ghStderr = "";
 
     if (opts._ghReviewForTest) {
-      const fakeResult = opts._ghReviewForTest(prUrl, reviewBody, ghVerdictFlag);
+      const fakeResult = opts._ghReviewForTest(prUrl, reviewBody, ghVerdictFlag, ghArgs);
       ghStatus = fakeResult.status;
       ghStderr = fakeResult.stderr;
     } else {
       const ghResult = spawnSync(
         "gh",
-        ["pr", "review", prUrl, ghVerdictFlag, "-b", reviewBody],
+        ghArgs,
         {
           stdio: ["ignore", "pipe", "pipe"],
           encoding: "utf8",
@@ -1403,4 +1436,47 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     }
     process.stderr.write(`✓ posted review (verdict=${reviewVerdict}) for PR #${prNumber}\n`);
   }
+}
+
+// ─── AGT-2241: review post pinned to head_sha ─────────────────────────
+
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
+/** REST `event` value for each verdict (POST /pulls/{n}/reviews). */
+const REVIEW_EVENT = {
+  "approve": "APPROVE",
+  "request-changes": "REQUEST_CHANGES",
+  "comment": "COMMENT",
+} as const;
+
+/**
+ * Build the `gh` argv that posts a peer review pinned to `headSha`:
+ *
+ *   gh api --method POST repos/<o>/<r>/pulls/<n>/reviews \
+ *     -f commit_id=<head_sha> -f event=<EVENT> -f body=<body>
+ *
+ * `-f` (raw field) sends each value as a literal string — unlike `-F`, a body
+ * starting with `@` is not read as a file path. owner/repo/number come from
+ * the already-validated, repo-bound `pr_url` (AGT-2240), so the path cannot
+ * be steered elsewhere. GitHub rejects a `commit_id` that is not part of the
+ * PR, so a stale or forged head_sha fails the post rather than landing on
+ * the wrong commit.
+ */
+export function buildPeerReviewPostArgs(
+  pr: ParsedPrUrl,
+  headSha: string,
+  verdict: "approve" | "request-changes" | "comment",
+  body: string,
+): string[] {
+  if (!FULL_SHA_RE.test(headSha)) {
+    throw new Error(`head_sha ${JSON.stringify(headSha)} is not a full 40-char lowercase hex SHA`);
+  }
+  return [
+    "api",
+    "--method", "POST",
+    `repos/${pr.owner}/${pr.repo}/pulls/${pr.number}/reviews`,
+    "-f", `commit_id=${headSha}`,
+    "-f", `event=${REVIEW_EVENT[verdict]}`,
+    "-f", `body=${body}`,
+  ];
 }
