@@ -297,6 +297,17 @@ present the result on the protected repo. The design:
   that declare no `repo_id` keep the pre-AGT-2272 behaviour, unbound; so
   does all existing history, which pre-receive never re-verifies.
 
+*Declared by default where safe (AGT-2276).* `stamp provision`,
+`stamp bootstrap` and `stamp init --migrate-to-server-attested` ask the
+server `stamp-server-pubkey --capabilities` (a static
+`{"approval_repo_id":true}` on images that sign `repo_id`; older images
+refuse the flag). Only on a yes do they write `repo_id:` — the pair
+`stamp review` would send anyway, so prompt selection is unchanged — and
+any failure leaves the repo undeclared with a note, because declaring an
+id against a server that cannot sign it would refuse every approval. The
+Shape 4 activation whitelist admits adding a well-formed `repo_id`, never
+changing or removing one.
+
 What it does not cover: a repo that never declares `repo_id` is not
 protected, and `stamp review` prints a note saying so with the line to
 add. The legacy 1.x verifier line (v2/v3 envelopes, the

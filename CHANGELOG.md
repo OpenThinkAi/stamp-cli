@@ -430,6 +430,21 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   declaring it before step 3 leaves CI unenforced. A malformed `repo_id` (anything
   but `<org>/<repo>`) is now a config error in the CLI, where an unknown
   key used to be ignored.
+- **New repos declare `repo_id` by default when the server signs it**
+  (AGT-2276). `stamp provision`, `stamp bootstrap` and
+  `stamp init --migrate-to-server-attested` ask the stamp server first
+  (`stamp-server-pubkey --capabilities`, which a current server answers
+  with `{"approval_repo_id":true}`) and, if it signs `repo_id` into
+  approvals, write `repo_id: <org>/<repo>` into `.stamp/config.yml`, in
+  place, keeping comments. The id is the pair `stamp review` already sends
+  for an undeclared repo (the last two segments of the `origin` URL), so
+  prompt selection does not change; a pair that is not a well-formed id is
+  never written. A server that predates the probe refuses the flag, and
+  then (or when the probe fails, or no server is known) nothing is written
+  and the command prints the line to add once the server is upgraded, so
+  an old server is never broken. The Shape 4 activation whitelist admits
+  adding a well-formed top-level `repo_id`; changing or removing one is
+  still refused. Repos that already declare `repo_id` are left alone.
 - **`stamp users remove` revokes SSH access for real, including after a
   restart.** sshd also read `/home/git/.ssh/authorized_keys`, which the
   entrypoint rewrote from `AUTHORIZED_KEYS` on every boot, and

@@ -29,6 +29,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { runMigrateToServerAttested } from "../src/commands/migrateServerAttested.ts";
 import { ensureUserKeypair, generateKeypair } from "../src/lib/keys.ts";
 import { validateShape4ActivationDiff } from "../src/lib/migrationBootstrap.ts";
+import { __setCapabilityProbeForTests, type CapabilityProbeTarget } from "../src/lib/serverCapabilities.ts";
 import { __setFetchForTests } from "../src/lib/serverPubkeyFetch.ts";
 import { parseManifest } from "../src/lib/trustedKeysManifest.ts";
 
@@ -441,6 +442,128 @@ describe("runMigrateToServerAttested — end-to-end whitelist acceptance", () =>
         paths.includes(".stamp/reviewers/security.md"),
         `deleted prompt file in activatedPaths: ${paths.join(", ")}`,
       );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+// ─── 4b. AGT-2276: repo_id declared when the server signs it ─────────
+
+describe("runMigrateToServerAttested — repo_id default (AGT-2276)", () => {
+  /** Run the migration on a feature branch with a stubbed capability probe. */
+  function migrate(
+    h: Harness,
+    approvalRepoId: boolean | "probe-fails",
+  ): { calls: CapabilityProbeTarget[]; errors: string[] } {
+    const calls: CapabilityProbeTarget[] = [];
+    const restore = __setCapabilityProbeForTests((t) => {
+      calls.push(t);
+      return approvalRepoId === "probe-fails"
+        ? { ok: false, reason: "stamp-server-pubkey --capabilities exited 2" }
+        : { ok: true, capabilities: { approvalRepoId } };
+    });
+    const errors: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      git(h.repo, ["checkout", "-q", "-b", "shape-4-activation"]);
+      withCwd(h.repo, () => runMigrateToServerAttested({ server: SERVER_ARG, selectAdminIndexes: [1] }));
+    } finally {
+      console.error = origError;
+      restore();
+    }
+    return { calls, errors };
+  }
+
+  function commitAndValidate(h: Harness) {
+    git(h.repo, [
+      "add",
+      ".stamp/config.yml",
+      ".stamp/trusted-keys/manifest.yml",
+      ".stamp/trusted-keys/review-server-prod.pub",
+    ]);
+    git(h.repo, ["rm", "-q", ".stamp/reviewers/security.md"]);
+    git(h.repo, ["commit", "-q", "-m", "Shape 4 activation"]);
+    return validateShape4ActivationDiff({
+      repoRoot: h.repo,
+      baseSha: shaOf(h.repo, "main"),
+      headSha: shaOf(h.repo, "shape-4-activation"),
+    });
+  }
+
+  const cfgOf = (h: Harness) =>
+    parseYaml(readFileSync(path.join(h.repo, ".stamp", "config.yml"), "utf8")) as Record<string, unknown>;
+
+  it("probe true: writes the origin pair as repo_id and the activation diff still validates", () => {
+    const h = setupShape2Repo({ multiAdmin: false });
+    try {
+      git(h.repo, ["remote", "add", "origin", "git@github.com:Acme/widget.git"]);
+      const { calls } = migrate(h, true);
+      assert.equal(calls.length, 1, "asks the server review_server is pointed at");
+      assert.equal(calls[0]!.host, "stamp.test.invalid");
+      assert.equal(calls[0]!.port, 22);
+      assert.equal(cfgOf(h)["repo_id"], "Acme/widget");
+      const result = commitAndValidate(h);
+      assert.ok(result.ok, `expected whitelist acceptance, got: ${(result as { reason?: string }).reason}`);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  for (const answer of [false, "probe-fails"] as const) {
+    it(`probe ${answer === false ? "false" : "failure (old server)"}: no repo_id, prints the note`, () => {
+      const h = setupShape2Repo({ multiAdmin: false });
+      try {
+        git(h.repo, ["remote", "add", "origin", "git@github.com:Acme/widget.git"]);
+        const { errors } = migrate(h, answer);
+        assert.equal("repo_id" in cfgOf(h), false);
+        assert.match(errors.join("\n"), /left without repo_id.*`repo_id: Acme\/widget`/s);
+        assert.ok(commitAndValidate(h).ok);
+      } finally {
+        h.cleanup();
+      }
+    });
+  }
+
+  it("malformed origin pair: refused without probing", () => {
+    const h = setupShape2Repo({ multiAdmin: false });
+    try {
+      git(h.repo, ["remote", "add", "origin", "git@github.com:-acme/widget.git"]);
+      const { calls, errors } = migrate(h, true);
+      assert.equal(calls.length, 0);
+      assert.equal("repo_id" in cfgOf(h), false);
+      assert.match(errors.join("\n"), /not a well-formed repo id/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("whitelist refuses a malformed repo_id addition and any change to an existing one", () => {
+    const h = setupShape2Repo({ multiAdmin: false });
+    try {
+      const cfgPath = path.join(h.repo, ".stamp", "config.yml");
+      const original = readFileSync(cfgPath, "utf8");
+      const withServer = original.replace("    required: [security]", "    required: [security]\n    review_server: ssh://git@x.invalid:22");
+
+      git(h.repo, ["checkout", "-q", "-b", "bad-add"]);
+      writeFileSync(cfgPath, `${withServer}repo_id: "-bad/x"\n`);
+      git(h.repo, ["commit", "-q", "-am", "bad add"]);
+      const bad = validateShape4ActivationDiff({ repoRoot: h.repo, baseSha: shaOf(h.repo, "main"), headSha: shaOf(h.repo, "bad-add") });
+      assert.equal(bad.ok, false);
+      assert.match((bad as { reason: string }).reason, /malformed repo_id/);
+
+      git(h.repo, ["checkout", "-q", "main"]);
+      writeFileSync(cfgPath, `${original}repo_id: Acme/widget\n`);
+      git(h.repo, ["commit", "-q", "-am", "declare"]);
+      git(h.repo, ["checkout", "-q", "-b", "change"]);
+      writeFileSync(cfgPath, `${withServer}repo_id: Acme/other\n`);
+      git(h.repo, ["commit", "-q", "-am", "change"]);
+      const changed = validateShape4ActivationDiff({ repoRoot: h.repo, baseSha: shaOf(h.repo, "main"), headSha: shaOf(h.repo, "change") });
+      assert.equal(changed.ok, false);
+      assert.match((changed as { reason: string }).reason, /modifies "repo_id"/);
     } finally {
       h.cleanup();
     }

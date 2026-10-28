@@ -539,6 +539,10 @@ set +e; ssh $OPTS -i $k/op git@127.0.0.1 stamp-sign-approval </dev/null >"$k/out
 set +e; ssh $OPTS -i $k/op git@127.0.0.1 /usr/local/sbin/stamp-sign-approval </dev/null >"$k/out" 2>&1; rc=$?; set -e
 [ $rc -eq 2 ] || fail "/usr/local/sbin/stamp-sign-approval was reachable over SSH (exit $rc)"
 [ ! -e /home/git/git-shell-commands/stamp-sign-approval ] || fail "stamp-sign-approval is in git-shell-commands"
+# AGT-2276: the capability probe answers through the gate (an enrolled
+# key over SSH), reporting that this image signs repo_id into approvals.
+caps=$(ssh $OPTS -i $k/op git@127.0.0.1 stamp-server-pubkey --capabilities 2>"$k/out") || fail "stamp-server-pubkey --capabilities failed over SSH"
+[ "$caps" = "{\"approval_repo_id\":true}" ] || fail "capability probe answered: $caps"
 '
 sign_boot1="$sign_common"'
 # Plant a symlink to a root-only file inside a repo; the next boot chown
