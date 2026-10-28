@@ -780,7 +780,12 @@ skipped, a symlinked or non-directory `hooks/` is replaced with a real
 directory, and each hook is staged in a root-only directory and renamed into
 place — a symlink or hard link at `hooks/pre-receive` is replaced, never
 written through, and root never `chown`s or `chmod`s the final path
-(AGT-2261). The logic lives in `server/lib/refresh-repo-hooks.sh`.
+(AGT-2261). The same pass also strips `core.hooksPath`, `include.path` and
+`includeIf.<cond>.path` from each repo's own `config` (editing it as the git
+user, never as root) and logs a warning per key removed: any of them could
+point git at a hook directory other than `hooks/` and skip the stamp
+pre-receive (AGT-2249). A key that cannot be removed fails the boot. The
+logic lives in `server/lib/refresh-repo-hooks.sh`.
 
 **Break-glass manual refresh** (useful if you need to push a hook update
 without restarting the container, or you're debugging):

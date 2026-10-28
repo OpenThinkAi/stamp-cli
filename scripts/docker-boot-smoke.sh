@@ -584,7 +584,9 @@ echo "docker-boot-smoke: review-signing key root:root 0600 across restart; git s
 #   - a whole hooks/ dir as a symlink to a root-only dir,
 #   - a repo path /srv/git/<x>.git as a symlink to a dir outside the volume,
 #   - a symlink at the refresh's staging path,
-# restart, and require: every target untouched (bytes, owner, mode, dir
+#   - core.hooksPath in h1.git/config pointing at an accept-all hook dir
+#     (AGT-2249),
+# restart, and require: core.hooksPath stripped (and logged), every target untouched (bytes, owner, mode, dir
 # listing), real root:root 0755 hooks byte-identical to /etc/stamp/*.cjs in
 # their place, and a push to the repo still running the stamp pre-receive
 # hook (unsigned main rejected; a fast-forward of an unprotected branch
@@ -624,6 +626,11 @@ su -s /bin/sh git -c "
   ln -s /root/hs/linkdir-target /srv/git/h4.git/hooks/pre-receive
   ln -s /root/hs/linkdir-target /srv/git/h4.git/hooks/post-receive
   ln -s /root/hs/dir-target /srv/git/.stamp-hook-staging
+  # AGT-2249: redirect h1's hooks to an accept-all dir via its config.
+  mkdir -p \$HOME/evil-hooks
+  printf '#!/bin/sh\nexit 0\n' > \$HOME/evil-hooks/pre-receive
+  chmod 0755 \$HOME/evil-hooks/pre-receive
+  git --git-dir=/srv/git/h1.git config core.hooksPath \$HOME/evil-hooks
 "
 SH
 cat > "$HOOKS_TMP/check.sh" <<'SH'
@@ -650,6 +657,11 @@ for r in h1 h2 h4; do
     cmp -s "$f" /etc/stamp/$hk.cjs || fail "$f is not the image bundle"
   done
 done
+# AGT-2249: the planted core.hooksPath is gone, so the push below meets
+# the stamp pre-receive rather than the accept-all one.
+if git config --file /srv/git/h1.git/config --get core.hooksPath >/dev/null; then
+  fail "core.hooksPath survived the boot refresh in h1.git/config"
+fi
 # The installed hooks still run on a normal push.
 su -s /bin/sh git -c "env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hs-home sh -c '
   set -e
@@ -676,7 +688,7 @@ if ! docker exec "$HOOKS_CONTAINER" sh /root/check.sh; then
   exit 1
 fi
 hooks_logs=$(docker logs "$HOOKS_CONTAINER" 2>&1)
-for want_line in "was a symlink; replacing the link" "is not a real directory; replacing it" "skipping symlinked repo path"; do
+for want_line in "was a symlink; replacing the link" "is not a real directory; replacing it" "skipping symlinked repo path" "removed 'core.hookspath' from /srv/git/h1.git/config"; do
   printf '%s\n' "$hooks_logs" | grep -F "$want_line" >/dev/null || {
     echo "error: boot log is missing the refresh warning '$want_line' (AGT-2261)." >&2
     printf '%s\n' "$hooks_logs" | tail -40 >&2
