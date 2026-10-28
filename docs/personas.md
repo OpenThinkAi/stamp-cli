@@ -325,7 +325,12 @@ Tag the source repo with versions (e.g. `v3.2`). Consumers pin to specific tags.
 ```sh
 # install + pin 'standards' from acme/stamp-personas at tag v3.2
 stamp reviewers fetch standards --from acme/stamp-personas@v3.2
+
+# stronger: pin the commit the tag points at (tags can be moved)
+stamp reviewers fetch standards --from acme/stamp-personas@<40-hex-commit-sha>
 ```
+
+Git tags and branches are mutable: whoever controls the source repo can move `v3.2` after you read the release notes. A full 40-hex commit SHA as `<ref>` names exactly one tree. Without a trust anchor (a signed manifest verified against `.stamp/verifying-keys/`, or `--expect-prompt-sha`), a fetch from a tag or branch prints a trust-on-first-use warning saying so (AGT-2249).
 
 This writes:
 

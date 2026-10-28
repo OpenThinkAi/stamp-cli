@@ -621,6 +621,11 @@ export async function reviewersFetch(
     // else: no manifest, no allowlist → TOFU (fail-open). No action needed.
   }
 
+  // AGT-2249: a first fetch with no trust anchor pins whatever the ref
+  // points at right now. Say so when that ref is a movable tag or branch.
+  const tofu = formatTofuWarning(source, ref, effectiveExpectPromptSha !== undefined);
+  if (tofu) console.error(tofu);
+
   const promptUrl = buildRawUrl(source, ref, `personas/${reviewerName}/prompt.md`);
   const configUrl = buildRawUrl(source, ref, `personas/${reviewerName}/config.yaml`);
 
@@ -880,6 +885,23 @@ export function reviewersVerify(opts: ReviewersVerifyOptions): void {
 // (incl. `v1.2.3-beta`), `release/v3.2`-style namespaced refs, and
 // 40-char SHAs.
 const FETCH_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+/**
+ * AGT-2249: warning for a trust-on-first-use fetch from a mutable ref, or
+ * null when the fetch is anchored (an expected prompt hash from a flag or a
+ * verified manifest) or the ref is a full commit SHA (immutable). Git tags
+ * and branches can be moved, so the bytes pinned into the lock file on a
+ * first fetch are whatever the ref points at at that moment.
+ */
+export function formatTofuWarning(source: string, ref: string, anchored: boolean): string | null {
+  if (anchored) return null;
+  if (/^[0-9a-f]{40}$/.test(ref)) return null;
+  return (
+    `warning: ${source}@${ref} is a movable tag or branch and this fetch has no trust anchor ` +
+      `(no verified signed manifest, no --expect-prompt-sha), so the lock pins whatever it points at now ` +
+      `(trust on first use). Prefer a full commit SHA as the ref, e.g. --from ${source}@<40-hex-sha>.`
+  );
+}
 
 export function validateFetchRef(ref: string, contextPath = "<inline>"): void {
   if (!FETCH_REF_RE.test(ref)) {

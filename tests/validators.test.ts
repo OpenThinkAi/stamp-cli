@@ -97,6 +97,7 @@ import {
 import { findBranchRule, type BranchRule } from "../src/lib/config.ts";
 import { parseServerConfig as parseServerYaml } from "../src/lib/serverConfig.ts";
 import {
+  formatTofuWarning,
   parseSourceSpec,
   validateFetchRef,
 } from "../src/commands/reviewers.ts";
@@ -2309,5 +2310,20 @@ describe("parseSourceSpec (--from <source>@<ref>)", () => {
       () => parseSourceSpec("acme/stamp-personas@"),
       /--from must be '<source>@<ref>'/,
     );
+  });
+});
+
+describe("formatTofuWarning (AGT-2249)", () => {
+  it("warns on an unanchored fetch from a tag or branch", () => {
+    const w = formatTofuWarning("acme/stamp-personas", "v3.2", false);
+    assert.ok(w);
+    assert.match(w, /movable tag or branch/);
+    assert.match(w, /full commit SHA/);
+    assert.ok(formatTofuWarning("acme/stamp-personas", "main", false));
+  });
+
+  it("is silent for a full commit SHA or an anchored fetch", () => {
+    assert.equal(formatTofuWarning("acme/stamp-personas", "a".repeat(40), false), null);
+    assert.equal(formatTofuWarning("acme/stamp-personas", "v3.2", true), null);
   });
 });
