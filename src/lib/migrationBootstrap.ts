@@ -36,6 +36,7 @@
  *     with `[server]` capability and `role_source: server`
  *   - adds (not modifies) corresponding `*.pub` files under
  *     `.stamp/trusted-keys/`
+ *   - optionally adds a well-formed top-level `repo_id:` (AGT-2276)
  *   - optionally adjusts the `reviewers:` block from prompt-paths form to
  *     `{}` form (the Shape 4 cleanup) — see `validateShape4ActivationDiff`
  *
@@ -71,6 +72,7 @@
 import { spawnSync } from "node:child_process";
 import { canonicalSerializePayload, type AttestationPayloadV4 } from "./attestationV4.js";
 import { parse as parseYaml } from "yaml";
+import { REPO_ID_CONFIG_KEY, isWellFormedRepoId } from "./repoBinding.js";
 
 /** Carried on a v3 PR-attestation payload to signal "this is a Shape 4
  *  migration-bootstrap envelope". When set, the verifier accepts an empty
@@ -116,7 +118,9 @@ export interface Shape4ValidationInput {
  *   - `.stamp/config.yml`: ADDS `review_server:` to a branch rule.
  *     Optionally MAY also adjust the `reviewers:` block from prompt-paths
  *     form to `{}` form (the Shape 4 cleanup change) — see below for
- *     the strict definition of "cleanup".
+ *     the strict definition of "cleanup". MAY also ADD a well-formed
+ *     top-level `repo_id:` (absent at base; AGT-2276) — never change or
+ *     remove one.
  *   - `.stamp/trusted-keys/manifest.yml`: ADDS (not modifies) entries
  *     carrying `[server]` capability AND `role_source: server`. Existing
  *     entries MUST NOT be modified or removed.
@@ -350,10 +354,26 @@ function validateConfigYamlChange(args: {
   // and any other key must be byte-identical between base and head
   // (deep equality over parsed JSON; the parser already normalized YAML
   // formatting differences).
+  //
+  // One exception (AGT-2276): `stamp init --migrate-to-server-attested`
+  // declares `repo_id:` when the review server signs it. ADDING a
+  // well-formed top-level `repo_id` (absent at base) is admitted: it only
+  // narrows which approvals verify. Changing or removing an existing one
+  // still falls through to the equality check below and is refused.
   const allowedDiffKeys = new Set(["branches", "reviewers"]);
   const allKeys = new Set([...Object.keys(baseObj), ...Object.keys(headObj)]);
   for (const k of allKeys) {
     if (allowedDiffKeys.has(k)) continue;
+    if (k === REPO_ID_CONFIG_KEY && !(k in baseObj)) {
+      if (!isWellFormedRepoId(headObj[k])) {
+        return {
+          ok: false,
+          reason: `.stamp/config.yml: bootstrap diff adds a malformed ${REPO_ID_CONFIG_KEY} (${JSON.stringify(headObj[k])}) — it must be "<org>/<repo>"`,
+          activatesReviewServer: false,
+        };
+      }
+      continue;
+    }
     if (!deepEqual(baseObj[k], headObj[k])) {
       return {
         ok: false,

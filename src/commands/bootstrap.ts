@@ -16,6 +16,10 @@ import {
 } from "../lib/config.js";
 import { currentBranch, runGit } from "../lib/git.js";
 import { classifyRemote, describeShape } from "../lib/remote.js";
+import { decideRepoIdDefault, REVIEW_ORG_REPO_REMOTE, type RepoIdDefault } from "../lib/repoIdDefault.js";
+import type { CapabilityProbeTarget } from "../lib/serverCapabilities.js";
+import { parseBareRepoSshUrl } from "../lib/serverConfig.js";
+import { parseReviewServerUrl } from "../lib/sshReviewClient.js";
 import {
   ensureDir,
   findRepoRoot,
@@ -77,6 +81,14 @@ export interface BootstrapOptions {
    * Default false: an operator at a terminal still gets the prompt.
    */
   yes?: boolean;
+  /**
+   * The stamp server this repo lives on, for the AGT-2276 capability
+   * probe that decides whether to declare `repo_id:`. `stamp provision`
+   * passes the server it just provisioned on. When unset, bootstrap asks
+   * the target branch's `review_server` if it has one, else the server
+   * the `origin` remote points at (a stamp-server clone URL).
+   */
+  server?: CapabilityProbeTarget;
 }
 
 const STARTER_PROMPTS: Record<string, string> = {
@@ -199,12 +211,23 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
     return;
   }
 
+  // 5b. AGT-2276: declare `repo_id:` when the server signs it into
+  //     approvals. Decided before any write so a probe failure only
+  //     costs the note, never a half-written branch.
+  const repoIdDecision = decideRepoIdDefault({
+    repoRoot,
+    existingRaw: currentConfig.repo_id,
+    target: resolveBootstrapProbeTarget(targetRule, opts, repoRoot),
+  });
+  reportRepoIdDecision(repoIdDecision);
+  const repoId = repoIdDecision.kind === "write" ? repoIdDecision.repoId : undefined;
+
   // 6. Create the bootstrap branch and write files.
   console.log(`\nCreating branch "${BOOTSTRAP_BRANCH}"`);
   runGit(["checkout", "-b", BOOTSTRAP_BRANCH], repoRoot);
 
   try {
-    writeBootstrapFiles(repoRoot, plan);
+    writeBootstrapFiles(repoRoot, plan, repoId);
     const agentsMdAction =
       opts.agentsMd === false ? "skipped" : ensureAgentsMd(repoRoot);
     const claudeMdAction =
@@ -281,6 +304,9 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
   console.log(`  branch:           ${targetBranch}`);
   console.log(`  reviewers:        ${plan.newReviewers.join(", ")} (now required)`);
   console.log(`  example:          defined-but-unrequired (safe to remove later via a normal review/merge cycle)`);
+  if (repoId !== undefined) {
+    console.log(`  repo_id:          ${repoId} (approvals bound to this repo)`);
+  }
   if (opts.noPush) {
     console.log(
       `\nLocal merge complete but not pushed. Push with: stamp push ${targetBranch}`,
@@ -292,7 +318,7 @@ export async function runBootstrap(opts: BootstrapOptions = {}): Promise<void> {
   }
 }
 
-interface BootstrapPlan {
+export interface BootstrapPlan {
   targetBranch: string;
   newReviewers: string[];
   /** Map of reviewer name → file path (relative to repo root) → prompt body */
@@ -433,7 +459,8 @@ function readSeedDir(seedDir: string): SeedRead {
   return { config, reviewerFiles, mirrorYml };
 }
 
-function writeBootstrapFiles(repoRoot: string, plan: BootstrapPlan): void {
+/** Exported for tests (AGT-2276). */
+export function writeBootstrapFiles(repoRoot: string, plan: BootstrapPlan, repoId: string | undefined): void {
   ensureDir(stampConfigDir(repoRoot));
   ensureDir(stampReviewersDir(repoRoot));
 
@@ -450,13 +477,57 @@ function writeBootstrapFiles(repoRoot: string, plan: BootstrapPlan): void {
   // AGT-2270: patch only the keys bootstrap sets, keeping comments (the
   // init retention scaffold) and other top-level keys (data_flow, ...).
   const configPath = stampConfigFile(repoRoot);
+  // AGT-2276: `repo_id` joins the patch only when the probe said so.
   const raw = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+  const repoIdPatch = repoId !== undefined ? { repo_id: repoId } : {};
   writeFileSync(
     configPath,
     raw
-      ? patchConfigYaml(raw, { branches: plan.newConfig.branches, reviewers: plan.newConfig.reviewers })
-      : stringifyConfig(plan.newConfig),
+      ? patchConfigYaml(raw, {
+          branches: plan.newConfig.branches,
+          reviewers: plan.newConfig.reviewers,
+          ...repoIdPatch,
+        })
+      : stringifyConfig({ ...plan.newConfig, ...repoIdPatch }),
   );
+}
+
+/**
+ * Which server to ask whether it signs `repo_id` (AGT-2276): the branch
+ * rule's `review_server` (the server that signs this repo's approvals),
+ * else the server provision passed in, else the stamp server the
+ * `origin` remote points at. Null when none applies — the caller then
+ * leaves `repo_id` undeclared.
+ */
+export function resolveBootstrapProbeTarget(
+  targetRule: BranchRule,
+  opts: BootstrapOptions,
+  repoRoot: string,
+): CapabilityProbeTarget | null {
+  if (targetRule.review_server) {
+    try {
+      return parseReviewServerUrl(targetRule.review_server);
+    } catch {
+      return null;
+    }
+  }
+  if (opts.server) return opts.server;
+  let url: string;
+  try {
+    url = runGit(["remote", "get-url", REVIEW_ORG_REPO_REMOTE], repoRoot).trim();
+  } catch {
+    return null;
+  }
+  const parsed = parseBareRepoSshUrl(url);
+  return parsed ? { user: parsed.user, host: parsed.host, port: parsed.port } : null;
+}
+
+function reportRepoIdDecision(d: RepoIdDefault): void {
+  if (d.kind === "write") {
+    console.log(`\nThe stamp server signs repo_id into approvals; declaring repo_id: ${d.repoId}`);
+  } else if (d.kind === "skip") {
+    console.log(`\n${d.note}`);
+  }
 }
 
 function printPlan(plan: BootstrapPlan, opts: BootstrapOptions): void {
@@ -471,6 +542,7 @@ function printPlan(plan: BootstrapPlan, opts: BootstrapOptions): void {
     console.log(`  mirror.yml:       install from seed dir`);
   }
   console.log(`  example reviewer: keep defined-but-unrequired`);
+  console.log(`  repo_id:          declare if the stamp server signs it (asked after the plan)`);
   console.log(
     `  AGENTS.md:        ${
       opts.agentsMd === false

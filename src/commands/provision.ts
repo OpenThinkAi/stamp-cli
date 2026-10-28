@@ -323,7 +323,9 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
   console.log(`Bootstrapping reviewers on the clone`);
   process.chdir(cloneTarget);
   try {
-    await runBootstrap({ yes: opts.yes });
+    // `server` lets bootstrap ask this server whether it signs repo_id
+    // into approvals, and declare it if so (AGT-2276).
+    await runBootstrap({ yes: opts.yes, server });
   } catch (err) {
     // Everything except the reviewer bootstrap is done by this point —
     // say so explicitly. The old behavior (bail with only bootstrap's

@@ -56,6 +56,9 @@ import {
   stampTrustedKeysDir,
 } from "../lib/paths.js";
 import { fetchServerReviewSigningPubkey } from "../lib/serverPubkeyFetch.js";
+import { patchConfigYaml } from "../lib/config.js";
+import { repoIdRawFromConfigYaml } from "../lib/repoBinding.js";
+import { decideRepoIdDefault } from "../lib/repoIdDefault.js";
 import {
   loadServerConfig,
   parseServerFlag,
@@ -376,23 +379,40 @@ export function runMigrateToServerAttested(
     manifestAction = "wrote";
   }
 
-  // 11c. Config write.
+  // 11c. AGT-2276: declare `repo_id:` when the server this migration
+  //      points review_server at signs it into approvals. Patched in
+  //      place on top of the line-oriented rewrite so comments survive;
+  //      the activation whitelist (validateShape4ActivationDiff) admits
+  //      adding a well-formed top-level `repo_id`.
+  const repoIdDecision = decideRepoIdDefault({
+    repoRoot,
+    existingRaw: repoIdRawFromConfigYaml(rewrite.text),
+    target: server,
+  });
+  let cfgText = rewrite.text;
+  if (repoIdDecision.kind === "write") {
+    cfgText = patchConfigYaml(cfgText, { repo_id: repoIdDecision.repoId });
+  } else if (repoIdDecision.kind === "skip") {
+    console.error(repoIdDecision.note);
+  }
+
+  // 11d. Config write.
   let cfgAction: "wrote" | "unchanged";
-  if (!rewrite.changed) {
+  if (cfgText === cfgInput) {
     cfgAction = "unchanged";
   } else {
-    writeFileSync(cfgPath, rewrite.text);
+    writeFileSync(cfgPath, cfgText);
     cfgAction = "wrote";
   }
 
-  // 11d. Delete .stamp/reviewers/*.md.
+  // 11e. Delete .stamp/reviewers/*.md.
   const deletedReviewers: string[] = [];
   for (const f of reviewerFilesToDelete) {
     rmSync(f, { force: true });
     deletedReviewers.push(relative(repoRoot, f));
   }
 
-  // 11e. Workflow file. Pass prCheckOpt=true to force write regardless
+  // 11f. Workflow file. Pass prCheckOpt=true to force write regardless
   //      of mode (the workflow IS the enforcement point in Shape 4).
   //      The mode arg only matters for the default-on/off branch when
   //      prCheckOpt is undefined; an explicit `true` short-circuits it.
@@ -400,7 +420,7 @@ export function runMigrateToServerAttested(
   //      of the migration semantically.
   const wf = maybeWriteVerifyWorkflow(repoRoot, true, "attested-pr");
 
-  // 11f. Refresh AGENTS.md with the Shape 4 (attested-pr) body. Stale
+  // 11g. Refresh AGENTS.md with the Shape 4 (attested-pr) body. Stale
   //      local-only guidance left behind from the pre-migration init
   //      would tell future agents "the remote accepts any push" — wrong,
   //      because branch protection + the verify workflow are now active.
@@ -425,6 +445,9 @@ export function runMigrateToServerAttested(
     console.log(
       `  review_server:   added to branch "${rewrite.reviewServerBranchAdded}" -> ${reviewServerUrl}`,
     );
+  }
+  if (repoIdDecision.kind === "write") {
+    console.log(`  repo_id:         ${repoIdDecision.repoId} (server signs it; approvals bound to this repo)`);
   }
   if (rewrite.reviewersRewrittenTo.length > 0) {
     console.log(
@@ -753,6 +776,7 @@ function printDryRun(s: DryRunSnapshot): void {
   );
   console.log(`Default branch:   ${s.defaultBranch}`);
   console.log(`review_server:    ${s.reviewServerUrl}`);
+  console.log(`repo_id:          declared at real-run if the server reports signing it (offline in dry-run)`);
   console.log(`min_signatures:   ${s.minimumSignatures}`);
   console.log();
   console.log(`Detected ${s.detected.length} pubkey(s) in .stamp/trusted-keys/:`);

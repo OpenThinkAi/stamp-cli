@@ -19,6 +19,19 @@
 #       Subsequent requests for the same repo are cache hits — the file
 #       persists across container reboots on the /srv/git volume.
 #
+#   ssh git@<host> stamp-server-pubkey --capabilities
+#       Print one JSON line naming what this server image does, for
+#       clients that must not assume a feature an older server lacks
+#       (AGT-2276). Today: `{"approval_repo_id":true}` — stamp-review
+#       signs the reviewed <org>/<repo> into every approval as
+#       `repo_id` (AGT-2272), so `stamp provision` / `stamp bootstrap` /
+#       `stamp init --migrate-to-server-attested` may declare `repo_id:`
+#       in .stamp/config.yml. A static answer: the verb ships in the
+#       same image as stamp-review, so it describes that image's code.
+#       Holds no secrets and reads no files. A server that predates
+#       this mode refuses `--capabilities` ("spec must not start with
+#       '-'", exit 2); clients read any failure as "no capabilities".
+#
 #   ssh git@<host> stamp-server-pubkey --review-signing
 #       Print the server's REVIEW-SIGNING public key (the SPKI PEM
 #       written by stamp-bootstrap-review-key on first boot). This is
@@ -48,6 +61,14 @@ set -e
 
 KEY_DIR=/srv/git/.ssh-client-keys
 SPEC="${1:-}"
+
+# Capability probe (AGT-2276). Branch before the deploy-key dispatch for
+# the same reason as --review-signing below. Keep the output one compact
+# JSON object on one line; add fields, never repurpose one.
+if [ "$SPEC" = "--capabilities" ]; then
+  printf '%s\n' '{"approval_repo_id":true}'
+  exit 0
+fi
 
 # Review-signing pubkey mode. Branch BEFORE the deploy-key dispatch so
 # the leading "-" doesn't trip the "spec must not start with '-'"
