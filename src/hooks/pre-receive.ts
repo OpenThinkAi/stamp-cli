@@ -946,11 +946,11 @@ function readConfigAt(sha: string): StampConfigAtRef | null {
     const parsedPathRules = parsePathRules(obj.path_rules);
     for (const warning of parsedPathRules.warnings) {
       // Visible to the operator on push (git forwards pre-receive
-      // stderr to the pushing client). Per AGT-336 security: silent
-      // drops of malformed rules are an operational security gap;
-      // surfacing each dropped rule by name lets an operator catch
-      // a bad config deploy on the next merge instead of discovering
-      // it the day an attacker exploits the missing gate.
+      // stderr to the pushing client). Malformed rules fail closed
+      // (AGT-2246: each bad field is replaced by its strict default,
+      // never dropped); the warning names the field so the operator
+      // can fix the config, since the gate may now be stricter than
+      // they intended.
       process.stderr.write(`stamp-verify: ${warning}\n`);
     }
     return {

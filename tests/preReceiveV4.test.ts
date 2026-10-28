@@ -1357,26 +1357,52 @@ describe("pre-receive v4 — .stamp/** admin-sig guard (AGT-336)", () => {
   });
 });
 
-describe("pre-receive v4 — path_rules: malformed-rule warnings (AGT-336 security round 1)", () => {
+describe("pre-receive v4 — path_rules: malformed rules fail closed (AGT-336, AGT-2246)", () => {
   // AGT-336 security review flagged silent drops of malformed rules
-  // as an operational security gap. parsePathRules now returns
-  // warnings alongside the parsed rules so the hook can surface them
-  // on stderr. These tests pin that contract.
+  // as an operational security gap, so parsePathRules returns
+  // warnings the hook surfaces on stderr. AGT-2246 went further: a
+  // malformed rule must never REMOVE a gate (a YAML typo in the
+  // `.stamp/**` rule used to switch the trust-anchor gate off). Each
+  // malformed field is replaced by its strict default instead.
+
+  const STRICT = {
+    require_capability: "admin",
+    minimum_signatures: 1,
+    bypass_review_cycle: false,
+  };
 
   it("returns { rules: [], warnings: [] } when path_rules is absent", () => {
     const p = parsePathRules(undefined);
     assert.deepEqual(p.rules, []);
     assert.deepEqual(p.warnings, []);
+    const q = parsePathRules(null);
+    assert.deepEqual(q.rules, []);
+    assert.deepEqual(q.warnings, []);
   });
 
-  it("emits a top-level warning when path_rules is an array (wrong shape)", () => {
-    const p = parsePathRules([{ pattern: ".stamp/**" }]);
+  it("returns no rules and no warnings for an empty map", () => {
+    const p = parsePathRules({});
     assert.deepEqual(p.rules, []);
+    assert.deepEqual(p.warnings, []);
+  });
+
+  it("gates EVERY path with strict defaults when path_rules is an array (wrong shape)", () => {
+    const p = parsePathRules([{ pattern: ".stamp/**" }]);
+    assert.deepEqual(p.rules, [{ pattern: "**", ...STRICT }]);
     assert.equal(p.warnings.length, 1);
     assert.match(p.warnings[0]!, /top-level value must be a YAML map/);
+    assert.match(p.warnings[0]!, /EVERY path is gated/);
   });
 
-  it("drops a rule with non-integer minimum_signatures and warns", () => {
+  it("gates EVERY path when path_rules is a scalar", () => {
+    for (const bad of [".stamp/**", 2, true]) {
+      const p = parsePathRules(bad);
+      assert.deepEqual(p.rules, [{ pattern: "**", ...STRICT }], `for ${JSON.stringify(bad)}`);
+      assert.equal(p.warnings.length, 1);
+    }
+  });
+
+  it("keeps a rule with non-integer minimum_signatures, failing closed to 1", () => {
     const p = parsePathRules({
       ".stamp/**": {
         require_capability: "admin",
@@ -1384,13 +1410,16 @@ describe("pre-receive v4 — path_rules: malformed-rule warnings (AGT-336 securi
         bypass_review_cycle: true,
       },
     });
-    assert.deepEqual(p.rules, []);
+    assert.deepEqual(p.rules, [
+      { pattern: ".stamp/**", require_capability: "admin", minimum_signatures: 1, bypass_review_cycle: true },
+    ]);
     assert.equal(p.warnings.length, 1);
     assert.match(p.warnings[0]!, /\.stamp\/\*\*.*minimum_signatures must be a positive integer/);
-    assert.match(p.warnings[0]!, /NOT gated/);
+    assert.match(p.warnings[0]!, /failing closed/i);
+    assert.doesNotMatch(p.warnings[0]!, /NOT gated/);
   });
 
-  it("drops a rule with non-boolean bypass_review_cycle and warns", () => {
+  it("keeps a rule with non-boolean bypass_review_cycle, failing closed to false", () => {
     const p = parsePathRules({
       ".stamp/**": {
         require_capability: "admin",
@@ -1398,12 +1427,14 @@ describe("pre-receive v4 — path_rules: malformed-rule warnings (AGT-336 securi
         bypass_review_cycle: "yes", // YAML 1.1's boolean-ish, but a plain string here
       },
     });
-    assert.deepEqual(p.rules, []);
+    assert.deepEqual(p.rules, [
+      { pattern: ".stamp/**", require_capability: "admin", minimum_signatures: 2, bypass_review_cycle: false },
+    ]);
     assert.equal(p.warnings.length, 1);
     assert.match(p.warnings[0]!, /bypass_review_cycle must be a YAML boolean/);
   });
 
-  it("drops a rule with empty require_capability and warns", () => {
+  it("keeps a rule with empty require_capability, failing closed to admin", () => {
     const p = parsePathRules({
       ".stamp/**": {
         require_capability: "",
@@ -1411,22 +1442,51 @@ describe("pre-receive v4 — path_rules: malformed-rule warnings (AGT-336 securi
         bypass_review_cycle: true,
       },
     });
-    assert.deepEqual(p.rules, []);
+    assert.deepEqual(p.rules, [
+      { pattern: ".stamp/**", require_capability: "admin", minimum_signatures: 1, bypass_review_cycle: true },
+    ]);
     assert.equal(p.warnings.length, 1);
     assert.match(p.warnings[0]!, /require_capability must be a non-empty string/);
   });
 
-  it("drops a rule with non-positive minimum_signatures and warns", () => {
+  it("keeps a rule with non-positive minimum_signatures, failing closed to 1", () => {
+    for (const bad of [0, -3, 1.5]) {
+      const p = parsePathRules({
+        ".stamp/**": {
+          require_capability: "admin",
+          minimum_signatures: bad,
+          bypass_review_cycle: true,
+        },
+      });
+      assert.equal(p.rules.length, 1, `for ${bad}`);
+      assert.equal(p.rules[0]!.minimum_signatures, 1);
+      assert.equal(p.warnings.length, 1);
+      assert.match(p.warnings[0]!, /minimum_signatures must be a positive integer/);
+    }
+  });
+
+  it("replaces every malformed field and warns once per field", () => {
     const p = parsePathRules({
-      ".stamp/**": {
-        require_capability: "admin",
-        minimum_signatures: 0,
-        bypass_review_cycle: true,
-      },
+      ".stamp/**": { require_capability: 7, minimum_signatures: "two" },
     });
+    assert.deepEqual(p.rules, [{ pattern: ".stamp/**", ...STRICT }]);
+    assert.equal(p.warnings.length, 3);
+  });
+
+  it("gates a rule whose body is not a map with all strict defaults", () => {
+    for (const bad of ["admin", null, 2, ["admin"]]) {
+      const p = parsePathRules({ ".stamp/**": bad });
+      assert.deepEqual(p.rules, [{ pattern: ".stamp/**", ...STRICT }], `for ${JSON.stringify(bad)}`);
+      assert.equal(p.warnings.length, 1);
+      assert.match(p.warnings[0]!, /rule body must be a YAML map/);
+    }
+  });
+
+  it("skips an empty pattern key (it matches nothing) with a warning", () => {
+    const p = parsePathRules({ "": { ...STRICT } });
     assert.deepEqual(p.rules, []);
     assert.equal(p.warnings.length, 1);
-    assert.match(p.warnings[0]!, /minimum_signatures must be a positive integer/);
+    assert.match(p.warnings[0]!, /empty or non-string pattern key/);
   });
 
   it("accepts a well-formed rule with zero warnings", () => {
@@ -1445,7 +1505,7 @@ describe("pre-receive v4 — path_rules: malformed-rule warnings (AGT-336 securi
     assert.equal(p.rules[0]!.bypass_review_cycle, true);
   });
 
-  it("partial-malformed: drops the bad rule, keeps the good one, warns once", () => {
+  it("partial-malformed: keeps the good rule as written and fails the bad one closed", () => {
     const p = parsePathRules({
       ".stamp/**": {
         require_capability: "admin",
@@ -1454,10 +1514,52 @@ describe("pre-receive v4 — path_rules: malformed-rule warnings (AGT-336 securi
       },
       ".github/workflows/*.yml": "not-a-map", // malformed
     });
-    assert.equal(p.rules.length, 1);
-    assert.equal(p.rules[0]!.pattern, ".stamp/**");
+    assert.equal(p.rules.length, 2);
+    assert.deepEqual(p.rules[0], { pattern: ".github/workflows/*.yml", ...STRICT });
+    assert.deepEqual(p.rules[1], {
+      pattern: ".stamp/**",
+      require_capability: "admin",
+      minimum_signatures: 1,
+      bypass_review_cycle: true,
+    });
     assert.equal(p.warnings.length, 1);
     assert.match(p.warnings[0]!, /\.github\/workflows.*rule body must be a YAML map/);
+  });
+
+  it("regression (AGT-2246): a typo'd .stamp/** rule still gates a trust-anchor edit", () => {
+    // The oaudit attack path: `minimum_signatures: "2"` used to drop
+    // the rule, so an edit to .stamp/reviewers/security.md merged with
+    // no admin signatures. The parsed rule must still match and the
+    // guard must reject an envelope with no trust-anchor signatures.
+    const h = setupHarness({ touchStampPath: true }); // touches .stamp/**
+    const prev = process.cwd();
+    try {
+      process.chdir(h.repo);
+      const { rules } = parsePathRules({
+        ".stamp/**": {
+          require_capability: "admin",
+          minimum_signatures: "2",
+          bypass_review_cycle: true,
+        },
+      });
+      const payload = buildPayload(h); // no trust_anchor_signatures
+      const outerSig = signOuter(h, payload);
+      const input = h.inputFor(payload, outerSig);
+      assert.ok(
+        input.changedFiles.some((f) => f.startsWith(".stamp/")),
+        "harness diff must touch .stamp/**",
+      );
+      input.pathRules = rules;
+      const guard = verifyV4StampPathsGuard(input);
+      assert.equal(guard.ok, false, "malformed .stamp/** rule must still gate the path");
+      assert.match(
+        (guard as { reason: string }).reason,
+        /requires 1 signature\(s\) from keys with capability 'admin'.*only 0 qualifying/,
+      );
+    } finally {
+      process.chdir(prev);
+      h.cleanup();
+    }
   });
 });
 

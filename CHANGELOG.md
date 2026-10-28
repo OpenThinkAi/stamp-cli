@@ -46,6 +46,18 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   checkout and no install. `tag` (`contents: write`) pushes the release tag
   and runs only git. The build checkout no longer persists the
   `GITHUB_TOKEN` in `.git/config`.
+- **Malformed `path_rules` entries fail closed.** A rule with a wrong-typed or
+  missing field (e.g. `minimum_signatures: "2"`, `bypass_review_cycle: yes`,
+  an empty `require_capability`) used to be dropped with a warning, leaving
+  its paths (typically `.stamp/**`) ungated. The rule is now kept and each bad
+  field takes a strict default: `require_capability: admin`,
+  `minimum_signatures: 1`, `bypass_review_cycle: false`. A rule body that is
+  not a map gets all three; a `path_rules:` value that is not a map gates every
+  path (`**`). The stderr warning still names the field. Applies to the
+  pre-receive hook, `stamp verify-pr`, `stamp attest`, `stamp merge` and
+  `stamp admin sign`.
+  The defaults stay satisfiable by one admin, so the commit that fixes the
+  typo can still land.
 
 ---
 

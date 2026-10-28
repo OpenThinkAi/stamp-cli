@@ -959,18 +959,44 @@ export function pathMatchesAny(filePath: string, patterns: string[]): boolean {
  * stderr-surfaceable messages for malformed rules; callers (pre-
  * receive's hook, verifyPr's loader) write each one to stderr so the
  * operator sees a visible signal on the first push after a bad config
- * deploy — matters because a silently-dropped `.stamp/**` rule is
- * exactly the misconfiguration an attacker would benefit from.
+ * deploy.
  *
  * Per AGT-336 security round 1: silent drops were flagged as an
- * operational security gap. A future `stamp config check` linter
- * remains the right home for structured pre-flight validation; this
- * stderr surface is the necessary interim measure.
+ * operational security gap. Per AGT-2246: dropping a malformed rule at
+ * all (even with a warning) was itself the gap — a single YAML typo in
+ * the `.stamp/**` rule switched the trust-anchor gate off. Malformed
+ * rules now FAIL CLOSED (see `parsePathRules`); the warning tells the
+ * operator which field was replaced by its strict default.
  */
 export interface ParsedPathRules {
   rules: PathRule[];
   warnings: string[];
 }
+
+/**
+ * Strict defaults substituted for a malformed path_rules field. Chosen
+ * so a malformed rule can only make the gate STRICTER than an absent
+ * one, never looser, while staying satisfiable (so the fix commit for
+ * the typo can still land):
+ *
+ *   - `require_capability: admin` — the capability every trust-anchor
+ *     gate uses; an admin must exist for `.stamp/**` edits anyway.
+ *   - `minimum_signatures: 1` — at least one admin signature. Not the
+ *     operator's intended number (we can't know it), but never 0, and
+ *     never a count that could deadlock a single-admin repo.
+ *   - `bypass_review_cycle: false` — admin signatures AND the reviewer
+ *     cycle are both required.
+ */
+export const FAIL_CLOSED_PATH_RULE_DEFAULTS = {
+  require_capability: "admin",
+  minimum_signatures: 1,
+  bypass_review_cycle: false,
+} as const;
+
+/** Pattern used when the whole `path_rules:` value is malformed (not a
+ *  map): we can't tell which paths the operator meant to gate, so every
+ *  path is gated with the strict defaults until the config is fixed. */
+export const FAIL_CLOSED_ALL_PATHS_PATTERN = "**";
 
 /**
  * Parse the `path_rules:` section out of a parsed `.stamp/config.yml`.
@@ -986,23 +1012,45 @@ export interface ParsedPathRules {
  * ```
  *
  * Returns `{ rules, warnings }`. Empty `rules` when the section is
- * absent / malformed at the top level — the verifier treats "no
- * path_rules" identically to "path_rules: {}", which is the safe-by-
- * default posture (no gate, but also no false-positive rejection of
- * well-formed envelopes from repos that haven't adopted path_rules
- * yet).
+ * absent (undefined / null) — the verifier treats "no path_rules"
+ * identically to "path_rules: {}" (no gate, and no false-positive
+ * rejection of envelopes from repos that haven't adopted path_rules).
  *
- * Per-rule, we drop entries with missing required fields or wrong
- * types BUT emit a `warnings` entry naming the offending field. The
- * caller writes each warning to stderr.
+ * Malformed input FAILS CLOSED (AGT-2246) — it never removes a gate:
+ *
+ *   - A rule whose body is not a map keeps its pattern and gets all
+ *     the `FAIL_CLOSED_PATH_RULE_DEFAULTS`.
+ *   - A rule with a missing / wrong-typed field keeps its pattern and
+ *     its well-formed fields; each malformed field is replaced by its
+ *     strict default.
+ *   - A non-map top-level value (array, string, number, boolean) gates
+ *     EVERY path (`**`) with the strict defaults.
+ *
+ * Each substitution emits a `warnings` entry naming the field; the
+ * caller writes it to stderr. Fail-closed rather than hard-reject
+ * because rules are read from the base tree: rejecting every push
+ * would also reject the commit that fixes the typo, bricking the
+ * repo, whereas the strict defaults stay satisfiable by one admin.
+ *
+ * An empty pattern key matches no path, so it is skipped with a
+ * warning (dropping it gates nothing less).
  */
 export function parsePathRules(raw: unknown): ParsedPathRules {
   if (raw === undefined || raw === null) return { rules: [], warnings: [] };
+  const D = FAIL_CLOSED_PATH_RULE_DEFAULTS;
+  const strictDesc = `require_capability: ${D.require_capability}, minimum_signatures: ${D.minimum_signatures}, bypass_review_cycle: ${D.bypass_review_cycle}`;
   if (typeof raw !== "object" || Array.isArray(raw)) {
     return {
-      rules: [],
+      rules: [
+        {
+          pattern: FAIL_CLOSED_ALL_PATHS_PATTERN,
+          require_capability: D.require_capability,
+          minimum_signatures: D.minimum_signatures,
+          bypass_review_cycle: D.bypass_review_cycle,
+        },
+      ],
       warnings: [
-        `path_rules: top-level value must be a YAML map (e.g. \`".stamp/**": { ... }\`). Got ${Array.isArray(raw) ? "an array" : typeof raw}; entire path_rules section ignored.`,
+        `path_rules: top-level value must be a YAML map (e.g. \`".stamp/**": { ... }\`). Got ${Array.isArray(raw) ? "an array" : typeof raw}; failing closed — EVERY path is gated (${strictDesc}) until .stamp/config.yml is fixed.`,
       ],
     };
   }
@@ -1010,44 +1058,54 @@ export function parsePathRules(raw: unknown): ParsedPathRules {
   const warnings: string[] = [];
   for (const [pattern, rule] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof pattern !== "string" || pattern.length === 0) {
-      warnings.push(`path_rules: empty or non-string pattern key skipped.`);
+      warnings.push(`path_rules: empty or non-string pattern key skipped (it matches no path).`);
       continue;
     }
     if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
       warnings.push(
-        `path_rules["${pattern}"]: rule body must be a YAML map with require_capability/minimum_signatures/bypass_review_cycle fields. Rule ignored — the path is NOT gated.`,
+        `path_rules["${pattern}"]: rule body must be a YAML map with require_capability/minimum_signatures/bypass_review_cycle fields. Failing closed — the path is gated with strict defaults (${strictDesc}).`,
       );
+      out.push({
+        pattern,
+        require_capability: D.require_capability,
+        minimum_signatures: D.minimum_signatures,
+        bypass_review_cycle: D.bypass_review_cycle,
+      });
       continue;
     }
     const r = rule as Record<string, unknown>;
-    if (typeof r.require_capability !== "string" || r.require_capability.length === 0) {
+    let require_capability: string;
+    if (typeof r.require_capability === "string" && r.require_capability.length > 0) {
+      require_capability = r.require_capability;
+    } else {
+      require_capability = D.require_capability;
       warnings.push(
-        `path_rules["${pattern}"]: require_capability must be a non-empty string (e.g. \`admin\`). Got ${typeof r.require_capability}; rule ignored — the path is NOT gated.`,
+        `path_rules["${pattern}"]: require_capability must be a non-empty string (e.g. \`admin\`). Got ${JSON.stringify(r.require_capability) ?? "nothing"}; failing closed — using require_capability: ${D.require_capability}.`,
       );
-      continue;
     }
+    let minimum_signatures: number;
     if (
-      typeof r.minimum_signatures !== "number" ||
-      !Number.isInteger(r.minimum_signatures) ||
-      r.minimum_signatures < 1
+      typeof r.minimum_signatures === "number" &&
+      Number.isInteger(r.minimum_signatures) &&
+      r.minimum_signatures >= 1
     ) {
+      minimum_signatures = r.minimum_signatures;
+    } else {
+      minimum_signatures = D.minimum_signatures;
       warnings.push(
-        `path_rules["${pattern}"]: minimum_signatures must be a positive integer (got ${JSON.stringify(r.minimum_signatures)}). Rule ignored — the path is NOT gated.`,
+        `path_rules["${pattern}"]: minimum_signatures must be a positive integer (got ${JSON.stringify(r.minimum_signatures) ?? "nothing"}). Failing closed — using minimum_signatures: ${D.minimum_signatures}; fix the value to require more.`,
       );
-      continue;
     }
-    if (typeof r.bypass_review_cycle !== "boolean") {
+    let bypass_review_cycle: boolean;
+    if (typeof r.bypass_review_cycle === "boolean") {
+      bypass_review_cycle = r.bypass_review_cycle;
+    } else {
+      bypass_review_cycle = D.bypass_review_cycle;
       warnings.push(
-        `path_rules["${pattern}"]: bypass_review_cycle must be a YAML boolean (true or false; YAML's \`yes\`/\`no\`/\`on\`/\`off\` are NOT parsed as booleans here). Got ${JSON.stringify(r.bypass_review_cycle)}; rule ignored — the path is NOT gated.`,
+        `path_rules["${pattern}"]: bypass_review_cycle must be a YAML boolean (true or false; YAML's \`yes\`/\`no\`/\`on\`/\`off\` are NOT parsed as booleans here). Got ${JSON.stringify(r.bypass_review_cycle) ?? "nothing"}; failing closed — using bypass_review_cycle: ${D.bypass_review_cycle} (admin signatures AND the reviewer cycle required).`,
       );
-      continue;
     }
-    out.push({
-      pattern,
-      require_capability: r.require_capability,
-      minimum_signatures: r.minimum_signatures,
-      bypass_review_cycle: r.bypass_review_cycle,
-    });
+    out.push({ pattern, require_capability, minimum_signatures, bypass_review_cycle });
   }
   // Sort by pattern for deterministic iteration / stable error messages.
   out.sort((a, b) => (a.pattern < b.pattern ? -1 : a.pattern > b.pattern ? 1 : 0));
