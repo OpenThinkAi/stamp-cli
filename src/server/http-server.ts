@@ -494,7 +494,8 @@ function buildRefreshOpts(): CloneOrFetchOpts | null {
   const deployKeyPath =
     process.env["STAMP_PROMPTS_DEPLOY_KEY_PATH"] ||
     (existsSync(DEFAULT_DEPLOY_KEY_PATH) ? DEFAULT_DEPLOY_KEY_PATH : undefined);
-  return { url, ref, cacheRoot, deployKeyPath };
+  const allowedSignersPath = process.env["STAMP_PROMPTS_ALLOWED_SIGNERS"] || undefined;
+  return { url, ref, cacheRoot, deployKeyPath, ...(allowedSignersPath ? { allowedSignersPath } : {}) };
 }
 
 /**

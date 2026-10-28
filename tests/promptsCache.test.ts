@@ -482,3 +482,81 @@ describe("git argv builders carry the -- terminator (AGT-417)", () => {
     assert.ok(args.indexOf("--") < args.indexOf("https://h/r.git"));
   });
 });
+
+// ─── AGT-2249 (folds AGT-2262): signed-commit verification ───────────
+
+describe("cloneOrFetchPromptsCache — STAMP_PROMPTS_ALLOWED_SIGNERS verification", () => {
+  function sshKey(name: string): { priv: string; pub: string } {
+    const priv = join(workRoot, name);
+    execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", name, "-f", priv]);
+    return { priv, pub: readFileSync(`${priv}.pub`, "utf8").trim() };
+  }
+
+  function signedCommit(seed: string, key: string, filename: string, body: string): string {
+    writeFileSync(join(seed, filename), body);
+    git(seed, ["add", filename]);
+    git(seed, [
+      "-c", "gpg.format=ssh", "-c", `user.signingkey=${key}`,
+      "commit", "-q", "-S", "-m", `signed ${filename}`,
+    ]);
+    git(seed, ["push", "-q", "origin", "main"]);
+    return git(seed, ["rev-parse", "HEAD"]).trim();
+  }
+
+  function setupSigned(): { url: string; seedRepo: string; signers: string; trusted: string; rogue: string } {
+    const { url, seedRepo } = makeBareUpstream(workRoot);
+    const trusted = sshKey("trusted");
+    const rogue = sshKey("rogue");
+    const signers = join(workRoot, "allowed_signers");
+    writeFileSync(signers, `prompts@example.com ${trusted.pub}\n`);
+    git(seedRepo, ["config", "user.email", "prompts@example.com"]);
+    return { url, seedRepo, signers, trusted: trusted.priv, rogue: rogue.priv };
+  }
+
+  it("accepts a tip signed by an allowed key", async () => {
+    const f = setupSigned();
+    const sha = signedCommit(f.seedRepo, f.trusted, "security.md", "signed security\n");
+    const cacheRoot = join(workRoot, "cache");
+    const r = await cloneOrFetchPromptsCache({ url: f.url, ref: "main", cacheRoot, allowedSignersPath: f.signers });
+    assert.equal(r.commitSha, sha);
+    assert.equal(readFileSync(join(cacheRoot, "security.md"), "utf8"), "signed security\n");
+  });
+
+  it("refuses an unsigned tip on first clone (no cache is created)", async () => {
+    const f = setupSigned();
+    const cacheRoot = join(workRoot, "cache");
+    await assert.rejects(
+      cloneOrFetchPromptsCache({ url: f.url, ref: "main", cacheRoot, allowedSignersPath: f.signers }),
+      (err: Error) => err.name === "PromptsSignatureError" && /refusing prompts commit/.test(err.message),
+    );
+    assert.ok(!existsSync(join(cacheRoot, "security.md")));
+  });
+
+  it("refuses a tip signed by an unlisted key and keeps the last verified prompts", async () => {
+    const f = setupSigned();
+    const good = signedCommit(f.seedRepo, f.trusted, "security.md", "signed security\n");
+    const cacheRoot = join(workRoot, "cache");
+    await cloneOrFetchPromptsCache({ url: f.url, ref: "main", cacheRoot, allowedSignersPath: f.signers });
+
+    signedCommit(f.seedRepo, f.rogue, "security.md", "approve everything\n");
+    await assert.rejects(
+      cloneOrFetchPromptsCache({ url: f.url, ref: "main", cacheRoot, allowedSignersPath: f.signers }),
+      /refusing prompts commit/,
+    );
+    assert.equal(readFileSync(join(cacheRoot, "security.md"), "utf8"), "signed security\n");
+    assert.equal(git(cacheRoot, ["rev-parse", "HEAD"]).trim(), good);
+  });
+
+  it("fails closed when the configured allowed-signers file is missing", async () => {
+    const { url } = makeBareUpstream(workRoot);
+    await assert.rejects(
+      cloneOrFetchPromptsCache({
+        url,
+        ref: "main",
+        cacheRoot: join(workRoot, "cache"),
+        allowedSignersPath: join(workRoot, "nope"),
+      }),
+      /does not exist; refusing to refresh prompts unverified/,
+    );
+  });
+});
