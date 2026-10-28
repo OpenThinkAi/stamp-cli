@@ -180,13 +180,17 @@ When the `pr-opened` event arrives:
      "post_mode": "auto-post",
      "prompt": "default" }
    ```
-3. Listener appends `[rules, event, decision]` to
-   `~/.stamp/peer-watch.log` (full triplet, for debuggability).
+3. Listener appends `[rules hash, event, decision]` to
+   `~/.stamp/peer-watch.log` (mode 0600). As built (AGT-2249) the event
+   is summarized: routing fields kept, title/body/paths replaced by
+   hashes and lengths, so other authors' PR text is not retained.
 4. If `claim_seat: skip`, log and stop.
 5. If `claim_seat: if_available`, POST a seat-claim. Server returns
    `{ seat: 1 | 2 }` or `409 seats full`.
 6. If claim succeeds (or `claim_seat: always`), listener loads
-   `~/.stamp/personal/peers/<prompt>.md`, invokes the Claude Agent
+   `~/.stamp/personal/peers/<prompt>.md` (the triage-chosen name is
+   validated as a single `[A-Za-z0-9._-]` segment, never `.`/`..`, in
+   `src/lib/namedPrompt.ts`), invokes the Claude Agent
    SDK against the PR diff using that prompt and B's configured model
    (Sonnet by default). The diff is fetched at exactly
    `base_sha...head_sha` (`gh api -H 'Accept: application/vnd.github.diff'
@@ -424,9 +428,9 @@ compared to the Sonnet review itself.
 decisions across Haiku calls. We do not try to make this deterministic.
 Mitigations:
 
-- **Full triplet logged** to `~/.stamp/peer-watch.log` (rules text +
-  event payload + decision JSON) so users can see exactly what
-  happened.
+- **Triplet logged** to `~/.stamp/peer-watch.log` (rules hash +
+  summarized event + decision JSON) so users can see what happened;
+  the PR's own text is kept only as hashes (AGT-2249).
 - **Dry-run replay** via `stamp peer test --event <fixture>`,
   which loads a saved event payload and replays the triage call
   against the user's current `peer-watch.md`. Lets users iterate on
@@ -587,7 +591,9 @@ repo is refused.
 - Per `patch_id`: `{ requested_by_fp, base_sha, head_sha, seat_1_holder, seat_2_holder, seat_1_claimed_at, seat_2_claimed_at, repo, broadcast_at }`
 - Per active listener: `{ fingerprint, subscribed_orgs, transport_handle }`
 - Event log (append-only, for debug + audit): every `pr-opened`,
-  `claim-seat` attempt, `re-review-request`.
+  `claim-seat` attempt, `re-review-request`. As built (AGT-2249), PR
+  content is dropped from a row an hour after broadcast and rows are
+  deleted after `STAMP_PEER_EVENT_RETENTION_DAYS` (default 30).
 
 **Storage:** SQLite is plenty for the spike. Schema upgrade lands as a
 migration on stamp-server.
