@@ -28,9 +28,12 @@ import {
   appendEvent,
   findPeerReviewEventsAfter,
   insertPatch,
+  insertUser,
   maxPeerReviewEventId,
   openServerDb,
+  type Role,
 } from "../src/lib/serverDb.ts";
+import { addRepoGrant, removeRepoGrant } from "../src/lib/repoAccess.ts";
 
 import {
   __clearSseConnectionsForTests,
@@ -115,6 +118,35 @@ function seedPatchAndEvent(
     // Get the max id (the row we just inserted).
     const row = db.prepare("SELECT MAX(id) AS id FROM peer_review_events").get() as { id: number };
     return row.id;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Insert a subscriber user (AGT-2256: delivery re-checks the subscriber's
+ * current role + repo grants). Returns the users.id to inject with.
+ */
+let subscriberSeq = 0;
+function insertSubscriber(
+  dbPath: string,
+  role: Role,
+  grants: Array<[string, string]> = [],
+): number {
+  const db = openServerDb({ path: dbPath, skipChmod: true });
+  try {
+    subscriberSeq += 1;
+    const n = subscriberSeq;
+    const id = insertUser(db, {
+      short_name: `sub-${n}`,
+      ssh_pubkey: `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIsub${n} sub-${n}`,
+      ssh_fp: `SHA256:sub${n}`,
+      stamp_pubkey: null,
+      role,
+      source: "env",
+    });
+    for (const [org, repo] of grants) addRepoGrant(db, id, org, repo, null);
+    return id;
   } finally {
     db.close();
   }
@@ -357,7 +389,7 @@ describe("peer-events poll worker — tick delivery", () => {
 
     // Inject a fake SSE client subscribed to "acme".
     const { res, frames } = makeFakeRes();
-    __injectSseConnectionForTests("fp-acme", { res, orgs: ["acme"] });
+    __injectSseConnectionForTests("fp-acme", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["acme"] });
 
     // Run one tick (cursor is 0 → picks up all rows).
     __runPeerEventsPollTickForTests();
@@ -375,7 +407,7 @@ describe("peer-events poll worker — tick delivery", () => {
     seedPatchAndEvent(dbPath, { patchId: "py-1", repo: "other-org/repo" });
 
     const { res, frames } = makeFakeRes();
-    __injectSseConnectionForTests("fp-x-only", { res, orgs: ["acme"] });
+    __injectSseConnectionForTests("fp-x-only", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["acme"] });
 
     __runPeerEventsPollTickForTests();
 
@@ -406,7 +438,7 @@ describe("peer-events poll worker — tick delivery", () => {
 
     // Inject a fake SSE client.
     const { res, frames } = makeFakeRes();
-    __injectSseConnectionForTests("fp-hist", { res, orgs: ["acme"] });
+    __injectSseConnectionForTests("fp-hist", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["acme"] });
 
     // Run a tick — should NOT deliver the old event.
     __runPeerEventsPollTickForTests();
@@ -421,7 +453,7 @@ describe("peer-events poll worker — tick delivery", () => {
     const id2 = seedPatchAndEvent(dbPath, { patchId: "adv-1", repo: "acme/r", eventType: "re-review-requested" });
 
     const { res } = makeFakeRes();
-    __injectSseConnectionForTests("fp-adv", { res, orgs: ["acme"] });
+    __injectSseConnectionForTests("fp-adv", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["acme"] });
 
     __runPeerEventsPollTickForTests();
 
@@ -438,7 +470,7 @@ describe("peer-events poll worker — tick delivery", () => {
     seedPatchAndEvent(dbPath, { patchId: "nodup-1", repo: "acme/r" });
 
     const { res, frames } = makeFakeRes();
-    __injectSseConnectionForTests("fp-nodup", { res, orgs: ["acme"] });
+    __injectSseConnectionForTests("fp-nodup", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["acme"] });
 
     __runPeerEventsPollTickForTests();
     const framesAfterFirst = frames.length;
@@ -466,8 +498,8 @@ describe("peer-events poll worker — tick delivery", () => {
     const { res: resAcme, frames: framesAcme } = makeFakeRes();
     const { res: resOther, frames: framesOther } = makeFakeRes();
 
-    __injectSseConnectionForTests("fp-acme-multi", { res: resAcme, orgs: ["acme"] });
-    __injectSseConnectionForTests("fp-other-multi", { res: resOther, orgs: ["other"] });
+    __injectSseConnectionForTests("fp-acme-multi", { res: resAcme, userId: insertSubscriber(dbPath, "admin"), orgs: ["acme"] });
+    __injectSseConnectionForTests("fp-other-multi", { res: resOther, userId: insertSubscriber(dbPath, "admin"), orgs: ["other"] });
 
     __runPeerEventsPollTickForTests();
 
@@ -484,7 +516,7 @@ describe("peer-events poll worker — tick delivery", () => {
 
     const { res, frames } = makeFakeRes();
     // Listener subscribed with lowercase (the natural CLI default).
-    __injectSseConnectionForTests("fp-case-lower", { res, orgs: ["micromediasites"] });
+    __injectSseConnectionForTests("fp-case-lower", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["micromediasites"] });
 
     __runPeerEventsPollTickForTests();
 
@@ -500,7 +532,7 @@ describe("peer-events poll worker — tick delivery", () => {
 
     const { res, frames } = makeFakeRes();
     // Listener subscribed with mixed-case — server must normalise on ingest.
-    __injectSseConnectionForTests("fp-case-mixed", { res, orgs: ["MicroMediaSites"] });
+    __injectSseConnectionForTests("fp-case-mixed", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["MicroMediaSites"] });
 
     __runPeerEventsPollTickForTests();
 
@@ -519,7 +551,7 @@ describe("peer-events poll worker — tick delivery", () => {
 
     const { res, frames } = makeFakeRes();
     // Subscribed with ["foo", "BAR"] — both should match after normalisation.
-    __injectSseConnectionForTests("fp-case-multi", { res, orgs: ["foo", "BAR"] });
+    __injectSseConnectionForTests("fp-case-multi", { res, userId: insertSubscriber(dbPath, "admin"), orgs: ["foo", "BAR"] });
 
     __runPeerEventsPollTickForTests();
 
@@ -534,7 +566,7 @@ describe("peer-events poll worker — tick delivery", () => {
 
     const { res, frames } = makeFakeRes();
     // Simulate a misconfigured client with an empty org entry.
-    __injectSseConnectionForTests("fp-empty-org", { res, orgs: [""] });
+    __injectSseConnectionForTests("fp-empty-org", { res, userId: insertSubscriber(dbPath, "admin"), orgs: [""] });
 
     __runPeerEventsPollTickForTests();
 
@@ -543,5 +575,103 @@ describe("peer-events poll worker — tick delivery", () => {
       0,
       "client with empty-string org must not match any org",
     );
+  });
+
+  // ─── AGT-2256: delivery bound to the subscriber's current grants ─────
+
+  function makeEndTrackingRes(): { res: ServerResponse; frames: string[]; ended: () => boolean } {
+    const frames: string[] = [];
+    let ended = false;
+    const res = {
+      write: (chunk: string) => { frames.push(chunk); return true; },
+      end: () => { ended = true; },
+      on: () => res,
+    } as unknown as ServerResponse;
+    return { res, frames, ended: () => ended };
+  }
+
+  it("a member granted acme/widget gets acme/widget events but not acme/gadget", () => {
+    const { dbPath } = dbFixture;
+    seedPatchAndEvent(dbPath, { patchId: "g-1", repo: "acme/gadget" });
+    seedPatchAndEvent(dbPath, { patchId: "w-1", repo: "acme/widget" });
+    const userId = insertSubscriber(dbPath, "member", [["acme", "widget"]]);
+    const { res, frames } = makeFakeRes();
+    __injectSseConnectionForTests("fp-scoped", { res, userId, orgs: ["acme"] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.equal(frames.length, 1, `frames=${JSON.stringify(frames)}`);
+    assert.match(frames[0] ?? "", /"patch_id":"w-1"/);
+  });
+
+  it("an unscoped member (no grants) receives nothing, even if subscribed", () => {
+    const { dbPath } = dbFixture;
+    seedPatchAndEvent(dbPath, { patchId: "u-1", repo: "acme/widget" });
+    const userId = insertSubscriber(dbPath, "member");
+    const { res, frames } = makeFakeRes();
+    __injectSseConnectionForTests("fp-unscoped", { res, userId, orgs: ["acme"] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.equal(frames.length, 0);
+  });
+
+  it("a grant revoked mid-stream stops delivery on the next tick", () => {
+    const { dbPath } = dbFixture;
+    const userId = insertSubscriber(dbPath, "member", [["acme", "*"]]);
+    const { res, frames } = makeFakeRes();
+    __injectSseConnectionForTests("fp-revoked", { res, userId, orgs: ["acme"] });
+
+    seedPatchAndEvent(dbPath, { patchId: "r-1", repo: "acme/widget" });
+    __runPeerEventsPollTickForTests();
+    assert.equal(frames.length, 1);
+
+    const db = openServerDb({ path: dbPath, skipChmod: true });
+    try {
+      assert.equal(removeRepoGrant(db, userId, "acme", "*"), true);
+    } finally {
+      db.close();
+    }
+    seedPatchAndEvent(dbPath, { patchId: "r-2", repo: "acme/widget" });
+    __runPeerEventsPollTickForTests();
+    assert.equal(frames.length, 1, "no delivery after the grant is revoked");
+  });
+
+  it("ends the stream when the subscriber's account was removed", () => {
+    const { dbPath } = dbFixture;
+    seedPatchAndEvent(dbPath, { patchId: "d-1", repo: "acme/widget" });
+    const userId = insertSubscriber(dbPath, "admin");
+    const db = openServerDb({ path: dbPath, skipChmod: true });
+    try {
+      db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    } finally {
+      db.close();
+    }
+    const { res, frames, ended } = makeEndTrackingRes();
+    __injectSseConnectionForTests("fp-gone", { res, userId, orgs: ["acme"] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.equal(frames.length, 0);
+    assert.equal(ended(), true);
+  });
+
+  it("strips the PR body from delivered pr-opened payloads", () => {
+    const { dbPath } = dbFixture;
+    seedPatchAndEvent(dbPath, {
+      patchId: "b-1",
+      repo: "acme/widget",
+      payload: { title: "t", body: "private notes", paths_changed: ["a.ts"] },
+    });
+    const { res, frames } = makeFakeRes();
+    __injectSseConnectionForTests("fp-body", { res, userId: insertSubscriber(dbPath, "owner"), orgs: ["acme"] });
+
+    __runPeerEventsPollTickForTests();
+
+    const parsed = JSON.parse((frames[0] ?? "").replace(/^data: /, "").trim()) as {
+      payload: Record<string, unknown>;
+    };
+    assert.equal("body" in parsed.payload, false);
+    assert.equal(parsed.payload["title"], "t");
   });
 });

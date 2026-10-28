@@ -588,12 +588,12 @@ export class PromptFetchFailedError extends Error {
  * exit 3 (authorization) with prose naming `stamp users grant`.
  */
 export class RepoOverrideNotAuthorizedError extends Error {
-  constructor(org: string, repo: string, reviewer: string) {
+  constructor(org: string, repo: string, reviewer: string, callerShortName: string) {
     super(
       `${org}/${repo} has a per-repo prompt override for reviewer ` +
-        `${JSON.stringify(reviewer)}, and you are not granted access to ` +
+        `${JSON.stringify(reviewer)}, and ${callerShortName} is not granted access to ` +
         `${org}/${repo} on this server. Ask an admin to run ` +
-        `'stamp users grant <your-short-name> --repo ${org}/${repo}'.`,
+        `'stamp users grant ${callerShortName} --repo ${org}/${repo}'.`,
     );
     this.name = "RepoOverrideNotAuthorizedError";
   }
@@ -722,6 +722,7 @@ export async function runReviewPipeline(
         input.params.org,
         input.params.repo,
         input.params.reviewer,
+        input.caller.short_name,
       );
     }
     // Read the default path already resolved above rather than asking

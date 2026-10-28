@@ -410,6 +410,22 @@ describe("stamp-review — request validation", () => {
     }
   });
 
+  it("rejects an --org / --repo longer than 100 chars (same cap as grants, AGT-2256)", () => {
+    const h = setup("member");
+    try {
+      const diff = Buffer.from("x");
+      for (const flag of ["--org", "--repo"] as const) {
+        const r = runStampReview(h, argvFor(diff, { [flag]: "a".repeat(101) }), {
+          stdin: diff,
+        });
+        assert.equal(r.status, 2, `${flag}: stderr=${r.stderr}`);
+        assert.match(r.stderr, new RegExp(`${flag} .*invalid shape`));
+      }
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it("rejects a --diff-sha256 that doesn't match the streamed bytes", () => {
     const h = setup("member");
     try {

@@ -981,7 +981,11 @@ pr
     `
 Subscribes the operator's stamp identity to PR-opened events for the given orgs
 via the stamp-server's SSE event stream (GET /peer/events), then loops
-indefinitely:
+indefinitely. The server only streams orgs and repos you are authorized for:
+owners/admins see every org; a member needs a repo grant
+('stamp users grant <name> --repo <org>/*' or '<org>/<repo>', run by an
+admin), and a member with no grants is refused (403).
+
   - Receives pr-opened events over the SSE transport (the sole listen transport)
   - Applies author-exclusion (skips own PRs)
   - Claims a reviewer seat; fetches the diff via 'gh pr diff'; runs the

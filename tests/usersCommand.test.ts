@@ -13,7 +13,8 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { formatGrants, ownerlessWarning } from "../src/commands/users.ts";
+import { explainExit, formatGrants, ownerlessWarning } from "../src/commands/users.ts";
+import type { ServerConfig } from "../src/lib/serverConfig.ts";
 
 type Row = Parameters<typeof ownerlessWarning>[0][number];
 
@@ -94,5 +95,38 @@ describe("formatGrants (AGT-2252)", () => {
       formatGrants({ short_name: "m", role: "member", grants: [{ org: "acme", repo: "*" }, { org: "x", repo: "y" }] }),
       "acme/*\nx/y\n",
     );
+  });
+});
+
+describe("explainExit — grant verbs (AGT-2256)", () => {
+  const server = { host: "stamp.example", port: 22, user: "git", repoRootPrefix: "/srv/git" } as unknown as ServerConfig;
+  const AUTHORITY = 3;
+  const USAGE = 2;
+
+  it("grant/revoke AUTHORITY states the grant rule, not the role-management rule", () => {
+    const msg = explainExit(AUTHORITY, "stamp users grant m", { server, shortName: "m", kind: "grant" }).message;
+    assert.match(msg, /Only owners and admins may grant or revoke repo access/);
+    assert.doesNotMatch(msg, /self-promote|admins may manage members only/);
+  });
+
+  it("grants AUTHORITY explains members may only list their own grants", () => {
+    const msg = explainExit(AUTHORITY, "stamp users grants x", { server, shortName: "x", kind: "grants" }).message;
+    assert.match(msg, /Members may only list their own grants/);
+  });
+
+  it("grant/revoke USAGE talks about --repo, never --to", () => {
+    const msg = explainExit(USAGE, "stamp users revoke m", { server, shortName: "m", kind: "grant" }).message;
+    assert.match(msg, /--repo is <org>\/<repo> or <org>\/\*/);
+    assert.doesNotMatch(msg, /--to/);
+  });
+
+  it("grants USAGE does not mention --to", () => {
+    const msg = explainExit(USAGE, "stamp users grants m", { server, shortName: "m", kind: "grants" }).message;
+    assert.doesNotMatch(msg, /--to/);
+  });
+
+  it("role verbs keep the --to hint", () => {
+    const msg = explainExit(USAGE, "stamp users promote m", { server, shortName: "m" }).message;
+    assert.match(msg, /--to value/);
   });
 });

@@ -70,7 +70,7 @@ import {
   type Role,
   type UserRow,
 } from "../lib/serverDb.js";
-import { resolveRepoAccess } from "../lib/repoAccess.js";
+import { REPO_SLUG_RE, resolveRepoAccess } from "../lib/repoAccess.js";
 import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 
@@ -100,8 +100,11 @@ const MAX_DIFF_BYTES = resolveMaxDiffBytes();
 // validation surface visible at this layer for code review.
 
 const REVIEWER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-const ORG_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
-const REPO_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+// --org / --repo share the grant table's slug shape (AGT-2256: one
+// definition, capped at 100 chars like GitHub slugs), so a value the verb
+// accepts is always one `stamp users grant --repo` can express.
+const ORG_NAME_RE = REPO_SLUG_RE;
+const REPO_NAME_RE = REPO_SLUG_RE;
 const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 const DIFF_SHA256_RE = /^[0-9a-f]{64}$/;
 

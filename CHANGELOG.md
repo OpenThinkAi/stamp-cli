@@ -55,6 +55,27 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   you use per-repo overrides, grant your members their repos, or their reviews
   of those repos will be refused.
 
+- **The peer-review event stream is bound to repo grants (security).**
+  `GET /peer/events?org=...` (what `stamp pr listen` subscribes to) checked
+  enrollment only, so any member could name another team's org and receive
+  its PR titles, bodies, changed paths and URLs. The `?org=` list is now
+  filtered against the caller's repo grants, and every event is re-checked
+  against the subscriber's current grants at `<org>/<repo>` level (a grant for
+  one repo no longer exposes its siblings; a revoked grant or removed account
+  stops delivery without a reconnect). The PR body is no longer included in
+  streamed events; title and paths still are, and listeners already fetch the
+  real PR with `gh`. Owners and admins are unaffected. **Upgrade note:**
+  unlike reviews, the stream fails closed for members with no grants: their
+  `stamp pr listen` now gets a 403 until an admin runs
+  `stamp users grant <name> --repo <org>/*` (or a specific repo).
+  Single-operator servers, where the listener is an owner or admin, need no
+  change.
+- **`stamp-review` caps `--org` / `--repo` at 100 characters**, the same shape
+  `stamp users grant --repo` accepts. The "not granted" error for a per-repo
+  override now names the caller instead of a `<your-short-name>` placeholder,
+  and `stamp users grant` / `revoke` / `grants` errors describe the grant rules
+  instead of the role-management ones (which mentioned `--to`).
+
 - **A headless provision without `--yes` now stops before any remote work.**
   With no TTY and no opt-out (`--yes` or `STAMP_REQUIRE_HUMAN_MERGE=0`),
   provision exits with a hint to pass `--yes` before it creates the server

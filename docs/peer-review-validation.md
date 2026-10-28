@@ -21,8 +21,12 @@ Create it on GitHub if it does not exist; it needs at least one commit on `main`
 
 ### Stamp server
 
-A running stamp server with `STAMP_PEER_REVIEWS_ENABLED=1` set. Record the
-server host:port:
+A running stamp server with `STAMP_PEER_REVIEWS_ENABLED=1` set. Each listener's
+stamp-server account must be authorized for the org it listens on: owners and
+admins always are; a member needs a grant, e.g.
+`stamp users grant <name> --repo anglepoint-engineering/*`. The event stream
+refuses (403) a member with no grants, and only delivers events for repos the
+member is granted. Record the server host:port:
 
 ```sh
 STAMP_SERVER="<host>:<port>"
