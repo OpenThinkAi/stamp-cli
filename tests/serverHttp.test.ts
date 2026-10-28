@@ -29,6 +29,7 @@ import {
   insertPatch,
   insertUser,
   openServerDb,
+  retireShortName,
 } from "../src/lib/serverDb.ts";
 import { signBytes } from "../src/lib/signing.ts";
 import { addRepoGrant } from "../src/lib/repoAccess.ts";
@@ -353,6 +354,26 @@ describe("HTTP server: POST /invite/accept — errors", () => {
       });
       assert.equal(r.status, 409);
       assert.equal(r.body.error, "short_name_taken");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("returns 409 short_name_retired for a removed member's name, without consuming the token (AGT-2270)", async () => {
+    const h = await start();
+    try {
+      const db = openServerDb({ path: h.dbPath, skipChmod: true });
+      try {
+        retireShortName(db, "carol", 99);
+      } finally {
+        db.close();
+      }
+      const token = mintTokenAgainst(h.dbPath, h.adminId);
+      const r = await post(h.port, "/invite/accept", { token, ssh_pubkey: INVITEE_SSH_LINE, short_name: "carol" });
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error, "short_name_retired");
+      const retry = await post(h.port, "/invite/accept", { token, ssh_pubkey: INVITEE_SSH_LINE, short_name: "carol2" });
+      assert.equal(retry.status, 200, JSON.stringify(retry.body));
     } finally {
       await h.cleanup();
     }
@@ -892,7 +913,7 @@ describe("POST /peer/register-extra: extras path (AGT-453)", () => {
   it("returns 409 when reviewer is the PR author", async () => {
     const h = await startPeer();
     const authorKp = genTestKeypair();
-    const patchId = "g".repeat(40);
+    const patchId = "6".repeat(40);
 
     seedPeerUser(h.dbPath, authorKp, "author7");
     seedPatch(h.dbPath, patchId, authorKp.fingerprint);
@@ -946,7 +967,7 @@ describe("AGT-453 regression: ssh-fp ≠ stamp-fp identity — HTTP heartbeat us
 
     const authorKp = genTestKeypair();
     seedPeerUser(h.dbPath, authorKp, "author8");
-    const patchId = "h".repeat(40);
+    const patchId = "7".repeat(40);
     seedPatch(h.dbPath, patchId, authorKp.fingerprint);
 
     const kp: TestKeypair = { privateKeyPem, publicKeyPem, fingerprint: stampFp };

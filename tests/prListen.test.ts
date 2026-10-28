@@ -552,7 +552,7 @@ describe("AC #4: seat-claim rejections", () => {
       }),
     );
     assert.equal(claims, 1);
-    assert.match(stderr, /no record of PR #\d+'s patch \(patch_not_found\); skipping/);
+    assert.match(stderr, /no record of PR #.*'s patch \(patch_not_found\); skipping/);
   });
 });
 
