@@ -121,8 +121,9 @@ trap 'rm -rf "$SCRATCH"' EXIT
 if [[ -n "$FROM_TARBALL" ]]; then
   # Brownfield migration path: the tarball IS a bare clone of the
   # operator's existing repo (history, .stamp/, trusted-keys, the works).
-  # Extract it as the bare repo. No seed commit is created — the operator's
-  # existing history becomes the bare's history. Hooks install AFTER, so
+  # Its refs and objects are imported into a fresh bare repo (see below).
+  # No seed commit is created — the operator's existing history becomes
+  # the bare's history. Hooks install AFTER, so
   # the existing commits never go through verification (they came from
   # before this repo was server-gated). Per DESIGN.md "Bootstrap" rule:
   # filesystem operations bypass the hook by definition.
@@ -149,41 +150,113 @@ if [[ -n "$FROM_TARBALL" ]]; then
     fi
   fi
 
-  echo "→ extracting existing repo from tarball into $REPO_DIR"
-  mkdir -p "$REPO_DIR"
+  # The tarball is NOT trusted as a bare repo in place (AGT-2266). A bare
+  # clone carries more than history: `config` (core.hooksPath would make
+  # git ignore the stamp pre-receive we install below; receive.* could
+  # weaken push checks; include.* can pull in other files), `hooks/`
+  # (update / post-update / reference-transaction / proc-receive would run
+  # as the git user on every push), `objects/info/alternates` and
+  # `commondir` (point object/ref lookup at OTHER repos on the host), and
+  # `info/grafts` (rewrites the history git sees). None of that may reach
+  # the server repo.
+  #
+  # So: extract into a scratch dir, strip it down to refs + objects, then
+  # `git init --bare` a FRESH repo at $REPO_DIR and fetch every ref into
+  # it. $REPO_DIR ends up with git's own default config/hooks plus the
+  # server settings applied below, and only the tarball's refs and the
+  # objects they reach.
+  IMPORT_DIR="$SCRATCH/import.git"
+  mkdir -p "$IMPORT_DIR"
+  echo "→ extracting existing repo from tarball into scratch dir"
   # The tarball was created with `tar -czf - -C <parent> <bare.git>`, so it
   # contains a single top-level directory (the bare clone) — strip that
-  # component so contents land directly in REPO_DIR.
+  # component so contents land directly in IMPORT_DIR.
   #
   # Hardening flags (GNU tar; ignored or no-op on busybox tar):
   #   --no-same-owner        ignore uid/gid in tar headers; chown to current
   #                          user. Prevents a tarball from claiming root- or
-  #                          other-user-owned files into the bare repo.
+  #                          other-user-owned files.
   #   --no-same-permissions  apply current umask to extracted files instead
   #                          of honoring tar header mode bits. Prevents
   #                          setuid/setgid surprises and overly-loose perms.
   #   --no-overwrite-dir     refuse to replace an existing directory's
-  #                          metadata with a tar entry's metadata. Belt-
-  #                          and-suspenders against a crafted tarball that
-  #                          tries to relax permissions on $REPO_DIR.
-  tar -xzf "$FROM_TARBALL" -C "$REPO_DIR" --strip-components=1 \
+  #                          metadata with a tar entry's metadata.
+  tar -xzf "$FROM_TARBALL" -C "$IMPORT_DIR" --strip-components=1 \
       --no-same-owner --no-same-permissions --no-overwrite-dir
+
+  # A bare clone produced by `git clone --bare` contains no symlinks. One
+  # in the extracted tree could redirect the sanitizing `rm` below, or the
+  # fetch's object reads, into another repo on the host (e.g. `objects` ->
+  # /srv/git/other.git/objects). Refuse rather than reason about it.
+  # (Rejecting link entries before extraction is AGT-2267.)
+  # (`| head` rather than `-quit`, which busybox find may lack; `|| true`
+  # because pipefail would otherwise turn find's SIGPIPE into a skip.)
+  LINK=$(find "$IMPORT_DIR" -type l -print | head -n 1 || true)
+  if [[ -n "$LINK" ]]; then
+    echo "error: tarball $FROM_TARBALL contains a symlink: ${LINK#"$IMPORT_DIR"/}" >&2
+    exit 1
+  fi
+
+  # Read the object format from the tarball's config WITHOUT letting git
+  # interpret that config as a repo config: `git config --file` reads one
+  # file and does not follow include.* directives. Only sha1/sha256 are
+  # accepted; anything else is rejected rather than passed to git init.
+  OBJECT_FORMAT=sha1
+  if [[ -f "$IMPORT_DIR/config" && ! -L "$IMPORT_DIR/config" ]]; then
+    OBJECT_FORMAT=$(git config --file "$IMPORT_DIR/config" --get extensions.objectformat 2>/dev/null || echo sha1)
+  fi
+  case "$OBJECT_FORMAT" in
+    sha1|sha256) ;;
+    *)
+      echo "error: $FROM_TARBALL has unsupported extensions.objectformat '$OBJECT_FORMAT'" >&2
+      exit 1
+      ;;
+  esac
+
+  # Strip the scratch copy before ANY git command runs against it as a
+  # repository (the fetch below runs upload-pack inside it). Its config is
+  # replaced by a minimal known-good one; everything that could redirect
+  # object/ref lookup or run code is removed.
+  rm -rf "$IMPORT_DIR/config" "$IMPORT_DIR/hooks" "$IMPORT_DIR/commondir" \
+         "$IMPORT_DIR/info/grafts" "$IMPORT_DIR/objects/info/alternates" \
+         "$IMPORT_DIR/objects/info/http-alternates"
+  {
+    printf '[core]\n\trepositoryformatversion = %s\n\tbare = true\n' \
+      "$([[ "$OBJECT_FORMAT" == sha256 ]] && echo 1 || echo 0)"
+    if [[ "$OBJECT_FORMAT" == sha256 ]]; then
+      printf '[extensions]\n\tobjectformat = sha256\n'
+    fi
+  } > "$IMPORT_DIR/config"
+
   # Verify it really is a bare repo. `git rev-parse --is-bare-repository`
   # exits 0 only inside a bare repo with the right layout.
-  if ! GIT_DIR="$REPO_DIR" git rev-parse --is-bare-repository >/dev/null 2>&1; then
+  if ! GIT_DIR="$IMPORT_DIR" git rev-parse --is-bare-repository >/dev/null 2>&1; then
     echo "error: $FROM_TARBALL did not contain a bare git repository" >&2
     exit 1
+  fi
+
+  # The tarball's default branch, if it names one under refs/heads/.
+  IMPORT_HEAD=$(GIT_DIR="$IMPORT_DIR" git symbolic-ref -q HEAD 2>/dev/null || true)
+
+  echo "→ creating bare repo at $REPO_DIR"
+  git init --bare --quiet --initial-branch=main --object-format="$OBJECT_FORMAT" "$REPO_DIR"
+
+  echo "→ importing refs and objects from tarball into $REPO_DIR"
+  # Hooks are not installed yet, and fetch never runs receive hooks anyway:
+  # the existing history predates server gating (DESIGN.md "Bootstrap").
+  if ! git --git-dir="$REPO_DIR" fetch --quiet --no-tags --update-head-ok \
+      "$IMPORT_DIR" '+refs/*:refs/*'; then
+    echo "error: could not import refs/objects from $FROM_TARBALL" >&2
+    exit 1
+  fi
+  if [[ "$IMPORT_HEAD" == refs/heads/* ]] && \
+     git --git-dir="$REPO_DIR" check-ref-format "$IMPORT_HEAD" && \
+     git --git-dir="$REPO_DIR" rev-parse -q --verify "$IMPORT_HEAD" >/dev/null; then
+    git --git-dir="$REPO_DIR" symbolic-ref HEAD "$IMPORT_HEAD"
   fi
 else
   echo "→ creating bare repo at $REPO_DIR"
   git init --bare --quiet --initial-branch=main "$REPO_DIR"
-
-  # Belt-and-suspenders to the pre-receive hook's FF check (issue #20).
-  # git defaults `receive.denyNonFastForwards` to false on bare repos, so
-  # without this, a buggy or race-blind hook could let a non-FF push land.
-  # With this set, git itself rejects non-FF before pre-receive even sees
-  # the push — pre-receive's check then becomes the second line of defense.
-  git --git-dir="$REPO_DIR" config receive.denyNonFastForwards true
 
   # Seed BEFORE installing the hook — this is the bootstrap bypass per DESIGN.md.
   # Once the hook is in place, every push is verified.
@@ -254,6 +327,14 @@ EOF
   git push --quiet "$REPO_DIR" main
 fi  # end of seed-vs-tarball branch
 
+# Belt-and-suspenders to the pre-receive hook's FF check (issue #20).
+# git defaults `receive.denyNonFastForwards` to false on bare repos, so
+# without this, a buggy or race-blind hook could let a non-FF push land.
+# With this set, git itself rejects non-FF before pre-receive even sees
+# the push — pre-receive's check then becomes the second line of defense.
+# Applied on BOTH paths: the brownfield import gets it too (AGT-2266).
+git --git-dir="$REPO_DIR" config receive.denyNonFastForwards true
+
 echo "→ installing stamp-verify hook (now active for all subsequent pushes)"
 install -m 0755 "$HOOK_SCRIPT" "$REPO_DIR/hooks/pre-receive"
 
@@ -270,6 +351,15 @@ USED_PLACEHOLDER_SEED=0
 # Placeholder seed only when neither --from-tarball nor seed-dir was given.
 if [[ -z "$SEED_DIR" && -z "$FROM_TARBALL" ]]; then
   USED_PLACEHOLDER_SEED=1
+fi
+
+# Final guard: the hook we just installed must be the one git runs. If any
+# config source (repo, or an operator's global/system config) sets
+# core.hooksPath, git would consult that directory instead and every push
+# would skip stamp verification. Refuse to report the repo ready.
+if HOOKS_PATH=$(git --git-dir="$REPO_DIR" config --get core.hooksPath 2>/dev/null) && [[ -n "$HOOKS_PATH" ]]; then
+  echo "error: core.hooksPath is set ('$HOOKS_PATH') for $REPO_DIR; git would ignore the stamp pre-receive hook" >&2
+  exit 1
 fi
 
 echo "✓ repo ready"

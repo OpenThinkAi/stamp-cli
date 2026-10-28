@@ -21,6 +21,17 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   (`git@github.com:<org>/<name>.git`), the same remote layout
   `--migrate-existing` leaves.
 
+### Security
+
+- **Brownfield `--from-tarball` imports no longer keep the tarball's git
+  config or hooks.** `setup-repo.sh` used to extract the uploaded bare clone
+  in place, so a `core.hooksPath` in its config made git skip the stamp-verify
+  pre-receive, and hooks it shipped (`update`, `reference-transaction`, ...)
+  ran as the server's git user on every push. The import now builds a fresh
+  bare repo and fetches only refs and objects into it, rejects tarballs
+  containing symlinks, sets `receive.denyNonFastForwards true` on this path
+  too, and refuses to finish if `core.hooksPath` is set from any config source.
+
 ### Changed
 
 - **A headless provision without `--yes` now stops before any remote work.**
