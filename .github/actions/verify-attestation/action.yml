@@ -16,11 +16,14 @@ inputs:
       whole gate, so `latest` is intentionally NOT the default — a
       compromised future publish would silently affect every workflow
       using this Action). Override only when you've audited the
-      replacement version. Setting to "latest" emits a
-      ::warning::-prefixed line in the Action log so operators see
-      the floating-version state in their CI run.
+      replacement version. The default installs with `npm ci` from the
+      lockfile in verifier/ (every transitive dependency pinned and
+      hash-checked); any other value installs without a lockfile and
+      emits a ::warning:: saying so ("latest" adds a second warning).
+      Every install runs with --ignore-scripts. Bump the default in
+      lockstep with verifier/package.json + package-lock.json.
     required: false
-    default: "1.6.0"
+    default: "1.11.0"
   node-version:
     description: Node.js version to install. stamp-cli requires >= 22.5.0.
     required: false
@@ -39,19 +42,24 @@ runs:
     - name: Resolve PR head + base SHAs
       id: refs
       shell: bash
+      # Event fields reach bash through env:, never through ${{ }}
+      # interpolation inside run: — an interpolated value is spliced into
+      # the script text before bash parses it, so a crafted field (a
+      # branch name is attacker-chosen on fork PRs) would become code.
       env:
         TARGET_BRANCH_OVERRIDE: ${{ inputs.target-branch }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        EVENT_NAME: ${{ github.event_name }}
       run: |
         set -euo pipefail
         # PR events expose head + base SHAs directly. For non-PR events
         # (workflow_dispatch testing, etc.), GitHub doesn't fill these
         # in — fail loudly so the operator sees the misconfig rather
         # than verifying against the wrong refs.
-        HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-        BASE_SHA="${{ github.event.pull_request.base.sha }}"
-        BASE_REF="${{ github.event.pull_request.base.ref }}"
         if [ -z "$HEAD_SHA" ] || [ -z "$BASE_SHA" ] || [ -z "$BASE_REF" ]; then
-          echo "::error::stamp/verify-attestation requires a pull_request event (got '${{ github.event_name }}'). Add 'on: pull_request' to the workflow."
+          echo "::error::stamp/verify-attestation requires a pull_request event (got '$EVENT_NAME'). Add 'on: pull_request' to the workflow."
           exit 2
         fi
         TARGET="${TARGET_BRANCH_OVERRIDE:-$BASE_REF}"
@@ -70,15 +78,51 @@ runs:
         STAMP_VERSION: ${{ inputs.stamp-version }}
       run: |
         set -euo pipefail
-        if [ "$STAMP_VERSION" = "latest" ]; then
-          # `latest` floats to whatever was published most recently.
-          # The verifier IS the trust anchor for the gate, so a
-          # compromised publish on `latest` would silently affect every
-          # workflow using this Action. Surface the floating-version
-          # choice in CI logs so operators see it.
-          echo "::warning::stamp/verify-attestation is installing stamp@latest. Pin stamp-version in production."
+        # The verifier is the trust anchor for the whole gate, so its
+        # install is locked down two ways:
+        #
+        #  1. --ignore-scripts: no lifecycle script from stamp or any
+        #     transitive dependency runs in the job that verifies the
+        #     attestation. stamp needs none (it is plain JS).
+        #  2. The default version installs with `npm ci` from the lockfile
+        #     committed beside this action (verifier/package-lock.json),
+        #     so every transitive dependency is pinned to an exact version
+        #     and checked against its integrity hash. A global install
+        #     would ignore stamp's own lockfile and float every
+        #     transitive to the newest version its semver range allows.
+        #
+        # The verifier lands in $RUNNER_TEMP, not the global prefix, and
+        # its bin dir is put on PATH for the verify step.
+        LOCK_DIR="$GITHUB_ACTION_PATH/verifier"
+        LOCKED_VERSION="$(node -p 'require(process.argv[1]).dependencies["@openthink/stamp"]' "$LOCK_DIR/package.json")"
+        PREFIX="$RUNNER_TEMP/stamp-verifier"
+        rm -rf "$PREFIX"
+        mkdir -p "$PREFIX"
+        # Collapsed log group: npm's install chatter is setup noise —
+        # the verification verdict below is what operators read.
+        if [ "$STAMP_VERSION" = "$LOCKED_VERSION" ]; then
+          cp "$LOCK_DIR/package.json" "$LOCK_DIR/package-lock.json" "$PREFIX/"
+          echo "::group::npm ci --ignore-scripts (@openthink/stamp@${STAMP_VERSION}, lockfile-pinned)"
+          npm ci --ignore-scripts --no-audit --no-fund --prefix "$PREFIX"
+          echo "::endgroup::"
+        else
+          if [ "$STAMP_VERSION" = "latest" ]; then
+            # `latest` floats to whatever was published most recently.
+            # A compromised publish on `latest` would silently affect
+            # every workflow using this Action. Surface the floating-
+            # version choice in CI logs so operators see it.
+            echo "::warning::stamp/verify-attestation is installing stamp@latest. Pin stamp-version in production."
+          fi
+          # Only the default version has a committed lockfile. An
+          # overridden version still installs without scripts, but its
+          # transitive dependencies resolve at CI time — say so.
+          echo "::warning::stamp-version ${STAMP_VERSION} is not the lockfile-pinned verifier (${LOCKED_VERSION}); its transitive dependencies are not locked."
+          echo '{"private":true}' > "$PREFIX/package.json"
+          echo "::group::npm install --ignore-scripts @openthink/stamp@${STAMP_VERSION}"
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$PREFIX" "@openthink/stamp@${STAMP_VERSION}"
+          echo "::endgroup::"
         fi
-        npm install -g "@openthink/stamp@${STAMP_VERSION}"
+        echo "$PREFIX/node_modules/.bin" >> "$GITHUB_PATH"
 
     - name: Fetch attestation refs
       shell: bash
@@ -102,7 +146,11 @@ runs:
         # those refs, severs the ancestry, and breaks merge-base. The
         # symptom was a confusing "git merge-base failed" exit from
         # the verifier even though both commits were present locally.
+        # Collapsed log group: the per-ref fetch lines are setup noise
+        # (one line per attestation ref in the repo's history).
+        echo "::group::git fetch refs/stamp/attestations/*"
         git fetch origin "+refs/stamp/attestations/*:refs/stamp/attestations/*"
+        echo "::endgroup::"
 
     - name: Verify attestation
       shell: bash
