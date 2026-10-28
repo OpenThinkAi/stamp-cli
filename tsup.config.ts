@@ -34,6 +34,9 @@ export default defineConfig([
       "server/seed-users": "src/server/seed-users.ts",
       "server/mint-invite": "src/server/mint-invite.ts",
       "server/start-http-server": "src/server/start-http-server.ts",
+      // Git-user background workers split out of the listener (AGT-2264):
+      // prompts poll + webhook-trigger refresh, trash sweep. No socket.
+      "server/start-workers": "src/server/start-workers.ts",
       "server/users-cli": "src/server/users-cli.ts",
       "server/bootstrap-review-key": "src/server/bootstrap-review-key.ts",
       "server/stamp-review": "src/server/stamp-review.ts",

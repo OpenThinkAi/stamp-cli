@@ -116,6 +116,8 @@ if [ ! -d "$LIVE_REPO" ]; then
 fi
 
 mkdir -p "$TRASH_DIR"
+# AGT-2264: trashed repos stay closed to "other" (the stamp-http listener).
+chmod o-rwx "$TRASH_DIR"
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 TRASHED="$TRASH_DIR/${TIMESTAMP}-${NAME}.git"
 mv "$LIVE_REPO" "$TRASHED"

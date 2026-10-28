@@ -101,7 +101,7 @@ describe("openServerDb", () => {
     }
   });
 
-  it("sets parent dir to 0o1770 — sticky+0o770 (0o750 silently demotes writes)", () => {
+  it("sets parent dir to 0o3770 — setgid+sticky+0o770 (0o750 silently demotes writes)", () => {
     // Pinned regression: phase 1 set the dir to 0o750. The git user
     // (HTTP server, mint-invite, users-cli) couldn't create sqlite's
     // -journal sidecar in that dir, so every UPDATE threw "attempt to
@@ -113,15 +113,18 @@ describe("openServerDb", () => {
     // sticky bit protects future root-owned files in this dir from
     // being touched by group-writable processes. Mask 0o7777 to
     // preserve sticky in the assertion — masking only 0o777 would
-    // silently allow a regression that drops the sticky bit.
+    // silently allow a regression that drops the sticky bit. The setgid
+    // bit (AGT-2264) makes sidecar files inherit the shared stamp-db
+    // group, so a journal written by the git user stays usable by the
+    // stamp-http listener and vice versa.
     const t = tmpDbPath();
     try {
       openServerDb({ path: t.path }).close();
       const dirMode = statSync(path.dirname(t.path)).mode & 0o7777;
       assert.equal(
         dirMode,
-        0o1770,
-        `parent dir should be 0o1770 (sticky + 0o770) to allow sqlite -journal creation while protecting root-owned files, got 0o${dirMode.toString(8)}`,
+        0o3770,
+        `parent dir should be 0o3770 (setgid + sticky + 0o770) to allow sqlite -journal creation while protecting root-owned files, got 0o${dirMode.toString(8)}`,
       );
     } finally {
       t.cleanup();

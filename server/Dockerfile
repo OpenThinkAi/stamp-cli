@@ -63,9 +63,22 @@ FROM alpine:3.24@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb2
 # stamp-sign-approval (signs server review approvals with the root-only
 # review-signing key, AGT-2263). See server/sudoers.d-stamp for the
 # tightly-scoped policy entries.
+#
+# stamp-http / stamp-db (AGT-2264): the internet-facing HTTP listener runs
+# as the system user stamp-http — no login shell, no home, no password, no
+# sudo rule, and NOT in the git group (which reads /etc/stamp/env and the
+# root:git key directory). It shares exactly one thing with git: the
+# stamp-db group, which owns the membership DB directory
+# (/srv/git/.stamp-state, root:stamp-db 3770) and users.db (0660).
 RUN apk add --no-cache git openssh-server openssh-client bash nodejs netcat-openbsd tar sudo \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
+ && addgroup -S stamp-db \
+ && addgroup -S stamp-http \
+ && adduser -S -D -H -h /var/empty -s /sbin/nologin -G stamp-http stamp-http \
+ && addgroup git stamp-db \
+ && addgroup stamp-http stamp-db \
+ && mkdir -p /var/empty \
  && mkdir -p /srv/git /home/git/.ssh /home/git/git-shell-commands /etc/stamp \
  && chown -R git:git /srv/git /home/git \
  && chmod 700 /home/git/.ssh
@@ -154,7 +167,7 @@ RUN { \
 # runs in-process), so git-shell never sees it. With the line present, any
 # enrolled key — any role — opens an sftp session as the git user and can
 # write straight into the bare repos (refs/objects, skipping pre-receive and
-# the whole review gate) and into the membership DB (root:git 0660). Nothing
+# the whole review gate) and into the membership DB (root:stamp-db 0660). Nothing
 # in stamp's workflow uses sftp/scp-over-sftp; pushers only run git and the
 # git-shell-commands verbs. The prepend trick above can't disable a
 # subsystem (there is no "Subsystem none"), so we delete the lines instead —
@@ -274,10 +287,15 @@ COPY server/stamp-gate /usr/local/bin/stamp-gate
 # of STAMP_PEER_REVIEWS_ENABLED (so an operator enabling the feature on a
 # running deploy finds the tables already present).
 COPY --from=builder /build/dist/server/pr-opened.cjs /usr/local/bin/stamp-pr-opened
-# HTTP listener for invite/accept. Started by entrypoint.sh as the git
-# user, runs alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
+# HTTP listener for invite/accept. Started by entrypoint.sh as the
+# unprivileged stamp-http user with an allowlisted env (AGT-2264), runs
+# alongside sshd on STAMP_HTTP_PORT (default 8080). TLS is
 # the hosting platform's job (Railway terminates at its edge proxy).
 COPY --from=builder /build/dist/server/start-http-server.cjs /usr/local/sbin/stamp-http-server
+# Git-user background workers split out of the listener (AGT-2264): the
+# prompts poll + webhook-trigger refresh and the trash sweep. Started by
+# entrypoint.sh as git; opens no socket.
+COPY --from=builder /build/dist/server/start-workers.cjs /usr/local/sbin/stamp-workers
 # User-management SSH command. One bundle dispatches list / promote /
 # demote / remove via argv. Symlinked below so git-shell finds it.
 COPY --from=builder /build/dist/server/users-cli.cjs /usr/local/bin/stamp-users
@@ -302,6 +320,9 @@ COPY server/lib/inject-sshd-setenv.sh /lib/inject-sshd-setenv.sh
 # entrypoint.sh sources this via `. "$(dirname "$0")/lib/refresh-repo-hooks.sh"`
 # to refresh per-repo hooks without following planted symlinks (AGT-2261).
 COPY server/lib/refresh-repo-hooks.sh /lib/refresh-repo-hooks.sh
+# entrypoint.sh sources this for the per-process env allowlists and
+# _exec_allowlisted_env (AGT-2264).
+COPY server/lib/allowlisted-env.sh /lib/allowlisted-env.sh
 
 # Sudoers fragment that grants the unprivileged git user passwordless
 # invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root
@@ -357,6 +378,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
              /usr/local/sbin/stamp-http-server \
+             /usr/local/sbin/stamp-workers \
              /usr/local/sbin/stamp-bootstrap-review-key \
              /usr/local/sbin/stamp-prompts-cache-bootstrap \
              /entrypoint.sh \

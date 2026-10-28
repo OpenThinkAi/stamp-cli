@@ -101,6 +101,31 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   planted link is replaced, never written through. It now runs before any
   git-user process starts. The break-glass refresh in `server/README.md` runs
   the same routine instead of the old `cp` loop.
+- **The stamp server's HTTP listener no longer runs with the container's
+  secrets or as `git`.** `stamp-http-server` (public port 8080) was started
+  with `su -p git`, so it inherited the whole container env
+  (`GITHUB_BOT_TOKEN`, `ANTHROPIC_API_KEY`, platform variables) and, as `git`,
+  could read `/etc/stamp/env`, the deploy keys and every repo. It now runs as
+  a new system user `stamp-http` (not in the `git` group, no sudo rule) from
+  `env -i` with only the variables its code reads; the one secret it keeps is
+  `STAMP_PROMPTS_WEBHOOK_SECRET`. It reaches `users.db` through a new
+  `stamp-db` group shared with `git`. The prompts poll, webhook-triggered
+  prompts refresh and trash sweep, which need git's files, moved to a new
+  git-user `stamp-workers` process with its own allowlist and no socket; the
+  listener hands a verified webhook to it through a trigger file. Repos,
+  `.trash` and the prompts cache are closed to other users, and `/srv/git`
+  can't be listed by them. Runtime prompts refreshes of a keyless (HTTPS or
+  `file://`) prompts repo no longer fail on a missing default deploy key.
+  See `server/README.md` "What the HTTP listener can reach".
+
+  **Upgrade:** automatic on the first boot of the new image: `.stamp-state`
+  becomes `root:stamp-db 3770`, `users.db` and its sidecars group
+  `stamp-db`, `/srv/git` mode `1751`, and existing repos, `.trash` and the
+  prompts cache lose their "other" bits. Prompts-poll, prompts-trigger and
+  trash-sweep log lines now carry the `stamp-workers` prefix. A new env var
+  the listener or workers read must be added to
+  `server/lib/allowlisted-env.sh`. Tooling that reads repos on the volume as
+  a non-`git` user must run as `git` or root.
 
 ### Changed
 
