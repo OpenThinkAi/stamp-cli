@@ -215,6 +215,20 @@ substitute it. Forging a verdict requires forging the server's
 signature, which requires either stealing the server's signing key or
 compromising the server.
 
+**Signing-key custody (AGT-2263).** The review-signing private key is
+`root:root 0600` and the git user — which runs `stamp-review`, the receive
+hooks and the HTTP listener — cannot read it. `stamp-review` gets each
+approval signed by piping its canonical bytes to the root helper
+`stamp-sign-approval` through a single no-argument sudoers rule; the
+helper signs only a canonical, well-formed `ApprovalV4` (exact key set
+incl. `repo_id`, strict shapes, its own `server_key_id`, `issued_at` within
+5 minutes of its clock) and logs every signature to the container log. A
+git-user compromise can therefore obtain fresh approvals only while it
+lasts — the same power it has over the review process itself, which runs
+as git by design — but cannot exfiltrate the key, backdate an approval or
+use the key to sign any other format. The bootstrap and the helper refuse
+to load a key with any other owner or mode, or behind a symlink.
+
 **Diff binding (`diff_sha256`).** The server signs the hash of the diff
 it actually reviewed. The verifier rehashes the actual merge diff at
 verify time; any mismatch rejects the push. An operator cannot get a

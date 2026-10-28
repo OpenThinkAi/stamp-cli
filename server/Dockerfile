@@ -58,11 +58,11 @@ FROM alpine:3.24@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb2
 # tar at /usr/bin/tar ahead of busybox's applet, so plain `tar` invocations
 # in setup-repo.sh resolve to GNU. Combined with the pre-extraction
 # entry-name check in setup-repo.sh, this is defense in depth.
-# sudo is installed so the git user can invoke a single root-owned helper
-# (stamp-ensure-repo-key) for per-repo deploy-key generation, preserving
-# the legacy root:git ownership posture on the key files while still
-# allowing lazy on-demand generation. See server/sudoers.d-stamp for the
-# tightly-scoped policy entry.
+# sudo is installed so the git user can invoke exactly two root-owned
+# helpers: stamp-ensure-repo-key (per-repo deploy-key generation) and
+# stamp-sign-approval (signs server review approvals with the root-only
+# review-signing key, AGT-2263). See server/sudoers.d-stamp for the
+# tightly-scoped policy entries.
 RUN apk add --no-cache git openssh-server openssh-client bash nodejs netcat-openbsd tar sudo \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
@@ -216,6 +216,15 @@ COPY --from=builder /build/dist/server/break-glass.cjs /usr/local/sbin/stamp-bre
 # fingerprint loudly to stdout (operator-instruction prose, not an
 # error); subsequent boots reuse it.
 COPY --from=builder /build/dist/server/bootstrap-review-key.cjs /usr/local/sbin/stamp-bootstrap-review-key
+# Root signing helper (AGT-2263). The review-signing key is root:root 0600
+# and never readable by git; stamp-review (git) signs each approval by
+# piping its canonical bytes to `sudo -n /usr/local/sbin/stamp-sign-approval`
+# (the one no-argument sudoers rule in server/sudoers.d-stamp). The helper
+# validates the payload as a well-formed ApprovalV4 under its own key id
+# with a fresh issued_at and prints only the signature. A helper, NOT a
+# verb: not symlinked into git-shell-commands, not on stamp-gate's
+# allowlist, so unreachable over SSH. root:root 0755 (set below).
+COPY --from=builder /build/dist/server/sign-approval.cjs /usr/local/sbin/stamp-sign-approval
 # Boot-time prompts-cache populator (AGT-375). Invoked by entrypoint.sh
 # as root after stamp-bootstrap-review-key. No-ops when
 # STAMP_PROMPTS_REPO_URL is unset (Phase A bundled-prompts path); when
@@ -348,6 +357,8 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/sbin/stamp-bootstrap-review-key \
              /usr/local/sbin/stamp-prompts-cache-bootstrap \
              /entrypoint.sh \
+ && chown root:root /usr/local/sbin/stamp-sign-approval \
+ && chmod 0755     /usr/local/sbin/stamp-sign-approval \
  && chown root:root /usr/local/sbin/stamp-authorized-keys \
  && chmod 0755     /usr/local/sbin/stamp-authorized-keys \
  && chown root:root /usr/local/sbin/stamp-break-glass \

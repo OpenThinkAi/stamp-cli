@@ -29,6 +29,8 @@ IMAGE_TAG="stamp-server-smoke:$(date +%s)-$$"
 CONTAINER_NAME="stamp-smoke-$$"
 REVOKE_CONTAINER="stamp-smoke-revoke-$$"
 REVOKE_KEYS=""
+SIGN_CONTAINER="stamp-smoke-sign-$$"
+SIGN_KEYS=""
 BOOT_WAIT_SECS="${STAMP_SMOKE_BOOT_WAIT:-10}"
 
 # Files that affect how the image BUILDS or BOOTS. A pure `src/lib/*` change
@@ -71,7 +73,9 @@ fi
 cleanup() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   docker rm -f "$REVOKE_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$SIGN_CONTAINER" >/dev/null 2>&1 || true
   [ -n "${REVOKE_KEYS:-}" ] && rm -rf "$REVOKE_KEYS"
+  [ -n "${SIGN_KEYS:-}" ] && rm -rf "$SIGN_KEYS"
   docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -368,12 +372,13 @@ docker run -d --name "$REVOKE_CONTAINER" \
   "$IMAGE_TAG" >/dev/null
 
 wait_sshd() {
+  local c="${1:-$REVOKE_CONTAINER}"
   for _ in $(seq 1 60); do
-    if docker exec "$REVOKE_CONTAINER" nc -z 127.0.0.1 22 >/dev/null 2>&1; then return 0; fi
+    if docker exec "$c" nc -z 127.0.0.1 22 >/dev/null 2>&1; then return 0; fi
     sleep 0.5
   done
-  echo "error: sshd in $REVOKE_CONTAINER did not come up" >&2
-  docker logs "$REVOKE_CONTAINER" 2>&1 | tail -40 >&2 || true
+  echo "error: sshd in $c did not come up" >&2
+  docker logs "$c" 2>&1 | tail -40 >&2 || true
   return 1
 }
 wait_sshd
@@ -454,6 +459,117 @@ printf '%s\n' "$revoke_logs" | grep "already bootstrapped" >/dev/null || {
 }
 docker rm -f "$REVOKE_CONTAINER" >/dev/null 2>&1 || true
 echo "docker-boot-smoke: removed key stays refused across reboot; file-only key refused; break-glass root-only ✓"
+
+# AGT-2263: the review-signing key is root:root 0600, never readable by
+# git, and survives a restart that way; stamp-review's signing path (the
+# git user → `sudo -n stamp-sign-approval`) works; the helper refuses a
+# non-approval payload and any argument; it is not reachable over SSH; the
+# scoped boot chown never follows a symlink planted in a repo; and a key a
+# pre-AGT-2263 image left git-owned is re-owned at boot. ANTHROPIC_API_KEY
+# is a dummy: it only switches on the key bootstrap — nothing here calls
+# the model.
+echo "docker-boot-smoke: asserting the review-signing key is root-only and signing goes through the root helper (AGT-2263)…"
+SIGN_KEYS=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N "" -C "smoke-signer" -f "$SIGN_KEYS/op" >/dev/null
+docker run -d --name "$SIGN_CONTAINER" \
+  -e ANTHROPIC_API_KEY=smoke-dummy-not-a-real-key \
+  -e AUTHORIZED_KEYS="$(cat "$SIGN_KEYS/op.pub")" \
+  "$IMAGE_TAG" >/dev/null
+wait_sshd "$SIGN_CONTAINER"
+docker exec "$SIGN_CONTAINER" mkdir -m 0700 /root/sk
+docker cp "$SIGN_KEYS/op" "$SIGN_CONTAINER:/root/sk/op" >/dev/null
+# Signs a fresh canonical approval through the helper exactly as
+# stamp-review does (as git, sudo -n, payload on stdin), verifies the
+# signature against the .pub, then checks the refusals.
+cat > "$SIGN_KEYS/signcheck.cjs" <<'JS'
+const c = require("node:crypto");
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const pem = fs.readFileSync("/srv/git/.stamp-state/review-signing-key.pub", "utf8");
+const pub = c.createPublicKey(pem);
+const fp = "sha256:" + c.createHash("sha256").update(pub.export({ type: "spki", format: "der" })).digest("hex");
+const sortKeys = (o) => Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[k]]));
+const approval = {
+  reviewer: "security", verdict: "approved",
+  prompt_sha256: "a".repeat(64), diff_sha256: "b".repeat(64),
+  base_sha: "0".repeat(40), head_sha: "1".repeat(40),
+  issued_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+  server_key_id: fp, repo_id: "acme/widget",
+};
+const bytes = Buffer.from(JSON.stringify(sortKeys(approval)));
+const helper = ["-n", "/usr/local/sbin/stamp-sign-approval"];
+const ok = spawnSync("sudo", helper, { input: bytes });
+if (ok.status !== 0) { console.error("helper failed:", ok.status, String(ok.stderr)); process.exit(1); }
+const sig = String(ok.stdout).trim();
+if (!c.verify(null, bytes, pub, Buffer.from(sig, "base64"))) { console.error("signature does not verify"); process.exit(1); }
+const bad = spawnSync("sudo", helper, { input: Buffer.from('{"msg":"sign me"}') });
+if (bad.status !== 2 || String(bad.stdout) !== "") { console.error("helper did not refuse a non-approval payload:", bad.status); process.exit(1); }
+const raw = spawnSync("sudo", helper, { input: Buffer.from("arbitrary bytes") });
+if (raw.status !== 2 || String(raw.stdout) !== "") { console.error("helper did not refuse arbitrary bytes:", raw.status); process.exit(1); }
+const args = spawnSync("sudo", [...helper, "--x"], { input: bytes });
+if (args.status === 0) { console.error("sudo admitted the helper with an argument"); process.exit(1); }
+console.log("signcheck ok");
+JS
+docker cp "$SIGN_KEYS/signcheck.cjs" "$SIGN_CONTAINER:/tmp/signcheck.cjs" >/dev/null
+docker exec "$SIGN_CONTAINER" chmod 0644 /tmp/signcheck.cjs
+
+sign_common='set -e
+k=/root/sk
+chmod 0600 $k/op
+K=/srv/git/.stamp-state/review-signing-key.pem
+P=/srv/git/.stamp-state/review-signing-key.pub
+OPTS="-o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+fail() { echo "$*" >&2; [ -f "$k/out" ] && cat "$k/out" >&2; exit 1; }
+[ "$(stat -c "%U:%G %a" $K)" = "root:root 600" ] || fail "review-signing key is $(stat -c "%U:%G %a" $K), want root:root 600"
+[ "$(stat -c "%U:%G %a" $P)" = "root:root 644" ] || fail "review-signing pub is $(stat -c "%U:%G %a" $P), want root:root 644"
+if su -s /bin/sh git -c "cat $K" >/dev/null 2>&1; then fail "git user can read the review-signing key"; fi
+su -s /bin/sh git -c "cat $P" >/dev/null || fail "git user cannot read the review-signing pub"
+su -s /bin/sh git -c "node /tmp/signcheck.cjs" >"$k/out" 2>&1 || fail "signing through stamp-sign-approval failed"
+set +e; ssh $OPTS -i $k/op git@127.0.0.1 stamp-sign-approval </dev/null >"$k/out" 2>&1; rc=$?; set -e
+[ $rc -eq 2 ] || fail "stamp-sign-approval was reachable over SSH (exit $rc)"
+set +e; ssh $OPTS -i $k/op git@127.0.0.1 /usr/local/sbin/stamp-sign-approval </dev/null >"$k/out" 2>&1; rc=$?; set -e
+[ $rc -eq 2 ] || fail "/usr/local/sbin/stamp-sign-approval was reachable over SSH (exit $rc)"
+[ ! -e /home/git/git-shell-commands/stamp-sign-approval ] || fail "stamp-sign-approval is in git-shell-commands"
+'
+sign_boot1="$sign_common"'
+# Plant a symlink to a root-only file inside a repo; the next boot chown
+# must re-own the link, not its target.
+su -s /bin/sh git -c "git init -q --bare /srv/git/smoke.git"
+echo sentinel > /root/sentinel && chmod 0600 /root/sentinel
+ln -s /root/sentinel /srv/git/smoke.git/evil-link
+# Simulate a key left git-owned by a pre-AGT-2263 image.
+chown git:git $K $P
+'
+if ! docker exec "$SIGN_CONTAINER" sh -c "$sign_boot1"; then
+  echo "error: review-signing key / helper assertion failed (AGT-2263, first boot) — see above." >&2
+  docker logs "$SIGN_CONTAINER" 2>&1 | tail -40 >&2 || true
+  exit 1
+fi
+echo "docker-boot-smoke: restarting the signing container (legacy git-owned key planted)…"
+docker restart "$SIGN_CONTAINER" >/dev/null
+wait_sshd "$SIGN_CONTAINER"
+sign_boot2="$sign_common"'
+[ "$(stat -c "%U:%G" /root/sentinel)" = "root:root" ] || fail "boot chown followed a symlink planted in a repo"
+[ "$(stat -c "%U" /srv/git/smoke.git/HEAD)" = "git" ] || fail "boot chown did not re-own repo contents to git"
+'
+if ! docker exec "$SIGN_CONTAINER" sh -c "$sign_boot2"; then
+  echo "error: review-signing key / helper assertion failed after restart (AGT-2263) — see above." >&2
+  docker logs "$SIGN_CONTAINER" 2>&1 | tail -40 >&2 || true
+  exit 1
+fi
+sign_logs=$(docker logs "$SIGN_CONTAINER" 2>&1)
+printf '%s\n' "$sign_logs" | grep "re-owned legacy git-owned" >/dev/null || {
+  echo "error: second boot did not report re-owning the legacy git-owned key (AGT-2263)." >&2
+  printf '%s\n' "$sign_logs" | tail -40 >&2
+  exit 1
+}
+printf '%s\n' "$sign_logs" | grep "stamp-sign-approval: signed reviewer=security" >/dev/null || {
+  echo "error: stamp-sign-approval did not write its audit line to the container log (AGT-2263)." >&2
+  printf '%s\n' "$sign_logs" | tail -40 >&2
+  exit 1
+}
+docker rm -f "$SIGN_CONTAINER" >/dev/null 2>&1 || true
+echo "docker-boot-smoke: review-signing key root:root 0600 across restart; git signs only via the helper; helper refuses non-approvals; not reachable over SSH ✓"
 
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"
