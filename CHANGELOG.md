@@ -34,6 +34,11 @@ Read these before deploying this release; details are in the entries below.
   set `STAMP_PROMPTS_ALLOWED_SIGNERS` (Phase B prompt signatures) and the
   retention variables `STAMP_PEER_EVENT_RETENTION_DAYS` /
   `STAMP_SERVER_VERDICT_RETENTION_DAYS` (default 30 days, `0` keeps).
+- **`STAMP_PROMPTS_CACHE_ROOT`** must now be a dot-dir directly under
+  `/srv/git` (default `/srv/git/.prompts-cache`); any other value stops the
+  boot. Reviewer settings set on the container (`STAMP_REVIEWER_MODEL`,
+  `STAMP_REVIEWER_THINKING`, `MAX_DIFF_BYTES`, `REVIEW_TIMEOUT_MS`) start
+  taking effect on this deploy.
 - **Peer listeners** skip every event until the repo lands
   `data_flow.peer_review_endpoints`, and need `origin/HEAD` set in each
   mapped clone (`git remote set-head origin --auto`).
@@ -153,6 +158,27 @@ Read these before deploying this release; details are in the entries below.
   corrected (npm has only `latest`; 1.x users install `@openthink/stamp@1`).
   `stamp pr open --help` names the enrolled-stamp-key prerequisite and
   `stamp reviewers fetch --help` recommends a commit SHA as the ref.
+- **Server settings that silently did nothing now reach `stamp-review`.**
+  sshd strips the container env from SSH sessions, and the entrypoint never
+  persisted `STAMP_REVIEWER_MODEL`, `STAMP_REVIEWER_THINKING`,
+  `MAX_DIFF_BYTES`, `REVIEW_TIMEOUT_MS` or `STAMP_PROMPTS_CACHE_ROOT` to
+  `/etc/stamp/env`, so the verb always used its defaults (`MAX_DIFF_BYTES`
+  was also read before the env file was loaded). `STAMP_ENV` and
+  `STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY` are persisted too, so a dev/test
+  `STAMP_PROMPTS_DIR` no longer makes every review fail as "production". A
+  new test fails when the verb reads a variable the entrypoint neither
+  writes nor lists as deliberately not passed. `write_env_var` refuses a
+  value containing a newline (it would have written a second line).
+- **`stamp-review` reads the prompts cache at `STAMP_PROMPTS_CACHE_ROOT`**
+  instead of always `/srv/git/.prompts-cache`, the same root the boot-time
+  clone and `stamp-workers` write. The entrypoint refuses a root the SSH
+  gate could serve or one of the server's own dot-dirs.
+- **The boot-time prompts clone uses the default deploy key**
+  (`/srv/git/.ssh-client-keys/prompts_repo_key`) when
+  `STAMP_PROMPTS_DEPLOY_KEY_PATH` is unset and a key is there, as runtime
+  refreshes already did, and the entrypoint re-pins that key `git:git 0600`.
+  The docs no longer tell you to set the variable to the default path or to
+  leave the cache root alone.
 
 ### Security
 

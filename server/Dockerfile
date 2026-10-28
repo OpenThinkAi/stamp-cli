@@ -328,6 +328,9 @@ COPY server/lib/refresh-repo-hooks.sh /lib/refresh-repo-hooks.sh
 # entrypoint.sh sources this for the per-process env allowlists and
 # _exec_allowlisted_env (AGT-2264).
 COPY server/lib/allowlisted-env.sh /lib/allowlisted-env.sh
+# entrypoint.sh sources this for the prompts cache-root check and the
+# deploy-key default fallback (AGT-2277).
+COPY server/lib/prompts-cache-config.sh /lib/prompts-cache-config.sh
 
 # Sudoers fragment that grants the unprivileged git user passwordless
 # invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root

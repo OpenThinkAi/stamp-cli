@@ -300,28 +300,39 @@ fi
 # Operators can override via STAMP_PROMPTS_KNOWN_HOSTS_PATH if they
 # want to pin a different known-hosts file (e.g. self-hosted github
 # enterprise). Empty → fall back to the image default.
+#
+# AGT-2277: STAMP_PROMPTS_CACHE_ROOT must be a dot-dir directly under
+# /srv/git (lib/prompts-cache-config.sh says why), checked whether or not
+# Phase B is on, since it is persisted for stamp-review below. With
+# STAMP_PROMPTS_DEPLOY_KEY_PATH unset, the deploy key is the default path
+# when a key is there — the same fallback stamp-workers' runtime refresh and
+# the bootstrap binary apply (src/server/promptsCachePaths.ts) — so the key
+# is pinned git:git 0600 here in that case too.
+. "$(dirname "$0")/lib/prompts-cache-config.sh"
+check_prompts_cache_root || exit 1
 if [ -n "$STAMP_PROMPTS_REPO_URL" ]; then
   if [ -n "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ] && [ ! -f "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ]; then
     echo "error: STAMP_PROMPTS_DEPLOY_KEY_PATH=$STAMP_PROMPTS_DEPLOY_KEY_PATH does not exist on the volume; provision the private SSH key (mirroring the stamp-ensure-repo-key flow) and redeploy. Never auto-generated." >&2
     exit 1
   fi
   export GIT_SSH_KNOWN_HOSTS="${STAMP_PROMPTS_KNOWN_HOSTS_PATH:-${GIT_SSH_KNOWN_HOSTS:-/etc/ssh/ssh_known_hosts}}"
-  _pcroot="${STAMP_PROMPTS_CACHE_ROOT:-/srv/git/.prompts-cache}"
+  _pcroot="${STAMP_PROMPTS_CACHE_ROOT:-$DEFAULT_PROMPTS_CACHE_ROOT}"
+  _pkey=$(resolve_prompts_deploy_key)
   # The git-run bootstrap below must be able to read the deploy key and
   # write the cache. Earlier images got that for free from the boot-time
   # `chown -R git:git /srv/git`; that sweep is now scoped to repo dirs
   # (AGT-2263), so hand exactly these paths to git explicitly — the key
   # only if it is a regular file (never follow a symlink), the cache with
   # -R -h (symlinks re-owned, not followed).
-  if [ -n "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ] && [ -f "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ] && [ ! -L "$STAMP_PROMPTS_DEPLOY_KEY_PATH" ]; then
-    chown git:git "$STAMP_PROMPTS_DEPLOY_KEY_PATH"
-    chmod 0600 "$STAMP_PROMPTS_DEPLOY_KEY_PATH"
+  if [ -n "$_pkey" ] && [ -f "$_pkey" ] && [ ! -L "$_pkey" ]; then
+    chown git:git "$_pkey"
+    chmod 0600 "$_pkey"
   fi
   if [ -d "$_pcroot" ] && [ ! -L "$_pcroot" ]; then
     chown -R -h git:git "$_pcroot" || true
   fi
   # Fix A (AGT-468): run bootstrap as the git user, not root. The deploy key
-  # at STAMP_PROMPTS_DEPLOY_KEY_PATH is git-readable (mode 0600, git-owned via
+  # ($_pkey) is git-readable (mode 0600, git-owned via
   # the explicit chown just above), so the user-switch is clean.
   # It gets the same allowlisted env as stamp-workers (AGT-2264: the
   # STAMP_PROMPTS_* / GIT_SSH_KNOWN_HOSTS vars it reads, no bot token or API
@@ -582,14 +593,28 @@ fi
 chown root:git /etc/stamp/env
 chmod 0640 /etc/stamp/env
 
+# One KEY=value per line, no quoting (lib/serverEnvFile.ts reads it back).
+# A value with a newline or carriage return would split into a second,
+# operator-unintended line — e.g. a STAMP_PROMPTS_DIR smuggled in through
+# another variable — so such a value is refused and the variable is NOT
+# written (the verb then uses its default). Logged, but not fatal: a bad
+# paste must not crash-loop the self-deploying server (AGT-420 rule).
 write_env_var() {
   local name="$1"
   local value
   value="$(eval "printf '%s' \"\$$name\"")"
-  if [ -n "$value" ]; then
-    printf '%s=%s\n' "$name" "$value" >> /etc/stamp/env
-  fi
+  [ -n "$value" ] || return 0
+  case "$value" in
+    *"$_wev_nl"*|*"$_wev_cr"*)
+      echo "warning: $name contains a newline or carriage return; not persisting it to /etc/stamp/env (SSH verbs will use the default)" >&2
+      return 0
+      ;;
+  esac
+  printf '%s=%s\n' "$name" "$value" >> /etc/stamp/env
 }
+_wev_nl='
+'
+_wev_cr=$(printf '\r')
 
 write_env_var GITHUB_BOT_TOKEN
 write_env_var ANTHROPIC_API_KEY  # consumed by stamp-review.cjs via lib/serverEnvFile.loadServerEnvFile()
@@ -661,6 +686,27 @@ write_env_var STAMP_FORBID_AI_ATTRIBUTION
 check_prompts_dir
 
 write_env_var STAMP_PROMPTS_DIR
+# AGT-2277: the resolver reads STAMP_ENV and the insecure-test toggle too.
+# Without them the verb saw a dev/test STAMP_PROMPTS_DIR (written above)
+# with STAMP_ENV unset — production — and refused every review. Both were
+# already validated by check_prompts_dir.
+write_env_var STAMP_ENV
+write_env_var STAMP_PROMPTS_DIR_INSECURE_TEST_ONLY
+
+# AGT-2277 — stamp-review tuning and the cache location. All read by the
+# stamp-review verb after its loadServerEnvFile() merge; sshd strips them
+# from the session, so before this every one of them silently did nothing
+# on the image. A bad value is tolerated: each resolver falls back to its
+# default (STAMP_REVIEWER_MODEL with a warning:), no boot guard. The cache
+# root was checked by check_prompts_cache_root above; the verb must read
+# the same root stamp-workers and the bootstrap write.
+# tests/serverEnvFileCoverage.test.ts fails if stamp-review reads a variable
+# that is neither written here nor listed there as unsupported.
+write_env_var STAMP_REVIEWER_MODEL
+write_env_var STAMP_REVIEWER_THINKING
+write_env_var MAX_DIFF_BYTES
+write_env_var REVIEW_TIMEOUT_MS
+write_env_var STAMP_PROMPTS_CACHE_ROOT
 
 # SSH sessions strip env vars by default; sshd_config's SetEnv bypasses
 # that for explicitly-listed vars. Inject a whitelist of operator-declared

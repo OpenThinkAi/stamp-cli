@@ -511,14 +511,14 @@ In Railway (Settings → Variables) or your platform's equivalent:
 | `STAMP_PROMPTS_REPO_REF` | Defaults to `main`; override only if you track a different branch/tag |
 | `STAMP_PROMPTS_ALLOWED_SIGNERS` | Path to an OpenSSH `allowed_signers` file; only tips signed by a listed key are accepted (strongly recommended — see the threat-model footnote below) |
 | `STAMP_PROMPTS_WEBHOOK_SECRET` | Paste the same string you typed into the github webhook config in step 3 |
-| `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Defaults to `/srv/git/.ssh-client-keys/prompts_repo_key`; override only if you stored the key elsewhere |
+| `STAMP_PROMPTS_DEPLOY_KEY_PATH` | Defaults to `/srv/git/.ssh-client-keys/prompts_repo_key` when a key is there (boot and runtime alike); override only if you stored the key elsewhere |
 
 Optional tuning:
 
 | Var | When to set |
 |---|---|
 | `STAMP_PROMPTS_POLL_INTERVAL_SEC` | Defaults to `3600` (one hour). Lower it during a webhook-secret rotation window (see "Webhook secret rotation" below); set the literal string `"0"` (and only `"0"`) to disable polling entirely for webhook-only mode. |
-| `STAMP_PROMPTS_CACHE_ROOT` | Defaults to `/srv/git/.prompts-cache`. Only override if your volume layout differs. |
+| `STAMP_PROMPTS_CACHE_ROOT` | Defaults to `/srv/git/.prompts-cache`. An override must be another dot-dir directly under `/srv/git` (e.g. `/srv/git/.prompts-alt`); anything else fails the boot. |
 | `STAMP_PROMPTS_KNOWN_HOSTS_PATH` | Only for self-hosted github enterprise. |
 
 The full env-var reference table is in [`server/README.md`'s "Env-var reference"](../server/README.md#env-var-reference).

@@ -99,6 +99,7 @@ import {
   ReviewSigningKeyError,
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
+import { DEFAULT_PROMPTS_CACHE_ROOT, resolvePromptsCacheRoot } from "./promptsCachePaths.js";
 import { formatRepoId } from "../lib/repoBinding.js";
 import { isValidModelId } from "../lib/userConfig.js";
 import {
@@ -168,19 +169,16 @@ export function resolveReviewTimeoutMs(): number {
 }
 
 /**
- * Phase B (AGT-373) cache-root path used when `STAMP_PROMPTS_REPO_URL`
- * is set. The webhook-driven prompts-cache module (AGT-372) maintains
- * a git clone at this fixed path inside the stamp-server image; the
- * post-receive webhook (AGT-374) and the boot-time clone step
- * (AGT-375) both write here. Operators don't override this path —
- * setting the URL is enough to opt in.
+ * Phase B (AGT-373) default cache-root path used when
+ * `STAMP_PROMPTS_REPO_URL` is set and `STAMP_PROMPTS_CACHE_ROOT` is not.
+ * The webhook / poll refresh (stamp-workers) and the boot-time clone
+ * (stamp-prompts-cache-bootstrap) write to the same resolved root —
+ * `resolvePromptsCacheRoot()` in `promptsCachePaths.ts` (AGT-2277: this
+ * verb used to hardcode the default and ignore STAMP_PROMPTS_CACHE_ROOT).
  *
- * Exported so AGT-374 (webhook route) and AGT-376 (periodic-poll
- * backstop) can pin the same path the resolver picks without
- * duplicating the literal, and so tests can assert the toggle's
- * landing site without spelunking the resolver internals.
+ * Exported so tests can assert the toggle's default landing site.
  */
-export const PHASE_B_CACHE_ROOT = "/srv/git/.prompts-cache";
+export const PHASE_B_CACHE_ROOT = DEFAULT_PROMPTS_CACHE_ROOT;
 
 /**
  * Default Phase A prompts directory — the path baked into the server image.
@@ -200,7 +198,7 @@ export const DEFAULT_PROMPTS_DIR = "/etc/stamp/reviewers";
  * Two-mode resolution (AGT-373):
  *
  *   1. If `STAMP_PROMPTS_REPO_URL` is set, return the Phase B cache
- *      root (`/srv/git/.prompts-cache`). The prompts-cache module
+ *      root (`STAMP_PROMPTS_CACHE_ROOT`, default `/srv/git/.prompts-cache`). The prompts-cache module
  *      (AGT-372) populates this path via webhook-driven
  *      `cloneOrFetchPromptsCache`. `STAMP_PROMPTS_DIR` is IGNORED in
  *      this mode — setting the URL is the operator's signal that
@@ -255,7 +253,7 @@ export function resolvePromptCacheRoot(): string {
   // authoritative channel, and a stale/unused Phase A var must NOT trigger
   // the production refusal below.
   if (process.env["STAMP_PROMPTS_REPO_URL"]) {
-    return PHASE_B_CACHE_ROOT;
+    return resolvePromptsCacheRoot();
   }
 
   // AGT-411: production hard-error on any non-default STAMP_PROMPTS_DIR.
@@ -649,7 +647,7 @@ export function helperApprovalSignerFromEnv(): ApprovalSigner {
  *
  * Default behavior when each field is omitted:
  *   - `promptResolver`: `defaultPromptCacheResolver(resolvePromptCacheRoot())`
- *     — AGT-370 + AGT-373. Cache root is `/srv/git/.prompts-cache`
+ *     — AGT-370 + AGT-373. Cache root is `STAMP_PROMPTS_CACHE_ROOT` (default `/srv/git/.prompts-cache`)
  *     when `STAMP_PROMPTS_REPO_URL` is set (Phase B), else
  *     `STAMP_PROMPTS_DIR || /etc/stamp/reviewers` (Phase A fallback).
  *   - `anthropic`: `new Anthropic({apiKey: process.env.ANTHROPIC_API_KEY})`

@@ -49,7 +49,6 @@ import {
 import {
   closeSync,
   constants as fsConstants,
-  existsSync,
   fstatSync,
   openSync,
   readSync,
@@ -100,6 +99,7 @@ import {
   type CloneOrFetchOpts,
   type RefreshResult,
 } from "./prompts-cache.js";
+import { resolvePromptsCacheRoot, resolvePromptsDeployKeyPath } from "./promptsCachePaths.js";
 import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import {
   fanoutToSeatHoldersFiltered,
@@ -122,13 +122,6 @@ const MAX_BODY_BYTES = 16 * 1024;
 const WEBHOOK_MAX_BODY_BYTES = 64 * 1024;
 // 5-second coalescing window — see `scheduleWebhookRefresh` below.
 const WEBHOOK_COALESCE_WINDOW_MS = 5_000;
-// Default cache location matches the project README + AGT-375's entrypoint
-// volume layout. Overridable via STAMP_PROMPTS_CACHE_ROOT.
-const DEFAULT_PROMPTS_CACHE_ROOT = "/srv/git/.prompts-cache";
-// Default deploy-key location matches AGT-375's entrypoint provisioning.
-// Resolved lazily inside `buildRefreshOpts` so a missing key path doesn't
-// crash import.
-const DEFAULT_DEPLOY_KEY_PATH = "/srv/git/.ssh-client-keys/prompts_repo_key";
 const SHORT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
 // Stamp signing pubkeys are PEM-wrapped SPKI. Loose shape check here
 // (anchored so trailing/leading garbage doesn't slip in); the real
@@ -497,17 +490,16 @@ export function __resetWebhookStateForTests(): void {
  * key is actually there. (The cache module does NOT ignore a missing key for
  * an HTTPS / file:// URL — it throws — so passing the default
  * unconditionally broke every runtime refresh of a keyless Phase B
- * deployment while the boot-time bootstrap, which passes no key, worked.)
+ * deployment.) The boot-time bootstrap resolves the same way since AGT-2277
+ * (`promptsCachePaths.ts`).
  */
 function buildRefreshOpts(): CloneOrFetchOpts | null {
   const url = process.env["STAMP_PROMPTS_REPO_URL"];
   if (!url) return null;
   const ref = process.env["STAMP_PROMPTS_REPO_REF"] || "main";
-  const cacheRoot =
-    process.env["STAMP_PROMPTS_CACHE_ROOT"] || DEFAULT_PROMPTS_CACHE_ROOT;
-  const deployKeyPath =
-    process.env["STAMP_PROMPTS_DEPLOY_KEY_PATH"] ||
-    (existsSync(DEFAULT_DEPLOY_KEY_PATH) ? DEFAULT_DEPLOY_KEY_PATH : undefined);
+  // Shared with the boot-time bootstrap and the stamp-review verb (AGT-2277).
+  const cacheRoot = resolvePromptsCacheRoot();
+  const deployKeyPath = resolvePromptsDeployKeyPath();
   const allowedSignersPath = process.env["STAMP_PROMPTS_ALLOWED_SIGNERS"] || undefined;
   return { url, ref, cacheRoot, deployKeyPath, ...(allowedSignersPath ? { allowedSignersPath } : {}) };
 }

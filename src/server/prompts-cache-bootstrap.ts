@@ -59,18 +59,9 @@ import {
   scrubGitUrlCredentials,
   type RefreshResult,
 } from "./prompts-cache.js";
+import { resolvePromptsCacheRoot, resolvePromptsDeployKeyPath } from "./promptsCachePaths.js";
 
 // ─── Constants ────────────────────────────────────────────────────────
-
-/**
- * Default cache root when `STAMP_PROMPTS_CACHE_ROOT` is unset. Matches
- * the path named in the project README:
- * `<vault>/projects/external-prompt-storage-via-webhook/README.md`.
- * The stamp-server image's persistent volume is mounted at `/srv/git`,
- * so the cache lives there for the same survival-across-redeploy
- * reason as `.ssh-host-keys` and `.stamp-state`.
- */
-const DEFAULT_CACHE_ROOT = "/srv/git/.prompts-cache";
 
 /**
  * Default ref to track when `STAMP_PROMPTS_REPO_REF` is unset. Project
@@ -92,8 +83,10 @@ async function main(): Promise<void> {
   }
 
   const ref = process.env["STAMP_PROMPTS_REPO_REF"] || DEFAULT_REF;
-  const cacheRoot = process.env["STAMP_PROMPTS_CACHE_ROOT"] || DEFAULT_CACHE_ROOT;
-  const deployKeyPath = process.env["STAMP_PROMPTS_DEPLOY_KEY_PATH"] || undefined;
+  const cacheRoot = resolvePromptsCacheRoot();
+  // AGT-2277: same fallback as the runtime refresh — the default key path
+  // when STAMP_PROMPTS_DEPLOY_KEY_PATH is unset, only if a key is there.
+  const deployKeyPath = resolvePromptsDeployKeyPath();
   const allowedSignersPath = process.env["STAMP_PROMPTS_ALLOWED_SIGNERS"] || undefined;
   if (!allowedSignersPath) {
     // AGT-2249: the prompts are the trust anchor for every server-signed

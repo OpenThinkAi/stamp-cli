@@ -914,6 +914,19 @@ describe("runReviewPipeline — env-var caps", () => {
       process.env.STAMP_PROMPTS_DIR = "/tmp/should-be-ignored";
       assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
 
+      // AGT-2277: the verb reads the same STAMP_PROMPTS_CACHE_ROOT the
+      // bootstrap and stamp-workers write (it used to hardcode the default).
+      const savedCacheRoot = process.env.STAMP_PROMPTS_CACHE_ROOT;
+      try {
+        process.env.STAMP_PROMPTS_CACHE_ROOT = "/srv/git/.prompts-alt";
+        assert.equal(resolvePromptCacheRoot(), "/srv/git/.prompts-alt");
+        process.env.STAMP_PROMPTS_CACHE_ROOT = "";
+        assert.equal(resolvePromptCacheRoot(), PHASE_B_CACHE_ROOT);
+      } finally {
+        if (savedCacheRoot === undefined) delete process.env.STAMP_PROMPTS_CACHE_ROOT;
+        else process.env.STAMP_PROMPTS_CACHE_ROOT = savedCacheRoot;
+      }
+
       // (c): REPO_URL unset, DIR set → Phase A path honors DIR.
       // Requires non-prod env + toggle (AGT-411).
       delete process.env.STAMP_PROMPTS_REPO_URL;
