@@ -234,11 +234,19 @@ it actually reviewed. The verifier rehashes the actual merge diff at
 verify time; any mismatch rejects the push. An operator cannot get a
 verdict for a sanitized diff and then push a malicious one.
 
-**Prompt cross-check (`prompt_sha256`).** The server's signature covers
-the hash of the prompt it loaded. The verifier independently recomputes
-that hash from the merge commit's own `.stamp/` tree and rejects on
-mismatch. This catches an operator who signs a downstream envelope
-referencing a different prompt than what's actually committed.
+**Prompt hash (`prompt_sha256`).** The server's signature covers the
+hash of the prompt it loaded. Since 2.1.0 the verifier does **not**
+recompute that hash from the repo tree — under server-held prompts
+(Shape 4) there is nothing in the operator's tree to recompute against.
+`prompt_sha256` is trusted by transitivity: the trusted-keys manifest at
+`base_sha` names the key with the `server` capability, that key signs the
+approval body, and the body carries `prompt_sha256` (see
+`verifyV4ApprovalSignatures` in `src/lib/v4Trust.ts`). Its integrity
+therefore rests on the server's prompt store: the image-bundled prompts or
+`STAMP_PROMPTS_DIR` (refused outside a test context by the AGT-411 guard),
+or a Phase B prompts repo whose commits the server verifies against
+`STAMP_PROMPTS_ALLOWED_SIGNERS` (AGT-2249). An operator cannot substitute a
+prompt: the server fetches it itself.
 
 **Role-gated trust-anchor changes (`path_rules` + admin capability +
 `bypass_review_cycle`).** `.stamp/**` changes — prompts, config, the
@@ -313,7 +321,7 @@ walkthrough; pair both with the design plan for the full reasoning.
 |---|---|
 | Operator passes fake prompt to local LLM, signs canonical prompt's hash | Server-attested verdicts — server fetches prompt itself; operator cannot influence what the LLM sees |
 | Operator signs a verdict for a sanitized diff, pushes a malicious one | `diff_sha256` binding — verifier hashes actual merge diff; mismatch rejected |
-| Operator embeds a permissive prompt's hash to justify approval | `prompt_sha256` cross-check against the committed `.stamp/` tree |
+| Operator embeds a permissive prompt's hash to justify approval | Server-signed approval — the server loads the prompt and signs its `prompt_sha256`; the operator never chooses either. Integrity of the server's prompt store: image-bundled prompts, the `STAMP_PROMPTS_DIR` production guard (AGT-411), and signed-commit verification of a Phase B prompts repo (`STAMP_PROMPTS_ALLOWED_SIGNERS`, AGT-2249) |
 | Member reviews a protected repo's diff under another repo's lenient prompt override (`--org`/`--repo` substitution) and presents the approval on the protected repo | Server-signed `repo_id` compared against the repo's declared `repo_id:` (AGT-2272); grant check on `--org`/`--repo` at request time (AGT-2252) |
 | Operator modifies `.stamp/reviewers/*.md` or `.stamp/config.yml` with permissive content, signed via the normal review flow | `path_rules` + `admin` capability + `bypass_review_cycle: true` — `.stamp/**` requires admin signatures, not reviewer verdicts |
 | Operator adds a new pubkey to `.stamp/trusted-keys/` to grant themselves more authority | Same as above — entire `.stamp/**` is gated |

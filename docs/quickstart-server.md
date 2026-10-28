@@ -32,7 +32,7 @@ The fastest path is Railway, but the image runs on any Docker host (Fly, a Linux
    - **Variables:**
      - `AUTHORIZED_KEYS` — your laptop's SSH pubkey (`cat ~/.ssh/id_ed25519.pub`); newline-delimited list if multiple operators. Read once, on first boot, to enroll the first admins; after that, add and remove people with `stamp invites` / `stamp users`
      - `OPERATOR_PUB_KEY` — your stamp signing key (`cat ~/.stamp/keys/ed25519.pub`); generate with `stamp keys generate` if you don't have one
-     - `GITHUB_BOT_TOKEN` — *optional*, only if you want GitHub mirroring (PAT with `contents: write` on the mirror repo)
+     - `GITHUB_BOT_TOKEN` — *optional*, only for the `stamp/verified` commit statuses on a GitHub mirror. Mirror **pushes** use the per-repo deploy key `stamp provision` registers, not this token. Use a **fine-grained** PAT (or a GitHub App installation token) limited to the mirror repo(s) with **Commit statuses: read and write** only, and an expiry you rotate on. Grant `contents: write` only if you deliberately use the HTTPS push fallback (no deploy key) — a classic PAT reaches every repo its user can
    - **Networking:** add a TCP proxy for container port 22; Railway gives you `<host>:<port>`.
 3. Add a convenient SSH alias on your laptop:
    ```sh
@@ -117,7 +117,7 @@ Once you're happy, commit and push the customizations through a normal stamp rev
 If you want a public GitHub mirror that deploy pipelines can integrate with:
 
 1. **Create the mirror repo on github.com** (empty; the post-receive hook needs it to exist).
-2. **Set `GITHUB_BOT_TOKEN`** as a Railway env var if you didn't in Step 1. The bot needs `contents: write` on the mirror repo.
+2. **Optionally set `GITHUB_BOT_TOKEN`** as a Railway env var for `stamp/verified` statuses: a fine-grained PAT scoped to the mirror repo with only *Commit statuses: read and write*, with an expiry. The push itself uses the per-repo deploy key that `stamp provision` registers; `contents: write` on the token is only needed for the HTTPS push fallback when no deploy key is registered.
 3. **Commit `.stamp/mirror.yml`** in your repo:
    ```yaml
    github:

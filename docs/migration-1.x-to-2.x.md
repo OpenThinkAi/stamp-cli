@@ -122,10 +122,20 @@ release ≥ 0.7.x can use it to step forward to 2.0.1.
 ### Step 1 — Upgrade stamp-server to a 2.x-capable build
 
 ```sh
-# Railway / Fly / K8s: redeploy from the 2.x image
-# Self-hosted Docker: pull and restart
-docker pull openthinkai/stamp-server:2.x
+# Railway / Fly / K8s: redeploy from a 2.x build of this repo
+# Self-hosted Docker: pull an EXACT image by digest and restart
+docker pull openthinkai/stamp-server@sha256:<digest>
 ```
+
+Pin the image by digest (or at least an exact version tag), never a moving
+tag like `2.x`. This image holds the review-signing key, `ANTHROPIC_API_KEY`,
+`GITHUB_BOT_TOKEN` and the per-repo deploy keys, and in Phase A it also
+carries the reviewer prompts — whatever is published under a moving tag is
+what you would deploy, with no record of which bytes ran and nothing to roll
+back to. Take the digest from a build you made or reviewed (`docker buildx
+imagetools inspect <image>:<version>` prints it), record it with the
+deployment, and bump it deliberately. Building the image yourself from a
+pinned commit of this repo (the Railway path) gives the same property.
 
 Add the new env vars:
 
@@ -312,7 +322,7 @@ The migration is a **single PR**. `stamp init --migrate-to-server-attested` scaf
 
 Upgrade stamp-server to a 2.1+ build (server-bundled reviewer prompts require 2.1).
 
-The server image bundles canonical reviewer prompts (`security.md`, `standards.md`, `product.md`) at `/etc/stamp/reviewers/` at build time. Operators who maintain a fork of stamp-server edit `server/reviewers/*.md` in the fork and rebuild — see [`server/README.md`](../server/README.md#reviewer-prompts) for the editing workflow. Upstream `openthinkai/stamp-server:2.x` ships with the default prompt set.
+The server image bundles canonical reviewer prompts (`security.md`, `standards.md`, `product.md`) at `/etc/stamp/reviewers/` at build time. Operators who maintain a fork of stamp-server edit `server/reviewers/*.md` in the fork and rebuild — see [`server/README.md`](../server/README.md#reviewer-prompts) for the editing workflow. Upstream stamp-server images ship with the default prompt set.
 
 ### Step 2 — Per-repo: one-command scaffold
 

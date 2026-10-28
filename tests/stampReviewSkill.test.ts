@@ -139,3 +139,13 @@ describe("skills/stamp-review.md — cross-file links resolve", () => {
     }
   });
 });
+
+describe("skills/stamp-review.md — argument hygiene (AGT-2249)", () => {
+  const text = readFileSync(SKILL_PATH, "utf8");
+  it("tells the agent to validate and single-quote the revspec and reviewer name", () => {
+    assert.match(text, /Validate and quote both values before running the command/);
+    assert.match(text, /must not start with `-`/);
+    assert.match(text, /stamp review --plan --diff 'main\.\.feature' --only 'security'/);
+  });
+});
+

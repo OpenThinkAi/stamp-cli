@@ -358,9 +358,12 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
      at container port `8080`). Example: `https://stamp-cli-production.up.railway.app`.
      `stamp invites mint` bakes this into share URLs; without it, mint
      refuses with a clear error.
-   - `GITHUB_BOT_TOKEN` — **optional**, only needed if you want to mirror
-     verified commits to a GitHub repo (see "GitHub mirror" below). A
-     fine-scoped GitHub PAT with `contents: write` on the target repo(s).
+   - `GITHUB_BOT_TOKEN` — **optional**. Posts the `stamp/verified` commit
+     statuses on a GitHub mirror (see "GitHub mirror" below); mirror pushes
+     use the per-repo deploy key. Use a fine-grained PAT (or GitHub App
+     installation token) scoped to the mirror repo(s) with *Commit statuses:
+     read and write* and an expiry; add `contents: write` only for the HTTPS
+     push fallback (no deploy key registered).
    - `STAMP_REVIEWER_MODEL` — **optional** (default `claude-sonnet-5-5`, the
      same id headless mode uses). Anthropic model id the `stamp-review` verb
      sends for every reviewer on this server — e.g. `claude-opus-5` to
@@ -500,8 +503,13 @@ server but the GitHub action never fires; the workaround was a parallel
 
 ### Server-side credentials
 
-Set `GITHUB_BOT_TOKEN` as a Railway env var with a GitHub PAT (or GitHub App
-installation token) that has `contents: write` on the target repo. The
+The push transport is, in order: the per-repo SSH deploy key that `stamp
+provision` registers (the default), the legacy shared deploy key, and only
+then HTTPS with `GITHUB_BOT_TOKEN`. With a deploy key in place the token only
+posts `stamp/verified` statuses, so scope it to that: a fine-grained PAT (or
+GitHub App installation token) limited to the mirror repo(s) with *Commit
+statuses: read and write* and an expiry you rotate on. For the HTTPS
+fallback it additionally needs `contents: write` on the target repo; the
 post-receive hook reads it from `/etc/stamp/env` (written by the entrypoint,
 chmod 600, git-owned) and constructs:
 

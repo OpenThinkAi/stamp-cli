@@ -38,6 +38,13 @@ stamp review --plan --diff <revspec> [--only <reviewer>]
 
 The `--diff` argument is required and comes from the user's request (e.g. `main..feature`, `main..HEAD`). Pass `--only <reviewer>` if the user named a single reviewer to run.
 
+**Validate and quote both values before running the command.** Branch names may legally contain shell metacharacters (`;`, `$`, `` ` ``, `|`, `&`, parentheses), so a revspec built from a contributor's branch name can carry a command, and a value starting with `-` would be read as an option. Before interpolating:
+
+- the revspec must match `^[A-Za-z0-9._/@{}~^-]+(\.\.\.?[A-Za-z0-9._/@{}~^-]+)?$` and must not start with `-`;
+- a reviewer name must match `^[A-Za-z0-9_-]+$`.
+
+If either check fails, stop and tell the user why — do not try to repair the value. When they pass, single-quote both in the command, e.g. `stamp review --plan --diff 'main..feature' --only 'security'`.
+
 - **stdout** is a single JSON document — the `ReviewPlan`. Parse it.
 - **stderr** carries a `note: ...` advisory that mirrors the banner. Surface it verbatim; the wording is shipped by stamp-cli and pinned by tests.
 - A non-zero exit means stamp could not build the plan (e.g. no `.stamp/config.yml`, unknown reviewer name, no commits in the repo). Show the operator the stderr message verbatim and stop — do not fabricate reviewers or invent a plan.

@@ -1208,6 +1208,20 @@ peer LLM review at those endpoints. A listener whose model is on its own
 host needs no entry. `require_confirmation` without `confirmed` refuses
 peer review too.
 
+**Where peer-review data is kept.** `stamp pr open` sends the PR's title,
+body, changed paths and URL to the stamp-server, which relays them to
+subscribed listeners. The server stores the broadcast in `users.db` only
+until it is delivered: an hour after broadcast the title, body and paths
+are dropped from the row, and events, patches and cached server-side
+verdict prose are deleted after 30 days (`STAMP_PEER_EVENT_RETENTION_DAYS`,
+`STAMP_SERVER_VERDICT_RETENTION_DAYS`; see `server/README.md`). Each
+listener machine keeps `~/.stamp/peer-watch.log` (mode `0600`): one line per
+triage with the repo, PR URL, SHAs, author fingerprint and decision, and
+only hashes and lengths of the title, body and paths — never the text
+(AGT-2249). Drafts saved by `stamp pr listen` are the listener's own review
+prose about someone else's PR, kept in `~/.stamp/drafts/` (`0600`) until
+`stamp peer drafts delete` removes them.
+
 The block is read from the merge-base tree like every other policy field,
 so a feature branch cannot ship its own `confirmed: true` to wave its own
 introduction past the gate. It is purely additive — it does **not** enter
