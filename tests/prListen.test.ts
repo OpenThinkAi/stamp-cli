@@ -533,6 +533,23 @@ describe("AC #4: seat-claim rejections", () => {
     );
   });
 
+  it("strips terminal escapes from server-supplied text before printing (AGT-2270)", async () => {
+    const fakeKeypair = genKeypair();
+    const { stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _fetchForTest: makeSeatRejectionHttpFetch("odd\u001b]0;pwned\u0007\u001b[2Jreason"),
+        _cwdForTest: "/tmp",
+        _eventQueueForTest: [makeEvent()],
+        ...bypassOperatorGate(),
+      }),
+    );
+    assert.match(stderr, /claim rejected: oddreason/);
+    assert.doesNotMatch(stderr, /\u001b/);
+  });
+
   it("skips an unknown patch (409 patch_not_found) without retrying (AGT-2270)", async () => {
     const fakeKeypair = genKeypair();
     let claims = 0;
