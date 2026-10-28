@@ -1131,6 +1131,36 @@ export function stringifyConfig(config: StampConfig): string {
 }
 
 /**
+ * Commented-out `retention:` block appended to the `.stamp/config.yml` that
+ * `stamp init` scaffolds (AGT-2247, decision D-5). Reviewer prose is KEPT
+ * by default — it lives in `.git/stamp/state.db` beside the diff it quotes,
+ * and a default TTL would silently delete history on upgrade — so this is
+ * documentation only: every line is a YAML comment and the parsed config
+ * has no `retention` field until the operator uncomments it. Keys mirror
+ * {@link RetentionConfig}; values must pass the same duration validation.
+ */
+export const RETENTION_CONFIG_SCAFFOLD = `
+# Reviewer prose (which can quote diff lines) is kept in .git/stamp/state.db
+# until you run \`stamp prune\`. To bound it, uncomment this block:
+#
+# retention:
+#   reviews: 60d       # age limit for review rows (<n>d, <n>h or <n>m)
+#   spools: 60d        # age limit for failed-parse / failed-run spool files
+#   auto_prune: true   # delete past-limit items after each \`stamp review\`;
+#                      # omit or false = only report them, never delete.
+#                      # Each prune uses the shorter of the two limits for
+#                      # both rows and spools.
+`;
+
+/**
+ * Render the initial `.stamp/config.yml` text written by `stamp init`:
+ * the serialized config plus the commented-out retention scaffold.
+ */
+export function renderInitialConfig(config: StampConfig): string {
+  return stringifyConfig(config) + RETENTION_CONFIG_SCAFFOLD;
+}
+
+/**
  * Resolve the branch rule for a literal branch name. Map keys may be
  * literal branch names OR glob patterns (`*`, `?` — same grammar as
  * mirror.yml's `tags:` field; see refPatterns.ts).

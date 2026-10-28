@@ -27,7 +27,7 @@ import {
   DEFAULT_STANDARDS_PROMPT,
   EXAMPLE_REVIEWER_PROMPT,
   MINIMAL_CONFIG,
-  stringifyConfig,
+  renderInitialConfig,
 } from "../lib/config.js";
 import { openDb } from "../lib/db.js";
 import {
@@ -147,7 +147,10 @@ function shSingleQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
-function printProseRetentionSnippet(repoRoot: string): void {
+function printProseRetentionSnippet(
+  repoRoot: string,
+  scaffolded: boolean,
+): void {
   // This snippet is copy-pasted into a privileged crontab. A newline or
   // control char in repoRoot (reachable via a crafted clone path) would
   // split the pasted text into a SECOND cron entry — cron splits on
@@ -191,6 +194,18 @@ function printProseRetentionSnippet(repoRoot: string): void {
     "  Or set STAMP_REVIEW_PROSE_TTL_DAYS (prune then nulls old prose), or run",
   );
   console.log("  `stamp review --no-prose` to never record prose for a repo.");
+  if (scaffolded) {
+    console.log(
+      "  Or uncomment the `retention:` block in .stamp/config.yml to auto-prune.",
+    );
+  } else {
+    // Re-init: config.yml already existed and was NOT rewritten, so there
+    // is no scaffolded block to point at — show the keys inline instead.
+    console.log(
+      "  Or add to .stamp/config.yml to auto-prune: retention: { reviews: 60d,",
+    );
+    console.log("  spools: 60d, auto_prune: true }");
+  }
 }
 
 export function runInit(opts: InitOptions = {}): void {
@@ -238,10 +253,10 @@ export function runInit(opts: InitOptions = {}): void {
 
   if (!alreadyHasConfig) {
     if (opts.minimal) {
-      writeFileSync(configFile, stringifyConfig(MINIMAL_CONFIG));
+      writeFileSync(configFile, renderInitialConfig(MINIMAL_CONFIG));
       writeFileSync(join(reviewersDir, "example.md"), EXAMPLE_REVIEWER_PROMPT);
     } else {
-      writeFileSync(configFile, stringifyConfig(DEFAULT_CONFIG));
+      writeFileSync(configFile, renderInitialConfig(DEFAULT_CONFIG));
       writeFileSync(
         join(reviewersDir, "security.md"),
         DEFAULT_SECURITY_PROMPT,
@@ -470,7 +485,7 @@ export function runInit(opts: InitOptions = {}): void {
   console.log(
     "opt out of the per-repo notice (STAMP_SUPPRESS_LLM_NOTICE=1).",
   );
-  printProseRetentionSnippet(repoRoot);
+  printProseRetentionSnippet(repoRoot, scaffoldOrSync === "scaffold");
 
   // Loud agent-imperative footer. Prints regardless of mode — both
   // server-gated (where it's redundant but harmless) and local-only (where
