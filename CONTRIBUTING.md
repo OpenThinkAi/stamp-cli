@@ -104,11 +104,11 @@ See [`docs/personas.md`](./docs/personas.md) for prompt-writing guidance.
   3. The mirror carries the commit to GitHub; the publish workflow picks up the new version and runs `npm publish --provenance` + creates a `v<version>` git tag.
 - Every non-bump merge safely no-ops the publish step.
 - Only `main` publishes to `latest`; there, alpha/beta/rc versions (e.g., `0.2.0-alpha.0`) publish under their label as the dist-tag (`alpha`, `beta`, `rc`).
-- This branch, `release/1.x`, is the 1.x maintenance line. Its publishes go to the `legacy-1` dist-tag whatever the version string, and the workflow refuses a version whose major is not 1, so a 1.x patch can never move `latest` back to the old verifier. Any other ref fails the build job before anything is packed. A push runs the `publish.yml` on the pushed branch, which is why this branch carries its own copy of the rule; `tests/publishWorkflow.test.ts` runs that step against each case.
+- On `release/1.x` (the 1.x maintenance line), publishes go to the `legacy-1` dist-tag whatever the version string, and the workflow refuses a version whose major is not 1, so a 1.x patch can never move `latest` back to the old verifier. Any other ref fails the build job before anything is packed. A push runs the `publish.yml` on the pushed branch, which is why `release/1.x` carries its own copy of the rule; `tests/publishWorkflow.test.ts` runs that step against each case.
 
 Auth uses npm's [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) via OIDC — no long-lived `NPM_TOKEN` secret. The trust relationship is configured once on the npm side (package → Settings → Trusted Publishers → GitHub Actions) pointing at `OpenThinkAi/stamp-cli` and the `publish.yml` workflow. Only the workflow's `publish` job holds `id-token: write`, and its `npm publish` exchanges a short-lived OIDC token at publish time. That job runs no dependency code: a separate `build` job (`contents: read`, `npm ci --ignore-scripts`) builds and packs the tarball and hands it over as an artifact, and a `tag` job (`contents: write`) pushes the release tag. Keep it that way when editing `publish.yml` — `tests/publishWorkflow.test.ts` pins the layout. `--provenance` attaches an SLSA build attestation to the published tarball; anyone can verify with `npm audit signatures`.
 
-Current state: we are pre-1.0. Breaking changes are allowed between minor versions.
+The 1.x line follows SemVer: no breaking changes within it.
 
 ## Code of conduct
 
