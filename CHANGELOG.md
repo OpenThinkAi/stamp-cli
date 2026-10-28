@@ -127,6 +127,51 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `server/lib/allowlisted-env.sh`. Tooling that reads repos on the volume as
   a non-`git` user must run as `git` or root.
 
+- **Protected tags can no longer be deleted by push.** A tag pointing into a
+  protected branch's verified history (the tags the pre-receive hook admits)
+  is now refused on `git push origin :refs/tags/<tag>`, like protected
+  branches since AGT-2254. Operators delete such a tag on the server.
+- **Boot strips hook-redirecting config from every repo.** Each boot removes
+  `core.hooksPath`, `include.path` and `includeIf.*.path` from every
+  `/srv/git/*.git/config` (as the git user) and logs each removal, so a
+  value planted by a git foothold can no longer route pushes around the
+  stamp pre-receive. A key that cannot be removed fails the boot.
+- **`pr-opened` broadcasts are bound to the SSH caller.** The payload's
+  author key must be the caller's enrolled stamp signing key; members with
+  no enrolled stamp key are refused with a message to re-enroll through an
+  invite.
+- **Phase B prompts can be signature-verified.** Set
+  `STAMP_PROMPTS_ALLOWED_SIGNERS` to an OpenSSH `allowed_signers` file and
+  the server accepts a prompts-repo tip only if `git verify-commit` finds a
+  signature by a listed key; a refused tip leaves the last verified prompts
+  in place. Boots without it warn that the prompts are trusted unverified.
+- **Server-side retention for peer events and verdict prose.** An hourly
+  sweep in `stamp-workers` drops PR title/body/paths from delivered peer
+  events after an hour and deletes peer events/patches and cached
+  server-side verdicts (reviewer prose) after 30 days
+  (`STAMP_PEER_EVENT_RETENTION_DAYS`, `STAMP_SERVER_VERDICT_RETENTION_DAYS`;
+  `0` keeps).
+- **Invite accept strips the SSH key comment** (user@host) before storing
+  the key, like the `AUTHORIZED_KEYS` seed path. **`stamp users list` shows
+  a member only their own `last_seen_at`.**
+- **`peer-watch.log` no longer keeps other authors' PR text.** Each triage
+  line keeps routing fields and only hashes/lengths of the title, body and
+  changed paths; the log is `0600`, and peer drafts are `0600` in a `0700`
+  dir.
+- **Reviewer endpoints are hashed in attestations.** Provenance in the
+  signed (and mirrored) attestation records the endpoint as
+  `sha256:<16 hex>` of its URL; `STAMP_HASH_PROVENANCE_ENDPOINT=0` restores
+  the URL. The local `state.db` row keeps it.
+- **WebFetch query strings are capped by default.** With no
+  `query_param_max_length` / `query_param_allowlist` on the entry, the
+  decoded query values of a reviewer WebFetch may total at most 64
+  characters.
+- **verify-attestation validates its outputs.** The composite action
+  rejects a `target-branch` that is not a plain branch name (a newline used
+  to be able to inject output keys); its `setup-node` pin is now v7.1.0 and
+  Dependabot covers it. The npm publish job runs in the `npm-publish`
+  environment so the Trusted Publisher can require it (see CONTRIBUTING).
+
 ### Changed
 
 - **Per-repo prompt overrides need a repo grant (security).** The `--org` /
@@ -171,6 +216,17 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   repo, clone, mirror, deploy key or Ruleset. Previously it did all of that
   and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
   and its plan now says how the bootstrap merge will be confirmed.
+
+- **`data_flow.review_endpoints`** (optional): the hosts `stamp review` may
+  send this repo's diffs to. When present, a locally run reviewer whose
+  provider host is not listed (an openai-compatible OpenAI/DeepSeek endpoint,
+  an `ANTHROPIC_BASE_URL` gateway, cloud routing) refuses the review before
+  anything leaves the machine.
+- **`stamp provision` warns about other write-enabled deploy keys** on the
+  mirror, which GitHub's repo-scoped DeployKey bypass would also exempt.
+- **`stamp reviewers fetch` warns on trust-on-first-use from a tag or
+  branch** with no signed manifest or `--expect-prompt-sha`; docs recommend
+  a commit SHA as the ref.
 
 ### Security
 
