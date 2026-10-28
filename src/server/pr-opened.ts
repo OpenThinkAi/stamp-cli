@@ -47,6 +47,7 @@ import {
 } from "../lib/serverDb.js";
 import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
+import { checkPrUrlBinding } from "../lib/prUrlBinding.js";
 
 import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import {
@@ -207,6 +208,16 @@ async function main(): Promise<void> {
         `repo must be <org>/<name> with alphanumeric/dash/dot/underscore only (got ${JSON.stringify(payload.repo)})`,
         4,
       );
+    }
+
+    // AGT-2240: bind pr_url to repo. The listener runs `gh pr diff` /
+    // `gh pr review` against pr_url under the reviewer's own GitHub token,
+    // and authorizes the author against `repo` — so a pr_url pointing at a
+    // different repo would be a confused deputy. Reject at the broker; the
+    // listener repeats the check before calling gh.
+    const binding = checkPrUrlBinding(payload.pr_url, payload.repo);
+    if (!binding.ok) {
+      fail(binding.reason, 4);
     }
 
     // AGT-454 Auth (GitHub-blind broker, pure-crypto):

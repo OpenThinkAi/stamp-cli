@@ -144,6 +144,14 @@ Server verifies `signature` against the repo's manifest at `base_sha`
 (must be a key with `operator` capability), stores the event, fans out
 to subscribed listeners.
 
+`pr_url` is bound to `repo`: it must be a
+`https://github.com/<owner>/<repo>/pull/<n>` URL whose owner/repo equals
+`repo` (case-insensitive). The server rejects a mismatched `pr-opened`, and
+the listener repeats the check on every event before it runs `gh pr diff` or
+`gh pr review`. Without the binding, an operator trusted in repo X could
+point `pr_url` at a PR in repo Y and have the reviewer's agent review and
+post there under the reviewer's own GitHub identity.
+
 **At listener (laptop B — the teammate):**
 
 B has previously run:

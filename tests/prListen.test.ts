@@ -591,7 +591,7 @@ describe("Security: pr_url validation — flag-shaped or empty pr_url skipped", 
     );
 
     assert.ok(
-      stderr.includes("does not match expected"),
+      stderr.includes("is not a https://github.com/"),
       `expected pr_url validation message in stderr, got: ${stderr}`,
     );
     assert.equal(sdkCalled, false, "SDK should NOT be called for flag-shaped pr_url");
@@ -616,10 +616,86 @@ describe("Security: pr_url validation — flag-shaped or empty pr_url skipped", 
     );
 
     assert.ok(
-      stderr.includes("does not match expected"),
+      stderr.includes("is not a https://github.com/"),
       `expected pr_url validation message in stderr, got: ${stderr}`,
     );
     assert.equal(sdkCalled, false, "SDK should NOT be called for empty pr_url");
+  });
+});
+
+// ─── AGT-2240: pr_url must be bound to the authorized repo ──────────
+
+describe("AGT-2240: pr_url bound to payload repo before gh diff/review", () => {
+  async function runOne(event: PeerReviewEvent) {
+    const calls = { claim: 0, sdk: 0, ghDiff: 0, ghReview: 0, operatorVerify: 0 };
+    const baseFetch = makeSuccessHttpFetch();
+    const { result, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: genKeypair(),
+        _fetchForTest: async (url, h, b) => {
+          if (url.endsWith("/peer/claim-seat")) calls.claim++;
+          return baseFetch(url, h, b);
+        },
+        _sdkRunnerForTest: async () => { calls.sdk++; return "body"; },
+        _ghDiffForTest: () => { calls.ghDiff++; return { status: 0, stdout: "diff", stderr: "" }; },
+        _ghReviewForTest: () => { calls.ghReview++; return { status: 0, stderr: "" }; },
+        _peerWatchRulesForTest: null,
+        _appendTripletForTest: () => {},
+        _cwdForTest: "/tmp",
+        _peerReposMapForTest: new Map([["acme/widget", "/tmp/fake-acme-widget"]]),
+        _operatorVerifyForTest: () => { calls.operatorVerify++; return { ok: true as const }; },
+        _eventQueueForTest: [event],
+      }),
+    );
+    return { exitCode: result, stderr, calls };
+  }
+
+  it("skips a pr-opened event whose pr_url points at a different repo (confused deputy)", async () => {
+    const { exitCode, stderr, calls } = await runOne(
+      makeEvent({ payloadOverrides: { pr_url: "https://github.com/victim/secret/pull/7" } }),
+    );
+    assert.equal(exitCode, 0);
+    assert.ok(
+      stderr.includes("points at victim/secret, not the authorized repo"),
+      `expected repo-binding skip in stderr, got: ${stderr}`,
+    );
+    assert.deepEqual(calls, { claim: 0, sdk: 0, ghDiff: 0, ghReview: 0, operatorVerify: 0 });
+  });
+
+  it("skips a pr-opened event whose pr_url is on a non-github.com host", async () => {
+    const { stderr, calls } = await runOne(
+      makeEvent({ payloadOverrides: { pr_url: "https://ghe.evil.example/acme/widget/pull/42" } }),
+    );
+    assert.ok(stderr.includes("is not a https://github.com/"), stderr);
+    assert.equal(calls.ghDiff + calls.ghReview + calls.claim, 0);
+  });
+
+  it("skips a re-review-requested event whose pr_url points at a different repo", async () => {
+    const { stderr, calls } = await runOne({
+      event_type: "re-review-requested",
+      patch_id: "d".repeat(40),
+      actor_fp: "sha256:" + "e".repeat(64),
+      payload: {
+        patch_id: "d".repeat(40),
+        requested_by_fp: "sha256:" + "f".repeat(64),
+        pr_url: "https://github.com/victim/secret/pull/99",
+        repo: "acme/widget",
+        seat: 1,
+      },
+    });
+    assert.ok(stderr.includes("not the authorized repo"), stderr);
+    assert.equal(calls.ghDiff + calls.ghReview + calls.claim + calls.sdk, 0);
+  });
+
+  it("accepts a pr_url whose owner/repo differs from repo only by case", async () => {
+    const { exitCode, stderr, calls } = await runOne(
+      makeEvent({ payloadOverrides: { pr_url: "https://github.com/Acme/Widget/pull/42" } }),
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(calls.ghDiff, 1, `gh pr diff should run; stderr: ${stderr}`);
+    assert.equal(calls.ghReview, 1, `gh pr review should run; stderr: ${stderr}`);
   });
 });
 

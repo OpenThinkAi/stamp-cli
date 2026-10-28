@@ -696,3 +696,61 @@ describe("AGT-431 AC 10: pr_url column — additive migration + boot-safe", () =
     }, "Second openServerDb call should not throw on existing DB");
   });
 });
+
+// ─── AGT-2240: pr_url bound to repo at the broker ────────────────────
+
+describe("AGT-2240: stamp-pr-opened rejects a pr_url outside the payload repo", () => {
+  let harness: Harness;
+  beforeEach(() => {
+    harness = setupHarness();
+    // sshd's ExposeAuthInfo format is `publickey <type> <base64>` — overwrite
+    // the shared harness file so the caller authenticates and the verb
+    // reaches payload validation.
+    writeFileSync(harness.authPath, `publickey ${MEMBER_SSH_LINE}\n`, "utf8");
+  });
+  afterEach(() => harness.cleanup());
+
+  function payload(prUrl: string) {
+    return JSON.stringify({
+      repo: "acme/widget",
+      patch_id: "a".repeat(40),
+      base_sha: "b".repeat(40),
+      head_sha: "c".repeat(40),
+      requested_by_fp: "sha256:" + "d".repeat(64),
+      paths_changed: ["src/x.ts"],
+      title: "t",
+      body: "b",
+      pr_url: prUrl,
+      pubkey: "not-a-key",
+      signature: "not-a-sig",
+    });
+  }
+
+  it("cross-repo pr_url → exit 4, rejected before signature verification", () => {
+    const result = spawnVerb("pr-opened", harness, {
+      stdin: payload("https://github.com/victim/secret/pull/7"),
+      peerReviewsEnabled: true,
+    });
+    assert.equal(result.status, 4, `stderr: ${result.stderr}`);
+    assert.match(result.stderr, /points at victim\/secret, not the authorized repo/);
+  });
+
+  it("non-github.com host → exit 4", () => {
+    const result = spawnVerb("pr-opened", harness, {
+      stdin: payload("https://evil.example/acme/widget/pull/7"),
+      peerReviewsEnabled: true,
+    });
+    assert.equal(result.status, 4, `stderr: ${result.stderr}`);
+    assert.match(result.stderr, /is not a https:\/\/github\.com\//);
+  });
+
+  it("matching pr_url passes the binding check (fails later on auth, not binding)", () => {
+    const result = spawnVerb("pr-opened", harness, {
+      stdin: payload("https://github.com/acme/widget/pull/7"),
+      peerReviewsEnabled: true,
+    });
+    assert.equal(result.status, 4, `stderr: ${result.stderr}`);
+    assert.match(result.stderr, /auth failure/);
+    assert.doesNotMatch(result.stderr, /authorized repo/);
+  });
+});
