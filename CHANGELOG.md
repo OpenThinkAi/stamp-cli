@@ -206,6 +206,15 @@ Read these before deploying this release; details are in the entries below.
   --capabilities` prints one JSON line. The unused `PHASE_B_CACHE_ROOT`
   export is gone (use `DEFAULT_PROMPTS_CACHE_ROOT` from
   `src/server/promptsCachePaths.ts`).
+- **`stamp review` shows the server's warnings on a successful review**
+  (AGT-2278). With a `review_server`, the server's stderr used to be shown
+  only when a review failed, so warnings such as an invalid
+  `MAX_DIFF_BYTES`, `REVIEW_TIMEOUT_MS` or `STAMP_REVIEWER_MODEL` were never
+  seen. Lines starting with `warning:` or `note:` are now printed to stderr
+  as `review_server (<reviewer>): ...`, with terminal escape sequences
+  removed and at most 20 lines / 4 KB per reviewer (a final line says how
+  many more were dropped). Other server stderr stays hidden; failures are
+  reported as before.
 
 ### Security
 
