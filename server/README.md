@@ -720,6 +720,21 @@ the per-deployment env file (`/etc/stamp/env`, which holds the GitHub
 mirror token and is owned `root:git` mode 0640). The wrapper scripts are
 symlinked under `/home/git/git-shell-commands/` at image build time.
 
+`git-shell` only constrains what runs as the login shell. sshd features
+negotiated outside the shell are switched off separately in
+`server/Dockerfile`:
+
+- **Forwarding** (TCP, agent, StreamLocal, X11, tunnels) is disabled.
+- **Subsystems are removed.** Alpine's stock `sshd_config` ships
+  `Subsystem sftp internal-sftp`, and sshd runs a subsystem directly,
+  without going through the login shell. With that line left in, any
+  enrolled key (any role) could open an sftp session as `git`. From there
+  it could write into the bare repos, skipping pre-receive and the review
+  gate, and into the membership DB. The image build deletes every
+  `Subsystem` line and fails if one survives. So `sftp git@<host>` and
+  `ssh -s git@<host> sftp` get "subsystem request failed", and
+  `scripts/docker-boot-smoke.sh` checks this on every boot-relevant merge.
+
 For container-level diagnostics — log inspection, manual hook refresh,
 disk usage — use your platform's web console or `<platform> exec`.
 

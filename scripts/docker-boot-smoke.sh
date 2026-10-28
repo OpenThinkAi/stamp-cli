@@ -140,6 +140,60 @@ if ! docker exec "$CONTAINER_NAME" su -s /bin/sh git -c "env -i PATH=/usr/local/
 fi
 echo "docker-boot-smoke: hook sees STAMP_FORBID_AI_ATTRIBUTION via /etc/stamp/env ✓"
 
+# AGT-2271: the sftp subsystem must be gone. A subsystem request is not
+# routed through the login shell, so with Alpine's stock `Subsystem sftp`
+# line any enrolled key got a file session as the git user — bypassing
+# git-shell, pre-receive and the review gate. Drive real SSH sessions from
+# inside the container to its own sshd (no published port, so concurrent
+# smoke runs can't clash): a throwaway key goes into the git user's
+# AuthorizedKeysFile fallback, then
+#   - positive controls: a git-shell-commands verb, git push and git clone
+#     over SSH all still work (so the refusal below isn't just "auth broke");
+#   - the assertion: an sftp session is refused with sshd's
+#     "subsystem request failed", via both `sftp` and `ssh -s … sftp`.
+echo "docker-boot-smoke: asserting the sftp subsystem is refused while git + git-shell-commands still work…"
+sftp_probe_script='set -e
+k=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N "" -f "$k/id" >/dev/null
+cat "$k/id.pub" > /home/git/.ssh/authorized_keys
+chown git:git /home/git/.ssh/authorized_keys
+chmod 0600 /home/git/.ssh/authorized_keys
+SSH_OPTS="-i $k/id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+export GIT_SSH_COMMAND="ssh $SSH_OPTS"
+
+out=$(ssh $SSH_OPTS git@127.0.0.1 list-stamp-repos) || { echo "git-shell-commands verb (list-stamp-repos) failed over SSH" >&2; exit 1; }
+
+su -s /bin/sh git -c "git init -q --bare -b main /srv/git/sftp-smoke.git"
+w="$k/w"
+git init -q -b main "$w"
+git -C "$w" -c user.email=smoke@example.invalid -c user.name=smoke commit -q --allow-empty -m smoke
+git -C "$w" push -q git@127.0.0.1:/srv/git/sftp-smoke.git main || { echo "git push over SSH failed" >&2; exit 1; }
+git clone -q git@127.0.0.1:/srv/git/sftp-smoke.git "$k/c" || { echo "git clone over SSH failed" >&2; exit 1; }
+[ "$(git -C "$k/c" rev-parse HEAD)" = "$(git -C "$w" rev-parse HEAD)" ] || { echo "cloned HEAD does not match pushed HEAD" >&2; exit 1; }
+
+if echo pwd | sftp $SSH_OPTS -b - git@127.0.0.1 >"$k/sftp.out" 2>&1; then
+  echo "sftp session OPENED as git — the sftp subsystem bypasses git-shell:" >&2
+  cat "$k/sftp.out" >&2
+  exit 1
+fi
+grep -qi "subsystem request failed" "$k/sftp.out" || { echo "sftp failed, but not with a subsystem refusal:" >&2; cat "$k/sftp.out" >&2; exit 1; }
+
+if ssh $SSH_OPTS -s git@127.0.0.1 sftp </dev/null >"$k/ssh-s.out" 2>&1; then
+  echo "ssh -s sftp was accepted:" >&2
+  cat "$k/ssh-s.out" >&2
+  exit 1
+fi
+grep -qi "subsystem request failed" "$k/ssh-s.out" || { echo "ssh -s sftp failed, but not with a subsystem refusal:" >&2; cat "$k/ssh-s.out" >&2; exit 1; }
+
+rm -rf /srv/git/sftp-smoke.git "$k"
+: > /home/git/.ssh/authorized_keys
+'
+if ! docker exec "$CONTAINER_NAME" sh -c "$sftp_probe_script"; then
+  echo "error: sftp-subsystem assertion failed (AGT-2271) — see above." >&2
+  exit 1
+fi
+echo "docker-boot-smoke: sftp refused; git push/clone + git-shell-commands work ✓"
+
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"
 exit 0

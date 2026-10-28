@@ -144,6 +144,28 @@ RUN { \
  && mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config \
  && chmod 0644 /etc/ssh/sshd_config
 
+# Strip every `Subsystem` directive (AGT-2271). Alpine's stock sshd_config
+# ships `Subsystem sftp ...`, and a subsystem request is NOT routed through
+# the user's login shell: sshd runs the subsystem directly (internal-sftp
+# runs in-process), so git-shell never sees it. With the line present, any
+# enrolled key — any role — opens an sftp session as the git user and can
+# write straight into the bare repos (refs/objects, skipping pre-receive and
+# the whole review gate) and into the membership DB (root:git 0660). Nothing
+# in stamp's workflow uses sftp/scp-over-sftp; pushers only run git and the
+# git-shell-commands verbs. The prepend trick above can't disable a
+# subsystem (there is no "Subsystem none"), so we delete the lines instead —
+# from the main config and any drop-in under sshd_config.d. Keywords are
+# case-insensitive in sshd_config, hence grep -i. The final grep fails the
+# build if a Subsystem line survives (e.g. a future base image moves it).
+RUN for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*; do \
+      [ -f "$f" ] || continue; \
+      grep -viE '^[[:space:]]*Subsystem([[:space:]]|$)' "$f" > "$f.new" || true; \
+      cat "$f.new" > "$f"; rm -f "$f.new"; \
+    done \
+ && if grep -rqiE '^[[:space:]]*Subsystem([[:space:]]|$)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null; then \
+      echo 'error: a Subsystem directive survived the strip (AGT-2271)' >&2; exit 1; \
+    fi
+
 # Bake GitHub.com's SSH host keys into the system-wide known_hosts so the
 # post-receive mirror-push leg can verify the destination without TOFU when
 # pushing as a deploy-key (SSH transport). Without this, the first SSH push
