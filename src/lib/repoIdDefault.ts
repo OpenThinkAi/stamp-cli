@@ -40,13 +40,13 @@ export type RepoIdDefault =
  * Note for a repo left without `repo_id` (same advice `stamp review`
  * prints for an unbound repo).
  */
-export function unboundRepoNote(reason: string, candidate: string | null): string {
+function unboundRepoNote(reason: string, candidate: string | null): string {
   const add = candidate
     ? `Add \`${REPO_ID_CONFIG_KEY}: ${candidate}\``
     : `Add \`${REPO_ID_CONFIG_KEY}: <org>/<repo>\` (the id this repo's prompts live under on the review server)`;
   return (
     `note: .stamp/config.yml was left without ${REPO_ID_CONFIG_KEY}, so verifiers do not bind ` +
-    `server-signed approvals to this repo: ${reason}. ${add} as an admin-signed .stamp/ change ` +
+    `server-signed approvals to this repo: ${reason}.\n  ${add} as an admin-signed .stamp/ change ` +
     `once the review server signs ${REPO_ID_CONFIG_KEY} (AGT-2272) to refuse approvals minted for another repo.`
   );
 }
@@ -108,8 +108,9 @@ export function decideRepoIdDefault(args: {
       note: unboundRepoNote("no stamp server to ask whether it signs repo_id", candidate.repoId),
     };
   }
-  const probe = probeServerCapabilities(args.target);
   const where = describeProbeTarget(args.target);
+  console.error(`asking the stamp server at ${where} whether it signs repo_id into approvals…`);
+  const probe = probeServerCapabilities(args.target);
   if (!probe.ok) {
     return {
       kind: "skip",

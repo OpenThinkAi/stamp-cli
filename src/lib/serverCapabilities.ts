@@ -44,8 +44,6 @@ export type CapabilityProbeResult =
 
 export type CapabilityProbe = (target: CapabilityProbeTarget) => CapabilityProbeResult;
 
-const NONE: ServerCapabilities = { approvalRepoId: false };
-
 /**
  * Parse the verb's stdout. Accepts exactly one JSON object (surrounding
  * whitespace allowed); anything else is `null`. Unknown fields are
@@ -106,11 +104,6 @@ export function probeServerCapabilities(target: CapabilityProbeTarget): Capabili
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
-}
-
-/** Capabilities, or none when the probe failed. */
-export function capabilitiesOrNone(r: CapabilityProbeResult): ServerCapabilities {
-  return r.ok ? r.capabilities : NONE;
 }
 
 /** Test seam: replace the probe. Call the returned restore fn in a

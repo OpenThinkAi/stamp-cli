@@ -84,9 +84,10 @@ export interface BootstrapOptions {
   /**
    * The stamp server this repo lives on, for the AGT-2276 capability
    * probe that decides whether to declare `repo_id:`. `stamp provision`
-   * passes the server it just provisioned on. When unset, bootstrap asks
-   * the target branch's `review_server` if it has one, else the server
-   * the `origin` remote points at (a stamp-server clone URL).
+   * passes the server it just provisioned on. The target branch's
+   * `review_server`, when set, is asked instead (it signs the approvals);
+   * with neither, bootstrap asks the server the `origin` remote points at
+   * (a stamp-server clone URL). See `resolveBootstrapProbeTarget`.
    */
   server?: CapabilityProbeTarget;
 }
@@ -526,7 +527,7 @@ function reportRepoIdDecision(d: RepoIdDefault): void {
   if (d.kind === "write") {
     console.log(`\nThe stamp server signs repo_id into approvals; declaring repo_id: ${d.repoId}`);
   } else if (d.kind === "skip") {
-    console.log(`\n${d.note}`);
+    console.error(`\n${d.note}`);
   }
 }
 
