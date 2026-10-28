@@ -104,15 +104,37 @@ jobs:
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
-          # Derive the npm dist-tag from the version string.
+          # Derive the npm dist-tag from the branch, then the version string.
+          #
+          # Only main may publish to 'latest' (oaudit AGT-2236). A maintenance
+          # line `release/<N>.x` publishes to `legacy-<N>` — the tag the
+          # dist-tag policy in CONTRIBUTING.md reserves for major N — whatever
+          # the version string looks like, so a 1.x patch can never move
+          # 'latest' (or a shared prerelease tag like 'rc') back to the old
+          # verifier. Any other ref fails closed, and a release line may only
+          # publish versions of its own major.
+          #
+          # On main:
           # - bare X.Y.Z → latest
           # - X.Y.Z-alpha.N → alpha (and likewise beta, rc, or any other suffix
           #   label) so prerelease versions do NOT clobber the 'latest' tag
-          if [[ "$VERSION" == *-* ]]; then
-            DIST_TAG="${VERSION#*-}"
-            DIST_TAG="${DIST_TAG%%.*}"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            if [[ "$VERSION" == *-* ]]; then
+              DIST_TAG="${VERSION#*-}"
+              DIST_TAG="${DIST_TAG%%.*}"
+            else
+              DIST_TAG="latest"
+            fi
+          elif [[ "$GITHUB_REF" =~ ^refs/heads/release/([0-9]+)\.x$ ]]; then
+            LINE_MAJOR="${BASH_REMATCH[1]}"
+            if [ "${VERSION%%.*}" != "$LINE_MAJOR" ]; then
+              echo "refusing to publish $VERSION from $GITHUB_REF: not a $LINE_MAJOR.x version" >&2
+              exit 1
+            fi
+            DIST_TAG="legacy-$LINE_MAJOR"
           else
-            DIST_TAG="latest"
+            echo "refusing to publish from $GITHUB_REF: only main and release/<N>.x publish" >&2
+            exit 1
           fi
           # Heredoc form so a newline in any value can't terminate the
           # output-key parser early and inject additional keys. The

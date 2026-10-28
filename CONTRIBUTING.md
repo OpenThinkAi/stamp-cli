@@ -139,6 +139,15 @@ resolve to the prior major until GA.
   `npm i @openthink/stamp@legacy-1` without typing a version. Currently:
   `legacy-1` → `1.10.0`.
 
+Only `main` publishes to `latest` (or to a prerelease label). The publish
+workflow derives the tag from the branch first: a push to a maintenance line
+`release/<N>.x` publishes to `legacy-<N>` whatever the version string, and
+refuses a version whose major is not N, so a 1.x patch can never move
+`latest` back to the old verifier. Any other ref fails the build job before
+anything is packed. `tests/publishWorkflow.test.ts` runs that step against
+each case. A push runs the `publish.yml` on the pushed branch, so a release
+line only gets this rule once its own copy of the workflow carries it.
+
 ### Cutting a new major version (runbook)
 
 1. **Draft the CHANGELOG.md entry first** — schema bumps, removed features,

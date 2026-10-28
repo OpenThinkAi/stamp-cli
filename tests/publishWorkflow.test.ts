@@ -8,11 +8,15 @@
  *   - only the publish job holds `id-token: write`, only the tag job holds
  *     `contents: write`, and the build job is read-only;
  *   - the build checkout does not persist the GITHUB_TOKEN;
- *   - every install uses --ignore-scripts.
+ *   - every install uses --ignore-scripts;
+ *   - only main publishes to `latest`: a `release/<N>.x` maintenance line
+ *     publishes to `legacy-<N>` and any other ref fails closed (AGT-2236).
  */
 
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { parse } from "yaml";
@@ -27,6 +31,7 @@ const WORKFLOW_PATH = path.resolve(
 
 interface Step {
   name?: string;
+  id?: string;
   uses?: string;
   run?: string;
   with?: Record<string, unknown>;
@@ -149,5 +154,67 @@ describe(".github/workflows/publish.yml", () => {
     for (const [name, job] of Object.entries(jobs)) {
       assert.ok(!/\$\{\{/.test(runText(job)), `job ${name} interpolates an expression into bash`);
     }
+  });
+});
+
+/**
+ * Runs the build job's `read target version` step as a real bash script
+ * against a scratch package.json, with GITHUB_REF set the way the runner
+ * sets it on a push. Returns the exit status and the parsed dist_tag output.
+ */
+function runVersionStep(ref: string, version: string): { status: number | null; distTag?: string; stderr: string } {
+  const step = jobs.build.steps.find((s) => s.id === "version");
+  assert.ok(step?.run, "build job has no `version` step");
+  const dir = mkdtempSync(path.join(tmpdir(), "stamp-publish-wf-"));
+  try {
+    writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "@openthink/stamp", version }));
+    const out = path.join(dir, "github_output");
+    writeFileSync(out, "");
+    const res = spawnSync("bash", ["-e", "-c", step.run], {
+      cwd: dir,
+      env: { PATH: process.env.PATH, GITHUB_REF: ref, GITHUB_OUTPUT: out },
+      encoding: "utf8",
+    });
+    const m = /^dist_tag<<(\S+)\n([\s\S]*?)\n\1$/m.exec(readFileSync(out, "utf8"));
+    return { status: res.status, distTag: m?.[2], stderr: res.stderr };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe("publish.yml dist-tag selection (AGT-2236)", () => {
+  it("keeps main's behaviour: bare versions go to latest, prereleases to their label", () => {
+    assert.deepEqual(runVersionStep("refs/heads/main", "3.7.0").distTag, "latest");
+    assert.deepEqual(runVersionStep("refs/heads/main", "4.0.0-rc.1").distTag, "rc");
+    assert.deepEqual(runVersionStep("refs/heads/main", "4.0.0-alpha.3").distTag, "alpha");
+  });
+
+  it("never tags a release/1.x publish latest: it goes to legacy-1", () => {
+    const r = runVersionStep("refs/heads/release/1.x", "1.11.1");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.distTag, "legacy-1");
+  });
+
+  it("keeps release-line prereleases off the shared prerelease tags", () => {
+    assert.equal(runVersionStep("refs/heads/release/1.x", "1.12.0-rc.1").distTag, "legacy-1");
+  });
+
+  it("refuses a release line publishing another major's version", () => {
+    const r = runVersionStep("refs/heads/release/1.x", "3.7.0");
+    assert.notEqual(r.status, 0);
+    assert.equal(r.distTag, undefined);
+  });
+
+  it("fails closed on any other ref", () => {
+    for (const ref of ["refs/heads/release/1.y", "refs/heads/feature", "refs/tags/v1.0.0", ""]) {
+      const r = runVersionStep(ref, "1.11.1");
+      assert.notEqual(r.status, 0, `ref ${JSON.stringify(ref)} should not publish`);
+      assert.equal(r.distTag, undefined);
+    }
+  });
+
+  it("publishes only from main and the release/1.x line", () => {
+    const raw = parse(readFileSync(WORKFLOW_PATH, "utf8")) as { on: { push: { branches: string[] } } };
+    assert.deepEqual(raw.on.push.branches, ["main", "release/1.x"]);
   });
 });
