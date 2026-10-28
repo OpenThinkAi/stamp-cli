@@ -32,6 +32,7 @@
  */
 
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -464,6 +465,38 @@ describe("AGT-1137: backendProvenance derives the stored record", () => {
   });
 });
 
+/** sha256("http://localhost:8000/v1"), first 16 hex — the AGT-2249 attested form. */
+const LOCAL_QWEN_ENDPOINT_HASH =
+  "sha256:" + createHash("sha256").update("http://localhost:8000/v1").digest("hex").slice(0, 16);
+
+describe("AGT-2249: the attested endpoint is hashed by default", () => {
+  it("hashes the endpoint, and STAMP_HASH_PROVENANCE_ENDPOINT=0 keeps it verbatim", () => {
+    const saved = process.env["STAMP_HASH_PROVENANCE_ENDPOINT"];
+    try {
+      delete process.env["STAMP_HASH_PROVENANCE_ENDPOINT"];
+      const internal = provenanceForAttestation({
+        backend_kind: "local",
+        backend_model: "m",
+        backend_endpoint: "https://llm.corp.internal/v1",
+      });
+      assert.match(internal!.endpoint!, /^sha256:[0-9a-f]{16}$/);
+      assert.doesNotMatch(JSON.stringify(internal), /corp\.internal/);
+      process.env["STAMP_HASH_PROVENANCE_ENDPOINT"] = "0";
+      assert.equal(
+        provenanceForAttestation({
+          backend_kind: "local",
+          backend_model: "m",
+          backend_endpoint: "https://llm.corp.internal/v1",
+        })!.endpoint,
+        "https://llm.corp.internal/v1",
+      );
+    } finally {
+      if (saved === undefined) delete process.env["STAMP_HASH_PROVENANCE_ENDPOINT"];
+      else process.env["STAMP_HASH_PROVENANCE_ENDPOINT"] = saved;
+    }
+  });
+});
+
 describe("AGT-1137: attestation payload compatibility (AC4)", () => {
   it("does not bump the payload schema version", () => {
     // The field is additive and optional, exactly like `mcp_servers_at_init`
@@ -484,7 +517,7 @@ describe("AGT-1137: attestation payload compatibility (AC4)", () => {
     assert.deepEqual(provenanceForAttestation(LOCAL_QWEN), {
       backend: "local",
       model: "qwen3-coder-30b",
-      endpoint: "http://localhost:8000/v1",
+      endpoint: LOCAL_QWEN_ENDPOINT_HASH,
     });
     assert.equal(
       provenanceForAttestation(null),
@@ -516,7 +549,7 @@ describe("AGT-1137: attestation payload compatibility (AC4)", () => {
     assert.deepEqual(parsed.payload.approvals[0]!.provenance, {
       backend: "local",
       model: "qwen3-coder-30b",
-      endpoint: "http://localhost:8000/v1",
+      endpoint: LOCAL_QWEN_ENDPOINT_HASH,
     });
   });
 

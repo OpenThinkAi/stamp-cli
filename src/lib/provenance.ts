@@ -26,6 +26,7 @@
  * against a different one.
  */
 
+import { createHash } from "node:crypto";
 import { LOCAL_DEFAULT_BASE_URL } from "./localReviewClient.js";
 import type { ReviewerBackend } from "./userConfig.js";
 
@@ -207,8 +208,31 @@ export function provenanceForAttestation(p: ReviewProvenance | null):
   return {
     backend: p.backend_kind,
     ...(p.backend_model !== null ? { model: p.backend_model } : {}),
-    ...(p.backend_endpoint !== null ? { endpoint: p.backend_endpoint } : {}),
+    ...(p.backend_endpoint !== null
+      ? { endpoint: attestedEndpoint(p.backend_endpoint) }
+      : {}),
   };
+}
+
+/** Opt-out switch for endpoint hashing in attestations (AGT-2249). */
+export const HASH_PROVENANCE_ENDPOINT_ENV = "STAMP_HASH_PROVENANCE_ENDPOINT";
+
+/**
+ * The endpoint as it goes into the SIGNED attestation (AGT-2249). The
+ * attestation rides the merge commit to the GitHub mirror — often a public
+ * repo, and permanent history — so a verbatim endpoint would publish
+ * internal hostnames (an openai-compatible gateway, a LAN model box, the
+ * stamp-server URL) and which vendor reviewed which code. By default it is
+ * recorded as `sha256:<first 16 hex of sha256(endpoint)>`: still enough to
+ * tell two endpoints apart, or to confirm a known one, without naming it.
+ * Same reasoning, and the same opt-out shape, as STAMP_HASH_MCP_NAMES
+ * (AGT-045): `STAMP_HASH_PROVENANCE_ENDPOINT=0` records it verbatim. The
+ * local `state.db` row always keeps the verbatim endpoint.
+ */
+export function attestedEndpoint(endpoint: string): string {
+  if (process.env[HASH_PROVENANCE_ENDPOINT_ENV] === "0") return endpoint;
+  if (/^sha256:[0-9a-f]{16}$/.test(endpoint)) return endpoint;
+  return `sha256:${createHash("sha256").update(endpoint, "utf8").digest("hex").slice(0, 16)}`;
 }
 
 /**

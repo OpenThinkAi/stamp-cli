@@ -1129,6 +1129,11 @@ required.
 - The signed `Stamp-Payload` trailer carrying approvals, base/head
   SHAs, signer key fingerprint, and a tool-call audit trace (tool
   names + input hashes — not the diff content itself).
+- Each approval's reviewer **provenance**: backend kind and model id, and
+  the endpoint as `sha256:<16 hex>` of its URL rather than the URL itself,
+  so an internal gateway or LAN model host is not published in mirrored
+  history (AGT-2249). `STAMP_HASH_PROVENANCE_ENDPOINT=0` records the URL
+  verbatim; the local `state.db` row always keeps it.
 
 **Disclosure on run.** Two notices fire on stderr:
 

@@ -27,6 +27,7 @@
  */
 
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
@@ -586,10 +587,14 @@ describe("AGT-1137: reviewer provenance reaches the signed attestation", () => {
       const mergeMsg = git(h.repo, ["log", "-1", "--pretty=%B", shaOf(h.repo, "main")]);
       const parsed = parseCommitAttestation(mergeMsg);
       assert.ok(parsed, "merge commit must carry a parseable attestation");
+      // AGT-2249: the mirrored attestation carries a hash of the endpoint,
+      // not the URL itself.
       assert.deepEqual(parsed.payload.approvals[0]?.provenance, {
         backend: "local",
         model: "qwen3-coder-30b",
-        endpoint: "http://localhost:8000/v1",
+        endpoint:
+          "sha256:" +
+          createHash("sha256").update("http://localhost:8000/v1").digest("hex").slice(0, 16),
       });
       assert.doesNotThrow(
         () => runFromRepo(h.repo, () => runVerify(shaOf(h.repo, "main"))),
