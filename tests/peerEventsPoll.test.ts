@@ -171,6 +171,7 @@ function makeFakeRes(): { res: ServerResponse; frames: string[] } {
 // `__injectSseConnectionForTests` injects a fake client into the module-private
 // `sseConnections` map without needing a real HTTP server + auth round-trip.
 import {
+  __getSseConnectionsForTests,
   __injectSseConnectionForTests,
 } from "../src/server/http-server.ts";
 
@@ -579,15 +580,15 @@ describe("peer-events poll worker — tick delivery", () => {
 
   // ─── AGT-2256: delivery bound to the subscriber's current grants ─────
 
-  function makeEndTrackingRes(): { res: ServerResponse; frames: string[]; ended: () => boolean } {
+  function makeEndTrackingRes(): { res: ServerResponse; frames: string[]; ends: () => number } {
     const frames: string[] = [];
-    let ended = false;
+    let ends = 0;
     const res = {
       write: (chunk: string) => { frames.push(chunk); return true; },
-      end: () => { ended = true; },
+      end: () => { ends += 1; },
       on: () => res,
     } as unknown as ServerResponse;
-    return { res, frames, ended: () => ended };
+    return { res, frames, ends: () => ends };
   }
 
   it("a member granted acme/widget gets acme/widget events but not acme/gadget", () => {
@@ -640,6 +641,7 @@ describe("peer-events poll worker — tick delivery", () => {
   it("ends the stream when the subscriber's account was removed", () => {
     const { dbPath } = dbFixture;
     seedPatchAndEvent(dbPath, { patchId: "d-1", repo: "acme/widget" });
+    seedPatchAndEvent(dbPath, { patchId: "d-2", repo: "acme/widget" });
     const userId = insertSubscriber(dbPath, "admin");
     const db = openServerDb({ path: dbPath, skipChmod: true });
     try {
@@ -647,13 +649,14 @@ describe("peer-events poll worker — tick delivery", () => {
     } finally {
       db.close();
     }
-    const { res, frames, ended } = makeEndTrackingRes();
+    const { res, frames, ends } = makeEndTrackingRes();
     __injectSseConnectionForTests("fp-gone", { res, userId, orgs: ["acme"] });
 
     __runPeerEventsPollTickForTests();
 
     assert.equal(frames.length, 0);
-    assert.equal(ended(), true);
+    assert.equal(ends(), 1, "stream ended exactly once even with several rows");
+    assert.equal(__getSseConnectionsForTests().includes("fp-gone"), false);
   });
 
   it("strips the PR body from delivered pr-opened payloads", () => {
@@ -673,5 +676,17 @@ describe("peer-events poll worker — tick delivery", () => {
     };
     assert.equal("body" in parsed.payload, false);
     assert.equal(parsed.payload["title"], "t");
+  });
+
+  it("delivers a row with a malformed repo (no '/') to no one, even an org-wide grant", () => {
+    const { dbPath } = dbFixture;
+    seedPatchAndEvent(dbPath, { patchId: "m-1", repo: "acme" });
+    const userId = insertSubscriber(dbPath, "member", [["acme", "*"]]);
+    const { res, frames } = makeFakeRes();
+    __injectSseConnectionForTests("fp-malformed", { res, userId, orgs: ["acme"] });
+
+    __runPeerEventsPollTickForTests();
+
+    assert.equal(frames.length, 0);
   });
 });

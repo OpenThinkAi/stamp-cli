@@ -33,6 +33,7 @@ import {
   runPrListen,
   buildPeerEventsUrl,
   parseSseStream,
+  sseCommentNotice,
   type PrListenOptions,
 } from "../src/commands/prListen.ts";
 import { Readable } from "node:stream";
@@ -2498,5 +2499,71 @@ describe("SSE transport: socket keepalive and idle-timeout options", () => {
     assert.equal(fakeSocket.keepAliveEnabled, true, "setKeepAlive should be called with enabled=true");
     assert.equal(fakeSocket.keepAliveInitialDelay, 30_000, "setKeepAlive initial delay should be 30000 ms");
     assert.equal(fakeSocket.timeoutMs, 0, "setTimeout(0) should disable the idle timeout");
+  });
+});
+
+// ─── AGT-2256: server-side org binding surfaced to the operator ──────
+
+describe("SSE org binding (AGT-2256) — client surface", () => {
+  it("turns the server's denied-orgs comment into a warning", () => {
+    const msg = sseCommentNotice(": not authorized for orgs other-org,third");
+    assert.ok(msg);
+    assert.match(msg, /^warning: server is not streaming org\(s\) other-org, third/);
+    assert.match(msg, /stamp users grant/);
+  });
+
+  it("ignores connected / heartbeat comments", () => {
+    assert.equal(sseCommentNotice(": connected sha256:abc"), null);
+    assert.equal(sseCommentNotice(": heartbeat"), null);
+  });
+
+  it("parseSseStream writes the denied-orgs warning to stderr and still parses events", async () => {
+    const ev = { event_type: "pr-opened", patch_id: "d".repeat(40), actor_fp: "fp", payload: {} };
+    const wire = `: connected x\n\n: not authorized for orgs other-org\n\ndata: ${JSON.stringify(ev)}\n\n`;
+    const received: PeerReviewEvent[] = [];
+    const { stderr } = await captureStderrAsync(
+      () =>
+        new Promise<void>((resolve) => {
+          const stream = Readable.from([wire]);
+          parseSseStream(stream, (e) => received.push(e));
+          stream.on("end", () => resolve());
+        }),
+    );
+    assert.equal(received.length, 1);
+    assert.match(stderr, /warning: server is not streaming org\(s\) other-org/);
+  });
+
+  it("exits 1 instead of retrying forever when a reconnect gets 403", async () => {
+    const fakeKeypair = genKeypair();
+    let calls = 0;
+    const sleepDelays: number[] = [];
+    const connectSseFactory = async (_attempt: number) => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: true as const,
+          nextEvent: () => Promise.resolve<PeerReviewEvent | null>(null),
+          close: () => {},
+        };
+      }
+      return { ok: false as const, status: 403, reason: "server responded 403: no grant" };
+    };
+    const { result: exitCode, stderr } = await captureStderrAsync(() =>
+      runWithExitCapture({
+        orgs: ["acme"],
+        server: FIXTURE_SERVER,
+        _keypairForTest: fakeKeypair,
+        _fetchForTest: makeSuccessHttpFetch(),
+        _sdkRunnerForTest: async () => "review body",
+        _ghReviewForTest: () => ({ status: 0, stderr: "" }),
+        _cwdForTest: "/tmp",
+        _connectSseForTest: connectSseFactory,
+        _sleepForTest: async (ms) => { sleepDelays.push(ms); },
+        ...bypassOperatorGate(),
+      }),
+    );
+    assert.equal(exitCode, 1, `stderr=${stderr}`);
+    assert.equal(calls, 2, "must not retry after a 403");
+    assert.match(stderr, /SSE reconnect refused — server responded 403: no grant; not retrying/);
   });
 });

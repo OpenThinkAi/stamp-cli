@@ -1330,12 +1330,19 @@ function runPeerEventsPollTick(): void {
           if (!client.orgs.includes(org)) continue;
           const caller = callerFor(client.userId);
           if (caller === null) {
-            // The subscriber's account was removed: end the stream (its
-            // close handler unregisters it) rather than keep streaming.
+            // The subscriber's account was removed: drop it from the
+            // registry now (so later rows this tick skip it) and end the
+            // stream rather than keep streaming.
             logLine("info", `SSE /peer/events: closing fp=${fp}: user no longer enrolled`);
+            sseConnections.delete(fp);
+            clearInterval(client.heartbeat);
+            unregisterListener(fp);
             try { client.res.end(); } catch { /* ignore */ }
             continue;
           }
+          // A malformed repo (no "<org>/<repo>") is delivered to no one —
+          // same fail-closed rule as the in-process path.
+          if (!org || !repoName) continue;
           if (!mayReceiveRepoEvents(db, caller, org, repoName)) continue;
           pushEventToSseClient(fp, event);
         }

@@ -69,7 +69,9 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `stamp pr listen` now gets a 403 until an admin runs
   `stamp users grant <name> --repo <org>/*` (or a specific repo).
   Single-operator servers, where the listener is an owner or admin, need no
-  change.
+  change. `stamp pr listen` now prints a `warning:` naming any `--org` the
+  server dropped for lack of a grant, and exits 1 when a reconnect is refused
+  with 401/403 instead of retrying forever.
 - **`stamp-review` caps `--org` / `--repo` at 100 characters**, the same shape
   `stamp users grant --repo` accepts. The "not granted" error for a per-repo
   override now names the caller instead of a `<your-short-name>` placeholder,
