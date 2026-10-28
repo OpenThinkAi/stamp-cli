@@ -1167,6 +1167,22 @@ data_flow:
   confirmed: true
 ```
 
+**Peer listeners (`stamp pr listen`).** A peer listener reviews *someone
+else's* PR, under its own operator's provider account. It runs unattended,
+so it fails closed: it skips any event unless the PR's repo, at the
+event's `base_sha`, lists the host the listener's LLM endpoint resolves to
+(`api.anthropic.com`, or the host of `ANTHROPIC_BASE_URL`):
+
+```yaml
+data_flow:
+  peer_review_endpoints: [api.anthropic.com]
+```
+
+Committing this list is the repo's consent, and so every author's, to
+peer LLM review at those endpoints. A listener whose model is on its own
+host needs no entry. `require_confirmation` without `confirmed` refuses
+peer review too.
+
 The block is read from the merge-base tree like every other policy field,
 so a feature branch cannot ship its own `confirmed: true` to wave its own
 introduction past the gate. It is purely additive — it does **not** enter

@@ -149,8 +149,8 @@ read](#identity--authentication)).
 `pr_url` is bound to `repo`: it must be a
 `https://github.com/<owner>/<repo>/pull/<n>` URL whose owner/repo equals
 `repo` (case-insensitive). The server rejects a mismatched `pr-opened`, and
-the listener repeats the check on every event before it runs `gh pr diff` or
-`gh pr review`. Without the binding, an operator trusted in repo X could
+the listener repeats the check on every event before it fetches the diff or
+posts the review. Without the binding, an operator trusted in repo X could
 point `pr_url` at a PR in repo Y and have the reviewer's agent review and
 post there under the reviewer's own GitHub identity.
 
@@ -167,6 +167,11 @@ $ stamp pr listen \
 
 When the `pr-opened` event arrives:
 
+0. **Data-flow gate (AGT-2248).** Before any LLM call, the listener reads
+   `.stamp/config.yml` at `base_sha` from its mapped clone (after the
+   operator check has bound `base_sha` to the protected branch) and skips
+   the event unless `data_flow.peer_review_endpoints` lists the host its
+   LLM endpoint resolves to. See [Data flow and consent](#data-flow-and-consent).
 1. Listener reads `~/.stamp/peer-watch.md` + composes
    `[rules + event-payload + triage-schema-prompt]` for a Haiku call.
 2. Haiku returns a **triage decision**:
@@ -183,7 +188,11 @@ When the `pr-opened` event arrives:
 6. If claim succeeds (or `claim_seat: always`), listener loads
    `~/.stamp/personal/peers/<prompt>.md`, invokes the Claude Agent
    SDK against the PR diff using that prompt and B's configured model
-   (Sonnet by default).
+   (Sonnet by default). The diff is fetched at exactly
+   `base_sha...head_sha` (`gh api -H 'Accept: application/vnd.github.diff'
+   repos/<o>/<r>/compare/<base>...<head>`), not `gh pr diff`, so it is the
+   diff of the commit the review is pinned to. A `head_sha` GitHub cannot
+   resolve skips the event and releases the seat.
 7. Per `post_mode`:
    - `auto-post`: `gh api --method POST
      repos/<owner>/<repo>/pulls/<n>/reviews -f commit_id=<head_sha>
@@ -333,6 +342,59 @@ stamp pr listen \
 (used by `stamp review`). The personal review prompt becomes the system
 prompt for the SDK call; the diff is the user message. Sonnet by
 default; configurable in `peer-watch.md`.
+
+## Data flow and consent
+
+A listener sends another author's content off-host: the PR title and
+changed paths to the Haiku triage call, and the full diff to the review
+call. Both go under the *listener operator's* provider account, with that
+account's retention settings. `stamp review`'s AGT-415 gate only covered an
+operator reviewing their own branch, so the listener now has its own gate,
+built on the same committed `data_flow` block:
+
+```yaml
+# .stamp/config.yml of the reviewed repo
+data_flow:
+  peer_review_endpoints: [api.anthropic.com]   # hosts, not URLs
+```
+
+- **Keyed on the endpoint, not the backend kind** (as in `stamp review`
+  since AGT-1138). The listener resolves its endpoint from the env its SDK
+  sessions inherit: `ANTHROPIC_BASE_URL`'s host, else `api.anthropic.com`.
+  A loopback endpoint keeps content on the host and needs no entry.
+  Bedrock/Vertex/Foundry routing can't be pinned to a host, so it is
+  always refused.
+- **Fail closed.** The listener runs unattended and cannot prompt. A
+  missing block or list, a host that isn't listed, an unreadable config at
+  `base_sha`, or `require_confirmation` without `confirmed` all skip the
+  event before triage. Nothing is sent.
+- **Read at `base_sha`**, which the operator check has already bound to
+  the protected branch, so a feature branch cannot grant itself consent.
+- **Disclosure.** Each event that passes prints a per-event off-host marker
+  and the repo's `data_flow.disclosure` (both silenced by
+  `STAMP_SUPPRESS_LLM_NOTICE=1`). A listener with an off-host endpoint
+  also prints the `STAMP_ANTHROPIC_NO_RETAIN` no-op warning at startup.
+
+**Whose consent.** The content belongs to the PR author, not to the
+listener operator. The decision is that the *repo's* committed policy
+stands in for the author's consent; there is no per-PR author flag. The
+reasons:
+
+- The author is verified as an operator of that repo at `base_sha`, and
+  the list lands through stamp review. Authors therefore know, from a
+  committed file, every endpoint a peer listener may send their PR to, and
+  can block it in review.
+- A per-event flag (e.g. `stamp pr open --peer-llm-ok`) would be one more
+  author-asserted field in a payload the GitHub-blind server relays. It
+  would only add a weaker channel beside the committed one.
+- An author who wants no peer LLM review of a given change can simply not
+  broadcast it. `stamp pr open` is an explicit request for peer review.
+
+What the list doesn't control is *which account* at a listed endpoint
+receives the content, or that account's retention settings. Those are
+the listener operator's responsibility. Teams that need ZDR must arrange
+it for every operator who runs a listener, or list only a gateway host
+they control.
 
 ## The triage decision
 

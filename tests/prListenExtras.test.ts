@@ -89,7 +89,11 @@ async function runAndCapture(opts: PrListenOptions): Promise<{ stderr: string; e
   };
 
   try {
-    await runPrListen(opts);
+    await runPrListen({
+      _dataFlowAtBaseForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
+      _llmEnvForTest: {},
+      ...opts,
+    });
   } catch (err) {
     if (!(err instanceof Error) || !err.message.startsWith("process.exit")) {
       throw err;

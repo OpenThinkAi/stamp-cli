@@ -988,9 +988,18 @@ admin), and a member with no grants is refused (403).
 
   - Receives pr-opened events over the SSE transport (the sole listen transport)
   - Applies author-exclusion (skips own PRs)
-  - Claims a reviewer seat; fetches the diff via 'gh pr diff'; runs the
-    builtin-default review via the Claude Agent SDK
-  - Posts the result via 'gh pr review --comment'
+  - Data-flow gate: reads the PR repo's .stamp/config.yml at base_sha from the
+    mapped clone and skips the event, before any LLM call, unless
+    data_flow.peer_review_endpoints lists this listener's LLM endpoint host
+    (api.anthropic.com, or the host of ANTHROPIC_BASE_URL); an armed
+    require_confirmation must also be confirmed. A model on this host
+    (loopback ANTHROPIC_BASE_URL) needs no entry. Unattended, so it never
+    prompts: no consent, no egress.
+  - Triages the title + changed paths (Haiku), claims a reviewer seat,
+    fetches the diff at base_sha...head_sha via the GitHub compare API
+    ('gh api .../compare/<base>...<head>'), runs the review via the Claude
+    Agent SDK; an unresolvable head_sha skips the event
+  - Posts the result via 'gh api .../pulls/<n>/reviews' pinned to head_sha
   - Sends a heartbeat every 60 s to keep the seat alive (seat heartbeat; the SSE stream uses TCP keepalive to keep the socket open)
 
 Default mode (session-hosted): stamp pr listen requires an active Claude Code

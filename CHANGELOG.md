@@ -63,6 +63,29 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   regular entries), as well as absolute and `..` paths, then extracts from a
   private copy of the tarball. The post-extraction scan stays as a second
   layer and now also refuses special files and multiply-linked files.
+- **`stamp pr listen` honours the reviewed repo's `data_flow` consent before
+  any LLM call.** The listener sent another author's PR title and changed
+  paths to a Haiku triage call and the full diff to a review call, under the
+  listener operator's provider account, without checking the repo's
+  committed `data_flow` block the way `stamp review` does. It now reads
+  `.stamp/config.yml` at the event's `base_sha` from the mapped clone and
+  skips the event, before triage, unless a new
+  `data_flow.peer_review_endpoints` list names the host its LLM endpoint
+  resolves to (`api.anthropic.com` by default, or the host of
+  `ANTHROPIC_BASE_URL`). An armed `require_confirmation` without `confirmed`
+  also refuses. The listener is unattended, so it fails closed instead of
+  prompting. A loopback endpoint needs no entry, and Bedrock/Vertex/Foundry
+  routing can't be tied to a host, so it is always refused. Each event that
+  passes prints an off-host marker plus the repo's `disclosure`. The diff is
+  now fetched at exactly `base_sha...head_sha` through the GitHub compare
+  API instead of `gh pr diff`, so the review posted against `head_sha`
+  covers that commit even if the author pushes again. A `head_sha` GitHub
+  can't resolve refuses the review and releases the seat.
+  **Upgrade note:** listeners skip every event until the repo opts in. To
+  allow peer LLM review, land
+  `data_flow: { peer_review_endpoints: [api.anthropic.com] }` (or your
+  gateway's host) in `.stamp/config.yml` through stamp review. Older stamp
+  versions ignore the new key.
 
 ### Changed
 

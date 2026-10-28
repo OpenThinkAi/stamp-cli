@@ -98,6 +98,10 @@ async function runWithExitCapture(opts: PrListenOptions): Promise<number> {
       CLAUDECODE: "1",
       CLAUDE_CODE_SESSION_ID: "deadbeef-cafe-babe-abcd-000000000000",
     },
+    // AGT-2248: the repo at base_sha consents to the listener's (default
+    // Anthropic) endpoint; tests of the data-flow gate override these.
+    _dataFlowAtBaseForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
+    _llmEnvForTest: {},
     ...opts,
   };
 
@@ -1924,7 +1928,7 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
     );
 
     assert.equal(sdkCalled, false, "review must NOT run when the diff fetch fails");
-    assert.ok(stderr.includes("could not fetch diff (gh)"), `expected gh-diff failure note: ${stderr}`);
+    assert.ok(stderr.includes("could not fetch diff at base...head (gh)"), `expected gh-diff failure note: ${stderr}`);
     assert.ok(httpCalls.some((u) => u.endsWith("/peer/claim-seat")), "seat should have been claimed first");
     assert.ok(httpCalls.some((u) => u.endsWith("/peer/release-seat")), "seat should be released after the diff fetch fails");
   });
@@ -1956,7 +1960,7 @@ describe("listener: fetches the diff via gh after claiming the seat", () => {
     );
 
     assert.equal(sdkCalled, false, "review must NOT run on an empty diff");
-    assert.ok(stderr.includes("could not fetch diff (gh)"), `expected gh-diff failure note: ${stderr}`);
+    assert.ok(stderr.includes("could not fetch diff at base...head (gh)"), `expected gh-diff failure note: ${stderr}`);
     assert.ok(httpCalls.some((u) => u.endsWith("/peer/release-seat")), "seat should be released on empty diff");
   });
 });

@@ -208,6 +208,10 @@ async function runListener(
     },
     _setIntervalForTest: () => setTimeout(() => {}, 0) as unknown as ReturnType<typeof setInterval>,
     _cwdForTest: "/tmp",
+    // AGT-2248: the repo at base_sha consents to the listener's (default
+    // Anthropic) endpoint; tests of the data-flow gate override these.
+    _dataFlowAtBaseForTest: () => ({ peer_review_endpoints: ["api.anthropic.com"] }),
+    _llmEnvForTest: {},
     ...extra,
   };
 
