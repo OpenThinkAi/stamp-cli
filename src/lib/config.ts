@@ -416,8 +416,9 @@ export interface DataFlowConfig {
    * the full diff to a review call, under the listener operator's own
    * provider account. Because it runs unattended it cannot prompt, so it
    * fails closed: it refuses any event whose repo does not list the
-   * listener's resolved endpoint host here (read at the event's
-   * `base_sha`, like every other policy field).
+   * listener's resolved endpoint host here, read at both the event's
+   * `base_sha` and the protected-branch tip (so withdrawing consent on the
+   * protected branch sticks even if an author cites an older base).
    *
    * Entries are lowercase `host` or `host:port` values (e.g.
    * `api.anthropic.com`). Absent or empty means no peer listener may send

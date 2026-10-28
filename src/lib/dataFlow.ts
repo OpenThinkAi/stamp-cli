@@ -198,7 +198,9 @@ export function resolvePeerLlmEndpoint(
 /**
  * Decide whether the listener may send a peer PR's content (title + paths
  * to triage, the full diff to review) to `endpoint`, given the target
- * repo's `data_flow` block read at the event's `base_sha`.
+ * repo's `data_flow` block. The listener calls it for the block at the
+ * event's `base_sha` and again for the block at the protected tip; both
+ * must pass.
  *
  * Fail-closed, because the listener is unattended and cannot prompt:
  *   - loopback endpoint → allowed; nothing leaves this host (same carve-out
@@ -220,8 +222,8 @@ export function checkPeerDataFlow(
     return {
       ok: false,
       reason:
-        `the repo's data_flow.require_confirmation is set but data_flow.confirmed is not true ` +
-        `at base_sha; peer content is not sent off-host until an operator commits the confirmation`,
+        `the repo's data_flow.require_confirmation is set but data_flow.confirmed is not true; ` +
+        `peer content is not sent off-host until an operator commits the confirmation`,
     };
   }
   if (endpoint.host === null) {

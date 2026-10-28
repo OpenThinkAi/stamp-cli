@@ -82,7 +82,9 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   now fetched at exactly `base_sha...head_sha` through the GitHub compare
   API instead of `gh pr diff`, so the review posted against `head_sha`
   covers that commit even if the author pushes again. A `head_sha` GitHub
-  can't resolve refuses the review and releases the seat.
+  can't resolve refuses the review and releases the seat. The failure line
+  now reads `✗ could not fetch diff at base...head (gh): …` (was
+  `could not fetch diff (gh)`).
   **Upgrade note:** listeners skip every event until the repo opts in. To
   allow peer LLM review, land
   `data_flow: { peer_review_endpoints: [api.anthropic.com] }` (or your
