@@ -30,7 +30,7 @@ The fastest path is Railway, but the image runs on any Docker host (Fly, a Linux
    - **Build → Dockerfile Path:** `server/Dockerfile`
    - **Volume:** mount one at `/srv/git` (this persists your bare repos)
    - **Variables:**
-     - `AUTHORIZED_KEYS` — your laptop's SSH pubkey (`cat ~/.ssh/id_ed25519.pub`); newline-delimited list if multiple operators
+     - `AUTHORIZED_KEYS` — your laptop's SSH pubkey (`cat ~/.ssh/id_ed25519.pub`); newline-delimited list if multiple operators. Read once, on first boot, to enroll the first admins; after that, add and remove people with `stamp invites` / `stamp users`
      - `OPERATOR_PUB_KEY` — your stamp signing key (`cat ~/.stamp/keys/ed25519.pub`); generate with `stamp keys generate` if you don't have one
      - `GITHUB_BOT_TOKEN` — *optional*, only if you want GitHub mirroring (PAT with `contents: write` on the mirror repo)
    - **Networking:** add a TCP proxy for container port 22; Railway gives you `<host>:<port>`.
@@ -155,7 +155,7 @@ These run on the post-merge tree before the merge is signed. Non-zero exit block
 
 Anyone else who wants to push needs:
 
-1. Their **SSH** pubkey added to the server's `AUTHORIZED_KEYS` (so they can connect).
+1. Their **SSH** pubkey enrolled on the server with `stamp invites mint` (so they can connect). `AUTHORIZED_KEYS` only seeds the first boot; editing it later enrolls no one. See [`server/README.md`](../server/README.md#onboarding-teammates).
 2. Their **stamp signing** pubkey committed to `.stamp/trusted-keys/` in the repo (so their signed merges verify). They generate it with `stamp keys generate`, then you commit the `.pub` file via the normal stamped review/merge cycle.
 
 ## What's next

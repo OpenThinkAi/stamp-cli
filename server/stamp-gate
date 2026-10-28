@@ -2,10 +2,9 @@
 #
 # stamp-gate — the forced command every SSH session runs (AGT-2265).
 #
-# The AuthorizedKeysCommand resolver emits each enrolled key as
+# The AuthorizedKeysCommand resolver (the only source of SSH access;
+# AuthorizedKeysFile is `none` since AGT-2260) emits each enrolled key as
 #   command="stamp-gate <user-id>",restrict <key>
-# and entrypoint.sh writes AuthorizedKeysFile lines as
-#   command="stamp-gate legacy",restrict <key>
 # so sshd runs this script (through git-shell, the git user's login shell)
 # whatever the client asked for. The client's command is in
 # SSH_ORIGINAL_COMMAND.

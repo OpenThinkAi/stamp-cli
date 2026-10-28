@@ -217,6 +217,30 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `commit_id=<head_sha>` instead of `gh pr review`, which has no commit
   option and attached the review to whatever the PR head was when the post
   landed, including commits pushed after the review started.
+- **`stamp users remove` revokes SSH access for real, including after a
+  restart.** sshd also read `/home/git/.ssh/authorized_keys`, which the
+  entrypoint rewrote from `AUTHORIZED_KEYS` on every boot, and
+  `stamp-seed-users` re-imported every `AUTHORIZED_KEYS` key as admin on
+  every boot, so a removed user came back on the next restart while their
+  key stayed in the env var. sshd_config now sets `AuthorizedKeysFile none`
+  in the prepended hardening block, the entrypoint no longer writes that
+  file (and deletes a stale copy), and the membership DB is the only source
+  of SSH access. `AUTHORIZED_KEYS` now bootstraps only an empty membership
+  DB, once: the seeder records a marker in `users.db` and never imports
+  from the env var again. A new root-only `stamp-break-glass` CLI
+  (`/usr/local/sbin`, `root:root 0700`, not an SSH verb) adds or
+  re-promotes a key from a root shell in the container (`railway ssh`,
+  `docker exec`) for an operator who is locked out. See server/README.md,
+  "Locked out (break-glass)".
+  **Upgrade notes:** on the first boot of the new image, a server whose
+  users table already has rows records the bootstrap as done without
+  importing anything, so every current member keeps access and the env var
+  is ignored from then on. Anyone you removed before upgrading was
+  re-imported by the old seeder on each restart and is in the table now:
+  check `stamp users list` and remove them again. Adding a key to
+  `AUTHORIZED_KEYS` no longer enrolls it; use `stamp invites mint`, or
+  `stamp-break-glass add` as root. The `stamp-gate legacy` binding for
+  `authorized_keys` file lines is gone.
 
 ---
 

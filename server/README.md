@@ -18,8 +18,10 @@ protected branches defined in each repo's committed `.stamp/config.yml`.
 - `/usr/local/bin/list-stamp-repos` — enumerate the live bare repos under
   `/srv/git/`, one `<name>.git` per line (backs `stamp server-repos list`;
   a verb rather than a raw `ls` because the git user's shell is `git-shell`)
-- `/entrypoint.sh` — sets up `authorized_keys` + operator pub key from env,
-  then boots sshd
+- `/usr/local/sbin/stamp-break-glass` — root-only recovery CLI that adds or
+  re-promotes a key in the membership DB (see [Locked out](#locked-out-break-glass))
+- `/entrypoint.sh` — bootstraps the membership DB from `AUTHORIZED_KEYS` on
+  first boot, writes the operator pub key from env, then boots sshd
 
 ## Reviewer prompts
 
@@ -321,12 +323,13 @@ git clone ssh://git@localhost:2222/srv/git/myproject.git
    - Attach a Railway volume to `/srv/git` — this persists your bare repos
      across deployments.
 5. **Configure environment variables** (Settings → Variables):
-   - `AUTHORIZED_KEYS` — newline-delimited list of SSH public keys allowed
-     to connect. Start with your own: `cat ~/.ssh/id_ed25519.pub`. **First-boot
-     bootstrap only:** these get imported into the membership sqlite as
-     `role=admin`; after that, the CLI surface (`stamp invites`, `stamp users`)
-     is authoritative. Adding/removing keys via this env var after the first
-     boot is supported but discouraged — see "Onboarding teammates" below.
+   - `AUTHORIZED_KEYS` — newline-delimited list of SSH public keys for the
+     first admins. Start with your own: `cat ~/.ssh/id_ed25519.pub`. **First-boot
+     bootstrap only:** on a server whose membership DB is empty, these are
+     imported as `role=admin`, once. After that the env var is never read
+     again: adding a key to it does not enroll anyone, and removing one does
+     not revoke anyone. Manage members with `stamp invites` / `stamp users` —
+     see "Onboarding teammates" below.
    - `OPERATOR_PUB_KEY` — the stamp-cli public key that will be seeded as
      the initial trusted signer in each new repo: `cat ~/.stamp/keys/ed25519.pub`.
    - `STAMP_PUBLIC_URL` — required for the invite flow. Set to the
@@ -560,8 +563,12 @@ per-repo signing trust.
 
 ### First-boot bootstrap (admin → owner)
 
-`AUTHORIZED_KEYS` entries are imported on first boot as `role=admin`. To
-get a real `owner` you self-promote once, while no owners exist yet:
+`AUTHORIZED_KEYS` entries are imported on first boot as `role=admin` — only
+into an empty membership DB, and only once. The server records that the
+bootstrap happened (a marker row in `users.db`) and never imports from the
+env var again, so a user you remove stays removed across restarts even if
+their key is still listed there. To get a real `owner` you self-promote
+once, while no owners exist yet:
 
 ```sh
 # As the operator whose SSH key is in AUTHORIZED_KEYS:
@@ -671,7 +678,30 @@ review only the granted `<org>/<repo>` pairs, and per-repo overrides
 apply to them for those pairs. Org and repo names are case-insensitive.
 
 `stamp users` reads/writes the sqlite directly via SSH; no env-var
-shuffle, no service restart.
+shuffle, no service restart. `stamp users remove` takes effect on the next
+connection: the membership DB is the only source of SSH access (sshd reads
+no `authorized_keys` file), and a restart never re-adds a removed user.
+
+### Locked out (break-glass)
+
+Because the membership DB is the only way in, losing every admin/owner key
+— or a missing, empty or unreadable `users.db` — means nobody can connect
+over SSH. Recover from a root shell inside the container, through your
+platform rather than SSH:
+
+```sh
+railway ssh                       # or: docker exec -it <container> sh
+# paste your SSH public key into a file, then:
+stamp-break-glass add --role owner /tmp/me.pub
+stamp-break-glass list            # id, role, source, fingerprint, name
+```
+
+`stamp-break-glass add [--role admin|owner] <pubkey-file | ->` adds each key
+that isn't enrolled (`source=manual`) and sets the role of one that is
+(default `admin`). It never removes anyone. It re-pins `users.db` to
+`root:git 0660` afterwards. The binary is `root:root 0700` in
+`/usr/local/sbin`, refuses any uid but 0, and is not an SSH verb, so it
+can't be reached as `git`.
 
 ## Backup
 
@@ -782,14 +812,13 @@ resolver prints each enrolled key as
 command="stamp-gate <user-id>",restrict ssh-ed25519 AAAA...
 ```
 
-and `entrypoint.sh` writes each `AUTHORIZED_KEYS` line to the legacy
-`AuthorizedKeysFile` as `command="stamp-gate legacy",restrict ...`. sshd
+and sshd reads no other key source (`AuthorizedKeysFile none`), so sshd
 runs `stamp-gate` whatever the client asked for. `restrict` also turns off
 pty allocation and all forwarding for the key. The gate:
 
 1. resolves the caller from `SSH_USER_AUTH` against the membership DB
    (and checks it is the user the line was issued for). A key that isn't
-   enrolled is refused, including one that only appears in the legacy file;
+   enrolled is refused;
 2. parses the client's command (`SSH_ORIGINAL_COMMAND`) with git-shell's
    own quoting rules and refuses anything that isn't a git transport verb
    or an installed stamp verb;
@@ -811,6 +840,12 @@ negotiated outside the shell are switched off separately in
 `server/Dockerfile`:
 
 - **Forwarding** (TCP, agent, StreamLocal, X11, tunnels) is disabled.
+- **No `authorized_keys` files.** `AuthorizedKeysFile none` sits in the
+  prepended (first-match) hardening block, so the membership DB, through
+  `AuthorizedKeysCommand`, is the only source of SSH access. A key that is
+  only in `/home/git/.ssh/authorized_keys` is refused, and the entrypoint
+  deletes any such file an older image left behind. The image build fails
+  if the first `AuthorizedKeysFile` directive is anything else.
 - **Subsystems are removed.** Alpine's stock `sshd_config` ships
   `Subsystem sftp internal-sftp`, and sshd runs a subsystem directly,
   without going through the login shell. With that line left in, any

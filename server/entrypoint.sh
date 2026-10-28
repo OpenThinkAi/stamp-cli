@@ -3,8 +3,11 @@
 # Container entrypoint: populate per-deployment config from env vars, then
 # start sshd.
 #
-#   AUTHORIZED_KEYS   newline-delimited authorized public keys for the git user
-#                     (who you SSH in as to push/pull/create repos)
+#   AUTHORIZED_KEYS   newline-delimited SSH public keys that bootstrap an EMPTY
+#                     users table as admins, once (AGT-2260). After that,
+#                     users.db is the only source of SSH access and is managed
+#                     with `stamp invites` / `stamp users` (or, locked out,
+#                     the root-only stamp-break-glass CLI).
 #   OPERATOR_PUB_KEY  PEM-encoded public key of the operator; will be seeded
 #                     into each new repo as the first trusted signer
 #
@@ -73,26 +76,20 @@ for keytype in ed25519 rsa ecdsa; do
   ssh-keygen -lf "$HOST_KEY_DIR/ssh_host_${keytype}_key.pub" 2>&1 | sed 's/^/  /' >&2
 done
 
-# Every legacy AuthorizedKeysFile line gets the SSH-gate forced command
-# (AGT-2265), so a key sshd matches from this file can't skip the gate.
-. "$(dirname "$0")/lib/gate-authorized-keys.sh"
+# No AuthorizedKeysFile (AGT-2260): sshd_config sets `AuthorizedKeysFile
+# none`, so users.db (via the AuthorizedKeysCommand resolver) is the only
+# source of SSH access and `stamp users remove` revokes a key for real.
+# Earlier images wrote AUTHORIZED_KEYS to /home/git/.ssh/authorized_keys on
+# every boot; sshd no longer reads it, but delete any copy a previous image
+# left on disk so nothing suggests it still grants access.
+rm -f /home/git/.ssh/authorized_keys /home/git/.ssh/authorized_keys2
 if [ -n "$AUTHORIZED_KEYS" ]; then
-  printf '%s\n' "$AUTHORIZED_KEYS" | _gate_authorized_keys > /home/git/.ssh/authorized_keys
-  chmod 600 /home/git/.ssh/authorized_keys
-  chown git:git /home/git/.ssh/authorized_keys
-  # AUTHORIZED_KEYS is deprecated as the ongoing membership source — its
-  # entries get imported into the sqlite users table by stamp-seed-users
-  # below, after which the CLI surface (stamp invites, stamp users) is
-  # authoritative. The env-var path remains supported for first-boot
-  # bootstrap so operators don't lose the existing way to seed an empty
-  # server, but new operators should be onboarded via `stamp invites
-  # mint`.
-  echo "note: AUTHORIZED_KEYS is supported for bootstrap; ongoing user management goes through 'stamp invites mint' and 'stamp users …'. See server/README.md." >&2
+  echo "note: AUTHORIZED_KEYS only bootstraps an empty server (first boot); ongoing user management goes through 'stamp invites mint' and 'stamp users …'. See server/README.md." >&2
 fi
 
 # Membership sqlite — back-end for the AuthorizedKeysCommand resolver
-# (sshd consults this on every connection before falling back to
-# AuthorizedKeysFile) AND the HTTP server's invite-accept endpoint
+# (sshd consults this on every connection; it is the only source of SSH
+# access) AND the HTTP server's invite-accept endpoint
 # (which writes new user rows). The DB lives on the persistent volume
 # so it survives container redeploys.
 #
@@ -113,12 +110,12 @@ fi
 # `readOnly: true` in code, so it can't mutate state even with the
 # write bit set.
 #
-# stamp-seed-users walks AUTHORIZED_KEYS and INSERT-OR-NO-OPs each entry
-# into the users table as role=admin source=env. This runs on EVERY boot
-# (not just the first one) because operators may add or remove keys
-# between deploys; the script is idempotent on the import side. Removal
-# of an env-var line does NOT cascade to a DB delete here — that's a
-# phase-3 operator action.
+# stamp-seed-users bootstraps the users table from AUTHORIZED_KEYS ONCE
+# (AGT-2260): only when the table is empty and no bootstrap marker is
+# recorded, it imports each key as role=admin source=env and records the
+# marker. On a server upgraded with users already present it records the
+# marker without importing. It runs every boot but never re-imports, so a
+# user removed with `stamp users remove` is not resurrected on restart.
 STAMP_STATE_DIR=/srv/git/.stamp-state
 mkdir -p "$STAMP_STATE_DIR"
 chown root:git "$STAMP_STATE_DIR"
@@ -134,10 +131,11 @@ if /usr/local/sbin/stamp-seed-users; then
     chmod 0660 "$STAMP_STATE_DIR/users.db"
   fi
 else
-  # Don't abort the boot. Note the AuthorizedKeysFile is no fallback here:
-  # its lines run the stamp-gate forced command (AGT-2265), which refuses
-  # keys that aren't in users.db.
-  echo "WARNING: stamp-seed-users failed; AuthorizedKeysCommand path may be empty until next boot" >&2
+  # Don't abort the boot: existing members in users.db keep working. There
+  # is no file fallback (AuthorizedKeysFile none) — a server with an empty
+  # or unreadable users.db admits nobody until an operator runs
+  # stamp-break-glass from a root shell in the container.
+  echo "WARNING: stamp-seed-users failed; only keys already in users.db can connect (recovery: stamp-break-glass, see server/README.md)" >&2
 fi
 
 # Review-signing key bootstrap (AGT-327). When ANTHROPIC_API_KEY is
@@ -146,8 +144,8 @@ fi
 # operator cannot forge per-approval signatures. We mint on first boot
 # and reuse on every subsequent boot.
 #
-# Failure of this step IS fatal — unlike stamp-seed-users which has a
-# legacy AuthorizedKeysFile fallback, there's no fallback for a
+# Failure of this step IS fatal — unlike stamp-seed-users (whose failure
+# leaves existing members working), there's no fallback for a
 # missing or wrong-mode review key. The capability either works
 # correctly (with stable identity) or refuses to start. Reviews
 # remain opt-in via ANTHROPIC_API_KEY: with it unset, the bootstrap

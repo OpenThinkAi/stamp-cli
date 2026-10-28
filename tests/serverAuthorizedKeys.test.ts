@@ -11,15 +11,14 @@
  * must handle correctly:
  *
  *   - Known fingerprint  → stdout = ssh_pubkey line, exit 0
- *   - Unknown fingerprint → empty stdout, exit 0 (sshd falls through to
- *                           AuthorizedKeysFile)
+ *   - Unknown fingerprint → empty stdout, exit 0 (key refused; sshd reads
+ *                           no AuthorizedKeysFile since AGT-2260)
  *   - Wrong username     → empty stdout, exit 0 (only `git` is valid)
- *   - Malformed fp       → empty stdout, exit 0 (fail open)
+ *   - Malformed fp       → empty stdout, exit 0 (key refused)
  *
- * Exit 0 in every case is intentional: ANY nonzero exit would make sshd
- * abort the auth attempt outright, locking the operator out if the DB is
- * briefly unavailable during a redeploy. The resolver always degrades to
- * "no match, try the next method."
+ * Exit 0 in every case is intentional: sshd treats empty output as "no
+ * match". With AuthorizedKeysFile none there is no next method, so a key
+ * the DB doesn't know is refused (recovery: stamp-break-glass).
  */
 
 import { strict as assert } from "node:assert";
@@ -141,7 +140,7 @@ describe("stamp-authorized-keys resolver", () => {
       assert.equal(
         r.status,
         0,
-        `resolver should fail open on missing DB; got status=${r.status} stderr=${r.stderr}`,
+        `resolver should exit 0 with no output on missing DB; got status=${r.status} stderr=${r.stderr}`,
       );
       assert.equal(r.stdout, "");
     } finally {

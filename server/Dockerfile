@@ -122,14 +122,14 @@ RUN { \
         'LoginGraceTime 30' \
         'MaxStartups 10:50:50' \
         'MaxSessions 5' \
-        '# Membership resolver: consult the stamp users DB as well as' \
-        '# AuthorizedKeysFile. sshd passes the offered key fingerprint' \
-        '# as %f (SHA256:<base64>); the resolver prints the matching' \
-        '# authorized_keys line on a hit, exits empty on a miss. Every line' \
-        '# it prints (and every AuthorizedKeysFile line entrypoint.sh writes)' \
-        '# carries command="stamp-gate ...",restrict (AGT-2265), so both' \
-        '# paths run the SSH gate. The legacy /home/git/.ssh/authorized_keys' \
-        '# path stays in play until AGT-2260 removes it.' \
+        '# Membership resolver: the stamp users DB is the ONLY source of' \
+        '# SSH access (AGT-2260). AuthorizedKeysFile none turns off the' \
+        '# per-user authorized_keys files, so `stamp users remove` revokes' \
+        '# a key for real. sshd passes the offered key fingerprint as %f' \
+        '# (SHA256:<base64>); the resolver prints the matching line on a' \
+        '# hit, exits empty on a miss. Every line it prints carries' \
+        '# command="stamp-gate <id>",restrict (AGT-2265).' \
+        'AuthorizedKeysFile none' \
         'AuthorizedKeysCommand /usr/local/sbin/stamp-authorized-keys %u %f' \
         'AuthorizedKeysCommandUser git' \
         '# Expose successful auth info (pubkey wire blob) to user sessions' \
@@ -142,7 +142,11 @@ RUN { \
       cat /etc/ssh/sshd_config; \
     } > /etc/ssh/sshd_config.new \
  && mv /etc/ssh/sshd_config.new /etc/ssh/sshd_config \
- && chmod 0644 /etc/ssh/sshd_config
+ && chmod 0644 /etc/ssh/sshd_config \
+ && first=$(grep -iE '^[[:space:]]*AuthorizedKeysFile([[:space:]]|$)' /etc/ssh/sshd_config | head -1 | tr -s ' \t' ' ') \
+ && if [ "$first" != 'AuthorizedKeysFile none' ]; then \
+      echo "error: first AuthorizedKeysFile directive is '$first', expected 'AuthorizedKeysFile none' (AGT-2260)" >&2; exit 1; \
+    fi
 
 # Strip every `Subsystem` directive (AGT-2271). Alpine's stock sshd_config
 # ships `Subsystem sftp ...`, and a subsystem request is NOT routed through
@@ -191,10 +195,19 @@ COPY --from=builder /build/dist/hooks/post-receive.cjs /etc/stamp/post-receive.c
 # the file (0755) and we rely on the image's stock /usr/local/sbin (root:root
 # 0755) for the parent.
 COPY --from=builder /build/dist/server/authorized-keys.cjs /usr/local/sbin/stamp-authorized-keys
-# Boot-time seeder — synchronizes AUTHORIZED_KEYS env var into the
-# membership sqlite. Invoked by entrypoint.sh as root on every container
-# start, before sshd exec.
+# Boot-time seeder — bootstraps an EMPTY membership sqlite from the
+# AUTHORIZED_KEYS env var, once (AGT-2260). Invoked by entrypoint.sh as root
+# on every container start, before sshd exec; after the first bootstrap it
+# never re-imports, so a removed user stays removed.
 COPY --from=builder /build/dist/server/seed-users.cjs /usr/local/sbin/stamp-seed-users
+# Break-glass recovery CLI (AGT-2260). users.db is the only source of SSH
+# access, so if every admin key is lost the operator opens a root shell in
+# the container (railway ssh / docker exec) and runs
+# `stamp-break-glass add --role owner <pubkey-file|->`. root:root 0700 (set
+# below): the git user can neither read nor execute it, and it is NOT
+# symlinked into git-shell-commands or on the stamp-gate verb allowlist, so
+# it is unreachable over SSH. It also refuses any uid but 0.
+COPY --from=builder /build/dist/server/break-glass.cjs /usr/local/sbin/stamp-break-glass
 # Boot-time review-signing-key bootstrap. Invoked by entrypoint.sh as
 # root after stamp-seed-users, before sshd exec. No-ops when
 # ANTHROPIC_API_KEY is unset (review capability disabled). On first
@@ -234,9 +247,9 @@ COPY --from=builder /build/dist/server/purge-trash.cjs /usr/local/bin/purge-tras
 # SSH_USER_AUTH against users.db and refuses role=member (exit 3). A
 # helper, not a verb — deliberately NOT symlinked into git-shell-commands.
 COPY --from=builder /build/dist/server/require-role.cjs /usr/local/sbin/stamp-require-role
-# SSH session gate (AGT-2265). The AuthorizedKeysCommand resolver emits
-# every key as `command="stamp-gate <user-id>",restrict`, and entrypoint.sh
-# writes AuthorizedKeysFile lines the same way, so every session runs the
+# SSH session gate (AGT-2265). The AuthorizedKeysCommand resolver (the only
+# source of SSH access — AuthorizedKeysFile is none) emits every key as
+# `command="stamp-gate <user-id>",restrict`, so every session runs the
 # stamp-gate verb whatever the client asked for. stamp-gate (shell, in
 # git-shell-commands so git-shell will run it as the forced command) calls
 # stamp-gate-check, which resolves the caller, parses SSH_ORIGINAL_COMMAND,
@@ -277,9 +290,6 @@ COPY server/lib/check-prompts-dir.sh /lib/check-prompts-dir.sh
 # (i.e. /lib/inject-sshd-setenv.sh). Must be copied into the image or the
 # entrypoint aborts on first boot when STAMP_SSH_PASS_ENV injection runs (AGT-469).
 COPY server/lib/inject-sshd-setenv.sh /lib/inject-sshd-setenv.sh
-# entrypoint.sh sources this helper to prepend the stamp-gate forced command
-# to every AuthorizedKeysFile line it writes (AGT-2265).
-COPY server/lib/gate-authorized-keys.sh /lib/gate-authorized-keys.sh
 
 # Sudoers fragment that grants the unprivileged git user passwordless
 # invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root
@@ -339,7 +349,9 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/sbin/stamp-prompts-cache-bootstrap \
              /entrypoint.sh \
  && chown root:root /usr/local/sbin/stamp-authorized-keys \
- && chmod 0755     /usr/local/sbin/stamp-authorized-keys
+ && chmod 0755     /usr/local/sbin/stamp-authorized-keys \
+ && chown root:root /usr/local/sbin/stamp-break-glass \
+ && chmod 0700     /usr/local/sbin/stamp-break-glass
 # Only stamp-authorized-keys needs the extra chown root:root + 0755:
 # sshd's AuthorizedKeysCommand validation refuses to load the script if
 # the file or any parent directory is group/other-writable. The other

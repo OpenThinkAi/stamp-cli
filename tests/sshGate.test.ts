@@ -7,7 +7,8 @@
  *      the verb allowlist (kept in lockstep with server/Dockerfile).
  *   2. The access rule: operators and unscoped members everywhere, scoped
  *      members only where a repo's mirror mapping matches a grant.
- *   3. The authorized_keys lines the resolver and entrypoint emit.
+ *   3. The authorized_keys lines the resolver emits (the only source of
+ *      access: AuthorizedKeysFile is none since AGT-2260).
  *   4. stamp-gate-check end to end (tsx, temp users.db, faked
  *      SSH_USER_AUTH) for the identity and refusal paths.
  *
@@ -268,15 +269,16 @@ describe("authorized_keys lines", () => {
     assert.equal(gatedAuthorizedKeysLine(7, `${KEY}\nssh-ed25519 AAAA x`), null);
     assert.equal(gatedAuthorizedKeysLine(0, KEY), null);
   });
-  it("entrypoint's helper gates every AuthorizedKeysFile line", () => {
-    const lib = path.join(ROOT, "server", "lib", "gate-authorized-keys.sh");
-    const input = `\n# comment\n  ${KEY}  \nfrom="10.0.0.1" ${KEY}\n`;
-    const out = execFileSync("sh", ["-c", `. "${lib}"; _gate_authorized_keys`], { input, encoding: "utf8" });
-    assert.equal(
-      out,
-      `command="stamp-gate legacy",restrict ${KEY}\n` +
-        `command="stamp-gate legacy",restrict,from="10.0.0.1" ${KEY}\n`,
+  it("sshd reads no AuthorizedKeysFile: users.db is the only source of access (AGT-2260)", () => {
+    const dockerfile = readFileSync(path.join(ROOT, "server", "Dockerfile"), "utf8");
+    assert.match(dockerfile, /'AuthorizedKeysFile none' \\/);
+    assert.ok(
+      dockerfile.indexOf("'AuthorizedKeysFile none'") < dockerfile.indexOf("cat /etc/ssh/sshd_config;"),
+      "AuthorizedKeysFile none must be in the prepended (first-match) block",
     );
+    const entrypoint = readFileSync(path.join(ROOT, "server", "entrypoint.sh"), "utf8");
+    assert.doesNotMatch(entrypoint, />\s*\/home\/git\/\.ssh\/authorized_keys/);
+    assert.doesNotMatch(entrypoint, /gate-authorized-keys/);
   });
 });
 
@@ -349,7 +351,7 @@ describe("stamp-gate-check", () => {
       const r = h.run(String(h.ids.member), "member", `list-stamp-repos`);
       assert.equal(r.status, 0, r.stderr);
       assert.equal(r.stdout, "list-stamp-repos");
-      const a = h.run("legacy", "admin", `delete-stamp-repo foo --purge`);
+      const a = h.run(String(h.ids.admin), "admin", `delete-stamp-repo foo --purge`);
       assert.equal(a.status, 0, a.stderr);
       assert.equal(a.stdout, `delete-stamp-repo 'foo' '--purge'`);
     } finally {
@@ -360,7 +362,11 @@ describe("stamp-gate-check", () => {
   it("refuses an unenrolled key, a missing identity, and a mismatched user id (exit 1)", () => {
     const h = harness();
     try {
-      assert.equal(h.run("legacy", "stranger", "list-stamp-repos").status, 1);
+      assert.equal(h.run(String(h.ids.admin), "stranger", "list-stamp-repos").status, 1);
+      // The pre-AGT-2260 `legacy` binding (AuthorizedKeysFile lines) is gone.
+      const legacy = h.run("legacy", "admin", "list-stamp-repos");
+      assert.equal(legacy.status, 1);
+      assert.match(legacy.stderr, /usage/);
       const mismatch = h.run(String(h.ids.admin), "member", "list-stamp-repos");
       assert.equal(mismatch.status, 1);
       assert.match(mismatch.stderr, /does not match/);
