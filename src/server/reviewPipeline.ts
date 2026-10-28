@@ -570,13 +570,19 @@ export function runSignApprovalHelper(
         ),
       ),
     );
-    child.on("close", (code) =>
+    child.on("close", (code, signal) =>
       done(() => {
-        const stderr = Buffer.concat(errOut).toString("utf8").trim();
+        // The helper's own lines carry an `error: ` lead; drop it so the
+        // verb doesn't print `error: … error: …`.
+        const stderr = Buffer.concat(errOut)
+          .toString("utf8")
+          .trim()
+          .replace(/^error:\s*/, "");
         if (code !== 0) {
+          const how = code === null ? `was killed by ${signal ?? "a signal"}` : `exited ${code}`;
           reject(
             new SigningKeyUnavailableError(
-              `signing helper exited ${code}${stderr ? `: ${stderr}` : ""}`,
+              `signing helper ${how}${stderr ? `: ${stderr}` : ""}`,
             ),
           );
           return;

@@ -22,6 +22,7 @@ import {
 } from "node:crypto";
 import {
   chmodSync,
+  linkSync,
   lstatSync,
   mkdtempSync,
   readFileSync,
@@ -222,6 +223,21 @@ describe("runSignApproval — helper core", () => {
     assert.match(r.err, /mode 0640/);
   });
 
+  it("refuses a key with a second hard link (exit 1)", () => {
+    linkSync(fx.keyPath, path.join(fx.dir, "planted-link"));
+    const r = run(canonical(approval(fx.fingerprint)));
+    assert.equal(r.code, 1);
+    assert.match(r.err, /2 hard links/);
+    // ...and the legacy re-own never touches it either.
+    const calls: string[] = [];
+    reownLegacyGitOwnedKeyFiles({
+      privateKeyPath: fx.keyPath,
+      gitUid: process.getuid!(),
+      chown: (p) => void calls.push(p),
+    });
+    assert.deepEqual(calls, [fx.pubPath]);
+  });
+
   it("refuses a symlinked key (exit 1)", () => {
     const link = path.join(fx.dir, "link.pem");
     symlinkSync(fx.keyPath, link);
@@ -416,7 +432,9 @@ describe("pipeline signs via the root helper, never by loading the key", () => {
       }),
     );
     await assert.rejects(signer.signApproval(bytes), (e: unknown) =>
-      e instanceof SigningKeyUnavailableError && /exited 1/.test(e.message) && /mode 0644/.test(e.message),
+      e instanceof SigningKeyUnavailableError &&
+      /exited 1: review-signing key/.test(e.message) &&
+      /mode 0644/.test(e.message),
     );
   });
 

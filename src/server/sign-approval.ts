@@ -36,7 +36,11 @@ function readBoundedStdin(cap: number): Buffer {
       n = readSync(0, buf, 0, buf.length, null);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EAGAIN") continue;
+      if (code === "EAGAIN") {
+        // Non-blocking stdin with no data yet: wait briefly, don't spin.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        continue;
+      }
       if (code === "EOF") break;
       throw err;
     }

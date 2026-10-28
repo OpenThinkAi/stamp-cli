@@ -117,6 +117,15 @@ export function assertPrivateKeyPosture(
         `(symlinks are refused). Refusing to load.`,
     );
   }
+  // A second hard link (e.g. one planted inside a repo dir on a host
+  // with fs.protected_hardlinks=0) would let the boot-time repo chown
+  // re-own this inode; refuse rather than trust it.
+  if (st.nlink !== 1) {
+    throw new ReviewSigningKeyError(
+      `review-signing key at ${privateKeyPath} has ${st.nlink} hard links; required exactly 1. ` +
+        `Refusing to load. Remove the extra links (find / -samefile ${privateKeyPath}).`,
+    );
+  }
   const expectedUid = process.getuid?.();
   if (expectedUid !== undefined && st.uid !== expectedUid) {
     throw new ReviewSigningKeyError(
@@ -538,7 +547,8 @@ function mintNewKey(
  * `assertPrivateKeyPosture` refuses anything else — so the bootstrap,
  * running as root, first re-owns files in exactly that legacy state:
  * a regular file (never a symlink — lchown semantics are not relied on,
- * the file is skipped) owned by the git user's uid. Any other foreign
+ * the file is skipped — and never one with extra hard links) owned by
+ * the git user's uid. Any other foreign
  * owner is left alone and fails the boot loudly.
  *
  * Returns the paths it re-owned so the caller can log them. `chown` is
@@ -559,7 +569,7 @@ export function reownLegacyGitOwnedKeyFiles(opts: {
     } catch {
       continue;
     }
-    if (!st.isFile() || st.isSymbolicLink()) continue;
+    if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) continue;
     if (st.uid !== opts.gitUid) continue;
     chown(p, 0, 0);
     reowned.push(p);

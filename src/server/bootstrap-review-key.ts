@@ -117,9 +117,9 @@ function main(): void {
     const gitUid = lookupGitUid();
     if (gitUid !== null) {
       for (const p of reownLegacyGitOwnedKeyFiles({ privateKeyPath, gitUid })) {
-        console.log(
-          `stamp-bootstrap-review-key: re-owned legacy git-owned ${p} to root:root (AGT-2263). ` +
-            `If the git user may have been compromised before this upgrade, rotate the key.`,
+        process.stderr.write(
+          `warning: stamp-bootstrap-review-key: re-owned legacy git-owned ${p} to root:root (AGT-2263). ` +
+            `If the git user may have been compromised before this upgrade, rotate the key.\n`,
         );
       }
     }
