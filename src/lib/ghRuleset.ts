@@ -203,12 +203,10 @@ export function mirrorBranchRulesetPattern(branch: string): string {
  * default branch literally — it keeps the protection pinned if the
  * default is later renamed. Duplicates are dropped; order is stable.
  */
-export function rulesetRefIncludes(
-  mirrorBranches: readonly string[] = [],
-): string[] {
+export function rulesetRefIncludes(mirrorBranches: readonly string[]): string[] {
   const out = ["~DEFAULT_BRANCH"];
   for (const b of mirrorBranches) {
-    if (typeof b !== "string" || b.length === 0) continue;
+    if (b.length === 0) continue;
     const pattern = mirrorBranchRulesetPattern(b);
     if (!out.includes(pattern)) out.push(pattern);
   }
@@ -225,7 +223,7 @@ export function rulesetRefIncludes(
  */
 export function buildRulesetPayload(
   actor: BypassActor,
-  mirrorBranches: readonly string[] = [],
+  mirrorBranches: readonly string[],
 ): unknown {
   return {
     name: "stamp-mirror-only",
@@ -426,7 +424,7 @@ export function applyStampRuleset(
   owner: string,
   repo: string,
   actor: BypassActor,
-  mirrorBranches: readonly string[] = [],
+  mirrorBranches: readonly string[],
 ): ApplyRulesetResult {
   const existing = findExistingStampRuleset(owner, repo);
   if (existing !== null) {

@@ -22,13 +22,12 @@ import {
 } from "../src/lib/ghRuleset.ts";
 import { matchesAnyPattern } from "../src/lib/refPatterns.ts";
 import { computeMirrorProvisionProblems } from "../src/lib/provisionVerify.ts";
-import { readMirrorYmlBranches } from "../src/commands/provision.ts";
+import { readMirrorYmlBranches } from "../src/lib/mirrorYml.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("rulesetRefIncludes", () => {
   it("defaults to the default branch only", () => {
-    assert.deepEqual(rulesetRefIncludes(), ["~DEFAULT_BRANCH"]);
     assert.deepEqual(rulesetRefIncludes([]), ["~DEFAULT_BRANCH"]);
   });
 
@@ -154,6 +153,16 @@ describe("computeMirrorProvisionProblems — branch coverage", () => {
     );
     assert.equal(problems.length, 1);
     assert.match(problems[0]!, /does not cover mirrored branch\(es\) "release\/\*"/);
+  });
+
+  it("fails closed when the Ruleset's conditions couldn't be read", () => {
+    const problems = computeMirrorProvisionProblems(
+      { ownerType: "User", deployKeyId: null, rulesetId: 3, uncoveredBranches: null },
+      MIRROR,
+      "/tmp/clone",
+    );
+    assert.equal(problems.length, 1);
+    assert.match(problems[0]!, /couldn't read the `stamp-mirror-only` Ruleset's target branches/);
   });
 
   it("passes when all are covered", () => {

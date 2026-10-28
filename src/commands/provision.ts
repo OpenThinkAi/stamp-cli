@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { runGit } from "../lib/git.js";
+import { readMirrorYmlBranches } from "../lib/mirrorYml.js";
 import {
   applyStampRuleset,
   checkGhAvailable,
@@ -52,7 +53,10 @@ import {
   type ServerConfig,
 } from "../lib/serverConfig.js";
 import { mergeConfirmationWouldFail } from "../lib/humanMerge.js";
-import { computeMirrorProvisionProblems } from "../lib/provisionVerify.js";
+import {
+  computeMirrorProvisionProblems,
+  type MirrorProvisionState,
+} from "../lib/provisionVerify.js";
 import { runBootstrap } from "./bootstrap.js";
 import { fetchServerPubkey } from "./server.js";
 
@@ -651,7 +655,7 @@ function verifyMirrorProvisioned(
   cloneTarget: string,
 ): void {
   console.log(`Verifying mirror provisioning on ${mirror.owner}/${mirror.repo}`);
-  const state = {
+  const state: MirrorProvisionState = {
     ownerType: lookupRepoOwnerType(mirror.owner, mirror.repo),
     deployKeyId: findDeployKey(
       mirror.owner,
@@ -659,11 +663,15 @@ function verifyMirrorProvisioned(
       STAMP_MIRROR_DEPLOY_KEY_TITLE,
     ),
     rulesetId: findExistingStampRuleset(mirror.owner, mirror.repo),
-    uncoveredBranches: [] as string[],
   };
   if (state.rulesetId !== null) {
-    state.uncoveredBranches =
-      findUncoveredMirrorBranches(mirror, state.rulesetId, readMirrorYmlBranches(cloneTarget)) ?? [];
+    // null (couldn't read the Ruleset's conditions) is reported as a
+    // problem by computeMirrorProvisionProblems — fail closed.
+    state.uncoveredBranches = findUncoveredMirrorBranches(
+      mirror,
+      state.rulesetId,
+      readMirrorYmlBranches(cloneTarget),
+    );
   }
   const problems = computeMirrorProvisionProblems(state, mirror, cloneTarget);
   if (problems.length === 0) {
@@ -1024,30 +1032,6 @@ function printMigrateSuccess(args: {
 }
 
 // ---------- ruleset branch coverage (AGT-2245) ----------
-
-/**
- * The `github.branches` list from `<repoRoot>/.stamp/mirror.yml`, or []
- * when the file is absent or malformed. The post-receive hook
- * (readMirrorConfig) is the strict, canonical parser and reports
- * malformed configs at push time; this reader only feeds the Ruleset's
- * include list, where "no extra branches" safely degrades to the
- * default-branch-only protection stamp has always applied.
- */
-export function readMirrorYmlBranches(repoRoot: string): string[] {
-  const path = join(repoRoot, ".stamp", "mirror.yml");
-  if (!existsSync(path)) return [];
-  try {
-    const parsed = parseYaml(readFileSync(path, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-    const gh = (parsed as Record<string, unknown>)["github"];
-    if (!gh || typeof gh !== "object" || Array.isArray(gh)) return [];
-    const branches = (gh as Record<string, unknown>)["branches"];
-    if (!Array.isArray(branches)) return [];
-    return branches.map(String).filter((b) => b.length > 0);
-  } catch {
-    return [];
-  }
-}
 
 /**
  * Mirrored branches the existing Ruleset doesn't cover, or null when the

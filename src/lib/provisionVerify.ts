@@ -38,9 +38,11 @@ export interface MirrorProvisionState {
    * mirror.yml `branches:` entries the Ruleset's ref_name conditions do
    * not cover (ghRuleset.uncoveredMirrorBranches). Each is a branch the
    * mirror pushes that anyone with write access can also push directly,
-   * bypassing the stamp gate (AGT-2245). Omitted or empty = all covered.
+   * bypassing the stamp gate (AGT-2245). Omitted or empty = all covered;
+   * null = the Ruleset's conditions couldn't be read, which fails
+   * verification (a coverage check that can't run must not pass).
    */
-  uncoveredBranches?: string[];
+  uncoveredBranches?: string[] | null;
 }
 
 /**
@@ -82,6 +84,12 @@ export function computeMirrorProvisionProblems(
       `no \`stamp-mirror-only\` Ruleset exists on ${repo} — the mirror has no ` +
         `GitHub-side enforcement (anyone with write access can push to it directly). ` +
         `Apply it via docs/github-ruleset-setup.md.`,
+    );
+  } else if (state.uncoveredBranches === null) {
+    problems.push(
+      `couldn't read the \`stamp-mirror-only\` Ruleset's target branches on ${repo} ` +
+        `to check them against .stamp/mirror.yml — verify by hand with ` +
+        `\`gh api repos/${repo}/rulesets/${state.rulesetId} --jq .conditions.ref_name\`.`,
     );
   } else if (state.uncoveredBranches && state.uncoveredBranches.length > 0) {
     problems.push(
