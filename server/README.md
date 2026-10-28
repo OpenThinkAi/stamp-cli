@@ -760,10 +760,19 @@ succeeds and the server rejects the push instead.
 When stamp-cli releases new hook code, redeploy the container — the builder
 stage recompiles and the fresh hook bundle lands at `/etc/stamp/pre-receive.cjs`
 and `/etc/stamp/post-receive.cjs`. On container restart, `entrypoint.sh`
-automatically walks `/srv/git/*.git/hooks/` and overwrites each repo's
-`pre-receive` + `post-receive` with the fresh bundle from `/etc/stamp/`. No
-manual step required — Railway's auto-deploy on push triggers the restart,
-and the refresh loop runs before sshd starts accepting connections.
+automatically walks `/srv/git/*.git/hooks/` and replaces each repo's
+`pre-receive` + `post-receive` with the fresh bundle from `/etc/stamp/`
+(`root:root`, mode `0755`). No manual step required — Railway's auto-deploy
+on push triggers the restart, and the refresh runs before sshd or any other
+git-user process starts.
+
+The repos (hooks directory included) are owned by the git user, so the
+refresh treats everything inside them as untrusted: a symlinked repo path is
+skipped, a symlinked or non-directory `hooks/` is replaced with a real
+directory, and each hook is staged in a root-only directory and renamed into
+place — a symlink or hard link at `hooks/pre-receive` is replaced, never
+written through, and root never `chown`s or `chmod`s the final path
+(AGT-2261). The logic lives in `server/lib/refresh-repo-hooks.sh`.
 
 **Break-glass manual refresh** (useful if you need to push a hook update
 without restarting the container, or you're debugging):
@@ -774,14 +783,16 @@ your platform's web console / container exec instead — Railway's
 in-dashboard shell, `fly ssh console`, `docker exec`, etc.:
 
 ```sh
-# Inside the container, as root:
-for r in /srv/git/*.git; do
-  cp /etc/stamp/pre-receive.cjs  "$r/hooks/pre-receive"
-  cp /etc/stamp/post-receive.cjs "$r/hooks/post-receive"
-  chown root:root "$r/hooks/pre-receive" "$r/hooks/post-receive"
-  chmod 0755 "$r/hooks/pre-receive" "$r/hooks/post-receive"
-done
+# Inside the container, as root — the same symlink-safe routine boot runs:
+sh -c '. /lib/refresh-repo-hooks.sh && _refresh_repo_hooks'
 ```
+
+Do not hand-roll this with `cp` + `chown` + `chmod` into `hooks/`: those
+follow a symlink the git user may have planted there. The boot-time run is
+the strongest form (no git-user process can race it); a live run still
+never writes through a link, but a concurrent git session could in
+principle swap `hooks/` between the check and the rename, so prefer a
+restart when you can.
 
 ## SSH access model
 
@@ -891,7 +902,8 @@ in-image workaround under current orchestration:
    host keys to `root:root` mode `0600` in `/srv/git/.ssh-host-keys/`,
    writes `/etc/stamp/operator.pub` as `root:root` mode `0444`, writes
    `/etc/stamp/env` (which holds `GITHUB_BOT_TOKEN`) as `root:git` mode
-   `0640`, and refreshes every per-repo hook to `root:root` mode `0755`.
+   `0640`, and refreshes every per-repo hook to `root:root` mode `0755`
+   without following symlinks planted in the git-owned repo.
    Several of these objects must remain unwritable by the git user
    (which runs the SSH session and the hook process), so whatever sets
    them up has to outrank that user.

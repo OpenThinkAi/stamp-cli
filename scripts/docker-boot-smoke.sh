@@ -31,6 +31,8 @@ REVOKE_CONTAINER="stamp-smoke-revoke-$$"
 REVOKE_KEYS=""
 SIGN_CONTAINER="stamp-smoke-sign-$$"
 SIGN_KEYS=""
+HOOKS_CONTAINER="stamp-smoke-hooks-$$"
+HOOKS_TMP=""
 BOOT_WAIT_SECS="${STAMP_SMOKE_BOOT_WAIT:-10}"
 
 # Files that affect how the image BUILDS or BOOTS. A pure `src/lib/*` change
@@ -74,6 +76,8 @@ cleanup() {
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   docker rm -f "$REVOKE_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$SIGN_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$HOOKS_CONTAINER" >/dev/null 2>&1 || true
+  [ -n "${HOOKS_TMP:-}" ] && rm -rf "$HOOKS_TMP"
   [ -n "${REVOKE_KEYS:-}" ] && rm -rf "$REVOKE_KEYS"
   [ -n "${SIGN_KEYS:-}" ] && rm -rf "$SIGN_KEYS"
   docker rmi "$IMAGE_TAG" >/dev/null 2>&1 || true
@@ -570,6 +574,115 @@ printf '%s\n' "$sign_logs" | grep "stamp-sign-approval: signed reviewer=security
 }
 docker rm -f "$SIGN_CONTAINER" >/dev/null 2>&1 || true
 echo "docker-boot-smoke: review-signing key root:root 0600 across restart; git signs only via the helper; helper refuses non-approvals; not reachable over SSH ✓"
+
+# AGT-2261: the boot-time hook refresh runs as root over git-owned repos and
+# must never follow a symlink the git user planted there. As git, plant
+#   - hooks/pre-receive + hooks/post-receive as symlinks to root-only files,
+#     and (in a second repo) to a root-only directory,
+#   - a whole hooks/ dir as a symlink to a root-only dir,
+#   - a repo path /srv/git/<x>.git as a symlink to a dir outside the volume,
+#   - a symlink at the refresh's staging path,
+# restart, and require: every target untouched (bytes, owner, mode, dir
+# listing), real root:root 0755 hooks byte-identical to /etc/stamp/*.cjs in
+# their place, and a push to the repo still running the stamp pre-receive
+# hook (unsigned main rejected; a fast-forward of an unprotected branch
+# seeded before the hooks went in is accepted).
+echo "docker-boot-smoke: asserting the boot hook refresh never follows planted symlinks (AGT-2261)…"
+HOOKS_TMP=$(mktemp -d)
+cat > "$HOOKS_TMP/plant.sh" <<'SH'
+set -e
+mkdir -m 0700 /root/hs
+printf 'sentinel-pre\n' > /root/hs/pre-target
+printf 'sentinel-post\n' > /root/hs/post-target
+mkdir -m 0700 /root/hs/dir-target /root/hs/repo-target /root/hs/repo-target/hooks /root/hs/linkdir-target
+printf 'marker\n' > /root/hs/dir-target/marker
+chmod 0600 /root/hs/pre-target /root/hs/post-target /root/hs/dir-target/marker
+# Seed a stamp-configured repo as git, before any stamp hook is installed.
+su -s /bin/sh git -c "
+  set -e
+  export HOME=/tmp/hs-home; mkdir -p \$HOME
+  git init -q --bare -b main /srv/git/h1.git
+  git clone -q /srv/git/h1.git \$HOME/w 2>/dev/null
+  cd \$HOME/w
+  git config user.email smoke@example.invalid; git config user.name smoke
+  git checkout -q -b main
+  mkdir -p .stamp
+  printf 'branches:\n  main:\n    required: [security]\nreviewers:\n  security:\n    prompt: x\n' > .stamp/config.yml
+  git add -A; git commit -qm seed; git push -q origin main
+  git push -q origin main:scratch
+  git init -q --bare -b main /srv/git/h2.git
+  git init -q --bare -b main /srv/git/h4.git
+  # The plants — all done by the git user, the foothold being modelled.
+  rm -f /srv/git/h1.git/hooks/pre-receive /srv/git/h1.git/hooks/post-receive
+  ln -s /root/hs/pre-target  /srv/git/h1.git/hooks/pre-receive
+  ln -s /root/hs/post-target /srv/git/h1.git/hooks/post-receive
+  rm -rf /srv/git/h2.git/hooks
+  ln -s /root/hs/dir-target /srv/git/h2.git/hooks
+  ln -s /root/hs/repo-target /srv/git/h3.git
+  ln -s /root/hs/linkdir-target /srv/git/h4.git/hooks/pre-receive
+  ln -s /root/hs/linkdir-target /srv/git/h4.git/hooks/post-receive
+  ln -s /root/hs/dir-target /srv/git/.stamp-hook-staging
+"
+SH
+cat > "$HOOKS_TMP/check.sh" <<'SH'
+set -e
+fail() { echo "$*" >&2; exit 1; }
+want() { [ "$(stat -c '%U:%G %a' "$1")" = "$2" ] || fail "$1 is $(stat -c '%U:%G %a' "$1"), want $2"; }
+[ "$(cat /root/hs/pre-target)" = sentinel-pre ] || fail "refresh wrote through hooks/pre-receive symlink"
+[ "$(cat /root/hs/post-target)" = sentinel-post ] || fail "refresh wrote through hooks/post-receive symlink"
+want /root/hs/pre-target "root:root 600"
+want /root/hs/post-target "root:root 600"
+want /root/hs/dir-target/marker "root:root 600"
+[ "$(ls -A /root/hs/dir-target)" = marker ] || fail "refresh wrote into a symlinked hooks/ dir: $(ls -A /root/hs/dir-target)"
+[ -z "$(ls -A /root/hs/repo-target/hooks)" ] || fail "refresh wrote into a symlinked repo path"
+[ -z "$(ls -A /root/hs/linkdir-target)" ] || fail "refresh moved a hook into the directory a hooks/<name> symlink points at"
+[ -L /srv/git/h3.git ] || fail "symlinked repo path was not left alone"
+[ ! -e /srv/git/.stamp-hook-staging ] && [ ! -L /srv/git/.stamp-hook-staging ] || fail "staging dir left behind"
+for r in h1 h2 h4; do
+  [ ! -L /srv/git/$r.git/hooks ] && [ -d /srv/git/$r.git/hooks ] || fail "$r hooks/ is not a real directory"
+  want /srv/git/$r.git/hooks "git:git 755"
+  for hk in pre-receive post-receive; do
+    f=/srv/git/$r.git/hooks/$hk
+    [ ! -L "$f" ] && [ -f "$f" ] || fail "$f is not a regular file"
+    want "$f" "root:root 755"
+    cmp -s "$f" /etc/stamp/$hk.cjs || fail "$f is not the image bundle"
+  done
+done
+# The installed hooks still run on a normal push.
+su -s /bin/sh git -c "env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hs-home sh -c '
+  set -e
+  cd /tmp/hs-home/w
+  echo x > x; git add -A; git commit -qm unsigned
+  if git push origin HEAD:main 2>push.err; then echo \"unsigned push to main was accepted\" >&2; exit 1; fi
+  grep -q \"stamp-verify: rejecting refs/heads/main\" push.err || { cat push.err >&2; exit 1; }
+  git push -q origin HEAD:scratch || { echo \"push to an unprotected branch failed\" >&2; exit 1; }
+'" || fail "push through the refreshed hooks did not behave"
+SH
+docker run -d --name "$HOOKS_CONTAINER" "$IMAGE_TAG" >/dev/null
+wait_sshd "$HOOKS_CONTAINER"
+docker cp "$HOOKS_TMP/plant.sh" "$HOOKS_CONTAINER:/root/plant.sh" >/dev/null
+docker cp "$HOOKS_TMP/check.sh" "$HOOKS_CONTAINER:/root/check.sh" >/dev/null
+if ! docker exec "$HOOKS_CONTAINER" sh /root/plant.sh; then
+  echo "error: could not plant the hook symlinks (AGT-2261) — see above." >&2
+  exit 1
+fi
+docker restart "$HOOKS_CONTAINER" >/dev/null
+wait_sshd "$HOOKS_CONTAINER"
+if ! docker exec "$HOOKS_CONTAINER" sh /root/check.sh; then
+  echo "error: boot hook refresh followed a planted symlink or left broken hooks (AGT-2261) — see above." >&2
+  docker logs "$HOOKS_CONTAINER" 2>&1 | tail -40 >&2 || true
+  exit 1
+fi
+hooks_logs=$(docker logs "$HOOKS_CONTAINER" 2>&1)
+for want_line in "was a symlink; replacing the link" "is not a real directory; replacing it" "skipping symlinked repo path"; do
+  printf '%s\n' "$hooks_logs" | grep -F "$want_line" >/dev/null || {
+    echo "error: boot log is missing the refresh warning '$want_line' (AGT-2261)." >&2
+    printf '%s\n' "$hooks_logs" | tail -40 >&2
+    exit 1
+  }
+done
+docker rm -f "$HOOKS_CONTAINER" >/dev/null 2>&1 || true
+echo "docker-boot-smoke: hook refresh replaces planted symlinks without touching their targets; refreshed hooks still gate pushes ✓"
 
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"

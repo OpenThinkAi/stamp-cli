@@ -299,6 +299,9 @@ COPY server/lib/check-prompts-dir.sh /lib/check-prompts-dir.sh
 # (i.e. /lib/inject-sshd-setenv.sh). Must be copied into the image or the
 # entrypoint aborts on first boot when STAMP_SSH_PASS_ENV injection runs (AGT-469).
 COPY server/lib/inject-sshd-setenv.sh /lib/inject-sshd-setenv.sh
+# entrypoint.sh sources this via `. "$(dirname "$0")/lib/refresh-repo-hooks.sh"`
+# to refresh per-repo hooks without following planted symlinks (AGT-2261).
+COPY server/lib/refresh-repo-hooks.sh /lib/refresh-repo-hooks.sh
 
 # Sudoers fragment that grants the unprivileged git user passwordless
 # invocation of stamp-ensure-repo-key (and nothing else). 0440 root:root
