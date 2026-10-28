@@ -52,6 +52,10 @@ import { mergeConfirmationWouldFail } from "../lib/humanMerge.js";
 import { computeMirrorProvisionProblems } from "../lib/provisionVerify.js";
 import { runBootstrap } from "./bootstrap.js";
 import { fetchServerPubkey } from "./server.js";
+import {
+  decideMirrorKeyAction,
+  validateExpectFingerprint,
+} from "../lib/mirrorKeyRotation.js";
 
 export interface ProvisionOptions {
   /**
@@ -95,8 +99,9 @@ export interface ProvisionOptions {
    * `stamp-mirror-only` Ruleset bypass list from `OrganizationAdmin`
    * to `DeployKey`. Fetches a per-repo deploy key from the stamp
    * server, registers it on the GitHub mirror under the canonical
-   * `stamp-mirror` title (deleting any prior key under that title
-   * that doesn't match — e.g. the legacy shared key), then adds
+   * `stamp-mirror` title (a prior key under that title that doesn't
+   * match is refused unless `replaceKey` + `expectFingerprint` approve
+   * the rotation — AGT-2242), then adds
    * `DeployKey` to the ruleset's bypass actors alongside any
    * existing entries.
    *
@@ -113,6 +118,19 @@ export interface ProvisionOptions {
    * `User` actors). No-op without `--migrate-bypass`.
    */
   removeOrgadmin?: boolean;
+  /**
+   * Under `--migrate-bypass`, allow replacing a registered `stamp-mirror`
+   * deploy key whose body differs from the key the stamp server reports
+   * (AGT-2242). Without it a mismatch is refused. Requires
+   * `expectFingerprint`.
+   */
+  replaceKey?: boolean;
+  /**
+   * Under `--migrate-bypass`, the OpenSSH SHA256 fingerprint the server's
+   * per-repo key must match, verified out-of-band. Checked on every path
+   * (first registration, no-op, replacement); required with `replaceKey`.
+   */
+  expectFingerprint?: string;
   /**
    * Forward `--yes` to the bootstrap step, and only there: it declares
    * automated-merge intent for the one protected-branch merge bootstrap
@@ -140,6 +158,21 @@ export async function runProvision(opts: ProvisionOptions): Promise<void> {
   if (opts.removeOrgadmin && !opts.migrateBypass) {
     throw new Error(
       `--remove-orgadmin is only meaningful with --migrate-bypass`,
+    );
+  }
+  if ((opts.replaceKey || opts.expectFingerprint !== undefined) && !opts.migrateBypass) {
+    throw new Error(
+      `--replace-key and --expect-fingerprint are only meaningful with --migrate-bypass`,
+    );
+  }
+  if (opts.expectFingerprint !== undefined) {
+    validateExpectFingerprint(opts.expectFingerprint);
+  }
+  if (opts.replaceKey && opts.expectFingerprint === undefined) {
+    throw new Error(
+      `--replace-key requires --expect-fingerprint <SHA256:...> (the new key's ` +
+        `fingerprint, verified out-of-band) — rotating a bypass-actor key is ` +
+        `never done on the server's word alone`,
     );
   }
   // Name is required for greenfield + migrate-existing, ignored for
@@ -1130,42 +1163,58 @@ async function runMigrateBypass(
   }
 
   // If a key already exists on the GitHub repo under the canonical
-  // stamp-mirror title, decide whether it's the one we want.
-  //   - Same public-key body → idempotent, nothing to do (reuse the id).
-  //   - Different body (e.g. the legacy shared key registered earlier
-  //     for this repo, or a stale per-repo from a re-keyed server)
-  //     → delete it before re-POSTing the new one. GitHub rejects a
-  //     re-POST under the same title with a different key body.
+  // stamp-mirror title, decide whether it's the one we want
+  // (AGT-2242 — see src/lib/mirrorKeyRotation.ts):
+  //   - Same key → idempotent, nothing to do (reuse the id).
+  //   - Different key (legacy shared key, a server restart that
+  //     regenerated the per-repo file, OR an attacker-substituted
+  //     server-side key) → REFUSE unless the operator passed
+  //     --replace-key --expect-fingerprint <fp> and the server's key
+  //     hashes to exactly <fp>. The registered key is a Ruleset bypass
+  //     actor, so it is never swapped on the server's word alone.
   console.log(`Checking existing deploy keys on ${mirror.owner}/${mirror.repo}`);
   const existingKeyId = findDeployKey(
     mirror.owner,
     mirror.repo,
     STAMP_MIRROR_DEPLOY_KEY_TITLE,
   );
+  const existingBody =
+    existingKeyId !== null
+      ? fetchDeployKeyPublic(mirror.owner, mirror.repo, existingKeyId)
+      : null;
+  const decision = decideMirrorKeyAction({
+    owner: mirror.owner,
+    repo: mirror.repo,
+    existingRegistered: existingKeyId !== null,
+    existingBody,
+    serverPubkey: pubkey,
+    replaceKey: opts.replaceKey,
+    expectFingerprint: opts.expectFingerprint,
+  });
   let deployKeyId: number;
-  if (existingKeyId !== null) {
-    const existingBody = fetchDeployKeyPublic(
-      mirror.owner,
-      mirror.repo,
-      existingKeyId,
+  if (decision.action === "reuse" && existingKeyId !== null) {
+    console.log(
+      `Deploy key: "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" already matches per-repo pubkey ` +
+        `(keyId ${existingKeyId}, ${decision.fingerprint}). No change.`,
     );
-    if (existingBody === pubkey) {
-      console.log(
-        `Deploy key: "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" already matches per-repo pubkey (keyId ${existingKeyId}). No change.`,
-      );
-      deployKeyId = existingKeyId;
-    } else {
-      console.log(
-        `Deploy key: "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" is registered but doesn't match the per-repo pubkey ` +
-          `(keyId ${existingKeyId}). Deleting before re-registering.`,
-      );
-      const del = deleteDeployKey(mirror.owner, mirror.repo, existingKeyId);
-      if (del.status === "failed") {
-        throw new Error(`deploy-key cleanup failed: ${del.error}`);
-      }
-      deployKeyId = registerStampMirrorKey(mirror, pubkey);
+    deployKeyId = existingKeyId;
+  } else if (decision.action === "replace" && existingKeyId !== null) {
+    console.log(
+      `Deploy key: replacing "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" (keyId ${existingKeyId}) ` +
+        `as approved by --replace-key:\n` +
+        `  old: ${decision.oldFingerprint}\n` +
+        `  new: ${decision.fingerprint} (matches --expect-fingerprint)`,
+    );
+    const del = deleteDeployKey(mirror.owner, mirror.repo, existingKeyId);
+    if (del.status === "failed") {
+      throw new Error(`deploy-key cleanup failed: ${del.error}`);
     }
+    deployKeyId = registerStampMirrorKey(mirror, pubkey);
   } else {
+    console.log(
+      `Deploy key: none registered under "${STAMP_MIRROR_DEPLOY_KEY_TITLE}"; ` +
+        `registering the server's per-repo key (${decision.fingerprint}).`,
+    );
     deployKeyId = registerStampMirrorKey(mirror, pubkey);
   }
 
@@ -1300,7 +1349,10 @@ function printMigrateBypassPlan(args: {
   console.log(
     fmt(
       "deploy key",
-      `fetch per-repo pubkey from server; register as "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on the mirror (replacing any prior entry under that title)`,
+      `fetch per-repo pubkey from server; register as "${STAMP_MIRROR_DEPLOY_KEY_TITLE}" on the mirror` +
+        (args.opts.replaceKey
+          ? ` (replacing a mismatched entry only if the server key matches --expect-fingerprint)`
+          : ` (a mismatched existing entry is refused, not replaced; see --replace-key)`),
     ),
   );
   console.log(

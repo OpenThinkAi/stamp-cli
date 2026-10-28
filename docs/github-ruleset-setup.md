@@ -60,7 +60,7 @@ The phased structure is deliberate. `--migrate-bypass` alone is purely additive 
 The migration tool handles:
 
 - **Idempotent re-runs.** If `stamp-mirror` is already registered with the matching key body, re-running is a no-op.
-- **Stale key replacement.** If `stamp-mirror` is registered but its public key doesn't match what the server currently generates (typical after a server-side restart regenerates the per-repo file — see the caveat below), the existing key is deleted and the new one re-registered.
+- **Mismatched keys are refused, not replaced.** If `stamp-mirror` is registered but its public key doesn't match what the server currently reports (the legacy shared key, a server restart that regenerated the per-repo file, or a key substituted by someone with write access to the server — see below), the migration stops and prints both fingerprints. It changes nothing on GitHub. The `stamp-mirror` key is a Ruleset bypass actor, so it is never swapped on the server's word alone. To rotate it, verify the new fingerprint out-of-band and re-run with `--replace-key --expect-fingerprint SHA256:...` (see [Rotating the `stamp-mirror` key](#rotating-the-stamp-mirror-key)).
 - **Stray-actor preservation.** Bypass actors of other types (e.g. a leftover `User` entry from a prior migration) are preserved unless `--remove-orgadmin` explicitly targets `OrganizationAdmin`. We don't strip what the migration didn't introduce.
 - **Non-canonical ruleset names.** If your repo's ruleset isn't named exactly `stamp-mirror-only` (e.g. an older repo with `Protect Main`), the migration registers the deploy key and warns that no canonical ruleset was found rather than guessing at the wrong target.
 
@@ -68,9 +68,21 @@ The migration tool handles:
 
 The stamp server's per-repo keypairs live at `/srv/git/.ssh-client-keys/<owner>_<repo>_ed25519` and are generated **lazily** on first request via the sudo-elevated `stamp-ensure-repo-key` helper. If your hosting platform (e.g. Railway) restarts the container in a way that doesn't preserve the keys directory, the per-repo files are regenerated on the next `stamp-server-pubkey <repo>` call — producing a **new** keypair with the **same name**. The previously-registered public key on GitHub becomes stale, and the mirror push starts failing with "Permission denied to deploy-key."
 
-The fix is to re-run `stamp provision --migrate-bypass` against each affected repo. The migration tool's "delete the mismatched key + re-register" path is the recovery flow. If you have many repos behind one stamp server it's worth wrapping this in a loop after each restart.
+Keep `/srv/git` on a persistent volume so this doesn't happen: the per-repo keys then survive restarts and the registered key keeps matching. If a regeneration does happen, re-registering is a deliberate per-repo rotation, not a routine reconciliation. Follow [Rotating the `stamp-mirror` key](#rotating-the-stamp-mirror-key) for each affected repo. **Do not script this into a post-restart loop.** A loop that registers whatever key the server reports would also register a key an attacker substituted on the server, and that key would bypass the Ruleset. `--migrate-bypass` refuses mismatches by default for exactly this reason.
 
-(The legacy shared `github_ed25519` key persists across restarts because the entrypoint script re-creates it if missing — but per-repo files have no equivalent boot-time regeneration. A future change may add a per-mirror.yml scan in the entrypoint to fix this; the current model relies on the migration tool's recovery path.)
+### Rotating the `stamp-mirror` key
+
+1. Run `stamp provision --migrate-bypass`. On a mismatch it stops and prints the fingerprint registered on GitHub and the fingerprint the server reports now.
+2. Verify the new fingerprint out-of-band, not through the stamp server's git-facing SSH channel. For example, open your hosting platform's console shell (Railway web shell, `fly ssh console`, `docker exec`) and run `ssh-keygen -lf /srv/git/.ssh-client-keys/<owner>_<repo>_ed25519.pub`. Then confirm *why* the key changed: a known restart that lost the volume, or the first migration off the legacy shared key. If you can't explain the change, treat the server as compromised and stop.
+3. Rotate with the verified fingerprint pinned:
+
+   ```sh
+   stamp provision --migrate-bypass --replace-key --expect-fingerprint SHA256:<verified>
+   ```
+
+   The old key is deleted and the new one registered only if the server's key hashes to exactly that fingerprint. `--expect-fingerprint` also works without `--replace-key`, where it guards first-time registration the same way.
+
+(The legacy shared `github_ed25519` key persists across restarts because the entrypoint script re-creates it if missing. Per-repo files have no boot-time regeneration, and a lazy re-generation after a lost volume produces a new key that you must rotate as above.)
 
 ### Key-file ownership and the lost "git-shell escape can't substitute" defense
 
@@ -82,7 +94,7 @@ What this means for the threat model:
 
 - A git-shell escape on the stamp server can now read AND overwrite the per-repo key file content — substituting a private key whose public half the attacker holds.
 - But to actually exploit the substitution, the attacker has to ALSO register their public key on the GitHub mirror's deploy-keys list, which requires repo-admin auth they don't get from a server-side escape.
-- The remaining exposure: if the attacker can also socially-engineer the operator into running `stamp provision --migrate-bypass` after substituting the local key, the migration's "register the server's current pubkey on GitHub" step would register the attacker's key as the new `stamp-mirror` deploy key. Bounded exploit chain (multi-step + requires operator action) rather than the single-step substitution the old posture defended against.
+- The remaining exposure was `stamp provision --migrate-bypass`, which used to delete a mismatched `stamp-mirror` key and register whatever key the server reported. Paired with routine post-restart reconciliation, that registered a substituted key as a bypass actor with no human in the loop. The migration now refuses a mismatch unless the operator passes `--replace-key --expect-fingerprint <fp>` with a fingerprint verified out-of-band (see [Rotating the `stamp-mirror` key](#rotating-the-stamp-mirror-key)). A substituted key can still become a bypass actor only if the operator verifies the attacker's fingerprint and approves it. A key registered for the first time (no existing `stamp-mirror` entry) is still trusted on first use unless `--expect-fingerprint` is given.
 
 ## Apply via the GitHub UI
 
@@ -177,7 +189,7 @@ gh api -X DELETE /repos/<owner>/<repo>/rulesets/<id>
 The authenticating identity doesn't match a bypass actor. Check, in order:
 
 1. **The deploy key is registered.** `gh api /repos/<owner>/<repo>/keys --jq '.[] | select(.title=="stamp-mirror")'` should show one entry; if absent, the registration step was skipped.
-2. **The registered key matches the server's current per-repo pubkey.** Compare `gh api /repos/<owner>/<repo>/keys/<id> --jq .key` against `ssh git@<stamp-server> stamp-server-pubkey <owner>/<repo>`. If they differ, your container restarted and regenerated the key — re-run `stamp provision --migrate-bypass` to reconcile.
+2. **The registered key matches the server's current per-repo pubkey.** Compare `gh api /repos/<owner>/<repo>/keys/<id> --jq .key` against `ssh git@<stamp-server> stamp-server-pubkey <owner>/<repo>`. If they differ, the server's key changed. That usually means a restart regenerated it, but confirm before acting, then follow [Rotating the `stamp-mirror` key](#rotating-the-stamp-mirror-key). A plain `--migrate-bypass` refuses the mismatch.
 3. **The ruleset's bypass list contains a `DeployKey` actor.** `gh api /repos/<owner>/<repo>/rulesets/<id> --jq .bypass_actors`. If not, the ruleset apply step was skipped or got rolled back.
 
 ### Mirror is out of sync after a transport failure

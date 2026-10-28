@@ -207,6 +207,11 @@ remote: mirror: main push already accepted; mirror out-of-sync.
    stamp provision --migrate-bypass    # fetches the server's per-repo key, registers it
    stamp push main --resync-mirror     # re-runs the mirror leg so the mirror catches up
    ```
+   If a **stale** `stamp-mirror` key is registered (one that doesn't match
+   the server's), `--migrate-bypass` refuses to replace it and prints both
+   fingerprints. Verify the new one out-of-band, then re-run with
+   `--replace-key --expect-fingerprint SHA256:...` (see
+   [docs/github-ruleset-setup.md](./github-ruleset-setup.md#rotating-the-stamp-mirror-key)).
    The key is **per-repo and server-side** — don't compare it against
    `~/.stamp/mirror-keys/` or another repo's registered key; those are
    different keys by design.
