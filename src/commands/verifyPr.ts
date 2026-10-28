@@ -932,7 +932,8 @@ function loadPubkeysAtBase(
  * Read `path_rules` from `.stamp/config.yml` at `base_sha`. Mirrors
  * `pre-receive.ts:readConfigAt`'s path_rules read path — same parser
  * (`parsePathRules`), same source-of-truth (the merge-base tree),
- * same stderr-surfaced warnings on malformed rules. The
+ * same fail-closed handling + stderr-surfaced warnings on malformed
+ * rules (AGT-2246). The
  * `parseConfigFromYaml` helper strips `path_rules` (its job is
  * `branches:` resolution), so we re-parse the raw YAML to recover
  * the rules map.
