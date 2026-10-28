@@ -8,6 +8,9 @@
  *
  * Rules:
  *   - Non-protected refs (no matching rule in .stamp/config.yml) pass through.
+ *   - Deletion of protected refs (new_sha=0000...) is rejected; a branch
+ *     is protected if its own pre-push config or the default branch's
+ *     config has a matching rule.
  *   - Creation of protected refs (old_sha=0000...) is rejected — operator
  *     must seed directly, see DESIGN.md "Bootstrap".
  *   - Force-pushes (new_sha not a descendant of old_sha) are rejected.
@@ -153,9 +156,17 @@ function main(): void {
 }
 
 function verifyRef(oldSha: string, newSha: string, refname: string): void {
-  // Deletion: allow (branch protection at the git/forge level handles this
-  // if the operator wants to prevent ref deletion).
-  if (newSha === ZERO_SHA) return;
+  // Deletion. On a stamp server this hook is the only gate — there is no
+  // forge-level branch protection behind it — so deleting a protected
+  // branch must be refused here. Recreating one by push is also refused
+  // (see the creation check below), so an allowed deletion would leave
+  // the repo broken until an operator re-seeds it on the server.
+  // Non-protected branches, tags and other ref classes may still be
+  // deleted.
+  if (newSha === ZERO_SHA) {
+    verifyDeletion(oldSha, refname);
+    return;
+  }
 
   // Tag pushes: a tag is accepted iff the commit it points at is reachable
   // from at least one protected branch (i.e., it was already verified when
@@ -244,6 +255,54 @@ function verifyRef(oldSha: string, newSha: string, refname: string): void {
   const newCommits = listNewCommits(oldSha, newSha);
   for (const sha of newCommits) {
     verifyCommit(sha, branch, rule, trustedKeys, refname);
+  }
+}
+
+/**
+ * Reject the deletion of a protected branch (AGT-2254). A branch counts as
+ * protected when a rule matches it in either the branch's own pre-push
+ * config (`oldSha:.stamp/config.yml`, the same trust boundary as every
+ * other branch rule) or the default branch's config (the anchor tag
+ * verification uses). Checking both means a branch protected only by the
+ * default branch's rules — e.g. a `release/*` glob — is covered even when
+ * its own tree carries no matching rule. Operators who really want a
+ * protected branch gone delete it directly on the server, the same way
+ * they seed one.
+ */
+function verifyDeletion(oldSha: string, refname: string): void {
+  if (!refname.startsWith("refs/heads/")) return;
+  const branch = refname.slice("refs/heads/".length);
+
+  const configs: StampConfigAtRef[] = [];
+  if (oldSha !== ZERO_SHA) {
+    const own = readConfigAt(oldSha);
+    if (own) configs.push(own);
+  }
+  const defaultTip = readDefaultBranchTip();
+  if (defaultTip !== null && defaultTip !== oldSha) {
+    const def = readConfigAt(defaultTip);
+    if (def) configs.push(def);
+  }
+
+  for (const config of configs) {
+    if (resolveBranchRule(config.branches, branch)) {
+      reject(
+        refname,
+        `deleting a protected branch is not allowed. Branch "${branch}" matches a rule in .stamp/config.yml; ` +
+          `an operator must remove it directly on the server if that is really intended.`,
+      );
+    }
+  }
+}
+
+/** Tip SHA of the bare repo's default branch (via HEAD), or null when HEAD
+ *  is unset or unborn. */
+function readDefaultBranchTip(): string | null {
+  try {
+    const headRef = run(["symbolic-ref", "HEAD"]).trim();
+    return run(["rev-parse", "--verify", "--quiet", `${headRef}^{commit}`]).trim() || null;
+  } catch {
+    return null;
   }
 }
 

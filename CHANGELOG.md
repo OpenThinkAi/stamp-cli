@@ -30,6 +30,15 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
   and its plan now says how the bootstrap merge will be confirmed.
 
+### Security
+
+- **The server pre-receive hook refuses to delete a protected branch.**
+  `git push origin :main` used to pass the hook, and since a protected
+  branch can't be recreated by push, the repo stayed broken until an
+  operator re-seeded it. A branch counts as protected when a rule in its own
+  pre-push config or the default branch's config matches it. Unprotected
+  branches and tags can still be deleted.
+
 ---
 
 ## 3.6.2 — 2026-10-19
