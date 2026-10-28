@@ -293,6 +293,7 @@ stamp push <target>                        # plain git push; hook stderr forward
 stamp push <target> --resync-mirror        # also ask the server to re-feed branch tips through
                                            #   the post-receive hook, so a repaired GitHub mirror
                                            #   catches up without waiting for the next real push
+                                           #   (owner/admin only)
 stamp verify <sha>                         # verify a merge commit's attestation locally
 ```
 

@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# stamp-gate — the forced command every SSH session runs (AGT-2265).
+#
+# The AuthorizedKeysCommand resolver emits each enrolled key as
+#   command="stamp-gate <user-id>",restrict <key>
+# and entrypoint.sh writes AuthorizedKeysFile lines as
+#   command="stamp-gate legacy",restrict <key>
+# so sshd runs this script (through git-shell, the git user's login shell)
+# whatever the client asked for. The client's command is in
+# SSH_ORIGINAL_COMMAND.
+#
+# stamp-gate-check resolves the caller from SSH_USER_AUTH + users.db,
+# parses SSH_ORIGINAL_COMMAND, refuses any repo path that isn't a live
+# /srv/git/<name>.git (dot-dirs such as .trash and .prompts-cache, nested
+# paths, `..`, relative and ~ paths), applies the role/grant rule, and
+# prints the command re-quoted. Only then does this script hand it to
+# git-shell, which dispatches it exactly as before (git-upload-pack /
+# git-receive-pack / git-upload-archive, or a git-shell-commands verb).
+#
+# Exit codes are stamp-gate-check's: 1 identity, 2 refused command,
+# 3 denied by role or grants.
+#
+set -e
+
+cmd=$(/usr/local/sbin/stamp-gate-check "$@") || exit $?
+exec /usr/bin/git-shell -c "$cmd"

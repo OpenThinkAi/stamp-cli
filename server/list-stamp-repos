@@ -9,6 +9,11 @@
 # Run via:
 #   ssh git@<host> list-stamp-repos
 #
+# Access (AGT-2265): enforced by the SSH gate (src/lib/sshGate.ts), not
+# here. Owners, admins and members with no repo grants may list; they can
+# already use every live repo. A member with repo grants is refused, since
+# the list would name repos they can't use.
+#
 # Exists because the git user's shell is git-shell, which only accepts
 # whitelisted verbs from git-shell-commands — the client used to send a
 # raw `ls -1 /srv/git/` string and got `fatal: unrecognized command`

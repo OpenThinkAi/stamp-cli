@@ -73,8 +73,11 @@ for keytype in ed25519 rsa ecdsa; do
   ssh-keygen -lf "$HOST_KEY_DIR/ssh_host_${keytype}_key.pub" 2>&1 | sed 's/^/  /' >&2
 done
 
+# Every legacy AuthorizedKeysFile line gets the SSH-gate forced command
+# (AGT-2265), so a key sshd matches from this file can't skip the gate.
+. "$(dirname "$0")/lib/gate-authorized-keys.sh"
 if [ -n "$AUTHORIZED_KEYS" ]; then
-  printf '%s\n' "$AUTHORIZED_KEYS" > /home/git/.ssh/authorized_keys
+  printf '%s\n' "$AUTHORIZED_KEYS" | _gate_authorized_keys > /home/git/.ssh/authorized_keys
   chmod 600 /home/git/.ssh/authorized_keys
   chown git:git /home/git/.ssh/authorized_keys
   # AUTHORIZED_KEYS is deprecated as the ongoing membership source — its
@@ -131,8 +134,9 @@ if /usr/local/sbin/stamp-seed-users; then
     chmod 0660 "$STAMP_STATE_DIR/users.db"
   fi
 else
-  # Don't abort the boot — sshd's AuthorizedKeysFile fallback still
-  # services connections from AUTHORIZED_KEYS during transition.
+  # Don't abort the boot. Note the AuthorizedKeysFile is no fallback here:
+  # its lines run the stamp-gate forced command (AGT-2265), which refuses
+  # keys that aren't in users.db.
   echo "WARNING: stamp-seed-users failed; AuthorizedKeysCommand path may be empty until next boot" >&2
 fi
 

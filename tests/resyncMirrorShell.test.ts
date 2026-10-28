@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 const SCRIPT = resolve(import.meta.dirname, "..", "server", "resync-mirror");
 const ZERO = "0".repeat(40);
+const GATE_PATH = "/usr/local/sbin/stamp-require-role";
 
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" });
@@ -38,7 +39,16 @@ describe("server/resync-mirror", () => {
   let hookLog: string;
 
   function run(args: string[]): { status: number | null; stderr: string } {
-    const res = spawnSync("sh", [SCRIPT, ...args], {
+    // The role gate (AGT-2265) is exercised in serverRequireRole.test.ts;
+    // here it is stubbed to "admitted" so these tests cover the verb itself.
+    const stub = join(gitRoot, "..", `${gitRoot.split("/").pop()}-gate-stub`);
+    writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+    chmodSync(stub, 0o755);
+    const script = `${stub}-resync-mirror`;
+    const src = readFileSync(SCRIPT, "utf8");
+    assert.ok(src.includes(GATE_PATH), `resync-mirror must call ${GATE_PATH}`);
+    writeFileSync(script, src.split(GATE_PATH).join(stub));
+    const res = spawnSync("sh", [script, ...args], {
       encoding: "utf8",
       env: { ...process.env, STAMP_GIT_ROOT: gitRoot },
     });
@@ -72,6 +82,9 @@ describe("server/resync-mirror", () => {
   });
 
   afterEach(() => {
+    const stub = join(gitRoot, "..", `${gitRoot.split("/").pop()}-gate-stub`);
+    rmSync(stub, { force: true });
+    rmSync(`${stub}-resync-mirror`, { force: true });
     rmSync(gitRoot, { recursive: true, force: true });
     rmSync(work, { recursive: true, force: true });
   });

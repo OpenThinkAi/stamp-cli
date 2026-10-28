@@ -23,8 +23,11 @@
 # shape for a resync — the mirror needs the ref moved, not a replay of
 # per-commit statuses for history that may already be there.
 #
+# Needs owner or admin (AGT-2265).
+#
 # Exit codes: 0 all requested branches re-fed; 1 operational failure
-# (missing repo/hook/branch); 2 argument error. Note exit 0 means the
+# (missing repo/hook/branch) or no enrolled identity; 2 argument error;
+# 3 role below admin. Note exit 0 means the
 # hook RAN — the hook itself never fails the invocation (mirror errors
 # are warnings on stderr, same as on a real push), so read the output.
 #
@@ -57,6 +60,12 @@ if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*$'; then
   echo "error: invalid repo name '$NAME' (must start with [A-Za-z0-9_] and match [A-Za-z0-9._-]+)" >&2
   exit 2
 fi
+
+# Role gate (AGT-2265). resync-mirror re-runs a repo's post-receive hook,
+# which pushes to GitHub with the server's mirror credentials and posts
+# commit statuses; that's an operator action, so it needs owner or admin.
+# Exits 1 (no/unenrolled identity) or 3 (role below admin) first.
+/usr/local/sbin/stamp-require-role admin "resync the mirror for repo '$NAME'" || exit $?
 
 # STAMP_GIT_ROOT is a test seam only (lets the test suite point at a temp
 # dir instead of /srv/git). sshd does not AcceptEnv it, so remote callers

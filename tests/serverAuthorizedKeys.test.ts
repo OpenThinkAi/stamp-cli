@@ -90,7 +90,7 @@ describe("stamp-authorized-keys resolver", () => {
     try {
       const r = runResolver(t.dbPath, "git", KEY_FINGERPRINT);
       assert.equal(r.status, 0, `non-zero exit; stderr=${r.stderr}`);
-      assert.equal(r.stdout.trim(), KEY_LINE);
+      assert.equal(r.stdout.trim(), `command="stamp-gate 1",restrict ${KEY_LINE}`);
     } finally {
       t.cleanup();
     }

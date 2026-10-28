@@ -524,11 +524,32 @@ that's populated and managed entirely through the `stamp` CLI. Three roles:
 |----------|----------------------------------------------------------------------|
 | `owner`  | Full control — invite anyone, promote/demote/remove anyone           |
 | `admin`  | Invite members, manage members. Cannot create or modify admins/owners |
-| `member` | Push/pull/merge (subject to per-repo trust). No user management      |
+| `member` | Push/pull/merge on the repos it may use (below; subject to per-repo trust). No user or repo management |
 
 Repo management — `new-stamp-repo`, `delete-stamp-repo` (soft delete and
-`--purge`), `restore-stamp-repo` and `purge-trash` — needs `owner` or
-`admin`. A `member` is refused with exit 3 (see [SSH access model](#ssh-access-model)).
+`--purge`), `restore-stamp-repo`, `purge-trash`, the trash listing
+(`stamp server-repos list --trash`) and `resync-mirror` — needs `owner`
+or `admin`. A `member` is refused with exit 3 (see
+[SSH access model](#ssh-access-model)).
+
+**Which repos a member can use.** Server bare repos have no owner of their
+own, so the rule reuses the repo grants (`stamp users grant <name> --repo
+<org>/<repo>` or `<org>/*`), matched against the GitHub repo each server
+repo mirrors to (`github.repo` in `.stamp/mirror.yml` on its default
+branch):
+
+- A member with **no grants** can clone and push every live repo, the same
+  single-tenant behaviour as before. `stamp users grants` shows who is
+  unscoped.
+- A member with **any grant** can clone and push only the repos whose
+  `mirror.yml` maps to one of its grants. A repo with no `mirror.yml`
+  `github.repo` is closed to scoped members; `list-stamp-repos` is too,
+  since it would name repos they can't use.
+
+The trade-off: unscoped is the default so existing single-team servers
+keep working on upgrade. To isolate teams, give every member at least one
+grant. The mapping lives on the repo's protected default branch, so it only
+changes through a reviewed, signed merge.
 
 **SSH access** is gated by membership in this DB (via sshd's
 `AuthorizedKeysCommand`). **Signing trust** for a stamp-gated repo is
@@ -732,9 +753,9 @@ Authenticated pushers can:
 - `ssh git@<host> delete-stamp-repo <name> [--purge]` (owner/admin)
 - `ssh git@<host> restore-stamp-repo <name> [--from <trash-entry>] [--as <new-name>]` (owner/admin)
 - `ssh git@<host> purge-trash [--older-than <N>d]` (owner/admin)
-- `ssh git@<host> list-trash`
-- `ssh git@<host> list-stamp-repos`
-- `ssh git@<host> resync-mirror <name> [<branch>...]`
+- `ssh git@<host> list-trash` (owner/admin)
+- `ssh git@<host> list-stamp-repos` (owner/admin, or a member with no repo grants)
+- `ssh git@<host> resync-mirror <name> [<branch>...]` (owner/admin)
 
 …but cannot get an interactive shell, run arbitrary commands, or read
 the per-deployment env file (`/etc/stamp/env`, which holds the GitHub
@@ -748,6 +769,42 @@ sshd's `SSH_USER_AUTH` against the membership DB before they touch
 `purge-trash` checks in-process. A `member` gets exit 3 and nothing is
 changed. Repos have no per-repo owner yet, so an admin can manage every
 repo on the server.
+
+### The session gate
+
+git-shell's `git-upload-pack` / `git-receive-pack` accept any path the
+`git` user can read, so on their own they would serve other teams' repos,
+the soft-deleted repos in `/srv/git/.trash` and the prompts cache. Every
+SSH session therefore runs a forced command. The `AuthorizedKeysCommand`
+resolver prints each enrolled key as
+
+```
+command="stamp-gate <user-id>",restrict ssh-ed25519 AAAA...
+```
+
+and `entrypoint.sh` writes each `AUTHORIZED_KEYS` line to the legacy
+`AuthorizedKeysFile` as `command="stamp-gate legacy",restrict ...`. sshd
+runs `stamp-gate` whatever the client asked for. `restrict` also turns off
+pty allocation and all forwarding for the key. The gate:
+
+1. resolves the caller from `SSH_USER_AUTH` against the membership DB
+   (and checks it is the user the line was issued for). A key that isn't
+   enrolled is refused, including one that only appears in the legacy file;
+2. parses the client's command (`SSH_ORIGINAL_COMMAND`) with git-shell's
+   own quoting rules and refuses anything that isn't a git transport verb
+   or an installed stamp verb;
+3. serves git verbs only for live repos, `/srv/git/<name>.git`
+   (`/srv/git/<name>` is accepted). Dot-dirs (`.trash`, `.prompts-cache`,
+   `.stamp-state`, ...), nested or relative paths, `~` and `..` are refused
+   **for every role**. An admin who needs a trashed repo restores it first;
+4. applies the member repo rule above to git verbs, and the
+   `list-stamp-repos` rule;
+5. re-quotes the command and hands it to `git-shell -c`, so what runs is
+   exactly what was checked.
+
+Exit codes: 1 no or unenrolled identity, 2 refused command or path, 3
+denied by role or grants. Interactive logins (`ssh git@<host>` with no
+command) are refused.
 
 `git-shell` only constrains what runs as the login shell. sshd features
 negotiated outside the shell are switched off separately in

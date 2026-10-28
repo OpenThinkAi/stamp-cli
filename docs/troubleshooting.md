@@ -222,8 +222,9 @@ stamp push main --resync-mirror
 ```
 (`--resync-mirror` asks the server to re-feed the branch tip through the
 mirror hook even when the push itself is a no-op. Needs a server image
-with the `resync-mirror` verb; on older images, fall back to the manual
-`git push` printed in the mirror error itself.)
+with the `resync-mirror` verb, and an owner or admin key: a `member` is
+refused with exit 3. On older images, fall back to the manual `git push`
+printed in the mirror error itself.)
 
 ---
 

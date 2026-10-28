@@ -9,7 +9,15 @@
 # Run via:
 #   ssh git@<host> list-trash
 #
+# Needs owner or admin (AGT-2265).
+#
 set -e
+
+# Role gate (AGT-2265). Trash holds repos deleted on purpose — sometimes to
+# erase data — and only owners/admins can restore or purge them, so only
+# they can list them. Exits 1 (no/unenrolled identity) or 3 (role below
+# admin) before reading anything.
+/usr/local/sbin/stamp-require-role admin "list trashed repos" || exit $?
 
 GIT_ROOT=/srv/git
 TRASH_DIR="$GIT_ROOT/.trash"
