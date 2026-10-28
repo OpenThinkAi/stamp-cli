@@ -1172,6 +1172,25 @@ data_flow:
   confirmed: true
 ```
 
+**Which providers may see the diff (`review_endpoints`).** Reviewers can
+run on Anthropic or on any OpenAI-compatible host (OpenAI, DeepSeek, a
+corporate gateway), and each provider is another sub-processor, possibly in
+another jurisdiction. To pin the set, commit the hosts `stamp review` may
+send this repo's diffs to:
+
+```yaml
+data_flow:
+  review_endpoints: [api.anthropic.com]
+```
+
+When the list is present, a review whose off-host reviewer would reach any
+other host — an unlisted openai-compatible endpoint, an `ANTHROPIC_BASE_URL`
+gateway, or Bedrock/Vertex routing that cannot be pinned to a host — is
+refused before the diff leaves the machine, naming the reviewer and host
+(AGT-2249). Reviewers on this host need no entry. Absent means no
+restriction. `review_server` branches are exempt: there the stamp-server
+chooses the provider.
+
 **Peer listeners (`stamp pr listen`).** A peer listener reviews *someone
 else's* PR, under its own operator's provider account. It runs unattended,
 so it fails closed. It skips any event unless the PR's repo lists, at

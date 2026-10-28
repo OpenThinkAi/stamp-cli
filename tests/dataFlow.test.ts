@@ -255,3 +255,69 @@ describe("no-retain warning (AC #4)", () => {
     assert.match(warning!, /STAMP_NO_LLM/);
   });
 });
+
+// ─── AGT-2249: data_flow.review_endpoints ─────────────────────────────
+
+import {
+  anthropicReviewEgress,
+  assertReviewEndpointsAllowed,
+  endpointHost,
+} from "../src/lib/dataFlow.ts";
+
+describe("data_flow.review_endpoints (AGT-2249)", () => {
+  it("parses and lowercases a host list", () => {
+    const cfg = parseConfigFromYaml(
+      BASE_CONFIG + `\ndata_flow:\n  review_endpoints: [API.Anthropic.com, "llm.internal:8443"]\n`,
+    );
+    assert.deepEqual(cfg.data_flow?.review_endpoints, ["api.anthropic.com", "llm.internal:8443"]);
+  });
+
+  it("rejects a URL entry", () => {
+    assert.throws(
+      () =>
+        parseConfigFromYaml(
+          BASE_CONFIG + `\ndata_flow:\n  review_endpoints: ["https://api.deepseek.com/v1"]\n`,
+        ),
+      /review_endpoints entry .* is not a host or host:port/,
+    );
+  });
+
+  it("is a no-op when the list is absent", () => {
+    assert.doesNotThrow(() =>
+      assertReviewEndpointsAllowed(undefined, [
+        { reviewer: "security", label: "https://api.deepseek.com/v1", host: "api.deepseek.com" },
+      ]),
+    );
+  });
+
+  it("allows listed hosts and refuses unlisted / unpinnable ones, naming them", () => {
+    const df = { review_endpoints: ["api.anthropic.com"] };
+    assert.doesNotThrow(() =>
+      assertReviewEndpointsAllowed(df, [
+        { reviewer: "security", label: "https://api.anthropic.com", host: "api.anthropic.com" },
+      ]),
+    );
+    assert.throws(
+      () =>
+        assertReviewEndpointsAllowed(df, [
+          { reviewer: "security", label: "https://api.anthropic.com", host: "api.anthropic.com" },
+          { reviewer: "standards", label: "https://api.deepseek.com/v1", host: "api.deepseek.com" },
+          { reviewer: "product", label: "CLAUDE_CODE_USE_BEDROCK=1 cloud routing", host: null },
+        ]),
+      (err: Error) =>
+        /standards: api\.deepseek\.com/.test(err.message) &&
+        /product: .* cannot be pinned to a host/.test(err.message) &&
+        !/security:/.test(err.message),
+    );
+  });
+
+  it("resolves the egress host for each backend", () => {
+    assert.equal(endpointHost("https://API.DeepSeek.com/v1"), "api.deepseek.com");
+    assert.equal(endpointHost("not a url"), null);
+    assert.equal(anthropicReviewEgress("security", {}).host, "api.anthropic.com");
+    assert.equal(
+      anthropicReviewEgress("security", { ANTHROPIC_BASE_URL: "https://gw.corp:8443" }).host,
+      "gw.corp:8443",
+    );
+  });
+});
