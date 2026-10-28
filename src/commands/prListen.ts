@@ -80,6 +80,7 @@ import { draftsDir } from "../lib/paths.js";
 import { loadPeerReposConfig, resolveLocalRepoPath } from "../lib/peerReposConfig.js";
 import { verifyOperatorAtBaseLocal } from "../lib/peerOperatorVerify.js";
 import { detectClaudeSession } from "../lib/claudeSession.js";
+import { checkPrUrlBinding } from "../lib/prUrlBinding.js";
 
 // ─── Options ──────────────────────────────────────────────────────────
 
@@ -834,13 +835,18 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // Security: validate pr_url before passing to `gh` as an argv element.
     // A flag-shaped pr_url (e.g. `-H` or `--hostname=evil`) would be
     // interpreted as a CLI option by gh rather than a positional argument,
-    // since `--` is absent. The regex also catches the empty/absent fallback.
-    const PR_URL_REGEX =
-      /^https:\/\/(?:[a-zA-Z0-9.-]+)\/[^/]+\/[^/]+\/pull\/\d+$/;
-    if (!PR_URL_REGEX.test(prUrlRaw)) {
+    // since `--` is absent. The parser also catches the empty/absent fallback.
+    //
+    // AGT-2240: the pr_url must also be a github.com PR in the SAME
+    // owner/repo as the payload's `repo` — the repo whose manifest
+    // authorizes the author. Otherwise an operator trusted in repo X could
+    // aim `gh pr diff` / `gh pr review` (run under THIS reviewer's GitHub
+    // token) at a PR in some other repo Y. Applies to pr-opened and
+    // re-review-requested alike.
+    const binding = checkPrUrlBinding(prUrlRaw, repo);
+    if (!binding.ok) {
       process.stderr.write(
-        `note: skipping event for PR #${prNumber} — pr_url ${JSON.stringify(prUrlRaw)} ` +
-          `does not match expected https://<host>/<owner>/<repo>/pull/<n> shape\n`,
+        `note: skipping event for PR #${prNumber} — ${binding.reason}\n`,
       );
       continue;
     }
