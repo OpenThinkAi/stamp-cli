@@ -28,6 +28,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = resolve(__dirname, "..", "scripts", "setup-repo.sh");
@@ -379,7 +380,8 @@ describe("setup-repo.sh --from-tarball does not trust the tarball's config or ho
     const repo = join(tmp, "out-link.git");
     const res = runSetup(repo, hook, tarball);
     assert.notStrictEqual(res.status, 0);
-    assert.match(res.stderr, /contains a symlink: hooks/);
+    // Refused by the pre-extraction entry check (AGT-2267).
+    assert.match(res.stderr, /contains a link or special-file entry: .*proj\.git\/hooks/);
     assert.ok(!existsSync(repo), "REPO_DIR must not be created");
   });
 
@@ -446,5 +448,178 @@ describe("setup-repo.sh --from-tarball does not trust the tarball's config or ho
     const res = runSetup(join(tmp, "out-shallow.git"), hook, tarball);
     assert.notStrictEqual(res.status, 0);
     assert.match(res.stderr, /shallow clone/);
+  });
+});
+
+// ---- AGT-2267: link / special entries refused BEFORE extraction ----
+
+/** One entry of a hand-built ustar archive (full control over type + names). */
+type TarEntry = { name: string; type: "0" | "1" | "2" | "5" | "6"; data?: string; linkname?: string };
+
+/**
+ * Minimal ustar writer. System tar won't emit hostile shapes (a symlink
+ * followed by a file written through it, a regular entry carrying a link
+ * name), so the tests build the bytes themselves.
+ */
+function ustar(entries: TarEntry[]): Buffer {
+  const blocks: Buffer[] = [];
+  for (const e of entries) {
+    const body = Buffer.from(e.data ?? "");
+    const h = Buffer.alloc(512);
+    const put = (off: number, len: number, v: string) => h.write(v, off, len, "utf8");
+    const oct = (off: number, len: number, n: number) => put(off, len, n.toString(8).padStart(len - 1, "0") + "\0");
+    put(0, 100, e.name);
+    oct(100, 8, e.type === "5" ? 0o755 : 0o644);
+    oct(108, 8, 0);
+    oct(116, 8, 0);
+    oct(124, 12, e.type === "0" ? body.length : 0);
+    oct(136, 12, 1_700_000_000);
+    h.fill(0x20, 148, 156); // checksum field counts as spaces while summing
+    put(156, 1, e.type);
+    put(157, 100, e.linkname ?? "");
+    put(257, 6, "ustar\0");
+    put(263, 2, "00");
+    let sum = 0;
+    for (const b of h) sum += b;
+    put(148, 8, sum.toString(8).padStart(6, "0") + "\0 ");
+    blocks.push(h);
+    if (e.type === "0" && body.length > 0) {
+      const padded = Buffer.alloc(Math.ceil(body.length / 512) * 512);
+      body.copy(padded);
+      blocks.push(padded);
+    }
+  }
+  blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks));
+}
+
+describe("setup-repo.sh --from-tarball refuses link and special entries before extraction (AGT-2267)", () => {
+  let tmp: string;
+  let shimDir: string;
+  let outside: string;
+
+  beforeEach(() => {
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), "stamp-setuprepo-2267-")));
+    // Same --no-overwrite-dir shim as the AGT-2266 suite (bsdtar lacks it).
+    shimDir = join(tmp, "shim");
+    mkdirSync(shimDir);
+    const realTar = execFileSync("sh", ["-c", "command -v tar"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      join(shimDir, "tar"),
+      `#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do [[ "$a" == --no-overwrite-dir ]] || args+=("$a"); done\nexec ${JSON.stringify(realTar)} "\${args[@]}"\n`,
+      { mode: 0o755 },
+    );
+    // Stand-in for "another repo's hooks dir on the host": must stay empty.
+    outside = join(tmp, "victim-hooks");
+    mkdirSync(outside);
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function runSetup(repo: string, tarball: string, path = `${shimDir}:${process.env.PATH}`) {
+    const pub = join(tmp, "trusted.pub");
+    const { publicKey } = generateKeyPairSync("ed25519");
+    writeFileSync(pub, publicKey.export({ type: "spki", format: "pem" }) as string);
+    const hook = join(tmp, "pre-receive.cjs");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    return spawnSync("bash", [SCRIPT, repo, hook, pub, "--from-tarball", tarball], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: path },
+    });
+  }
+
+  const base: TarEntry[] = [
+    { name: "proj.git/", type: "5" },
+    { name: "proj.git/HEAD", type: "0", data: "ref: refs/heads/main\n" },
+    { name: "proj.git/refs/", type: "5" },
+    { name: "proj.git/objects/", type: "5" },
+  ];
+
+  function assertRefused(entries: TarEntry[], stderrPattern: RegExp) {
+    const tarball = join(tmp, "hostile.tar.gz");
+    writeFileSync(tarball, ustar(entries));
+    const repo = join(tmp, "out.git");
+    const res = runSetup(repo, tarball);
+    assert.notStrictEqual(res.status, 0, `must be refused; stdout: ${res.stdout}`);
+    assert.match(res.stderr, stderrPattern);
+    // Refused before extraction: nothing reached the host.
+    assert.doesNotMatch(res.stdout, /extracting/);
+    assert.ok(!existsSync(repo), "REPO_DIR must not be created");
+    assert.deepStrictEqual(readdirSync(outside), [], "nothing may be written outside the scratch dir");
+  }
+
+  it("refuses a symlink entry followed by a file written through it", () => {
+    assertRefused(
+      [
+        ...base,
+        { name: "proj.git/hooks", type: "2", linkname: outside },
+        { name: "proj.git/hooks/post-update", type: "0", data: "#!/bin/sh\necho pwned\n" },
+      ],
+      /link or special-file entry: .*proj\.git\/hooks/,
+    );
+  });
+
+  it("refuses a hardlink entry", () => {
+    const victim = join(outside, "..", "victim-file");
+    writeFileSync(victim, "do not touch\n");
+    assertRefused(
+      [...base, { name: "proj.git/packed-refs", type: "1", linkname: victim }],
+      /link or special-file entry: .*proj\.git\/packed-refs/,
+    );
+  });
+
+  it("refuses a fifo entry", () => {
+    assertRefused([...base, { name: "proj.git/fifo", type: "6" }], /link or special-file entry: .*proj\.git\/fifo/);
+  });
+
+  it("refuses an absolute-path entry", () => {
+    assertRefused([...base, { name: `${outside}/abs`, type: "0", data: "x" }], /unsafe entry: \//);
+  });
+
+  it("refuses a `..` path entry", () => {
+    assertRefused([...base, { name: "proj.git/../../victim-hooks/rel", type: "0", data: "x" }], /unsafe entry: .*\.\./);
+  });
+
+  it("still catches a symlink after extraction if a tar's listing misses it (defense in depth)", () => {
+    // A tar whose listings come back empty: the pre-extraction checks see
+    // nothing, so only the post-extraction allowlist scan stands between
+    // the symlink and the import.
+    const lying = join(tmp, "lying-shim");
+    mkdirSync(lying);
+    writeFileSync(
+      join(lying, "tar"),
+      `#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == -t* ]] && exit 0; done\nexec ${JSON.stringify(join(shimDir, "tar"))} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const tarball = join(tmp, "dangling.tar.gz");
+    writeFileSync(tarball, ustar([...base, { name: "proj.git/refs/evil", type: "2", linkname: outside }]));
+    const repo = join(tmp, "out-dangling.git");
+    const res = runSetup(repo, tarball, `${lying}:${process.env.PATH}`);
+    assert.notStrictEqual(res.status, 0);
+    assert.match(res.stderr, /extracted a symlink, hardlink or special file: refs\/evil/);
+    assert.ok(!existsSync(repo), "REPO_DIR must not be created");
+  });
+
+  it("still imports a clean hand-built tarball", () => {
+    const work = join(tmp, "work");
+    mkdirSync(work);
+    const git = (args: string[], cwd?: string) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+    git(["init", "-q", "--initial-branch=main"], work);
+    git(["config", "user.email", "t@example.com"], work);
+    git(["config", "user.name", "t"], work);
+    writeFileSync(join(work, "a.txt"), "one\n");
+    git(["add", "."], work);
+    git(["commit", "-q", "-m", "one"], work);
+    const stage = join(tmp, "stage");
+    mkdirSync(stage);
+    git(["clone", "-q", "--bare", work, join(stage, "proj.git")]);
+    const tarball = join(tmp, "clean.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", stage, "proj.git"], { stdio: "pipe" });
+    const repo = join(tmp, "out-clean.git");
+    const res = runSetup(repo, tarball);
+    assert.strictEqual(res.status, 0, `setup-repo.sh failed: ${res.stderr}`);
+    assert.strictEqual(git(["--git-dir", repo, "rev-parse", "refs/heads/main"]), git(["rev-parse", "main"], work));
   });
 });
