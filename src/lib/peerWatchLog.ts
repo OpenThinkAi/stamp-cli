@@ -11,7 +11,8 @@
  * Injection seam: `_appendForTest` replaces real `appendFileSync` in tests.
  */
 
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import type { TriageDecision } from "./peerTriage.js";
 import { peerWatchLogPath } from "./paths.js";
@@ -69,7 +70,12 @@ export interface TripletRecord {
   pr_url: string;
   /** SHA-256 hex digest of the peer-watch.md bytes used for this call. */
   rules_hash: string;
-  /** The raw event payload (untrusted but logged as-is for replay). */
+  /**
+   * The event payload. `appendTriplet` writes it through
+   * `summarizeEventPayload` (AGT-2249): routing fields are kept, the PR's
+   * title/body/changed paths are replaced by hashes and counts so another
+   * author's PR content does not accumulate on this machine.
+   */
   event_payload: Record<string, unknown>;
   /** The triage decision that was returned. */
   decision: TriageDecision;
@@ -98,6 +104,45 @@ export interface AppendTripletInput extends TripletRecord {
   _maxBytesForTest?: number;
 }
 
+// ─── Payload summary (AGT-2249) ───────────────────────────────────────
+
+/** Payload keys whose content is another author's PR text. */
+const CONTENT_KEYS = ["title", "body"] as const;
+
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+/**
+ * Reduce an event payload to what debugging a triage decision needs without
+ * keeping another author's PR content: every routing field (repo, patch_id,
+ * SHAs, fingerprints, pr_url, ...) is kept; `title`/`body` become
+ * `<key>_sha256` + `<key>_length`; `paths_changed` becomes
+ * `paths_changed_count` + `paths_changed_sha256`; `pubkey` and `signature`
+ * are dropped (bulky, and the fingerprint is kept).
+ */
+export function summarizeEventPayload(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (k === "pubkey" || k === "signature") continue;
+    if ((CONTENT_KEYS as readonly string[]).includes(k) && typeof v === "string") {
+      out[`${k}_sha256`] = sha256Hex(v);
+      out[`${k}_length`] = v.length;
+      continue;
+    }
+    if (k === "paths_changed" && Array.isArray(v)) {
+      out["paths_changed_count"] = v.length;
+      out["paths_changed_sha256"] = sha256Hex(JSON.stringify(v));
+      continue;
+    }
+    if (v !== null && typeof v === "object") continue; // nested content: drop
+    out[k] = v;
+  }
+  return out;
+}
+
 // ─── Append ──────────────────────────────────────────────────────────
 
 /**
@@ -113,7 +158,7 @@ export function appendTriplet(input: AppendTripletInput): void {
     repo: input.repo,
     pr_url: input.pr_url,
     rules_hash: input.rules_hash,
-    event_payload: input.event_payload,
+    event_payload: summarizeEventPayload(input.event_payload),
     decision: input.decision,
     ...(input.kind !== undefined ? { kind: input.kind } : {}),
     ...(input.reason !== undefined ? { reason: input.reason } : {}),
@@ -126,11 +171,14 @@ export function appendTriplet(input: AppendTripletInput): void {
     if (input._appendForTest) {
       input._appendForTest(logPath, line);
     } else {
-      // Ensure the parent dir exists before writing.
-      mkdirSync(dirname(logPath), { recursive: true });
+      // Ensure the parent dir exists before writing. AGT-2249: the log
+      // names other people's PRs, so it is owner-only (0600 in a 0700
+      // dir), re-applied on every append for logs created before this.
+      mkdirSync(dirname(logPath), { recursive: true, mode: 0o700 });
       // Bound total size before appending (OpenThinkAi/stamp-cli#47).
       rotateIfNeeded(logPath, input._maxBytesForTest ?? PEER_WATCH_LOG_MAX_BYTES);
-      appendFileSync(logPath, line, "utf8");
+      appendFileSync(logPath, line, { encoding: "utf8", mode: 0o600 });
+      chmodSync(logPath, 0o600);
     }
   } catch (err) {
     process.stderr.write(
