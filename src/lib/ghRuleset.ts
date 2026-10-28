@@ -499,6 +499,101 @@ export function findDeployKey(
   return Number.isFinite(id) ? id : null;
 }
 
+/** One entry from `GET /repos/:o/:r/keys`. */
+export interface DeployKeyInfo {
+  id: number;
+  title: string;
+  read_only: boolean;
+}
+
+/**
+ * List every deploy key on the repo, or null when the gh call fails (the
+ * caller treats that as "could not check", never as "none").
+ */
+export function listDeployKeys(owner: string, repo: string): DeployKeyInfo[] | null {
+  const r = spawnSync(
+    "gh",
+    [
+      "api",
+      "--paginate",
+      `/repos/${owner}/${repo}/keys`,
+      "--jq",
+      ".[] | {id, title, read_only}",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" },
+  );
+  if (r.status !== 0) return null;
+  const out: DeployKeyInfo[] = [];
+  for (const line of r.stdout.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const k = JSON.parse(line) as { id?: unknown; title?: unknown; read_only?: unknown };
+      if (typeof k.id !== "number") continue;
+      out.push({
+        id: k.id,
+        title: typeof k.title === "string" ? k.title : "",
+        read_only: k.read_only === true,
+      });
+    } catch {
+      return null;
+    }
+  }
+  return out;
+}
+
+/**
+ * Write-enabled deploy keys other than the canonical stamp-mirror key
+ * (AGT-2249). GitHub's `DeployKey` ruleset bypass actor is repo-scoped, not
+ * key-scoped: EVERY write-enabled deploy key on the mirror bypasses the
+ * stamp-mirror-only ruleset and can push straight to main. Read-only keys
+ * cannot push, so they are fine.
+ */
+export function otherWriteDeployKeys(
+  keys: readonly DeployKeyInfo[],
+  canonicalKeyId: number,
+): DeployKeyInfo[] {
+  return keys.filter((k) => !k.read_only && k.id !== canonicalKeyId);
+}
+
+/** Warning text for `otherWriteDeployKeys` hits, or null when there are none. */
+export function formatExtraDeployKeyWarning(
+  owner: string,
+  repo: string,
+  extra: readonly DeployKeyInfo[],
+): string | null {
+  if (extra.length === 0) return null;
+  const list = extra.map((k) => `           - "${k.title}" (id ${k.id})`).join("\n");
+  return (
+    `warning: ${owner}/${repo} has ${extra.length} other write-enabled deploy key(s):\n${list}\n` +
+    `         GitHub's DeployKey ruleset bypass covers EVERY write deploy key on the repo, so each of\n` +
+    `         these can push to the protected branches without the stamp gate. Delete them, or re-add\n` +
+    `         them read-only (gh api -X DELETE /repos/${owner}/${repo}/keys/<id>). See\n` +
+    `         docs/github-ruleset-setup.md.`
+  );
+}
+
+/**
+ * Print the extra-write-key warning for a mirror (AGT-2249); a failed
+ * listing prints a note that the check could not run.
+ */
+export function warnOnExtraWriteDeployKeys(
+  owner: string,
+  repo: string,
+  canonicalKeyId: number,
+  list: (o: string, r: string) => DeployKeyInfo[] | null = listDeployKeys,
+): void {
+  const keys = list(owner, repo);
+  if (keys === null) {
+    console.log(
+      `note: could not list deploy keys on ${owner}/${repo} to check for other write-enabled keys ` +
+        `(gh api /repos/${owner}/${repo}/keys failed).`,
+    );
+    return;
+  }
+  const warning = formatExtraDeployKeyWarning(owner, repo, otherWriteDeployKeys(keys, canonicalKeyId));
+  if (warning) console.log(warning);
+}
+
 /**
  * Build a human-usable failure detail from a failed `gh api` invocation.
  *

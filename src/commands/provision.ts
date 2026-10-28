@@ -41,6 +41,7 @@ import {
   lookupRepoOwnerType,
   parseGithubOriginUrl,
   registerDeployKey,
+  warnOnExtraWriteDeployKeys,
   replaceBypassActors,
   STAMP_MIRROR_DEPLOY_KEY_TITLE,
   uncoveredMirrorBranches,
@@ -628,6 +629,7 @@ function applyMirrorRuleset(
     );
     actor = { type: "DeployKey", id: reg.keyId };
     actorDescription = `stamp-server deploy key "${STAMP_MIRROR_DEPLOY_KEY_TITLE}", id ${reg.keyId}`;
+    warnOnExtraWriteDeployKeys(mirror.owner, mirror.repo, reg.keyId);
   } else {
     // Personal repos: User actor on the gh-authed user, same as before
     // the deploy-key migration. Personal repos don't face the org
@@ -1292,6 +1294,8 @@ async function runMigrateBypass(
     );
     deployKeyId = registerStampMirrorKey(mirror, pubkey);
   }
+
+  warnOnExtraWriteDeployKeys(mirror.owner, mirror.repo, deployKeyId);
 
   // Locate the ruleset. Three legitimate cases:
   //
