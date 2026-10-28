@@ -100,6 +100,12 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   verified out-of-band. The run proceeds only if the server's key matches it.
   `--expect-fingerprint` alone also pins a first-time registration. See
   docs/github-ruleset-setup.md, "Rotating the `stamp-mirror` key".
+- **Maintenance-line publishes no longer take `latest` on npm.** The publish
+  workflow now picks the dist-tag from the branch. Only `main` publishes to
+  `latest` (or a prerelease label). `release/<N>.x` publishes to `legacy-<N>`
+  and refuses versions of another major, and any other ref fails closed.
+  Previously a bare `1.x.y` from `release/1.x` was tagged `latest`, which
+  would have silently downgraded unpinned installs to the 1.x verifier.
 
 ---
 
