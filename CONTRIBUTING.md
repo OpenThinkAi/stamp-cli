@@ -138,10 +138,15 @@ resolve to the prior major until GA.
 - **`latest`** — current GA. Default for `npm i @openthink/stamp`.
 - **`next`** — major-version prereleases (alpha / beta / rc), when used.
   Cleared once a corresponding GA flips `latest`.
-- **`legacy-N`** — pinned to the final release of major version N after the
-  next major ships. Lets operators staying on the old line do
-  `npm i @openthink/stamp@legacy-1` without typing a version. Currently:
-  `legacy-1` → `1.10.0`.
+- **`legacy-N`** — meant to point at the final release of major version N
+  after the next major ships, so operators staying on the old line can
+  `npm i @openthink/stamp@legacy-N` without typing a version. **No `legacy-1`
+  tag exists on npm today** (`npm view @openthink/stamp dist-tags` shows only
+  `latest`); 1.x users install `@openthink/stamp@1`, which resolves to the
+  newest 1.x (1.11.0). The tag is not created by any workflow until a 1.x
+  patch is published from `release/1.x`. To create it by hand, a maintainer
+  with publish rights runs `npm dist-tag add @openthink/stamp@1.11.0 legacy-1`
+  (it asks for the npm second factor).
 
 Only `main` publishes to `latest` (or to a prerelease label). The publish
 workflow derives the tag from the branch first: a push to a maintenance line

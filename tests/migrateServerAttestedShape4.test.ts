@@ -528,6 +528,32 @@ describe("runMigrateToServerAttested — repo_id default (AGT-2276)", () => {
     });
   }
 
+  it("already declared: keeps it, does not probe, and says so (AGT-2243)", () => {
+    const h = setupShape2Repo({ multiAdmin: false });
+    try {
+      git(h.repo, ["remote", "add", "origin", "git@github.com:Acme/widget.git"]);
+      const cfgPath = path.join(h.repo, ".stamp", "config.yml");
+      writeFileSync(cfgPath, `${readFileSync(cfgPath, "utf8")}repo_id: Acme/other\n`);
+      git(h.repo, ["commit", "-q", "-am", "declare repo_id"]);
+      const logs: string[] = [];
+      const origLog = console.log;
+      console.log = (...args: unknown[]) => {
+        logs.push(args.map(String).join(" "));
+      };
+      let calls: CapabilityProbeTarget[];
+      try {
+        ({ calls } = migrate(h, true));
+      } finally {
+        console.log = origLog;
+      }
+      assert.equal(calls.length, 0, "an existing declaration is not re-probed");
+      assert.equal(cfgOf(h)["repo_id"], "Acme/other");
+      assert.ok(logs.includes("repo_id already declared: Acme/other"), logs.join("\n"));
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it("malformed origin pair: refused without probing", () => {
     const h = setupShape2Repo({ multiAdmin: false });
     try {

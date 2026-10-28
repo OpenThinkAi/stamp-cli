@@ -945,7 +945,9 @@ Exit codes:
 
 Prerequisites:
   - 'gh' must be installed: https://cli.github.com
-  - stamp signing key at ~/.stamp/keys/ed25519 ('stamp keys generate' to create)
+  - stamp signing key at ~/.stamp/keys/ed25519 ('stamp keys generate' to create),
+    enrolled on the server as yours (the server refuses a broadcast signed by any other
+    key; enroll it by accepting an invite with 'stamp invites accept')
   - stamp-server config at ~/.stamp/server.yml ('stamp server config <host:port>' to set)
 `,
   )
@@ -1758,7 +1760,7 @@ reviewers
   )
   .requiredOption(
     "--from <source@ref>",
-    "source repo and ref — '<owner>/<repo>@<tag>' (GitHub) or full 'https://' URL + ref",
+    "source repo and ref — '<owner>/<repo>@<ref>' (GitHub) or full 'https://' URL + ref; prefer a commit SHA as the ref (a tag or branch can move)",
   )
   .option(
     "--expect-prompt-sha <sha256>",

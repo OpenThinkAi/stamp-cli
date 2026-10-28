@@ -108,8 +108,8 @@ stamp update                          # in-place upgrade of an existing install
 npm i -g @openthink/stamp@latest      # fresh install of GA (2.0.1+)
 ```
 
-Operators who explicitly need to stay on the 1.x line can pin to
-`@openthink/stamp@legacy-1` once that dist-tag is published (the bridge
+Operators who explicitly need to stay on the 1.x line can install
+`@openthink/stamp@1`, which resolves to the newest 1.x release (the bridge
 release ships deprecation notices pointing at this guide and supports both
 1.x operator-trust and 2.x server-attested verification side by side
 per-repo via `review_server` config). Existing repos keep working on
@@ -195,7 +195,8 @@ values) — you make them by hand before the migration commit lands:
   `.stamp/config.yml` — the pair this repo's prompts live under on the
   server (`stamp review` prints the one it is using). Verifiers then refuse
   approvals the server signed for any other repo (AGT-2272). Needs a stamp
-  server new enough to sign `repo_id`; see the CHANGELOG for the order.
+  server new enough to sign `repo_id`; follow the upgrade order in the
+  README ("Binding approvals to the repo").
 
 **Single-trusted-key repos:** if your `.stamp/trusted-keys/` has only one
 pubkey, `minimum_signatures: 2` will block every future `.stamp/**` change
@@ -730,12 +731,12 @@ This is deliberate. An automated promotion would conflate "this key can merge co
   verifiable indefinitely. Default `stamp init` scaffolds 2.x-aware config;
   `--mode local-only` opts into no-trust mode with an explicit banner.
 - **2.x maintenance:** the 1.x line moves to security-patches-only after
-  2.0 GA. Operators who can't migrate immediately can pin to
-  `@openthink/stamp@legacy-1` (the 1.10.0 release) — the patch window is
-  per-issue rather than a fixed N-month commitment.
+  2.0 GA. Operators who can't migrate immediately can install
+  `@openthink/stamp@1` (the newest 1.x, currently 1.11.0) — the patch window
+  is per-issue rather than a fixed N-month commitment.
 
 If your team has a long-running 1.x deployment that can't migrate
-immediately, `@legacy-1` is your stable landing pad.
+immediately, `@openthink/stamp@1` is your stable landing pad.
 
 ---
 

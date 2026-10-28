@@ -58,7 +58,7 @@ import {
 import { fetchServerReviewSigningPubkey } from "../lib/serverPubkeyFetch.js";
 import { patchConfigYaml } from "../lib/config.js";
 import { repoIdRawFromConfigYaml } from "../lib/repoBinding.js";
-import { decideRepoIdDefault } from "../lib/repoIdDefault.js";
+import { decideRepoIdDefault, repoIdAlreadyDeclaredLine } from "../lib/repoIdDefault.js";
 import {
   loadServerConfig,
   parseServerFlag,
@@ -392,6 +392,8 @@ export function runMigrateToServerAttested(
   let cfgText = rewrite.text;
   if (repoIdDecision.kind === "write") {
     cfgText = patchConfigYaml(cfgText, { repo_id: repoIdDecision.repoId });
+  } else if (repoIdDecision.kind === "declared") {
+    console.log(repoIdAlreadyDeclaredLine(repoIdDecision.repoId));
   } else if (repoIdDecision.kind === "skip") {
     console.error(repoIdDecision.note);
   }

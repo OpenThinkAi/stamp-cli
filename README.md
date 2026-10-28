@@ -5,8 +5,8 @@
 > requires forging a server signature — the operator no longer constructs both
 > sides of "what the LLM saw" and "what the LLM said." On the 1.x line and
 > upgrading? See the [**1.x → 2.x migration guide**](./docs/migration-1.x-to-2.x.md).
-> 1.x receives security patches only; pin to `@openthink/stamp@legacy-1` if you
-> need to stay on it.
+> 1.x receives security patches only; install `@openthink/stamp@1` (the newest
+> 1.x, currently 1.11.0) if you need to stay on it.
 
 Local, headless pull-request system for agent-to-agent code review workflows.
 
@@ -52,7 +52,7 @@ what trust guarantees you actually get. In 2.x, the trust ladder is explicit:
 | Mode | Origin is… | Trust source | Enforcement |
 |---|---|---|---|
 | **Server-gated attestations** (trust model, recommended) | A stamp server you deployed | Server signs every verdict; admin-cap keys gate `.stamp/**` changes | Pre-receive hook rejects unstamped pushes; v4 envelope verified end-to-end |
-| **Attested PRs** (trust model) | GitHub | Server signs every verdict; verified in CI against a public key (asymmetric) | `stamp/verify-attestation@v1` required PR check |
+| **Attested PRs** (trust model) | GitHub | Server signs every verdict; verified in CI against a public key (asymmetric) | `stamp verify` required PR check (the SHA-pinned `verify-attestation` action) |
 | **Local-only** (advisory, no trust) | Anywhere | None — `--plan` / `--headless` produce no attestation | Discipline-only; signs merges but the remote doesn't enforce anything |
 
 The two **trust models** are server-gated attestations and Attested PRs;
@@ -100,7 +100,7 @@ config without touching your reviewer prompts. See the
 
 For teams whose source of truth is GitHub, `stamp init` against a github.com
 origin auto-scaffolds `.github/workflows/stamp-verify.yml` (the verifier that
-runs `stamp/verify-attestation@v1` on every PR):
+runs the SHA-pinned `verify-attestation` action on every PR):
 
 ```sh
 cd myproject
@@ -306,7 +306,7 @@ stamp attest [<branch>] --into <target> [--push <remote>]
                                            #   with --push, also git push --atomic branch +
                                            #   attestation ref to <remote> in one transaction
 stamp verify-pr <head> --base <ref> --into <branch>
-                                           # consumer side; used by stamp/verify-attestation@v1
+                                           # consumer side; used by the verify-attestation action
                                            # action and runnable locally for debugging
 ```
 
@@ -330,12 +330,25 @@ stamp trust grant <name>                            # stage a per-repo signing-t
 > **Identity privacy (AGT-422).** `stamp users list` is readable by every
 > enrolled user, so short_names are visible to the whole team. To avoid
 > exposing the PII conventionally found in SSH key comments
-> (`firstname.lastname@laptop`), env-seeded keys default to a
+> (`firstname.lastname@laptop`), seeded and invited keys default to a
 > **content-addressed** `user-<8-hex>` short_name and the key comment is
 > **stripped** before the pubkey is stored. A human-readable name is set
-> only when someone explicitly runs `stamp users set-name`. `last_seen_at`
-> is recorded on every authenticated command so `stamp users prune
-> --idle-for <Nd>` can retire stale accounts.
+> only with `stamp invites accept --short-name` or `stamp users set-name`.
+> A name freed by a removal or rename is reserved: members can't claim it,
+> owners and admins can assign it. `last_seen_at` is recorded on every
+> authenticated command so `stamp users prune --idle-for <Nd>` can retire
+> stale accounts; members see only their own.
+
+**Peer review (needs `STAMP_PEER_REVIEWS_ENABLED=1` on the server):**
+
+```sh
+stamp pr open <branch>                 # push, gh pr create, broadcast to listeners
+stamp pr listen --org <org>            # review peers' PRs (repo must consent; see "Data flow / privacy")
+stamp pr ping [pr-url]                 # ask seat-holders to re-review after new commits
+stamp peer test --event <fixture>      # dry-run triage against a saved event
+stamp peer log [--raw] [--limit <n>]   # read ~/.stamp/peer-watch.log
+stamp peer drafts list|show <id>|delete [<id>] [--all --older-than 30d --yes]
+```
 
 **Browsing history:**
 
@@ -356,7 +369,7 @@ stamp reviewers edit <name>                       # open existing reviewer's pro
 stamp reviewers test <name> --diff <revspec>      # invoke reviewer w/o recording to DB
 stamp reviewers show <name> [--limit <n>]         # verdict history + stats for calibration
 stamp reviewers remove <name> [--delete-file]     # de-register; optional rm of .md
-stamp reviewers fetch <name> --from <source@ref>  # install + pin from canonical source
+stamp reviewers fetch <name> --from <source@ref>  # install + pin from canonical source (prefer a commit SHA as ref)
                                                    #   add --expect-prompt-sha <hex> (or --expect-tools-sha / --expect-mcp-sha)
                                                    #   to anchor first-fetch trust against an out-of-band published manifest
 stamp reviewers verify [<name>]                   # check prompt/tool/mcp against lock; exit 3 on drift
@@ -526,20 +539,19 @@ the server hook prints a warning and keeps enforcing whatever parsed.
 In 2.x server-gated mode, three additional config surfaces apply:
 
 ```yaml
-# .stamp/config.yml — review_server tells stamp where to fetch signed verdicts
-review_server:
-  host: stamp                                # ssh alias for your stamp-server
-  pubkey_fingerprint: sha256:abc...          # the server's review-signing key fingerprint
-  trusted_keys_snapshot_sha256: sha256:def... # optional pin; verifier recomputes if absent
+# .stamp/config.yml
+repo_id: acme/widget                         # optional; binds server-signed approvals to this repo (see below)
 
 branches:
   main:
     required: [security, standards, product]
-    path_rules:
-      - pattern: ".stamp/**"
-        require_capability: admin
-        minimum_signatures: 2
-        bypass_review_cycle: true            # reviewers can't approve their own prompt changes
+    review_server: ssh://git@stamp.example.com:22   # the stamp server that runs and signs reviews
+
+path_rules:                                  # top-level map: glob pattern -> rule
+  ".stamp/**":
+    require_capability: admin
+    minimum_signatures: 2
+    bypass_review_cycle: true                # reviewers can't approve their own prompt changes
 ```
 
 ```yaml
@@ -559,6 +571,37 @@ as `trusted_keys_snapshot_sha256` — that's the load-bearing primitive behind
 lenient revocation. Hand-edit by running `stamp admin add-key` /
 `stamp admin revoke` (see the [Trust-anchor administration](#trust-anchor-administration-2x-server-gated-mode)
 commands above), not by editing the YAML directly.
+
+#### Binding approvals to the repo (`repo_id`)
+
+`repo_id: <org>/<repo>` is the id this repo's prompts live under on the
+stamp server. Once it is declared, the server signs the reviewed id into
+every approval, and the pre-receive hook, `stamp verify-pr` and
+`stamp merge` refuse an approval signed for any other repo (or one with no
+`repo_id`). That stops an approval minted under a more lenient repo's
+prompts from gating this one. Repos that declare nothing verify as before.
+
+New repos get it by default: `stamp provision`, `stamp bootstrap` and
+`stamp init --migrate-to-server-attested` ask the server
+(`stamp-server-pubkey --capabilities`) and write `repo_id` only if it says
+it signs it. Otherwise they print the line to add later. A repo that
+already declares one is left alone (`repo_id already declared: <id>`).
+
+To add it to an existing repo, upgrade in this order:
+
+1. **Stamp server image**, so approvals carry `repo_id`.
+2. **Every operator's stamp CLI**, so `stamp review` sends the declared id
+   and `stamp merge` checks it.
+3. **CI:** point `stamp/verify-attestation`'s `stamp-version` at the new
+   release (the server's hook was upgraded in step 1).
+4. **Then** land `repo_id:` in `.stamp/config.yml` as an admin-signed
+   `.stamp/` change, and re-run `stamp review` on open branches: approvals
+   minted before step 1 carry no `repo_id` and are refused once it is
+   declared.
+
+Declaring it before step 1 blocks every merge; before step 3, CI does not
+enforce it. Renaming a repo: see
+[docs/troubleshooting.md](./docs/troubleshooting.md#renaming-a-repo-that-declares-repo_id).
 
 ### Per-user reviewer-model selection
 
@@ -986,7 +1029,9 @@ infrastructure. Suitable for solo use or small trusted teams.
 stamp-cli is designed for agents as the primary user. What that means in
 practice:
 
-- **Output is prose**, not JSON. LLMs read prose natively. No `--json` flag.
+- **Output is prose** by default. LLMs read prose natively. A few
+  commands emit JSON for scripts (`stamp users list --json`,
+  `stamp users grants --json`, `stamp review --plan`).
 - **Control flow is exit codes.** Agent loops branch on them.
 - **State is files.** `.stamp/config.yml`, `.git/stamp/state.db` (chmoded
   `0600`; parent `.git/stamp/` chmoded `0700`), git commit trailers. Easy
@@ -1204,13 +1249,27 @@ data_flow:
 ```
 
 Committing this list is the repo's consent, and so every author's, to
-peer LLM review at those endpoints. A listener whose model is on its own
-host needs no entry. `require_confirmation` without `confirmed` refuses
-peer review too.
+peer LLM review at those endpoints. Entries are compared with the
+endpoint URL's host including any port, so a gateway on a non-default
+port is listed as `host:port`. A listener whose model is on its own host
+needs no entry. Bedrock, Vertex and Foundry routing can't be tied to a
+host and is always refused. `require_confirmation` without `confirmed`
+refuses peer review too.
+
+Each listener also needs, per mapped clone in `~/.stamp/peer-repos.yml`,
+`origin/HEAD` set (`git remote set-head origin --auto`) and regular
+fetches: the PR's `base_sha` must be on the default branch as the clone
+knows it, and a key revoked there stops being reviewed once the clone has
+fetched the revocation. On a server with members, a member's listener
+needs a grant (`stamp users grant <name> --repo <org>/*`); without one it
+gets a 403 and exits 1. Skip reasons and fixes are in
+[docs/troubleshooting.md](./docs/troubleshooting.md#stamp-pr-listen-skips-an-event).
+`stamp pr open` needs your stamp signing key enrolled on the server
+(through `stamp invites accept`).
 
 **Where peer-review data is kept.** `stamp pr open` sends the PR's title,
-body, changed paths and URL to the stamp-server, which relays them to
-subscribed listeners. The server stores the broadcast in `users.db` only
+body, changed paths and URL to the stamp-server, which relays the title,
+paths and URL (not the body) to listeners allowed to see that repo. The server stores the broadcast in `users.db` only
 until it is delivered: an hour after broadcast the title, body and paths
 are dropped from the row, and events, patches and cached server-side
 verdict prose are deleted after 30 days (`STAMP_PEER_EVENT_RETENTION_DAYS`,

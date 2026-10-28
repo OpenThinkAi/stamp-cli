@@ -60,11 +60,26 @@ Copy the appropriate fixture to `~/.stamp/peer-watch.md` on each reviewer machin
 For Tests 1–6, use the auto-post persona unless the test specifically calls for
 draft behavior.
 
-> **CAVEAT**: use `post_mode: draft` (not `dry-run`) to suppress GitHub posting
-> in your peer-watch rules. `post_mode: dry-run` is declared in the triage schema
-> but currently falls through to the real `gh pr review` call (AGT-452 will fix
-> this). Until AGT-452 lands, `draft` is the only mode that reliably suppresses
-> the GitHub post.
+> **Testing rules without posting:** `post_mode: dry-run` runs triage and the
+> review, prints the verdict and review body to the listener's terminal, releases
+> the seat and posts nothing to GitHub (no `gh` call, no draft file).
+> `post_mode: draft` also posts nothing, but saves the body to
+> `~/.stamp/drafts/<patch-id>.md` for you to post by hand.
+
+### Repo consent for peer review
+
+`stamp pr listen` skips every event until the test repo opts in to sending
+diffs to the listener's LLM endpoint. Land this in the test repo's
+`.stamp/config.yml` (through stamp review) before Test 1:
+
+```yaml
+data_flow:
+  peer_review_endpoints: [api.anthropic.com]   # or your ANTHROPIC_BASE_URL host
+```
+
+Each listener's clone of the test repo also needs `origin/HEAD` set
+(`git remote set-head origin --auto`) and should be fetched before each test,
+because the listener checks the event against the protected branch tip.
 
 ### Default review prompt
 
@@ -386,14 +401,14 @@ The peer-review loop is a **hybrid transport**:
   verified against the server's `users` table. Requires `http_url` in
   `~/.stamp/server.yml` (the HTTP origin of the stamp-server).
 - **Diff fetch**: the SSE notification payload is metadata-only. After claiming a
-  seat the listener fetches the real unified diff via `gh pr diff <pr_url>` — the
-  per-repo GitHub authorization boundary. A diff-fetch failure releases the seat
-  and skips the event.
+  seat the listener fetches the diff at exactly `base_sha...head_sha` through the
+  GitHub compare API with `gh api`, the per-repo GitHub authorization boundary.
+  A fetch failure, or a diff GitHub reports as too large or truncated, releases
+  the seat and skips the event.
 - **Seat protocol** (claim/heartbeat/release/re-review) rides SSH subprocess verbs
   (`src/server/claim-seat.ts`, `src/server/re-review-request.ts`, etc.). These are
   short-lived processes; the seat assignments persist in the server's SQLite DB.
 
 **Descoped items** (do not test in this runbook — separate tickets):
 - `claim_seat: always` extras-post path → AGT-451
-- `post_mode: dry-run` → AGT-452 (use `draft` instead)
 - Seat-claim over WS → AGT-453

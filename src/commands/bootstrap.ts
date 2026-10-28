@@ -16,7 +16,12 @@ import {
 } from "../lib/config.js";
 import { currentBranch, runGit } from "../lib/git.js";
 import { classifyRemote, describeShape } from "../lib/remote.js";
-import { decideRepoIdDefault, REVIEW_ORG_REPO_REMOTE, type RepoIdDefault } from "../lib/repoIdDefault.js";
+import {
+  decideRepoIdDefault,
+  repoIdAlreadyDeclaredLine,
+  REVIEW_ORG_REPO_REMOTE,
+  type RepoIdDefault,
+} from "../lib/repoIdDefault.js";
 import type { CapabilityProbeTarget } from "../lib/serverCapabilities.js";
 import { parseBareRepoSshUrl } from "../lib/serverConfig.js";
 import { parseReviewServerUrl } from "../lib/sshReviewClient.js";
@@ -526,6 +531,8 @@ export function resolveBootstrapProbeTarget(
 function reportRepoIdDecision(d: RepoIdDefault): void {
   if (d.kind === "write") {
     console.log(`\nThe stamp server signs repo_id into approvals; declaring repo_id: ${d.repoId}`);
+  } else if (d.kind === "declared") {
+    console.log(`\n${repoIdAlreadyDeclaredLine(d.repoId)}`);
   } else if (d.kind === "skip") {
     console.error(`\n${d.note}`);
   }
