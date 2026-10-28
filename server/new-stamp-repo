@@ -19,8 +19,9 @@
 #     is seeded directly with that .stamp/ config + a fresh empty initial
 #     commit.
 #   - --from-tarball <path>: path on the SERVER to a gzipped bare-clone of
-#     the operator's existing repo. The tarball is extracted as the bare
-#     repo, preserving the operator's full history + .stamp/ + trusted-keys.
+#     the operator's existing repo. Its refs and objects are imported into a
+#     fresh bare repo, preserving the operator's full history + .stamp/ +
+#     trusted-keys; the tarball's git config and hooks are discarded.
 #     Used by `stamp provision --migrate-existing` for brownfield migration.
 #
 set -e

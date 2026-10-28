@@ -110,8 +110,8 @@ exploit the server-side scripts to disrupt other tenants.
   payload + signature. A replay against a different ref with a
   different base fails the SHA-binding check at `pre-receive`.
 - *Push non-fast-forward (race or rebase).*
-  `receive.denyNonFastForwards=true` is set on freshly-created bare
-  repos (audit #20 fix), AND `pre-receive` re-reads the live ref tip
+  `receive.denyNonFastForwards=true` is set on every bare repo, fresh
+  or brownfield-imported (audit #20 fix; AGT-2266), AND `pre-receive` re-reads the live ref tip
   via `rev-parse` and re-checks FF against it — catching the race
   where stdin's `oldSha` is stale because a peer pushed first.
 - *Cross-tenant `rm` via `new-stamp-repo --from-tarball`.* The
@@ -121,6 +121,18 @@ exploit the server-side scripts to disrupt other tenants.
   Closed by audit M-S2: the path is now constrained to
   `/tmp/stamp-migrate-*.tar.gz` AND `readlink -f` re-checks that the
   canonical resolution stays under `/tmp/`.
+- *Hostile git config or hooks in a `--from-tarball` import.* A bare
+  clone carries its own `config` (`core.hooksPath` would make git skip
+  the installed stamp-verify pre-receive) and `hooks/` (an `update` or
+  `reference-transaction` hook would run as `git` on every push).
+  Closed by AGT-2266: `setup-repo.sh` extracts into a scratch dir,
+  refuses symlinks, copies only `HEAD`, `refs/`, `packed-refs` and
+  `objects/` (minus alternates) into a clean scratch repo with a minimal
+  config, then `git init --bare`s a fresh repo and fetches (with
+  `upload-pack --strict`) only the refs and the objects they reach. A
+  stray `.git` gitfile, `commondir`, grafts or hooks never reach a
+  directory git reads as a repository. It refuses to finish if `core.hooksPath` is
+  set from any config source.
 
 **Effective?** Push paths are closed. Server-side scripts are bounded
 to operator-shaped inputs.

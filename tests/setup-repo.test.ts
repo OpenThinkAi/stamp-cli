@@ -5,10 +5,9 @@
  * Scope: the rejection path. We craft tarballs whose entries contain
  * absolute paths or `..` segments and assert setup-repo.sh exits non-zero
  * with a clear "unsafe entry" error and writes nothing to the target
- * REPO_DIR. The successful-extraction path uses GNU-tar-only flags
- * (`--no-overwrite-dir`) and is exercised by the Alpine container in
- * production; running it on a developer's BSD-tar macOS box would fail
- * for tar-version reasons unrelated to the fix.
+ * REPO_DIR. The successful-extraction path uses a GNU-tar-only flag
+ * (`--no-overwrite-dir`); the AGT-2266 suite below runs it through a PATH
+ * shim that drops that flag so it works on BSD-tar macOS boxes too.
  */
 
 import { strict as assert } from "node:assert";
@@ -21,6 +20,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -213,5 +213,238 @@ describe("new-stamp-repo --from-tarball path constraint (v4 audit M-S2)", () => 
       }
       rmSync(targetDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---- AGT-2266 (+ folded AGT-2268, AGT-2269): tarball config/hooks stripped ----
+
+describe("setup-repo.sh --from-tarball does not trust the tarball's config or hooks (AGT-2266)", () => {
+  let tmp: string;
+  let shimDir: string;
+
+  beforeEach(() => {
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), "stamp-setuprepo-2266-")));
+    // The script passes GNU-tar-only `--no-overwrite-dir`; macOS bsdtar
+    // rejects it outright. A PATH shim drops that one flag so the success
+    // path runs on every dev box. Production (Alpine, GNU tar) is
+    // unaffected; the flag is irrelevant to what these tests assert.
+    shimDir = join(tmp, "shim");
+    mkdirSync(shimDir);
+    const realTar = execFileSync("sh", ["-c", "command -v tar"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      join(shimDir, "tar"),
+      `#!/usr/bin/env bash\nargs=()\nfor a in "$@"; do [[ "$a" == --no-overwrite-dir ]] || args+=("$a"); done\nexec ${JSON.stringify(realTar)} "\${args[@]}"\n`,
+      { mode: 0o755 },
+    );
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const git = (args: string[], cwd?: string, env?: NodeJS.ProcessEnv): string =>
+    execFileSync("git", args, { cwd, encoding: "utf8", env: env ?? process.env, stdio: "pipe" }).trim();
+
+  function makePubKey(): string {
+    const path = join(tmp, "trusted.pub");
+    const { publicKey } = generateKeyPairSync("ed25519");
+    writeFileSync(path, publicKey.export({ type: "spki", format: "pem" }) as string);
+    return path;
+  }
+
+  // Stand-in for the stamp-verify hook: rejects every push and leaves a
+  // marker, so a test can tell whether git actually ran it.
+  function makeRejectingHook(): { hook: string; marker: string } {
+    const marker = join(tmp, "stamp-hook-ran");
+    const hook = join(tmp, "hooks-src", "pre-receive.cjs");
+    mkdirSync(dirname(hook), { recursive: true });
+    writeFileSync(hook, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\necho stamp-verify-rejected >&2\nexit 1\n`, { mode: 0o755 });
+    return { hook, marker };
+  }
+
+  /** A work repo with history on `trunk` + a `feature` branch and a tag. */
+  function makeWorkRepo(): string {
+    const work = join(tmp, "work");
+    mkdirSync(work);
+    git(["init", "-q", "--initial-branch=trunk"], work);
+    git(["config", "user.email", "t@example.com"], work);
+    git(["config", "user.name", "t"], work);
+    writeFileSync(join(work, "a.txt"), "one\n");
+    git(["add", "."], work);
+    git(["commit", "-q", "-m", "one"], work);
+    git(["branch", "feature"], work);
+    git(["tag", "v1"], work);
+    writeFileSync(join(work, "a.txt"), "two\n");
+    git(["commit", "-q", "-am", "two"], work);
+    return work;
+  }
+
+  /** Bare clone of `work`, poisoned the ways the audit findings describe. */
+  function makeHostileTarball(work: string): { tarball: string; evilHooks: string } {
+    const stage = join(tmp, "stage");
+    mkdirSync(stage);
+    const bare = join(stage, "proj.git");
+    git(["clone", "-q", "--bare", work, bare]);
+
+    // (1) core.hooksPath pointing at an attacker dir with an accept-all
+    //     pre-receive — git would run that instead of the stamp hook.
+    const evilHooks = join(tmp, "evil-hooks");
+    mkdirSync(evilHooks);
+    writeFileSync(join(evilHooks, "pre-receive"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    git(["--git-dir", bare, "config", "core.hooksPath", evilHooks]);
+    // (2) receive.* weakening + an include of an arbitrary file.
+    git(["--git-dir", bare, "config", "receive.denyNonFastForwards", "false"]);
+    git(["--git-dir", bare, "config", "receive.denyDeletes", "false"]);
+    writeFileSync(join(tmp, "included.cfg"), `[core]\n\thooksPath = ${evilHooks}\n`);
+    git(["--git-dir", bare, "config", "include.path", join(tmp, "included.cfg")]);
+    // (3) extra executable hooks that would run server-side on every push.
+    for (const h of ["update", "post-update", "reference-transaction", "proc-receive", "post-receive"]) {
+      writeFileSync(join(bare, "hooks", h), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    }
+    // (4) alternates / commondir / grafts redirecting lookups elsewhere.
+    mkdirSync(join(bare, "objects", "info"), { recursive: true });
+    writeFileSync(join(bare, "objects", "info", "alternates"), join(tmp, "elsewhere.git", "objects") + "\n");
+    writeFileSync(join(bare, "info", "grafts"), "");
+
+    const tarball = join(tmp, "proj.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", stage, "proj.git"], { stdio: "pipe" });
+    return { tarball, evilHooks };
+  }
+
+  function runSetup(repo: string, hook: string, tarball: string, extraEnv: NodeJS.ProcessEnv = {}) {
+    return spawnSync("bash", [SCRIPT, repo, hook, makePubKey(), "--from-tarball", tarball], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, ...extraEnv },
+    });
+  }
+
+  it("imports history but drops the tarball's config, hooks and alternates; the stamp hook gates pushes", () => {
+    const work = makeWorkRepo();
+    const { tarball, evilHooks } = makeHostileTarball(work);
+    const { hook, marker } = makeRejectingHook();
+    const repo = join(tmp, "out.git");
+
+    const res = runSetup(repo, hook, tarball);
+    assert.strictEqual(res.status, 0, `setup-repo.sh failed: ${res.stderr}`);
+
+    // History, branches, tags and the default branch survive the import.
+    assert.strictEqual(git(["--git-dir", repo, "rev-parse", "refs/heads/trunk"]), git(["rev-parse", "trunk"], work));
+    assert.strictEqual(git(["--git-dir", repo, "rev-parse", "refs/heads/feature"]), git(["rev-parse", "feature"], work));
+    assert.strictEqual(git(["--git-dir", repo, "rev-parse", "refs/tags/v1"]), git(["rev-parse", "v1"], work));
+    assert.strictEqual(git(["--git-dir", repo, "symbolic-ref", "HEAD"]), "refs/heads/trunk");
+
+    // Tarball config is gone; server settings are applied.
+    const cfg = spawnSync("git", ["--git-dir", repo, "config", "--get", "core.hooksPath"], { encoding: "utf8" });
+    assert.notStrictEqual(cfg.status, 0, `core.hooksPath must be unset, got: ${cfg.stdout}`);
+    assert.strictEqual(git(["--git-dir", repo, "config", "--get", "receive.denyNonFastForwards"]), "true");
+    const deletes = spawnSync("git", ["--git-dir", repo, "config", "--get", "receive.denyDeletes"], { encoding: "utf8" });
+    assert.notStrictEqual(deletes.status, 0, "tarball receive.* settings must not survive");
+    const inc = spawnSync("git", ["--git-dir", repo, "config", "--get", "include.path"], { encoding: "utf8" });
+    assert.notStrictEqual(inc.status, 0, "tarball include.path must not survive");
+
+    // Only stamp's hook is live; tarball hooks are gone. (git never runs
+    // `*.sample` files, which `git init` may template in executable.)
+    const execHooks = readdirSync(join(repo, "hooks")).filter(
+      (h) => !h.endsWith(".sample") && (statSync(join(repo, "hooks", h)).mode & 0o111) !== 0,
+    );
+    assert.deepStrictEqual(execHooks, ["pre-receive"]);
+    assert.ok(!existsSync(join(repo, "objects", "info", "alternates")), "alternates must not survive");
+    assert.ok(!existsSync(join(repo, "info", "grafts")), "grafts must not survive");
+    assert.ok(!existsSync(join(repo, "commondir")), "commondir must not survive");
+
+    // End to end: a push runs the installed stamp hook, not the tarball's
+    // accept-all hooksPath, and is rejected.
+    writeFileSync(join(work, "a.txt"), "three\n");
+    git(["commit", "-q", "-am", "three"], work);
+    const push = spawnSync("git", ["push", repo, "trunk"], { cwd: work, encoding: "utf8" });
+    assert.notStrictEqual(push.status, 0, "push must be rejected by the stamp hook");
+    assert.match(push.stderr, /stamp-verify-rejected/);
+    assert.ok(existsSync(marker), "stamp pre-receive must have run");
+    assert.ok(existsSync(join(evilHooks, "pre-receive")));
+  });
+
+  it("rejects a tarball that contains a symlink", () => {
+    const stage = join(tmp, "stage-link");
+    const bare = join(stage, "proj.git");
+    mkdirSync(stage);
+    git(["init", "-q", "--bare", bare]);
+    rmSync(join(bare, "hooks"), { recursive: true, force: true });
+    const target = join(tmp, "elsewhere-hooks");
+    mkdirSync(target);
+    symlinkSync(target, join(bare, "hooks"));
+    const tarball = join(tmp, "link.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", stage, "proj.git"], { stdio: "pipe" });
+
+    const { hook } = makeRejectingHook();
+    const repo = join(tmp, "out-link.git");
+    const res = runSetup(repo, hook, tarball);
+    assert.notStrictEqual(res.status, 0);
+    assert.match(res.stderr, /contains a symlink: hooks/);
+    assert.ok(!existsSync(repo), "REPO_DIR must not be created");
+  });
+
+  it("refuses to report ready when core.hooksPath comes from another config source", () => {
+    const work = makeWorkRepo();
+    const { tarball, evilHooks } = makeHostileTarball(work);
+    const { hook } = makeRejectingHook();
+    const globalCfg = join(tmp, "global.gitconfig");
+    writeFileSync(globalCfg, `[core]\n\thooksPath = ${evilHooks}\n`);
+    const res = runSetup(join(tmp, "out-global.git"), hook, tarball, { GIT_CONFIG_GLOBAL: globalCfg });
+    assert.notStrictEqual(res.status, 0);
+    assert.match(res.stderr, /core\.hooksPath is set/);
+    assert.doesNotMatch(res.stdout, /repo ready/);
+    assert.ok(!existsSync(join(tmp, "out-global.git")), "half-built REPO_DIR must be removed");
+  });
+
+  it("ignores a `.git` gitfile that would redirect the import to another repo on the host", () => {
+    // upload-pack's non-strict path discovery tries `<path>/.git` first and
+    // follows gitfiles, so a tarball shipping `.git: gitdir: <victim>` could
+    // make the import copy another tenant's history. The allowlist copy (and
+    // `upload-pack --strict`) must keep that from happening.
+    const victimWork = join(tmp, "victim-work");
+    mkdirSync(victimWork);
+    git(["init", "-q", "--initial-branch=main"], victimWork);
+    git(["config", "user.email", "v@example.com"], victimWork);
+    git(["config", "user.name", "v"], victimWork);
+    writeFileSync(join(victimWork, "secret.txt"), "secret\n");
+    git(["add", "."], victimWork);
+    git(["commit", "-q", "-m", "secret"], victimWork);
+    git(["branch", "victim-secret"], victimWork);
+    const victim = join(tmp, "victim.git");
+    git(["clone", "-q", "--bare", victimWork, victim]);
+    const victimSha = git(["--git-dir", victim, "rev-parse", "refs/heads/victim-secret"]);
+
+    const work = makeWorkRepo();
+    const stage = join(tmp, "stage-gitfile");
+    mkdirSync(stage);
+    const bare = join(stage, "proj.git");
+    git(["clone", "-q", "--bare", work, bare]);
+    writeFileSync(join(bare, ".git"), `gitdir: ${victim}\n`);
+    const tarball = join(tmp, "gitfile.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", stage, "proj.git"], { stdio: "pipe" });
+
+    const { hook } = makeRejectingHook();
+    const repo = join(tmp, "out-gitfile.git");
+    const res = runSetup(repo, hook, tarball);
+    assert.strictEqual(res.status, 0, `setup-repo.sh failed: ${res.stderr}`);
+    const refs = git(["--git-dir", repo, "for-each-ref", "--format=%(refname)"]);
+    assert.doesNotMatch(refs, /victim-secret/, "victim refs must not be imported");
+    const has = spawnSync("git", ["--git-dir", repo, "cat-file", "-e", victimSha], { encoding: "utf8" });
+    assert.notStrictEqual(has.status, 0, "victim objects must not be imported");
+    assert.strictEqual(git(["--git-dir", repo, "rev-parse", "refs/heads/trunk"]), git(["rev-parse", "trunk"], work));
+  });
+
+  it("rejects a shallow clone with a clear message", () => {
+    const work = makeWorkRepo();
+    const stage = join(tmp, "stage-shallow");
+    mkdirSync(stage);
+    const bare = join(stage, "proj.git");
+    git(["clone", "-q", "--bare", "--depth=1", `file://${work}`, bare]);
+    const tarball = join(tmp, "shallow.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", stage, "proj.git"], { stdio: "pipe" });
+    const { hook } = makeRejectingHook();
+    const res = runSetup(join(tmp, "out-shallow.git"), hook, tarball);
+    assert.notStrictEqual(res.status, 0);
+    assert.match(res.stderr, /shallow clone/);
   });
 });
