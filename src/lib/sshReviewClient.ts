@@ -691,7 +691,7 @@ function exitCodeHint(exitCode: number | null): string {
     case 2:
       return "usage error — likely a client/server protocol mismatch. Check that the server is running a compatible stamp version.";
     case 3:
-      return "the SSH key you connected with isn't enrolled as a member on this stamp server. Run `stamp invites accept <url>` or ask an admin to enroll you.";
+      return "not authorized: either the SSH key you connected with isn't enrolled as a member on this stamp server (run `stamp invites accept <url>` or ask an admin to enroll you), or you aren't granted access to this repo's org/repo (ask an admin to run `stamp users grant <your-short-name> --repo <org>/<repo>`). The server's stderr above says which.";
     case 4:
       return "request validation failed (diff size cap or sha256 mismatch) — check `stamp review` isn't being asked to review an unbounded diff.";
     case 5:

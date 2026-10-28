@@ -532,7 +532,7 @@ your-org/your-repo/security.md       # optional per-repo override
 
 `getPromptPath` in [`src/server/prompts-cache.ts`](../src/server/prompts-cache.ts) does NOT honor the `default/` prefix. It resolves prompts in this order:
 
-1. `<cacheRoot>/<org>/<repo>/<reviewer>.md` (per-repo override, when the SSH verb supplies org + repo context)
+1. `<cacheRoot>/<org>/<repo>/<reviewer>.md` (per-repo override, when the SSH verb supplies org + repo context and the caller is authorized for that pair: an owner/admin, or a member granted it with `stamp users grant`)
 2. `<cacheRoot>/<reviewer>.md` (flat default — what gets used for everyone else)
 
 If you literally copy the project README's example and end up with `default/security.md` etc. at the cache root, the lookup will return `<none>` files because `<cacheRoot>/security.md` does not exist — only `<cacheRoot>/default/security.md` does. The boot log shows this as `files=<none>` despite a populated prompts repo.

@@ -320,6 +320,9 @@ stamp users demote <name> --to <admin|member>       # owner-only
 stamp users remove <name>                           # owner / admin-removes-member
 stamp users set-name <name> --to <new-name>         # claim a human name (default is user-<hex>)
 stamp users prune --idle-for <Nd>                   # remove idle users (never owners/self)
+stamp users grant <name> --repo <org>/<repo|*>      # owner/admin: scope a member to repos
+stamp users revoke <name> --repo <org>/<repo|*>     # owner/admin: remove a repo grant
+stamp users grants <name>                           # list a user's repo grants
 stamp trust grant <name>                            # stage a per-repo signing-trust PR
 ```
 

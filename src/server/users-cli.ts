@@ -5,6 +5,9 @@
  *   ssh git@<host> stamp-users promote <name> --to <admin|owner>
  *   ssh git@<host> stamp-users demote  <name> --to <admin|member>
  *   ssh git@<host> stamp-users remove  <name>
+ *   ssh git@<host> stamp-users grant   <name> --repo <org>/<repo|*>
+ *   ssh git@<host> stamp-users revoke  <name> --repo <org>/<repo|*>
+ *   ssh git@<host> stamp-users grants  <name>
  *
  * Symlinked into /home/git/git-shell-commands/stamp-users on the server.
  * Authenticates the caller by reading SSH_USER_AUTH (requires
@@ -23,19 +26,23 @@
  *   6 — cannot remove self
  *   7 — set-name: requested name already taken (AGT-422)
  *
- * stdout = machine-readable payload (a JSON object for `list`, an empty
+ * stdout = machine-readable payload (a JSON object for `list` and
+ * `grants`, an empty
  * body for write operations). stderr = human-readable prose using the
  * lowercase `note:` / `error:` convention that crosses the SSH boundary
  * unchanged into the operator's terminal.
  */
 
 import {
+  listRepoGrantsForCaller,
   listUsersForCaller,
   pruneIdleUsers,
   removeUser,
   setUserName,
+  setRepoGrant,
   setUserRole,
   type ListUsersDenial,
+  type RepoGrantDenial,
   type PruneIdleDenial,
   type RemoveUserDenial,
   type SetNameDenial,
@@ -76,7 +83,10 @@ function usage(): never {
       "  stamp-users remove           <short_name>\n" +
       "  stamp-users set-name         <short_name> --to <new_name>\n" +
       "  stamp-users prune            --idle-for <N>d\n" +
-      "  stamp-users get-stamp-pubkey <short_name>\n",
+      "  stamp-users get-stamp-pubkey <short_name>\n" +
+      "  stamp-users grant            <short_name> --repo <org>/<repo|*>\n" +
+      "  stamp-users revoke           <short_name> --repo <org>/<repo|*>\n" +
+      "  stamp-users grants           <short_name>\n",
   );
   process.exit(EXIT.USAGE);
 }
@@ -112,7 +122,20 @@ interface ParsedPrune {
   idleForSecs: number;
 }
 
+interface ParsedRepoGrant {
+  subcommand: "grant" | "revoke";
+  short_name: string;
+  repo: string;
+}
+
+interface ParsedListGrants {
+  subcommand: "grants";
+  short_name: string;
+}
+
 type Parsed =
+  | ParsedRepoGrant
+  | ParsedListGrants
   | ParsedSetRole
   | ParsedRemove
   | ParsedList
@@ -211,8 +234,55 @@ function parseArgs(argv: string[]): Parsed {
     if (!m) fail(`--idle-for must be '<N>d' (whole days, e.g. 30d) — got ${JSON.stringify(idle)}`, EXIT.USAGE);
     return { subcommand: "prune", idleForSecs: Number(m[1]) * 86400 };
   }
+  if (sub === "grant" || sub === "revoke") {
+    let short_name = "";
+    let repo = "";
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i]!;
+      if (arg === "--repo") {
+        const next = rest[i + 1];
+        if (!next) fail(`'--repo' requires a value`, EXIT.USAGE);
+        repo = next;
+        i++;
+      } else if (arg.startsWith("--")) {
+        fail(`unknown flag: ${arg}`, EXIT.USAGE);
+      } else if (!short_name) {
+        short_name = arg;
+      } else {
+        fail(`unexpected positional argument: ${arg}`, EXIT.USAGE);
+      }
+    }
+    if (!short_name) fail(`missing <short_name>`, EXIT.USAGE);
+    if (!repo) fail(`'${sub}' requires --repo <org>/<repo|*>`, EXIT.USAGE);
+    return { subcommand: sub, short_name, repo };
+  }
+  if (sub === "grants") {
+    if (rest.length === 0) fail(`missing <short_name>`, EXIT.USAGE);
+    if (rest.length > 1) fail(`unexpected positional argument: ${rest[1]}`, EXIT.USAGE);
+    return { subcommand: "grants", short_name: rest[0]! };
+  }
   fail(`unknown subcommand: ${sub}`, EXIT.USAGE);
 }
+
+function exitFromRepoGrantDenial(reason: RepoGrantDenial): number {
+  switch (reason) {
+    case "target_not_found":
+      return EXIT.NOT_FOUND;
+    case "caller_lacks_authority":
+      return EXIT.AUTHORITY;
+    case "invalid_repo_spec":
+    case "target_not_member":
+      return EXIT.USAGE;
+  }
+}
+
+const REPO_GRANT_DENIAL_PROSE: Record<RepoGrantDenial, string> = {
+  target_not_found: "no such user",
+  caller_lacks_authority: "only owners and admins may manage repo grants",
+  invalid_repo_spec: "--repo must be <org>/<repo> or <org>/* (alphanumerics + . _ -)",
+  target_not_member:
+    "repo grants scope members only; owners and admins already have access to every repo",
+};
 
 function exitFromSetRoleDenial(reason: SetRoleDenial): number {
   switch (reason) {
@@ -442,6 +512,59 @@ function runGetStampPubkey(parsed: ParsedGetStampPubkey): void {
   }
 }
 
+function runRepoGrant(parsed: ParsedRepoGrant): void {
+  const caller = resolveCaller();
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const result = setRepoGrant(db, caller, parsed.short_name, parsed.repo, parsed.subcommand);
+    if (!result.ok) {
+      fail(
+        `${parsed.subcommand} ${parsed.short_name} --repo ${parsed.repo}: ${REPO_GRANT_DENIAL_PROSE[result.reason]}`,
+        exitFromRepoGrantDenial(result.reason),
+      );
+    }
+    const pair = `${result.org}/${result.repo}`;
+    if (parsed.subcommand === "grant") {
+      process.stderr.write(
+        result.changed
+          ? `note: granted ${parsed.short_name} access to ${pair}\n`
+          : `note: ${parsed.short_name} already had access to ${pair} (no change)\n`,
+      );
+    } else {
+      process.stderr.write(
+        result.changed
+          ? `note: revoked ${parsed.short_name}'s access to ${pair}\n`
+          : `note: ${parsed.short_name} had no grant for ${pair} (no change)\n`,
+      );
+    }
+  } finally {
+    db.close();
+  }
+}
+
+function runListGrants(parsed: ParsedListGrants): void {
+  const caller = resolveCaller();
+  const db = openServerDb({ skipChmod: true });
+  try {
+    const result = listRepoGrantsForCaller(db, caller, parsed.short_name);
+    if (!result.ok) {
+      fail(
+        `grants ${parsed.short_name}: ${result.reason === "target_not_found" ? "no such user" : "members may only list their own grants"}`,
+        result.reason === "target_not_found" ? EXIT.NOT_FOUND : EXIT.AUTHORITY,
+      );
+    }
+    process.stdout.write(
+      JSON.stringify({
+        short_name: result.short_name,
+        role: result.role,
+        grants: result.grants.map((g) => ({ org: g.org, repo: g.repo, created_at: g.created_at })),
+      }) + "\n",
+    );
+  } finally {
+    db.close();
+  }
+}
+
 function main(): void {
   const parsed = parseArgs(process.argv.slice(2));
   switch (parsed.subcommand) {
@@ -463,6 +586,13 @@ function main(): void {
       break;
     case "get-stamp-pubkey":
       runGetStampPubkey(parsed);
+      break;
+    case "grant":
+    case "revoke":
+      runRepoGrant(parsed);
+      break;
+    case "grants":
+      runListGrants(parsed);
       break;
   }
 }

@@ -12,6 +12,9 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
 
 ### Added
 
+- **`stamp users grant` / `revoke` / `grants`** — owners and admins scope
+  members to `<org>/<repo>` pairs (or a whole org with `<org>/*`) on the
+  stamp server. See the per-repo override change below.
 - **`stamp provision --yes`** — forwarded to the bootstrap step and nothing
   else: it skips the confirmation prompt on the one merge bootstrap performs,
   the same narrow scope as `stamp bootstrap --yes`
@@ -22,6 +25,19 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `--migrate-existing` leaves.
 
 ### Changed
+
+- **Per-repo prompt overrides need a repo grant (security).** The `--org` /
+  `--repo` a `stamp review` client sends to the server pick the per-repo
+  prompt override, and were only shape-checked: any enrolled member could
+  review a diff under another repo's (possibly lenient) override and use the
+  signed approval elsewhere. The server now binds the pair to the caller.
+  Owners and admins are unaffected. Members need a grant
+  (`stamp users grant <name> --repo <org>/<repo>` or `<org>/*`) for an
+  override to apply; a member with no grants still reviews under the default
+  prompts, but a review naming a repo that has an override is refused (exit 3).
+  A member with any grant can review only granted repos. **Upgrade note:** if
+  you use per-repo overrides, grant your members their repos, or their reviews
+  of those repos will be refused.
 
 - **A headless provision without `--yes` now stops before any remote work.**
   With no TTY and no opt-out (`--yes` or `STAMP_REQUIRE_HUMAN_MERGE=0`),

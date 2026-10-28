@@ -1,5 +1,5 @@
 /**
- * `stamp users {list, promote, demote, remove}` — client-side CLI for the
+ * `stamp users {list, promote, demote, remove, grant, revoke, grants}` — client-side CLI for the
  * server-side user-management surface.
  *
  * Each subcommand SSHes to the configured stamp server and invokes
@@ -346,4 +346,81 @@ export function runUsersPrune(opts: PruneUsersOptions): void {
       server,
     });
   }
+}
+
+// ─── repo grants (AGT-2252) ──────────────────────────────────────────
+
+export interface RepoGrantOptions {
+  shortName: string;
+  /** `<org>/<repo>` or `<org>/*`; validated server-side. */
+  repo: string;
+}
+
+export function runUsersGrant(opts: RepoGrantOptions): void {
+  const server = resolveServer();
+  const result = callRemote(server, ["grant", opts.shortName, "--repo", opts.repo]);
+  if (result.status !== 0) {
+    throw explainExit(result.status, `stamp users grant ${opts.shortName}`, {
+      server,
+      shortName: opts.shortName,
+    });
+  }
+}
+
+export function runUsersRevoke(opts: RepoGrantOptions): void {
+  const server = resolveServer();
+  const result = callRemote(server, ["revoke", opts.shortName, "--repo", opts.repo]);
+  if (result.status !== 0) {
+    throw explainExit(result.status, `stamp users revoke ${opts.shortName}`, {
+      server,
+      shortName: opts.shortName,
+    });
+  }
+}
+
+interface RemoteGrantsPayload {
+  short_name?: string;
+  role?: string;
+  grants?: Array<{ org: string; repo: string }>;
+}
+
+export function runUsersGrants(opts: { shortName: string; json?: boolean }): void {
+  const server = resolveServer();
+  const result = callRemote(server, ["grants", opts.shortName]);
+  if (result.status !== 0) {
+    throw explainExit(result.status, `stamp users grants ${opts.shortName}`, {
+      server,
+      shortName: opts.shortName,
+    });
+  }
+  if (opts.json) {
+    process.stdout.write(result.stdout);
+    return;
+  }
+  let payload: RemoteGrantsPayload;
+  try {
+    payload = JSON.parse(result.stdout) as RemoteGrantsPayload;
+  } catch (e) {
+    throw new Error(
+      `server returned non-JSON output: ${(e as Error).message}. ` +
+        `Raw: ${JSON.stringify(result.stdout.slice(0, 200))}`,
+    );
+  }
+  process.stdout.write(formatGrants(payload));
+}
+
+/** Human-readable grants listing. Exported for unit tests. */
+export function formatGrants(payload: RemoteGrantsPayload): string {
+  const name = payload.short_name ?? "?";
+  if (payload.role === "owner" || payload.role === "admin") {
+    return `${name} is ${payload.role === "admin" ? "an admin" : "an owner"}: access to every repo (grants do not apply)\n`;
+  }
+  const grants = payload.grants ?? [];
+  if (grants.length === 0) {
+    return (
+      `${name} has no repo grants: unscoped — may review under the server's default ` +
+      `prompts, but never under a per-repo prompt override\n`
+    );
+  }
+  return grants.map((g) => `${g.org}/${g.repo}`).join("\n") + "\n";
 }

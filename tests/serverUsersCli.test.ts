@@ -423,3 +423,49 @@ describe("stamp-users — unknown subcommand", () => {
     }
   });
 });
+
+describe("stamp-users — repo grants (AGT-2252)", () => {
+  it("admin grants, lists, and revokes a member's repo access", () => {
+    const h = setup("admin");
+    try {
+      let r = run(h, ["grant", "other", "--repo", "Acme/Prod"]);
+      assert.equal(r.status, EXIT.OK, `stderr=${r.stderr}`);
+      assert.match(r.stderr, /granted other access to acme\/prod/);
+
+      r = run(h, ["grants", "other"]);
+      assert.equal(r.status, EXIT.OK, `stderr=${r.stderr}`);
+      const payload = JSON.parse(r.stdout) as { grants: Array<{ org: string; repo: string }> };
+      assert.deepEqual(
+        payload.grants.map((g) => `${g.org}/${g.repo}`),
+        ["acme/prod"],
+      );
+
+      r = run(h, ["revoke", "other", "--repo", "acme/prod"]);
+      assert.equal(r.status, EXIT.OK, `stderr=${r.stderr}`);
+      r = run(h, ["grants", "other"]);
+      assert.deepEqual((JSON.parse(r.stdout) as { grants: unknown[] }).grants, []);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("AUTHORITY: a member cannot grant (including to themselves)", () => {
+    const h = setup("member");
+    try {
+      const r = run(h, ["grant", "caller", "--repo", "sandbox/play"]);
+      assert.equal(r.status, EXIT.AUTHORITY, `stderr=${r.stderr}`);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("USAGE: rejects a malformed --repo and a missing --repo", () => {
+    const h = setup("owner");
+    try {
+      assert.equal(run(h, ["grant", "other", "--repo", "no-slash"]).status, EXIT.USAGE);
+      assert.equal(run(h, ["grant", "other"]).status, EXIT.USAGE);
+    } finally {
+      h.cleanup();
+    }
+  });
+});
