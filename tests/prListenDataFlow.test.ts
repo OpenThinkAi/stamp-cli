@@ -340,6 +340,19 @@ describe("AGT-2248: listener refuses without consent for its endpoint", () => {
 });
 
 describe("AGT-2248: listener proceeds with consent", () => {
+  // These assert on the marker/disclosure text, which
+  // STAMP_SUPPRESS_LLM_NOTICE=1 silences. `stamp merge` runs checks with the
+  // caller's env, and agent loops export that flag, so pin it unset here.
+  let savedSuppress: string | undefined;
+  before(() => {
+    savedSuppress = process.env.STAMP_SUPPRESS_LLM_NOTICE;
+    delete process.env.STAMP_SUPPRESS_LLM_NOTICE;
+  });
+  after(() => {
+    if (savedSuppress === undefined) delete process.env.STAMP_SUPPRESS_LLM_NOTICE;
+    else process.env.STAMP_SUPPRESS_LLM_NOTICE = savedSuppress;
+  });
+
   it("triages, reviews and posts when the endpoint is listed, printing the marker", async () => {
     const r = await runListener([prOpened()], {
       _dataFlowAtRefForTest: () => ({
