@@ -818,6 +818,13 @@ function buildV4Trailers(input: {
     { where: input.targetTipSha.slice(0, 8), raw: readRepoIdAt(input.targetTipSha) },
     { where: input.baseSha.slice(0, 8), raw: readRepoIdAt(input.baseSha) },
   ]);
+  if (repoBinding.kind === "invalid") {
+    // A repo-config problem, not one reviewer's: report it once.
+    throw new Error(
+      `${repoBinding.reason}. Server approvals cannot be checked against a malformed ` +
+        `repo id; fix it (an admin-signed .stamp/ change) before merging.`,
+    );
+  }
 
   // Query server-signed approval rows for this (base, head) pair.
   const db = openDb(stampStateDbPath(input.repoRoot));
@@ -920,7 +927,10 @@ function buildV4Trailers(input: {
       }
       const binding = checkApprovalRepoId(approval.repo_id, repoBinding);
       if (!binding.ok) {
-        throw new Error(`server approval for "${reviewerName}": ${binding.reason}`);
+        throw new Error(
+          `server approval for "${reviewerName}": ${binding.reason} ` +
+            `(\`stamp review --diff ${input.revspec}\`)`,
+        );
       }
       if (approval.verdict !== "approved") {
         throw new Error(

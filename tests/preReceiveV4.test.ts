@@ -26,7 +26,6 @@
  * wrapper finds the right git.
  */
 
-import { UNBOUND } from "../src/lib/repoBinding.ts";
 import { strict as assert } from "node:assert";
 import {
   createHash,
@@ -74,6 +73,7 @@ import {
   verifyV4TrustAnchorSignatures,
   type PhaseInputV4,
 } from "../src/hooks/pre-receive.ts";
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 
 // Schema version constant used when building test payloads. The
 // dispatch-threshold test imports the real constants from

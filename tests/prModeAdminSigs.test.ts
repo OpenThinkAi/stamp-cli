@@ -22,7 +22,6 @@
  * anchor collection surface AGT-355 left as a TODO.
  */
 
-import { UNBOUND } from "../src/lib/repoBinding.ts";
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
@@ -75,6 +74,7 @@ import {
   type PathRule,
   type PhaseInputV4,
 } from "../src/lib/v4Trust.ts";
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 
 // runAttest doesn't call requireHumanMerge but be defensive in case a
 // future change pulls it in (matches the sibling tests' posture).

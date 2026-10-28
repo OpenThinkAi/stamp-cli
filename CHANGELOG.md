@@ -217,7 +217,9 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   admin-signed change, and re-run `stamp review` on open branches, since
   approvals minted before step 1 carry no `repo_id` and are refused once
   the id is declared. Declaring it before step 1 blocks every merge;
-  declaring it before step 3 leaves CI unenforced.
+  declaring it before step 3 leaves CI unenforced. A malformed `repo_id` (anything
+  but `<org>/<repo>`) is now a config error in the CLI, where an unknown
+  key used to be ignored.
 
 ---
 

@@ -37,7 +37,6 @@
  * signature directly without going through `verifyV4SignerTrust`).
  */
 
-import { UNBOUND } from "../src/lib/repoBinding.ts";
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import {
@@ -83,6 +82,7 @@ import {
   verifyV4TrustAnchorSignatures,
   type PhaseInputV4,
 } from "../src/hooks/pre-receive.ts";
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
