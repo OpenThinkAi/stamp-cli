@@ -526,6 +526,10 @@ that's populated and managed entirely through the `stamp` CLI. Three roles:
 | `admin`  | Invite members, manage members. Cannot create or modify admins/owners |
 | `member` | Push/pull/merge (subject to per-repo trust). No user management      |
 
+Repo management — `new-stamp-repo`, `delete-stamp-repo` (soft delete and
+`--purge`), `restore-stamp-repo` and `purge-trash` — needs `owner` or
+`admin`. A `member` is refused with exit 3 (see [SSH access model](#ssh-access-model)).
+
 **SSH access** is gated by membership in this DB (via sshd's
 `AuthorizedKeysCommand`). **Signing trust** for a stamp-gated repo is
 separate: each repo's `.stamp/trusted-keys/` directory lists whose
@@ -724,9 +728,10 @@ Authenticated pushers can:
 
 - `git push` / `git fetch` / `git clone` (via the built-in
   `git-receive-pack`, `git-upload-pack`, `git-upload-archive` commands)
-- `ssh git@<host> new-stamp-repo <name> [...]`
-- `ssh git@<host> delete-stamp-repo <name> [--purge]`
-- `ssh git@<host> restore-stamp-repo <name> [--from <trash-entry>] [--as <new-name>]`
+- `ssh git@<host> new-stamp-repo <name> [...]` (owner/admin)
+- `ssh git@<host> delete-stamp-repo <name> [--purge]` (owner/admin)
+- `ssh git@<host> restore-stamp-repo <name> [--from <trash-entry>] [--as <new-name>]` (owner/admin)
+- `ssh git@<host> purge-trash [--older-than <N>d]` (owner/admin)
 - `ssh git@<host> list-trash`
 - `ssh git@<host> list-stamp-repos`
 - `ssh git@<host> resync-mirror <name> [<branch>...]`
@@ -735,6 +740,14 @@ Authenticated pushers can:
 the per-deployment env file (`/etc/stamp/env`, which holds the GitHub
 mirror token and is owned `root:git` mode 0640). The wrapper scripts are
 symlinked under `/home/git/git-shell-commands/` at image build time.
+
+Every SSH user runs as the one Unix user `git`, so file permissions can't
+tell roles apart. The verbs marked owner/admin resolve the caller from
+sshd's `SSH_USER_AUTH` against the membership DB before they touch
+`/srv/git`: the shell verbs call the `stamp-require-role` helper, and
+`purge-trash` checks in-process. A `member` gets exit 3 and nothing is
+changed. Repos have no per-repo owner yet, so an admin can manage every
+repo on the server.
 
 `git-shell` only constrains what runs as the login shell. sshd features
 negotiated outside the shell are switched off separately in

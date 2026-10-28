@@ -10,8 +10,8 @@
  * recovery path once trash is purged. So it gates on role ≥ admin (owner or
  * admin), matching the operator-only authority class of `stamp invites
  * mint`. A bare enrolled member (push/review access) must NOT be able to
- * destroy server-side history. (The pre-existing soft-delete script's own
- * role posture is out of scope here; this verb does not loosen it.)
+ * destroy server-side history. The shell siblings (new/delete/restore-
+ * stamp-repo) apply the same gate via `stamp-require-role` (AGT-2259).
  *
  * All purge logic + the destructive-delete containment lives in
  * trashPurge.ts (shared with the in-process sweep worker). This file is the
@@ -24,12 +24,7 @@
  *   3 — authority denial (caller's role doesn't permit purge)
  */
 
-import {
-  findUserBySshFingerprint,
-  openServerDb,
-  touchLastSeen,
-} from "../lib/serverDb.js";
-import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
+import { checkCallerRole } from "../lib/sshRoleGate.js";
 import {
   DEFAULT_TRASH_DIR,
   purgeTrash,
@@ -69,35 +64,11 @@ function parseOlderThanDays(argv: string[]): number {
 
 /** Resolve + authorize the caller: must be an enrolled owner/admin. */
 function authorizeOperator(): void {
-  const caller = readAuthenticatedPubkey();
-  if (!caller) {
-    fail(
-      "could not determine authenticated identity (SSH_USER_AUTH unset or has no " +
-        "publickey entry). Server may be missing 'ExposeAuthInfo yes' in sshd_config.",
-      1,
-    );
-  }
-  const db = openServerDb({ skipChmod: true });
-  try {
-    const callerRow = findUserBySshFingerprint(db, caller.fingerprint);
-    if (!callerRow) {
-      fail(
-        `caller fingerprint ${caller.fingerprint} is not in the membership DB.`,
-        1,
-      );
-    }
-    if (callerRow.role !== "owner" && callerRow.role !== "admin") {
-      fail(
-        `role ${callerRow.role} is not permitted to purge trash — this is an ` +
-          `irreversible mass-delete; need owner or admin.`,
-        3,
-      );
-    }
-    // Authenticated operator invocation — record activity (AGT-422).
-    touchLastSeen(db, callerRow.id);
-  } finally {
-    db.close();
-  }
+  const result = checkCallerRole(
+    "admin",
+    "purge trash — this is an irreversible mass-delete",
+  );
+  if (!result.ok) fail(result.message, result.kind === "denied" ? 3 : 1);
 }
 
 function main(): void {

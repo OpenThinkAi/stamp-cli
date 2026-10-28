@@ -194,6 +194,65 @@ if ! docker exec "$CONTAINER_NAME" sh -c "$sftp_probe_script"; then
 fi
 echo "docker-boot-smoke: sftp refused; git push/clone + git-shell-commands work ✓"
 
+# AGT-2259: the repo-management verbs are role-gated. Every SSH user runs
+# them as the Unix user `git`, so before the fix any enrolled key —
+# including role=member — could create, delete, purge or restore any repo.
+# Enroll two throwaway keys in users.db (seeded as admin, the second then
+# demoted to member) and drive the verbs over real SSH sessions:
+#   - member: new / delete / delete --purge / restore are each refused with
+#     exit 3 and leave the repo and its trash copy untouched;
+#   - admin: the same four verbs succeed (create → soft delete → restore →
+#     purge), so the gate isn't just refusing everyone.
+echo "docker-boot-smoke: asserting repo verbs refuse role=member and admit admin…"
+role_gate_script='set -e
+k=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N "" -C smoke-admin -f "$k/admin" >/dev/null
+ssh-keygen -q -t ed25519 -N "" -C smoke-member -f "$k/member" >/dev/null
+AUTHORIZED_KEYS="$(cat "$k/admin.pub" "$k/member.pub")" /usr/local/sbin/stamp-seed-users >/dev/null
+chown root:git /srv/git/.stamp-state/users.db
+chmod 0660 /srv/git/.stamp-state/users.db
+member_fp=$(ssh-keygen -lf "$k/member.pub" | awk "{print \$2}")
+node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"/srv/git/.stamp-state/users.db\");const r=db.prepare(\"UPDATE users SET role=? WHERE ssh_fp=?\").run(\"member\",process.argv[1]);if(r.changes!==1)process.exit(1)" "$member_fp"
+# new-stamp-repo seeds the operator key as the first trusted signer; the
+# smoke container has no OPERATOR_PUB_KEY, so mint a throwaway one.
+node -e "process.stdout.write(require(\"node:crypto\").generateKeyPairSync(\"ed25519\").publicKey.export({type:\"spki\",format:\"pem\"}))" > /etc/stamp/operator.pub
+chmod 0444 /etc/stamp/operator.pub
+OPTS="-o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+as() { who=$1; shift; ssh $OPTS -i "$k/$who" git@127.0.0.1 "$@"; }
+expect_denied() {
+  set +e; as member "$@" >"$k/out" 2>&1; rc=$?; set -e
+  if [ $rc -ne 3 ] || ! grep -q "role member is not permitted" "$k/out"; then
+    echo "member was NOT refused for: $* (exit $rc)" >&2; cat "$k/out" >&2; exit 1
+  fi
+}
+as admin new-stamp-repo gate-smoke >/dev/null || { echo "admin new-stamp-repo failed" >&2; exit 1; }
+[ -d /srv/git/gate-smoke.git ] || { echo "admin create did not create the repo" >&2; exit 1; }
+
+expect_denied new-stamp-repo gate-smoke-member
+[ ! -e /srv/git/gate-smoke-member.git ] || { echo "member create left a repo behind" >&2; exit 1; }
+expect_denied delete-stamp-repo gate-smoke
+expect_denied delete-stamp-repo gate-smoke --purge
+[ -d /srv/git/gate-smoke.git ] || { echo "member delete/purge removed the live repo" >&2; exit 1; }
+
+as admin delete-stamp-repo gate-smoke >/dev/null || { echo "admin soft delete failed" >&2; exit 1; }
+[ ! -e /srv/git/gate-smoke.git ] || { echo "admin soft delete left the live repo" >&2; exit 1; }
+expect_denied restore-stamp-repo gate-smoke
+expect_denied delete-stamp-repo gate-smoke --purge
+ls /srv/git/.trash | grep -q -- "-gate-smoke.git\$" || { echo "member purge removed the trash copy" >&2; exit 1; }
+
+as admin restore-stamp-repo gate-smoke >/dev/null || { echo "admin restore failed" >&2; exit 1; }
+[ -d /srv/git/gate-smoke.git ] || { echo "admin restore did not bring the repo back" >&2; exit 1; }
+as admin delete-stamp-repo gate-smoke --purge >/dev/null || { echo "admin purge failed" >&2; exit 1; }
+[ ! -e /srv/git/gate-smoke.git ] || { echo "admin purge left the live repo" >&2; exit 1; }
+
+rm -rf "$k" /etc/stamp/operator.pub
+'
+if ! docker exec "$CONTAINER_NAME" sh -c "$role_gate_script"; then
+  echo "error: repo-verb role-gate assertion failed (AGT-2259) — see above." >&2
+  exit 1
+fi
+echo "docker-boot-smoke: member refused new/delete/purge/restore; admin admitted ✓"
+
 health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")
 echo "docker-boot-smoke: container up after ${BOOT_WAIT_SECS}s ✓  (healthcheck: $health)"
 exit 0

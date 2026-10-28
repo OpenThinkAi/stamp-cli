@@ -226,8 +226,14 @@ COPY --from=builder /build/dist/server/stamp-review.cjs /usr/local/bin/stamp-rev
 # Trash-retention purge SSH command (AGT-423). `git@server purge-trash
 # --older-than <N>d` removes soft-deleted bare repos older than the TTL.
 # Wrapped by `stamp server-repos purge`; symlinked into git-shell-commands
-# below. SSH-access-gated only, like its delete/restore/list-trash siblings.
+# below. Role-gated to owner/admin (AGT-423).
 COPY --from=builder /build/dist/server/purge-trash.cjs /usr/local/bin/purge-trash
+# Role gate the shell repo verbs call before touching /srv/git (AGT-2259):
+# new-stamp-repo, delete-stamp-repo (incl. --purge) and restore-stamp-repo
+# run `stamp-require-role admin "<action>"`, which resolves the caller from
+# SSH_USER_AUTH against users.db and refuses role=member (exit 3). A
+# helper, not a verb — deliberately NOT symlinked into git-shell-commands.
+COPY --from=builder /build/dist/server/require-role.cjs /usr/local/sbin/stamp-require-role
 # Peer-agentic review SSH verbs (AGT-427 / AGT-453). Only stamp-pr-opened
 # remains — the six seat-protocol verbs were migrated to HTTP POST
 # endpoints in AGT-453. The SQLite migration always runs at boot regardless
@@ -308,6 +314,7 @@ RUN chmod +x /etc/stamp/pre-receive.cjs \
              /usr/local/bin/stamp-users \
              /usr/local/bin/stamp-pr-opened \
              /usr/local/sbin/stamp-ensure-repo-key \
+             /usr/local/sbin/stamp-require-role \
              /usr/local/sbin/stamp-authorized-keys \
              /usr/local/sbin/stamp-seed-users \
              /usr/local/sbin/stamp-http-server \
