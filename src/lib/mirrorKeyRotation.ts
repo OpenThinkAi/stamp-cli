@@ -132,8 +132,8 @@ export function decideMirrorKeyAction(
 
   const oldFp = existing?.fingerprint ?? "(unreadable)";
   const fpLines =
-    `  registered on GitHub : ${oldFp}\n` +
-    `  stamp server reports : ${newFp}\n`;
+    `  registered on GitHub: ${oldFp}\n` +
+    `  stamp server reports: ${newFp}\n`;
 
   if (!input.replaceKey) {
     throw new Error(
@@ -145,8 +145,10 @@ export function decideMirrorKeyAction(
         `Verify the new fingerprint out-of-band (e.g. \`ssh-keygen -lf ` +
         `/srv/git/.ssh-client-keys/${input.owner}_${input.repo}_ed25519.pub\` ` +
         `from your hosting platform's console, and confirm why the key ` +
-        `changed). If the rotation is expected, re-run with:\n` +
-        `  stamp provision --migrate-bypass --replace-key --expect-fingerprint ${newFp}`,
+        `changed). If the rotation is expected, re-run with the fingerprint you ` +
+        `verified (deliberately not pre-filled — copying the server's value ` +
+        `would skip the check):\n` +
+        `  stamp provision --migrate-bypass --replace-key --expect-fingerprint SHA256:<verified>`,
     );
   }
   if (input.expectFingerprint === undefined) {

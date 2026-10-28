@@ -71,6 +71,13 @@ describe("decideMirrorKeyAction", () => {
         assert.ok(err.message.includes(FP_A), "old fingerprint shown");
         assert.ok(err.message.includes(FP_B), "new fingerprint shown");
         assert.match(err.message, /--replace-key --expect-fingerprint/);
+        // The re-run hint must NOT pre-fill the server-reported fingerprint:
+        // copy-pasting it would turn the out-of-band pin into a click-through.
+        assert.match(err.message, /--expect-fingerprint SHA256:<verified>/);
+        assert.ok(
+          !err.message.includes(`--expect-fingerprint ${FP_B}`),
+          "re-run hint pre-fills the unverified server fingerprint",
+        );
         return true;
       },
     );
