@@ -13,6 +13,9 @@
  *     `requested_by_fp` (fp-recompute bind).
  *   - Ed25519 signature over `canonicalSerializePeerPayload(payloadWithoutSig)`
  *     is verified against the carried `pubkey`.
+ *   - The carried key must be the SSH caller's own enrolled stamp signing
+ *     key (users.stamp_pubkey, AGT-2249): a member cannot broadcast as
+ *     someone else. Members with no enrolled stamp key are refused.
  *   - No server-side repo or manifest access; operator-ness is verified
  *     client-side by each listener against its own local clone.
  *
@@ -48,6 +51,7 @@ import {
 import { loadServerEnvFile } from "../lib/serverEnvFile.js";
 import { readAuthenticatedPubkey } from "../lib/sshUserAuth.js";
 import { checkPrUrlBinding } from "../lib/prUrlBinding.js";
+import { fingerprintFromPem } from "../lib/keys.js";
 
 import { canonicalSerializePeerPayload } from "../lib/attestationV4.js";
 import {
@@ -235,6 +239,34 @@ async function main(): Promise<void> {
     );
     if (!authResult.ok) {
       fail(`auth failure: ${authResult.reason}`, 4);
+    }
+
+    // AGT-2249: bind the broadcast's author to the SSH caller. The
+    // signature above only proves the payload was signed by the key it
+    // carries; without this check any enrolled member could broadcast
+    // under another member's (or a throwaway) stamp key, spamming
+    // listeners and spending someone else's rate bucket. The author key
+    // must be the caller's own enrolled stamp signing key.
+    if (callerRow.stamp_pubkey === null) {
+      fail(
+        `auth failure: ${callerRow.short_name} has no stamp signing key enrolled on this server, ` +
+          `so a pr-opened broadcast cannot be bound to them. Re-enroll through an invite ` +
+          `(\`stamp invites accept\`) from the machine whose stamp key signs the broadcast.`,
+        4,
+      );
+    }
+    let enrolledFp: string;
+    try {
+      enrolledFp = fingerprintFromPem(callerRow.stamp_pubkey);
+    } catch {
+      fail(`auth failure: ${callerRow.short_name}'s enrolled stamp key is not a valid SPKI PEM`, 4);
+    }
+    if (enrolledFp !== payload.requested_by_fp) {
+      fail(
+        `auth failure: requested_by_fp ${payload.requested_by_fp} is not the stamp key enrolled ` +
+          `for the SSH caller ${callerRow.short_name} (${enrolledFp})`,
+        4,
+      );
     }
 
     // Persist patch row + event.

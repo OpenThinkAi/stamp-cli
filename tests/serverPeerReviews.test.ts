@@ -69,6 +69,7 @@ interface Harness {
 
 function setupHarness(
   role: "owner" | "admin" | "member" = "member",
+  stampPubkey: string | null = null,
 ): Harness {
   const dir = mkdtempSync(path.join(os.tmpdir(), "stamp-pr-tests-"));
   const dbPath = path.join(dir, "users.db");
@@ -80,6 +81,7 @@ function setupHarness(
       short_name: "caller",
       ssh_pubkey: MEMBER_SSH_LINE,
       ssh_fp: MEMBER_SSH_FP,
+      stamp_pubkey: stampPubkey,
       role,
       source: "env",
     });
@@ -87,11 +89,8 @@ function setupHarness(
     db.close();
   }
 
-  writeFileSync(
-    authPath,
-    `publickey ${MEMBER_SSH_FP} ${MEMBER_SSH_LINE}\n`,
-    "utf8",
-  );
+  // sshd's ExposeAuthInfo format: `publickey <type> <base64> [comment]`.
+  writeFileSync(authPath, `publickey ${MEMBER_SSH_LINE}\n`, "utf8");
 
   return {
     dir,
@@ -703,10 +702,6 @@ describe("AGT-2240: stamp-pr-opened rejects a pr_url outside the payload repo", 
   let harness: Harness;
   beforeEach(() => {
     harness = setupHarness();
-    // sshd's ExposeAuthInfo format is `publickey <type> <base64>` — overwrite
-    // the shared harness file so the caller authenticates and the verb
-    // reaches payload validation.
-    writeFileSync(harness.authPath, `publickey ${MEMBER_SSH_LINE}\n`, "utf8");
   });
   afterEach(() => harness.cleanup());
 
@@ -752,5 +747,75 @@ describe("AGT-2240: stamp-pr-opened rejects a pr_url outside the payload repo", 
     assert.equal(result.status, 4, `stderr: ${result.stderr}`);
     assert.match(result.stderr, /auth failure/);
     assert.doesNotMatch(result.stderr, /authorized repo/);
+  });
+});
+
+// ─── AGT-2249: requested_by_fp bound to the SSH caller's enrolled key ──
+
+import { fingerprintFromPem, generateKeypair } from "../src/lib/keys.ts";
+import { signBytes } from "../src/lib/signing.ts";
+import { canonicalSerializePeerPayload } from "../src/lib/attestationV4.ts";
+
+describe("AGT-2249: stamp-pr-opened binds the author key to the SSH caller", () => {
+  const callerKey = generateKeypair();
+  const otherKey = generateKeypair();
+
+  function signedPayload(kp: { privateKeyPem: string; publicKeyPem: string }) {
+    const body = {
+      repo: "acme/widget",
+      patch_id: "a".repeat(40),
+      base_sha: "b".repeat(40),
+      head_sha: "c".repeat(40),
+      requested_by_fp: fingerprintFromPem(kp.publicKeyPem),
+      paths_changed: ["src/x.ts"],
+      title: "t",
+      body: "b",
+      pr_url: "https://github.com/acme/widget/pull/7",
+      pubkey: kp.publicKeyPem,
+    };
+    const signature = signBytes(kp.privateKeyPem, canonicalSerializePeerPayload(body));
+    return JSON.stringify({ ...body, signature });
+  }
+
+  it("accepts a broadcast signed by the caller's own enrolled stamp key", () => {
+    const h = setupHarness("member", callerKey.publicKeyPem);
+    try {
+      const r = spawnVerb("pr-opened", h, {
+        stdin: signedPayload(callerKey),
+        peerReviewsEnabled: true,
+      });
+      assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+      assert.deepEqual(JSON.parse(r.stdout.trim()), { ok: true, patch_id: "a".repeat(40) });
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("refuses a validly signed broadcast under another member's key (exit 4)", () => {
+    const h = setupHarness("member", callerKey.publicKeyPem);
+    try {
+      const r = spawnVerb("pr-opened", h, {
+        stdin: signedPayload(otherKey),
+        peerReviewsEnabled: true,
+      });
+      assert.equal(r.status, 4, `stderr: ${r.stderr}`);
+      assert.match(r.stderr, /is not the stamp key enrolled for the SSH caller/);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("refuses a caller with no enrolled stamp key, with a clear message (exit 4)", () => {
+    const h = setupHarness("member", null);
+    try {
+      const r = spawnVerb("pr-opened", h, {
+        stdin: signedPayload(callerKey),
+        peerReviewsEnabled: true,
+      });
+      assert.equal(r.status, 4, `stderr: ${r.stderr}`);
+      assert.match(r.stderr, /has no stamp signing key enrolled/);
+    } finally {
+      h.cleanup();
+    }
   });
 });
