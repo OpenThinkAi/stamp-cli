@@ -293,6 +293,24 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `AUTHORIZED_KEYS` no longer enrolls it; use `stamp invites mint`, or
   `stamp-break-glass add` as root. The `stamp-gate legacy` binding for
   `authorized_keys` file lines is gone.
+- **Peer seat claims are bound to the caller** (AGT-2253). `POST
+  /peer/claim-seat` and `/peer/register-extra` checked the inner payload
+  signature only against the `pubkey` the payload carried, which could be
+  any throwaway key, so one enrolled member could claim seats under fresh
+  identities: fill both seats on any patch to lock out real reviewers, or
+  hold a reviewer seat on their own PR past the author check. The server
+  now refuses (401 `fingerprint_mismatch`) any payload whose `claimant_fp`
+  or `pubkey` is not the key that signed the request headers, matching
+  heartbeat and release-seat. `re-review-request` gets the same bind on
+  `requester_fp`. Claim-seat and register-extra also require the caller to
+  be allowed to see the patch repo's events, the same rule as the
+  peer-events stream: owners and admins always, members only with a grant
+  for the repo or its org (403 `repo_access_denied`); a body `repo` that is
+  not the patch's repo is refused (400 `repo_mismatch`), and register-extra
+  on an unknown patch is refused (409 `patch_not_found`) where it used to be
+  recorded. **Upgrade note:** on a server with members, grant each listener
+  its repos (`stamp users grant <name> --repo <org>/*`) or its claims will be
+  refused; it would already receive no events without one.
 
 ---
 
