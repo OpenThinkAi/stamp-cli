@@ -385,6 +385,14 @@ program
     "--remove-orgadmin",
     "under --migrate-bypass, also remove OrganizationAdmin from the ruleset's bypass list. Verify the DeployKey transport works (one stamp push) before running this — there is no automated push-verification step",
   )
+  .option(
+    "--replace-key",
+    "under --migrate-bypass, allow replacing a registered stamp-mirror deploy key that doesn't match the server's per-repo key. Without it a mismatch is refused (the key is a Ruleset bypass actor). Requires --expect-fingerprint",
+  )
+  .option(
+    "--expect-fingerprint <SHA256:...>",
+    "under --migrate-bypass, the OpenSSH SHA256 fingerprint the server's per-repo key must match, verified out-of-band (e.g. `ssh-keygen -lf` on the server's key file). Checked on every run; required with --replace-key",
+  )
   .action(
     async (
       name: string | undefined,
@@ -399,6 +407,8 @@ program
         migrateExisting?: boolean;
         migrateBypass?: boolean;
         removeOrgadmin?: boolean;
+        replaceKey?: boolean;
+        expectFingerprint?: string;
         yes?: boolean;
       },
     ) => {
@@ -420,6 +430,8 @@ program
           migrateExisting: opts.migrateExisting,
           migrateBypass: opts.migrateBypass,
           removeOrgadmin: opts.removeOrgadmin,
+          replaceKey: opts.replaceKey,
+          expectFingerprint: opts.expectFingerprint,
           yes: opts.yes,
         });
       } catch (err) {

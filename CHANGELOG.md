@@ -30,6 +30,19 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
   and its plan now says how the bootstrap merge will be confirmed.
 
+### Security
+
+- **`stamp provision --migrate-bypass` no longer replaces a mismatched
+  `stamp-mirror` deploy key on its own.** That key is a Ruleset bypass actor,
+  and the migration used to delete it and register whatever key the stamp
+  server reported. A key substituted on the server would then become a bypass
+  actor at the next routine reconciliation. A mismatch now stops the run and
+  prints the registered and reported fingerprints. To rotate, pass
+  `--replace-key --expect-fingerprint SHA256:...` with a fingerprint you
+  verified out-of-band. The run proceeds only if the server's key matches it.
+  `--expect-fingerprint` alone also pins a first-time registration. See
+  docs/github-ruleset-setup.md, "Rotating the `stamp-mirror` key".
+
 ---
 
 ## 3.6.2 — 2026-10-19
