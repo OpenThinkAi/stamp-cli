@@ -503,6 +503,28 @@ describe("listUsersForCaller", () => {
     }
   });
 
+  it("hides other users' last_seen_at from a member, not from an admin (AGT-2249)", () => {
+    const fx = buildFixture(1);
+    const db = open(fx.dbPath);
+    try {
+      db.prepare(`UPDATE users SET last_seen_at = 1700000000`).run();
+      const asMember = listUsersForCaller(db, fx.users.member1);
+      assert.ok(asMember.ok);
+      if (!asMember.ok) return;
+      for (const u of asMember.users) {
+        if (u.id === fx.users.member1.id) assert.equal(u.last_seen_at, 1700000000);
+        else assert.equal(u.last_seen_at, null, `${u.short_name}'s last_seen_at leaked to a member`);
+      }
+      const asAdmin = listUsersForCaller(db, fx.users.admin1);
+      assert.ok(asAdmin.ok);
+      if (!asAdmin.ok) return;
+      assert.ok(asAdmin.users.every((u) => u.last_seen_at === 1700000000));
+    } finally {
+      db.close();
+      fx.cleanup();
+    }
+  });
+
   it("members may list users (no authority restriction on read)", () => {
     const fx = buildFixture(2);
     const db = open(fx.dbPath);

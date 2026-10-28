@@ -206,6 +206,10 @@ export type ListUsersResult =
  * collaboration tool; keeping the list freely readable lowers the
  * coordination cost ("who else has access here?") without revealing
  * anything sensitive.
+ *
+ * AGT-2249: `last_seen_at` is per-person activity history (it updates on
+ * every authenticated command), not coordination data, so a member sees it
+ * only for their own row; owners/admins, who run the server, see all.
  */
 export function listUsersForCaller(
   db: DatabaseSync,
@@ -214,7 +218,7 @@ export function listUsersForCaller(
   // land), but every current `Role` value is permitted to list — the
   // exposed columns are coordination-data (who else has access) not
   // secrets. See doc comment above.
-  _caller: UserRow,
+  caller: UserRow,
 ): ListUsersResult {
   const rows = db
     .prepare(
@@ -226,7 +230,11 @@ export function listUsersForCaller(
          short_name`,
     )
     .all() as unknown as UserRow[];
-  return { ok: true, users: rows };
+  if (caller.role !== "member") return { ok: true, users: rows };
+  return {
+    ok: true,
+    users: rows.map((u) => (u.id === caller.id ? u : { ...u, last_seen_at: null })),
+  };
 }
 
 // Same shape the invite-accept + mint paths validate (kept local, matching
