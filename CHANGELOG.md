@@ -14,11 +14,9 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
 
 Read these before deploying this release; details are in the entries below.
 
-- **Order:** (1) redeploy the stamp server image, (2) upgrade every
-  operator's stamp CLI, (3) point CI's `stamp/verify-attestation`
-  `stamp-version` at this release, (4) only then declare `repo_id` in repos
-  that don't have it yet. `server/README.md`, "Upgrading the server to this
-  release", has the operator checklist.
+- **Order:** follow `server/README.md`, "Upgrading the server to this
+  release" (the upgrade order and the operator checklist are kept there
+  only).
 - **Release step (maintainers):** downstream repos only get the hardened
   `verify-attestation` action once `VERIFY_ACTION_REF` (and
   `VERIFY_ACTION_VERSION`) in `src/lib/verifyWorkflow.ts` is bumped to a
@@ -39,6 +37,8 @@ Read these before deploying this release; details are in the entries below.
   boot. Reviewer settings set on the container (`STAMP_REVIEWER_MODEL`,
   `STAMP_REVIEWER_THINKING`, `MAX_DIFF_BYTES`, `REVIEW_TIMEOUT_MS`) start
   taking effect on this deploy.
+- **`STAMP_SERVER_DB_PATH`** set to anything but
+  `/srv/git/.stamp-state/users.db` now stops the boot (AGT-2238).
 - **Peer listeners** skip every event until the repo lands
   `data_flow.peer_review_endpoints`, and need `origin/HEAD` set in each
   mapped clone (`git remote set-head origin --auto`).
@@ -148,7 +148,7 @@ Read these before deploying this release; details are in the entries below.
 - **Docs sweep** (AGT-2243): new troubleshooting entries for peer-listener
   skip reasons, `stamp pr open` without an enrolled stamp key, an undeclared
   `repo_id`, renaming a repo that declares `repo_id`, and a boot halted by
-  `refresh-repo-hooks`; a README section on `repo_id` with the upgrade order;
+  `refresh-repo-hooks`; a README section on `repo_id`;
   `server/README.md` "Upgrading the server to this release"; the README's
   2.x config example now shows `review_server` and `path_rules` in their real
   shape; the peer-review runbook no longer says `post_mode: dry-run` posts;
@@ -179,6 +179,33 @@ Read these before deploying this release; details are in the entries below.
   refreshes already did, and the entrypoint re-pins that key `git:git 0600`.
   The docs no longer tell you to set the variable to the default path or to
   leave the cache root alone.
+- **`stamp merge` says when nobody confirmed a merge** (AGT-2238). With
+  `--yes` or `STAMP_REQUIRE_HUMAN_MERGE=0` it prints `note: confirmation
+  prompt skipped (…)` on stderr instead of skipping the prompt silently
+  (`stamp bootstrap --yes` and `stamp provision --yes` too). The committed
+  `require_human_merge: false` opt-out stays quiet.
+- **Docs say what `--yes` does and doesn't do** (AGT-2238). The threat
+  model, SECURITY.md and README no longer claim that skipping the merge
+  prompt needs host access: `--yes` and `STAMP_REQUIRE_HUMAN_MERGE=0` are
+  chosen by whoever runs `stamp merge`, so an agent with a shell can pass
+  them. They skip only the prompt, never the review gate. To keep every
+  merge in a person's hands, don't let the agent run `stamp merge` with
+  your key.
+- **The membership DB path is fixed** (AGT-2238). `STAMP_SERVER_DB_PATH`
+  reached the listener, `stamp-workers` and the seeder but not the SSH key
+  resolver or the verbs, so moving the DB split membership. The entrypoint
+  now refuses any value but the default.
+- **`stamp-review` warns about a bad `MAX_DIFF_BYTES` or
+  `REVIEW_TIMEOUT_MS`** (AGT-2238): one `warning:` line on its stderr when
+  the value isn't a positive integer, then the default, where it used to
+  fall back silently.
+- **Docs tidy** (AGT-2238): the server upgrade order now lives only in
+  `server/README.md` ("Upgrading the server to this release"), and the
+  README, CHANGELOG and migration guide link to it; `stamp reviewers fetch
+  --from` has shorter help; the docs say `stamp-server-pubkey
+  --capabilities` prints one JSON line. The unused `PHASE_B_CACHE_ROOT`
+  export is gone (use `DEFAULT_PROMPTS_CACHE_ROOT` from
+  `src/server/promptsCachePaths.ts`).
 
 ### Security
 
@@ -485,15 +512,9 @@ Read these before deploying this release; details are in the entries below.
   hook, `stamp verify-pr` and `stamp merge` refuse any approval signed for
   another id, and any approval with no `repo_id`. No schema bump: v5
   envelopes, existing history and repos that declare no id verify as
-  before. Upgrade order: (1) stamp server image, so approvals carry
-  `repo_id`; (2) operators' stamp CLI, so `stamp review` sends the declared
-  id and `stamp merge` checks it; (3) CI: point `stamp/verify-attestation`'s
-  `stamp-version` at this release (the hook upgrades with step 1); (4)
-  only then land `repo_id:` in each repo's `.stamp/config.yml` as an
-  admin-signed change, and re-run `stamp review` on open branches, since
-  approvals minted before step 1 carry no `repo_id` and are refused once
-  the id is declared. Declaring it before step 1 blocks every merge;
-  declaring it before step 3 leaves CI unenforced. A malformed `repo_id` (anything
+  before. Declare it only after the upgrade order in `server/README.md`,
+  "Upgrading the server to this release"; declaring it before the server
+  is upgraded blocks every merge. A malformed `repo_id` (anything
   but `<org>/<repo>`) is now a config error in the CLI, where an unknown
   key used to be ignored.
 - **New repos declare `repo_id` by default when the server signs it**

@@ -195,8 +195,8 @@ values) — you make them by hand before the migration commit lands:
   `.stamp/config.yml` — the pair this repo's prompts live under on the
   server (`stamp review` prints the one it is using). Verifiers then refuse
   approvals the server signed for any other repo (AGT-2272). Needs a stamp
-  server new enough to sign `repo_id`; follow the upgrade order in the
-  README ("Binding approvals to the repo").
+  server new enough to sign `repo_id`; follow the upgrade order in
+  [`server/README.md`, "Upgrading the server to this release"](../server/README.md#upgrading-the-server-to-this-release).
 
 **Single-trusted-key repos:** if your `.stamp/trusted-keys/` has only one
 pubkey, `minimum_signatures: 2` will block every future `.stamp/**` change
@@ -637,7 +637,7 @@ The bundled `server/reviewers/*.md` files in your stamp-cli fork remain in the i
 - [`server/README.md`'s "Phase B — external prompts via webhook"](../server/README.md#phase-b--external-prompts-via-webhook) — the configuration reference: env vars, deploy-key flow, webhook setup, first-boot expectations, periodic-poll log lines, troubleshooting matrix, threat-model table.
 - [`server/README.md`'s "Migrating bundled prompts (Phase A → Phase B)"](../server/README.md#migrating-bundled-prompts-phase-a--phase-b) — the seed-the-prompts-repo-from-`server/reviewers/` recipe.
 - [`src/server/prompts-cache.ts`](../src/server/prompts-cache.ts) — `cloneOrFetchPromptsCache` (atomic refresh) and `getPromptPath` (lookup order including the `default/` gotcha).
-- [`src/server/reviewPipeline.ts`](../src/server/reviewPipeline.ts) — `resolvePromptCacheRoot()` env-var dispatch and the `PHASE_B_CACHE_ROOT` export shared by the webhook + poll workers.
+- [`src/server/reviewPipeline.ts`](../src/server/reviewPipeline.ts) — `resolvePromptCacheRoot()` env-var dispatch; the Phase B cache root itself comes from [`src/server/promptsCachePaths.ts`](../src/server/promptsCachePaths.ts), shared with the webhook + poll workers.
 
 ---
 

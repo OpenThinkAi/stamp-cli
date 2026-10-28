@@ -99,7 +99,7 @@ import {
   ReviewSigningKeyError,
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
-import { DEFAULT_PROMPTS_CACHE_ROOT, resolvePromptsCacheRoot } from "./promptsCachePaths.js";
+import { resolvePromptsCacheRoot } from "./promptsCachePaths.js";
 import { formatRepoId } from "../lib/repoBinding.js";
 import { isValidModelId } from "../lib/userConfig.js";
 import {
@@ -138,10 +138,25 @@ export const DEFAULT_MAX_DIFF_BYTES = 5_000_000;
  * typo'd "5MB" would otherwise parse to NaN and disable the cap).
  */
 export function resolveMaxDiffBytes(): number {
-  const raw = process.env["MAX_DIFF_BYTES"];
-  if (!raw) return DEFAULT_MAX_DIFF_BYTES;
+  return positiveIntEnv("MAX_DIFF_BYTES", DEFAULT_MAX_DIFF_BYTES);
+}
+
+/**
+ * Read a positive-integer env var. Unset or empty → `fallback`, silently.
+ * Set but not a positive integer → `fallback`, with one stderr line naming
+ * the variable (AGT-2238): a typo'd value used to fall back without a word,
+ * so an operator who set `MAX_DIFF_BYTES=5MB` never learned it was ignored.
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) return DEFAULT_MAX_DIFF_BYTES;
+  if (!Number.isInteger(n) || n <= 0) {
+    process.stderr.write(
+      `warning: ${name}=${JSON.stringify(raw)} is not a positive integer; using the default ${fallback}\n`,
+    );
+    return fallback;
+  }
   return n;
 }
 
@@ -161,24 +176,8 @@ export const DEFAULT_REVIEW_TIMEOUT_MS = 300_000;
  * than silently disabling the cap.
  */
 export function resolveReviewTimeoutMs(): number {
-  const raw = process.env["REVIEW_TIMEOUT_MS"];
-  if (!raw) return DEFAULT_REVIEW_TIMEOUT_MS;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) return DEFAULT_REVIEW_TIMEOUT_MS;
-  return n;
+  return positiveIntEnv("REVIEW_TIMEOUT_MS", DEFAULT_REVIEW_TIMEOUT_MS);
 }
-
-/**
- * Phase B (AGT-373) default cache-root path used when
- * `STAMP_PROMPTS_REPO_URL` is set and `STAMP_PROMPTS_CACHE_ROOT` is not.
- * The webhook / poll refresh (stamp-workers) and the boot-time clone
- * (stamp-prompts-cache-bootstrap) write to the same resolved root —
- * `resolvePromptsCacheRoot()` in `promptsCachePaths.ts` (AGT-2277: this
- * verb used to hardcode the default and ignore STAMP_PROMPTS_CACHE_ROOT).
- *
- * Exported so tests can assert the toggle's default landing site.
- */
-export const PHASE_B_CACHE_ROOT = DEFAULT_PROMPTS_CACHE_ROOT;
 
 /**
  * Default Phase A prompts directory — the path baked into the server image.

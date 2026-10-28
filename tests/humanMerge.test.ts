@@ -134,6 +134,56 @@ describe("requireHumanMerge — opt-outs", () => {
   });
 });
 
+// AGT-2238: --yes and STAMP_REQUIRE_HUMAN_MERGE=0 are agent-passable, so a
+// skipped prompt is announced on stderr; the committed config opt-out is not.
+describe("requireHumanMerge — skipped-prompt note on stderr", () => {
+  function captureStderr(fn: () => void): string {
+    const orig = process.stderr.write.bind(process.stderr);
+    let out = "";
+    (process.stderr as { write: unknown }).write = (chunk: string | Uint8Array) => {
+      out += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      return true;
+    };
+    try {
+      fn();
+    } finally {
+      (process.stderr as { write: unknown }).write = orig;
+    }
+    return out;
+  }
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.STAMP_REQUIRE_HUMAN_MERGE;
+    delete process.env.STAMP_REQUIRE_HUMAN_MERGE;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.STAMP_REQUIRE_HUMAN_MERGE;
+    else process.env.STAMP_REQUIRE_HUMAN_MERGE = saved;
+  });
+
+  it("--yes prints one note naming the flag and the merge", () => {
+    const err = captureStderr(() => requireHumanMerge({ ...baseArgs, yes: true }));
+    assert.match(err, /^note: confirmation prompt skipped \(--yes\): nobody confirmed feature → main at a prompt; the review gate still applied\.\n$/);
+  });
+
+  it("STAMP_REQUIRE_HUMAN_MERGE=0 prints the note naming the env var", () => {
+    process.env.STAMP_REQUIRE_HUMAN_MERGE = "0";
+    const err = captureStderr(() => requireHumanMerge(baseArgs));
+    assert.match(err, /confirmation prompt skipped \(STAMP_REQUIRE_HUMAN_MERGE=0\)/);
+  });
+
+  it("require_human_merge: false (committed, reviewed config) prints nothing", () => {
+    const err = captureStderr(() =>
+      requireHumanMerge({
+        ...baseArgs,
+        yes: true,
+        branchRule: { ...baseRule, require_human_merge: false },
+      }),
+    );
+    assert.equal(err, "");
+  });
+});
+
 // ──────────────────────────────────────────────────────────────────────────────
 // AC#2 (AGT-414): diffStat is printed above the prompt when present.
 // ──────────────────────────────────────────────────────────────────────────────

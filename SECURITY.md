@@ -103,9 +103,14 @@ regardless of code changes. Mitigations — random hex diff fence, structured
 allowlist, WebFetch path-prefix pinning, and (since v1.2) on-by-default
 operator confirmation before signing — are listed in the
 [`DESIGN.md`](./DESIGN.md) security-model section. Operators running
-unattended agent loops opt out via `STAMP_REQUIRE_HUMAN_MERGE=0` (per-shell)
-or `branches.<name>.require_human_merge: false` (committed config); the
-stance is stamp's, the posture is the operator's.
+unattended agent loops opt out via `--yes` (per command),
+`STAMP_REQUIRE_HUMAN_MERGE=0` (per shell) or
+`branches.<name>.require_human_merge: false` (committed config); the
+stance is stamp's, the posture is the operator's. All three skip only the
+prompt, never the review gate. The first two are chosen by whoever runs
+the command, so an agent that runs `stamp merge` itself can pass them: the
+prompt is a checkpoint for merges a person runs, not a control against an
+agent (see the threat model, attacker 3).
 
 **Threat model.** A reader-focused enumeration of attackers, paths, and
 defenses lives at [`docs/threat-model.md`](./docs/threat-model.md). It

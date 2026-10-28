@@ -1760,7 +1760,7 @@ reviewers
   )
   .requiredOption(
     "--from <source@ref>",
-    "source repo and ref — '<owner>/<repo>@<ref>' (GitHub) or full 'https://' URL + ref; prefer a commit SHA as the ref (a tag or branch can move)",
+    "'<owner>/<repo>@<ref>' or 'https://…@<ref>'; prefer a commit SHA (tags and branches move)",
   )
   .option(
     "--expect-prompt-sha <sha256>",

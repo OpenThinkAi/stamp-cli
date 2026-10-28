@@ -583,24 +583,15 @@ prompts from gating this one. Repos that declare nothing verify as before.
 
 New repos get it by default: `stamp provision`, `stamp bootstrap` and
 `stamp init --migrate-to-server-attested` ask the server
-(`stamp-server-pubkey --capabilities`) and write `repo_id` only if it says
-it signs it. Otherwise they print the line to add later. A repo that
-already declares one is left alone (`repo_id already declared: <id>`).
+(`stamp-server-pubkey --capabilities`, which prints one JSON line) and
+write `repo_id` only if it says it signs it. Otherwise they print the line
+to add later. A repo that already declares one is left alone
+(`repo_id already declared: <id>`).
 
-To add it to an existing repo, upgrade in this order:
-
-1. **Stamp server image**, so approvals carry `repo_id`.
-2. **Every operator's stamp CLI**, so `stamp review` sends the declared id
-   and `stamp merge` checks it.
-3. **CI:** point `stamp/verify-attestation`'s `stamp-version` at the new
-   release (the server's hook was upgraded in step 1).
-4. **Then** land `repo_id:` in `.stamp/config.yml` as an admin-signed
-   `.stamp/` change, and re-run `stamp review` on open branches: approvals
-   minted before step 1 carry no `repo_id` and are refused once it is
-   declared.
-
-Declaring it before step 1 blocks every merge; before step 3, CI does not
-enforce it. Renaming a repo: see
+To add it to an existing repo, declare it only as the last step of the
+upgrade order in
+[server/README.md, "Upgrading the server to this release"](./server/README.md#upgrading-the-server-to-this-release).
+Renaming a repo: see
 [docs/troubleshooting.md](./docs/troubleshooting.md#renaming-a-repo-that-declares-repo_id).
 
 ### Per-user reviewer-model selection
@@ -1065,7 +1056,14 @@ done
 risk of LLM-verdict-as-merge-authorization). Three opt-out paths:
 `--yes` per-invocation, `STAMP_REQUIRE_HUMAN_MERGE=0` per-shell, or
 `branches.<name>.require_human_merge: false` in `.stamp/config.yml`
-(committed and reviewer-gated like any other config).
+(committed and reviewer-gated like any other config). They skip only the
+prompt; the review gate and required checks still apply. `--yes` and the
+env var are chosen by whoever runs `stamp merge`, so an agent with a shell
+can pass them too, and stamp prints `note: confirmation prompt skipped
+(…)` on stderr when it does. The prompt is a checkpoint for merges a
+person runs. To keep every merge in a person's hands, don't give the agent
+a shell that can run `stamp merge` with your key (see
+[threat model](./docs/threat-model.md), attacker 3).
 
 For trust-anchor changes specifically, set
 `reviewers.<name>.enforce_reads_on_dotstamp: true` on the reviewer
@@ -1269,10 +1267,11 @@ gets a 403 and exits 1. Skip reasons and fixes are in
 
 **Where peer-review data is kept.** `stamp pr open` sends the PR's title,
 body, changed paths and URL to the stamp-server, which relays the title,
-paths and URL (not the body) to listeners allowed to see that repo. The server stores the broadcast in `users.db` only
-until it is delivered: an hour after broadcast the title, body and paths
-are dropped from the row, and events, patches and cached server-side
-verdict prose are deleted after 30 days (`STAMP_PEER_EVENT_RETENTION_DAYS`,
+paths and URL (not the body) to listeners allowed to see that repo. The
+server stores the broadcast in `users.db` only until it is delivered: an
+hour after broadcast the title, body and paths are dropped from the row, and
+events, patches and cached server-side verdict prose are deleted after 30
+days (`STAMP_PEER_EVENT_RETENTION_DAYS`,
 `STAMP_SERVER_VERDICT_RETENTION_DAYS`; see `server/README.md`). Each
 listener machine keeps `~/.stamp/peer-watch.log` (mode `0600`): one line per
 triage with the repo, PR URL, SHAs, author fingerprint and decision, and

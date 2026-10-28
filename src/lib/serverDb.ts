@@ -63,8 +63,10 @@ export const DEFAULT_SERVER_DB_PATH = "/srv/git/.stamp-state/users.db";
 /**
  * Resolve the effective DB path. Precedence:
  *   1. Explicit `opts.path` (tests, future config)
- *   2. STAMP_SERVER_DB_PATH env var (CLI-spawning tests; also a relief
- *      valve for operators who want to relocate the DB on the volume)
+ *   2. STAMP_SERVER_DB_PATH env var (CLI-spawning tests). Not a way to
+ *      relocate the DB in the server image: the entrypoint refuses any
+ *      value but the default, because the SSH side never receives it
+ *      (AGT-2238).
  *   3. DEFAULT_SERVER_DB_PATH (production)
  */
 export function resolveServerDbPath(explicit?: string): string {

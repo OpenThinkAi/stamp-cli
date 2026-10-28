@@ -14,7 +14,9 @@ import type { BranchRule } from "./config.js";
  * operator sees what's about to land — base→head SHAs, the source branch,
  * the target — and confirms (or aborts) before any history change.
  *
- * Three opt-outs, all explicit:
+ * Three opt-outs, all explicit. The first two are chosen by whoever runs
+ * the command, so they do not stop an agent that runs `stamp merge` itself
+ * (docs/threat-model.md, attacker 3); the third is committed config:
  *   1. CLI flag      `stamp merge … --yes`     (per-invocation, the
  *                                              "I'm about to do a batch
  *                                              of these" path)
@@ -71,8 +73,22 @@ export function requireHumanMerge(args: RequireHumanMergeArgs): void {
   // IMPORTANT: use strict equality (=== false, not falsy) so that the
   // string value "strict" is never truthy-coerced into bypassing the gate.
   if (args.branchRule.require_human_merge === false) return;
-  if (args.yes) return;
-  if (process.env.STAMP_REQUIRE_HUMAN_MERGE === "0") return;
+  // --yes and STAMP_REQUIRE_HUMAN_MERGE=0 are chosen by whoever runs the
+  // command — an author-agent with a shell can pass either (AGT-2238). Say
+  // so on stderr, so a transcript or CI log shows that nobody confirmed
+  // this merge at a prompt. The reviewer gate has already run either way.
+  const skippedBy = args.yes
+    ? "--yes"
+    : process.env.STAMP_REQUIRE_HUMAN_MERGE === "0"
+      ? "STAMP_REQUIRE_HUMAN_MERGE=0"
+      : null;
+  if (skippedBy !== null) {
+    process.stderr.write(
+      `note: confirmation prompt skipped (${skippedBy}): nobody confirmed ` +
+        `${args.source} → ${args.target} at a prompt; the review gate still applied.\n`,
+    );
+    return;
+  }
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error(

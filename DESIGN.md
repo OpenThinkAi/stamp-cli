@@ -299,9 +299,9 @@ present the result on the protected repo. The design:
 
 *Declared by default where safe (AGT-2276).* `stamp provision`,
 `stamp bootstrap` and `stamp init --migrate-to-server-attested` ask the
-server `stamp-server-pubkey --capabilities` (a static
-`{"approval_repo_id":true}` on images that sign `repo_id`; older images
-refuse the flag). Only on a yes do they write `repo_id:` — the pair
+server `stamp-server-pubkey --capabilities`, which prints one JSON line
+(a static `{"approval_repo_id":true}` on images that sign `repo_id`;
+older images refuse the flag). Only on a yes do they write `repo_id:` — the pair
 `stamp review` would send anyway, so prompt selection is unchanged — and
 any failure leaves the repo undeclared with a note, because declaring an
 id against a server that cannot sign it would refuse every approval. The
@@ -462,8 +462,9 @@ new `required_checks.run` string. Conservative guidance:
    not for an encoded chunk of the diff (AGT-2249). Tune it per entry
    with `query_param_max_length` (replaces the 64-character cap) and/or
    `query_param_allowlist` (permitted param names; set without a max
-   length, it lifts the default cap). Consider an MCP server with narrowly scoped tools as an
-   alternative when a single host serves multiple unrelated surfaces.
+   length, it lifts the default cap). Consider an MCP server with
+   narrowly scoped tools as an alternative when a single host serves
+   multiple unrelated surfaces.
 3. Do not share MCP API keys across reviewers if a single-reviewer
    compromise shouldn't imply access to everything.
 4. The reviewer session is isolated from the operator's own Claude

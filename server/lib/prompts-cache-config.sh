@@ -29,8 +29,9 @@ DEFAULT_PROMPTS_DEPLOY_KEY_PATH=/srv/git/.ssh-client-keys/prompts_repo_key
 #   - It must live on the persistent volume anyway (the cache is
 #     rebuilt from the network otherwise).
 check_prompts_cache_root() {
+  # Unset/empty: the default is used. Return before any temporaries exist.
+  [ -n "${STAMP_PROMPTS_CACHE_ROOT:-}" ] || return 0
   _pcr=$STAMP_PROMPTS_CACHE_ROOT
-  [ -n "$_pcr" ] || return 0
   _pcr_name=${_pcr#/srv/git/}
   _pcr_ok=1
   [ "$_pcr_name" != "$_pcr" ] || _pcr_ok=0
