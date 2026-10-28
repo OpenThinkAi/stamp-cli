@@ -564,6 +564,8 @@ A brand-new bare repo has no `.stamp/config.yml` and no `.stamp/trusted-keys/` t
 
 Because this commit is written directly to the bare repo's object store via local git operations (not a push), it does not pass through the pre-receive hook. From that point on, all remote pushes are verified normally — the hook reads the committed config and trusted-keys from the target branch's HEAD, and will reject any push whose attestation doesn't validate.
 
+Because creation by push is refused, deletion by push is refused too for any protected branch (one that matches a rule in its own pre-push config or in the default branch's config): an allowed `git push origin :main` could not be undone by push. Non-protected branches and tags can still be deleted. An operator who really wants a protected branch gone removes it directly on the server.
+
 **Rejected alternatives:**
 - *"Hook accepts first unverified push"* — anyone with SSH access can bootstrap the repo with malicious config or trust their own key
 - *"Hook reads config from the incoming tree"* — creates a chicken-and-egg verification of the config commit itself
