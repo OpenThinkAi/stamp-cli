@@ -319,6 +319,14 @@ Audit your own setup against this list. If a control is absent, the
   a merge if branch protection is configured to require it. *What
   fails:* the verifier becomes advisory — a malicious or careless
   push can land an unverified commit.
+- **The verifier install in `stamp/verify-attestation`.** The action
+  installs the verifier with `npm ci --ignore-scripts` from the lockfile in
+  `.github/actions/verify-attestation/verifier/`, so its transitive
+  dependencies are pinned and hash-checked and none of their install
+  scripts run. *What fails if weakened:* overriding `stamp-version` to a
+  version without a committed lockfile lets transitive dependencies float
+  at CI time (the action warns), and a compromised dependency could make
+  `stamp verify-pr` pass an unattested PR.
 
 ### Operator configuration choices
 

@@ -1,0 +1,7 @@
+{
+  "name": "stamp-verify-attestation-verifier",
+  "private": true,
+  "dependencies": {
+    "@openthink/stamp": "1.11.0"
+  }
+}

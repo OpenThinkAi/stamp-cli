@@ -24,6 +24,36 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   (`git@github.com:<org>/<name>.git`), the same remote layout
   `--migrate-existing` leaves.
 
+### Security
+
+- **Brownfield `--from-tarball` imports no longer keep the tarball's git
+  config or hooks.** `setup-repo.sh` used to extract the uploaded bare clone
+  in place, so a `core.hooksPath` in its config made git skip the stamp-verify
+  pre-receive, and hooks it shipped (`update`, `reference-transaction`, ...)
+  ran as the server's git user on every push. The import now builds a fresh
+  bare repo and fetches only refs and objects into it, rejects tarballs
+  containing symlinks, sets `receive.denyNonFastForwards true` on this path
+  too. Brownfield import of a shallow clone now fails with a clear message.
+- **`setup-repo.sh` refuses to finish if `core.hooksPath` is set from any
+  config source**, on both the fresh and brownfield paths. A server whose git
+  user has a global or system `core.hooksPath` used to get repos where git
+  never ran the stamp-verify hook; `new-stamp-repo` now fails instead, removes
+  the half-built repo, and says how to find and unset the setting.
+- **The `stamp/verify-attestation` action locks down the verifier install.**
+  It used to run `npm install -g @openthink/stamp@<version>`, which ignores
+  stamp's lockfile: every transitive dependency floated to the newest version
+  its semver range allowed at CI time, and their install scripts ran in the
+  job that verifies the attestation. The default verifier (1.11.0, unchanged,
+  so v2 envelopes still verify) now installs with `npm ci --ignore-scripts`
+  from a lockfile committed beside the action
+  (`.github/actions/verify-attestation/verifier/`), pinning every transitive
+  dependency and checking its integrity hash. An overridden `stamp-version`
+  also installs with `--ignore-scripts` and warns that its transitive
+  dependencies are not locked. The action's PR event fields now reach bash
+  via `env:` instead of `${{ }}` interpolation inside `run:`. Repos pick this
+  up when the action ref in `stamp-verify.yml` is bumped to a release that
+  contains it.
+
 ### Changed
 
 - **Per-repo prompt overrides need a repo grant (security).** The `--org` /
