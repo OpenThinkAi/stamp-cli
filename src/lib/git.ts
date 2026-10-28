@@ -87,6 +87,20 @@ export function showAtRef(ref: string, path: string, cwd: string): string {
 }
 
 /**
+ * `.stamp/config.yml` text at `ref`, or null when it is absent or the ref
+ * can't be read. The one client-side reader for the repo_id binding
+ * (AGT-2272) in review / merge / verify-pr (AGT-2270). The pre-receive
+ * hook keeps its own reader so this module stays out of the hook bundle.
+ */
+export function readStampConfigYamlAt(ref: string, cwd: string): string | null {
+  try {
+    return showAtRef(ref, ".stamp/config.yml", cwd);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * List basenames directly under `<ref>:<dirPath>` (non-recursive). Empty
  * array if the directory doesn't exist at `<ref>` — distinguished from
  * "git error" by branching on git ls-tree's exit code the same way

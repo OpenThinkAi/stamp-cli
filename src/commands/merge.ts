@@ -22,6 +22,7 @@ import {
   pathExistsAtRef,
   resolveDiff,
   runGit,
+  readStampConfigYamlAt,
   showAtRef,
 } from "../lib/git.js";
 import { ensureUserKeypair } from "../lib/keys.js";
@@ -805,15 +806,8 @@ function buildV4Trailers(input: {
   // enforce (tip-before-merge + base_sha declarations). Checking it here
   // turns a push-time rejection into a merge-time one, before a signed
   // merge commit exists.
-  const readRepoIdAt = (ref: string): unknown => {
-    let yaml: string | null;
-    try {
-      yaml = showAtRef(ref, ".stamp/config.yml", input.repoRoot);
-    } catch {
-      yaml = null;
-    }
-    return repoIdRawFromConfigYaml(yaml);
-  };
+  const readRepoIdAt = (ref: string): unknown =>
+    repoIdRawFromConfigYaml(readStampConfigYamlAt(ref, input.repoRoot));
   const repoBinding = resolveRepoBinding([
     { where: input.targetTipSha.slice(0, 8), raw: readRepoIdAt(input.targetTipSha) },
     { where: input.baseSha.slice(0, 8), raw: readRepoIdAt(input.baseSha) },
