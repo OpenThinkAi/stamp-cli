@@ -25,14 +25,39 @@ on:
     # push whose package.json version is already published.
     branches: [main, "release/1.x"]
 
+# Job layout (least privilege per job; oaudit AGT-2234 / AGT-2237):
+#
+#   build   contents: read     — reads the version, checks the registry,
+#                                installs deps, typechecks, builds and packs
+#                                the tarball, uploads it as an artifact.
+#                                This is the only job that runs dependency
+#                                code (tsc, tsup), so it holds no OIDC and
+#                                no write token.
+#   publish id-token: write    — downloads the tarball and publishes it.
+#                                No checkout, no `npm ci`, no lifecycle
+#                                scripts: nothing from the dependency tree
+#                                ever runs while ACTIONS_ID_TOKEN_REQUEST_*
+#                                is in the environment.
+#   tag     contents: write    — pushes the v<version> tag after a
+#                                successful publish. Runs only git.
+#
+# Workflow-level `permissions: {}` makes every job start from nothing, so
+# a job only holds what it lists below.
+permissions: {}
+
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     permissions:
-      contents: write
-      id-token: write
+      contents: read
+
+    outputs:
+      name: ${{ steps.version.outputs.name }}
+      version: ${{ steps.version.outputs.version }}
+      dist_tag: ${{ steps.version.outputs.dist_tag }}
+      published: ${{ steps.check.outputs.published }}
 
     steps:
       # Actions are pinned by full commit SHA (not mutable tag) because this
@@ -40,16 +65,20 @@ jobs:
       # @v4 tag would let an upstream compromise ship malicious stamp-cli to
       # every downstream installer. Dependabot's github-actions ecosystem
       # keeps these SHAs current with annotated PRs.
+      #
+      # persist-credentials: false — this job never pushes, so the
+      # GITHUB_TOKEN is not written into .git/config where build-time
+      # dependency code could read it.
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: setup node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           cache: "npm"
-          registry-url: "https://registry.npmjs.org"
-
 
       # The package.json `version` and `name` are *file content*, not
       # GitHub-managed metadata. Both reach this workflow as whatever
@@ -57,18 +86,19 @@ jobs:
       # file content is gated by stamp's reviewer flow upstream, but the
       # CI side must still treat them as untrusted strings: bash and
       # ${{ … }} interpolation will both happily expand a `"; …; "` shape
-      # into shell that this workflow runs with `id-token: write` (npm
-      # OIDC publish) and `contents: write` (git push) — i.e. enough to
-      # ship a malicious release of @openthink/stamp and tag it.
+      # into shell — and these values flow into the publish job
+      # (`id-token: write`, npm OIDC publish) and the tag job
+      # (`contents: write`, git push), i.e. enough to ship a malicious
+      # release of @openthink/stamp and tag it.
       #
       # Two defenses, both shipping here:
       #   1. The values are written to GITHUB_OUTPUT via heredoc rather
       #      than `echo "k=$V"`, so a newline-bearing version cannot
       #      inject extra output keys (output-injection shape).
-      #   2. Downstream steps consume those outputs via `env:` rather
-      #      than ${{ … }} substituted into bash, so a `"`/`;`/`$`
-      #      embedded in the value is shell-quoted by Actions and
-      #      handed to bash as a literal env-var value.
+      #   2. Downstream steps (in every job) consume those outputs via
+      #      `env:` rather than ${{ … }} substituted into bash, so a
+      #      `"`/`;`/`$` embedded in the value is shell-quoted by Actions
+      #      and handed to bash as a literal env-var value.
       - name: read target version
         id: version
         run: |
@@ -118,18 +148,73 @@ jobs:
             echo "$NAME@$VERSION not on npm — will publish."
           fi
 
+      # --ignore-scripts: no preinstall/install/postinstall from the
+      # dependency tree runs, even in this unprivileged job — a malicious
+      # install script here could still tamper with the tarball that the
+      # publish job signs with provenance. The only deps that declare
+      # install scripts are esbuild (its postinstall is an optional
+      # binary-path optimisation; the platform binary comes from the
+      # @esbuild/* optional dependency) and fsevents (macOS only).
       - name: install
         if: steps.check.outputs.published == 'false'
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: typecheck
         if: steps.check.outputs.published == 'false'
         run: npm run typecheck
 
-      # Build is invoked automatically via package.json's prepublishOnly
-      # script before the tarball is assembled, so no explicit build step.
-      # --provenance requires id-token: write and a Trusted Publisher on
-      # the npm side; attaches an SLSA build attestation to the tarball.
+      # Build explicitly, then pack with --ignore-scripts: the publish job
+      # publishes a prebuilt tarball, so prepublishOnly never runs there.
+      - name: build
+        if: steps.check.outputs.published == 'false'
+        run: npm run build
+
+      - name: pack
+        if: steps.check.outputs.published == 'false'
+        run: |
+          mkdir -p "$RUNNER_TEMP/package"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/package"
+          ls -l "$RUNNER_TEMP/package"
+
+      - name: upload tarball
+        if: steps.check.outputs.published == 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/package/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    if: needs.build.outputs.published == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # id-token: write is the only grant: OIDC for npm Trusted Publishing
+    # (the registry PUT) and for --provenance (the SLSA attestation). No
+    # contents permission — this job does not check out the repo.
+    permissions:
+      id-token: write
+
+    steps:
+      - name: setup node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: download tarball
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/package
+
+      # Publishes the prebuilt tarball from the build job. Publishing a
+      # tarball runs no package lifecycle scripts; --ignore-scripts makes
+      # that explicit. --provenance requires id-token: write and a Trusted
+      # Publisher on the npm side; attaches an SLSA build attestation to
+      # the tarball.
       #
       # npx npm@<pinned> (not bare 'npm publish'): Node 22 bundles npm 10.x,
       # which supports OIDC only for provenance signing but NOT for
@@ -144,15 +229,35 @@ jobs:
       # the moment it ships, including a compromised one. Bump explicitly
       # when a newer npm is needed; lower bound is 11.5.1 for OIDC publish.
       - name: publish
-        if: steps.check.outputs.published == 'false'
         env:
-          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
-        run: npx -y npm@11.13.0 publish --access public --provenance --tag "$DIST_TAG"
+          DIST_TAG: ${{ needs.build.outputs.dist_tag }}
+        run: |
+          shopt -s nullglob
+          TARBALLS=("$RUNNER_TEMP"/package/*.tgz)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          npx -y npm@11.13.0 publish "${TARBALLS[0]}" --ignore-scripts --access public --provenance --tag "$DIST_TAG"
+
+  tag:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # contents: write to push the release tag. This job runs only git —
+    # no npm, no dependency code — so the persisted checkout token is
+    # never exposed to third-party scripts.
+    permissions:
+      contents: write
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: tag release
-        if: steps.check.outputs.published == 'false'
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           TAG="v$VERSION"
           git tag "$TAG"

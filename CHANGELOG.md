@@ -38,6 +38,14 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   operator re-seeded it. A branch counts as protected when a rule in its own
   pre-push config or the default branch's config matches it. Unprotected
   branches and tags can still be deleted.
+- **The npm publish workflow no longer runs dependency code while it holds
+  the OIDC token.** `publish.yml` is split into three jobs. `build`
+  (`contents: read`) installs with `npm ci --ignore-scripts`, typechecks,
+  builds and packs the tarball. `publish` (`id-token: write` only) downloads
+  that tarball and publishes it with `--ignore-scripts --provenance`, with no
+  checkout and no install. `tag` (`contents: write`) pushes the release tag
+  and runs only git. The build checkout no longer persists the
+  `GITHUB_TOKEN` in `.git/config`.
 
 ---
 

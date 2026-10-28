@@ -106,7 +106,7 @@ See [`docs/personas.md`](./docs/personas.md) for prompt-writing guidance.
   3. The mirror carries the commit to GitHub; the publish workflow picks up the new version and runs `npm publish --provenance` + creates a `v<version>` git tag.
 - Every non-bump merge safely no-ops the publish step.
 
-Auth uses npm's [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) via OIDC — no long-lived `NPM_TOKEN` secret. The trust relationship is configured once on the npm side (package → Settings → Trusted Publishers → GitHub Actions) pointing at `OpenThinkAi/stamp-cli` and the `publish.yml` workflow. The workflow grants itself `id-token: write`, and `npm publish` exchanges a short-lived OIDC token at publish time. `--provenance` attaches an SLSA build attestation to the published tarball; anyone can verify with `npm audit signatures`.
+Auth uses npm's [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) via OIDC — no long-lived `NPM_TOKEN` secret. The trust relationship is configured once on the npm side (package → Settings → Trusted Publishers → GitHub Actions) pointing at `OpenThinkAi/stamp-cli` and the `publish.yml` workflow. Only the workflow's `publish` job holds `id-token: write`, and its `npm publish` exchanges a short-lived OIDC token at publish time. That job runs no dependency code: a separate `build` job (`contents: read`, `npm ci --ignore-scripts`) builds and packs the tarball and hands it over as an artifact, and a `tag` job (`contents: write`) pushes the release tag. Keep it that way when editing `publish.yml` — `tests/publishWorkflow.test.ts` pins the layout. `--provenance` attaches an SLSA build attestation to the published tarball; anyone can verify with `npm audit signatures`.
 
 ### Major-version cuts
 
