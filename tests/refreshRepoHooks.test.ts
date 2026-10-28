@@ -138,6 +138,24 @@ describe("AGT-2261: refresh-repo-hooks.sh", () => {
     }
   });
 
+  it("replaces a hook symlink that points at a directory; the directory gains nothing", () => {
+    const h = setup();
+    try {
+      const repo = bareRepo(h, "a");
+      const targetDir = path.join(h.outside, "hook-link-dir");
+      mkdirSync(targetDir);
+      symlinkSync(targetDir, path.join(repo, "hooks", "pre-receive"));
+      symlinkSync(targetDir, path.join(repo, "hooks", "post-receive"));
+      const r = run(h);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(readdirSync(targetDir), [], "mv followed the link into its target dir");
+      assertInstalled(repo, "pre-receive", PRE);
+      assertInstalled(repo, "post-receive", POST);
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it("replaces a dangling hook symlink without creating its target", () => {
     const h = setup();
     try {

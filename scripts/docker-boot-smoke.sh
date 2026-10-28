@@ -578,6 +578,7 @@ echo "docker-boot-smoke: review-signing key root:root 0600 across restart; git s
 # AGT-2261: the boot-time hook refresh runs as root over git-owned repos and
 # must never follow a symlink the git user planted there. As git, plant
 #   - hooks/pre-receive + hooks/post-receive as symlinks to root-only files,
+#     and (in a second repo) to a root-only directory,
 #   - a whole hooks/ dir as a symlink to a root-only dir,
 #   - a repo path /srv/git/<x>.git as a symlink to a dir outside the volume,
 #   - a symlink at the refresh's staging path,
@@ -593,7 +594,7 @@ set -e
 mkdir -m 0700 /root/hs
 printf 'sentinel-pre\n' > /root/hs/pre-target
 printf 'sentinel-post\n' > /root/hs/post-target
-mkdir -m 0700 /root/hs/dir-target /root/hs/repo-target /root/hs/repo-target/hooks
+mkdir -m 0700 /root/hs/dir-target /root/hs/repo-target /root/hs/repo-target/hooks /root/hs/linkdir-target
 printf 'marker\n' > /root/hs/dir-target/marker
 chmod 0600 /root/hs/pre-target /root/hs/post-target /root/hs/dir-target/marker
 # Seed a stamp-configured repo as git, before any stamp hook is installed.
@@ -610,6 +611,7 @@ su -s /bin/sh git -c "
   git add -A; git commit -qm seed; git push -q origin main
   git push -q origin main:scratch
   git init -q --bare -b main /srv/git/h2.git
+  git init -q --bare -b main /srv/git/h4.git
   # The plants — all done by the git user, the foothold being modelled.
   rm -f /srv/git/h1.git/hooks/pre-receive /srv/git/h1.git/hooks/post-receive
   ln -s /root/hs/pre-target  /srv/git/h1.git/hooks/pre-receive
@@ -617,6 +619,8 @@ su -s /bin/sh git -c "
   rm -rf /srv/git/h2.git/hooks
   ln -s /root/hs/dir-target /srv/git/h2.git/hooks
   ln -s /root/hs/repo-target /srv/git/h3.git
+  ln -s /root/hs/linkdir-target /srv/git/h4.git/hooks/pre-receive
+  ln -s /root/hs/linkdir-target /srv/git/h4.git/hooks/post-receive
   ln -s /root/hs/dir-target /srv/git/.stamp-hook-staging
 "
 SH
@@ -631,9 +635,10 @@ want /root/hs/post-target "root:root 600"
 want /root/hs/dir-target/marker "root:root 600"
 [ "$(ls -A /root/hs/dir-target)" = marker ] || fail "refresh wrote into a symlinked hooks/ dir: $(ls -A /root/hs/dir-target)"
 [ -z "$(ls -A /root/hs/repo-target/hooks)" ] || fail "refresh wrote into a symlinked repo path"
+[ -z "$(ls -A /root/hs/linkdir-target)" ] || fail "refresh moved a hook into the directory a hooks/<name> symlink points at"
 [ -L /srv/git/h3.git ] || fail "symlinked repo path was not left alone"
 [ ! -e /srv/git/.stamp-hook-staging ] && [ ! -L /srv/git/.stamp-hook-staging ] || fail "staging dir left behind"
-for r in h1 h2; do
+for r in h1 h2 h4; do
   [ ! -L /srv/git/$r.git/hooks ] && [ -d /srv/git/$r.git/hooks ] || fail "$r hooks/ is not a real directory"
   want /srv/git/$r.git/hooks "git:git 755"
   for hk in pre-receive post-receive; do

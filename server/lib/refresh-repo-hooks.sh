@@ -17,8 +17,9 @@
 #     itself, never its target — and recreated as a real directory.
 #   - Each hook is prepared in full (bytes, mode 0755, owner) in a root-only
 #     0700 staging directory on the same filesystem, then rename(2)d into
-#     hooks/<name>. rename replaces the directory ENTRY: a symlink or hard
-#     link sitting at hooks/<name> is unlinked, not written through, and
+#     hooks/<name>. A symlink at hooks/<name> is unlinked first (mv would
+#     otherwise follow one that resolves to a directory); rename then
+#     replaces the ENTRY, so a hard link there is never written through, and
 #     chown/chmod are never applied to the final path at all. (The previous
 #     `cp src hooks/<name>; chown; chmod` wrote through a planted symlink and
 #     then chowned/chmodded its target — a root-level overwrite of an
@@ -58,17 +59,17 @@ _refresh_repo_hooks() {
   # mkdir then fails rather than following if anything reappeared.
   rm -rf "$_rrh_stage"
   if ! mkdir -m 0700 "$_rrh_stage"; then
-    echo "error: refresh-repo-hooks: cannot create staging dir $_rrh_stage" >&2
+    echo "error: refresh-repo-hooks: cannot create staging dir $_rrh_stage (check that $STAMP_GIT_ROOT is mounted, writable by root and not full)" >&2
     return 1
   fi
 
   _rrh_rc=0
   for _rrh_repo in "$STAMP_GIT_ROOT"/*.git; do
-    [ -d "$_rrh_repo" ] || continue
     if [ -L "$_rrh_repo" ]; then
       echo "warning: refresh-repo-hooks: skipping symlinked repo path $_rrh_repo" >&2
       continue
     fi
+    [ -d "$_rrh_repo" ] || continue
 
     _rrh_hooks="$_rrh_repo/hooks"
     if [ -L "$_rrh_hooks" ] || { [ -e "$_rrh_hooks" ] && [ ! -d "$_rrh_hooks" ]; }; then
@@ -96,14 +97,20 @@ _refresh_repo_hooks() {
         _rrh_rc=1
         continue
       fi
+      # A symlink must be unlinked first, not left for mv to replace: a
+      # two-argument mv (BusyBox and BSD alike) stat()s DEST through the
+      # link and, if it resolves to a directory, moves the file INTO that
+      # directory — root writing wherever git pointed the link.
       if [ -L "$_rrh_dest" ]; then
         echo "warning: refresh-repo-hooks: $_rrh_dest was a symlink; replacing the link (target untouched)" >&2
+        rm -f "$_rrh_dest" || { _rrh_rc=1; continue; }
       elif [ -e "$_rrh_dest" ] && [ ! -f "$_rrh_dest" ]; then
-        echo "warning: refresh-repo-hooks: $_rrh_dest is not a regular file; removing it" >&2
+        echo "warning: refresh-repo-hooks: $_rrh_dest is not a regular file; replacing it" >&2
         rm -rf "$_rrh_dest" || { _rrh_rc=1; continue; }
       fi
-      # rename(2): replaces the entry (symlink, hard link or stale file)
-      # without ever opening what it pointed at.
+      # DEST is now absent or a regular file, so mv is a plain rename(2): a
+      # regular file (or hard link) there is replaced as an entry, never
+      # opened or written.
       if ! mv -f "$_rrh_tmp" "$_rrh_dest"; then
         echo "error: refresh-repo-hooks: cannot install $_rrh_dest" >&2
         _rrh_rc=1
