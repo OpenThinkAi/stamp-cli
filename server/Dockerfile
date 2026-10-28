@@ -7,16 +7,22 @@
 #
 # Caveat — what the digest pin does NOT cover: the `apk add --no-cache`
 # step further down installs git, openssh-server, bash, nodejs,
-# netcat-openbsd, and tar from Alpine 3.21's mutable package repositories.
-# Those repos receive ongoing 3.21 patch updates, so two builds 24h apart
+# netcat-openbsd, and tar from Alpine 3.24's mutable package repositories.
+# Those repos receive ongoing 3.24 patch updates, so two builds 24h apart
 # can resolve different package versions even on an identical base digest.
 # The image is therefore reproducible at the base-userspace layer but not
 # bit-for-bit reproducible end-to-end. We accept this: pinning every apk
 # package would add Renovate churn on a weekly cadence for marginal risk
 # reduction (this is a LOW-tier audit finding — see oaudit-may-2-2026
 # rerun-3 L5), and the digest pin still defeats the higher-impact attack
-# of upstream-tag re-push.
-FROM node:24-alpine3.21@sha256:b8f7c9056af700568c1ce76173f1c93743fb64ca1343e18cdf3a6ded8985ad3d AS builder
+# of upstream-tag re-push. `nodejs~24` is the one exception (AGT-2270): it
+# keeps the runtime Node on the major the hook bundles are built with in
+# the builder below, while patch updates still flow.
+#
+# The builder tracks the runtime's Alpine branch (AGT-2270: it was on
+# alpine3.21, which leaves support around 2026-11, so digest bumps kept a
+# build toolchain with no security fixes). Move both together.
+FROM node:24-alpine3.24@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS builder
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json tsup.config.ts ./
 RUN npm ci
@@ -24,11 +30,10 @@ COPY src ./src
 RUN npm run build
 
 # Runtime: bare git server + sshd + node (to run the hook) + the hook itself.
-# Bumped from alpine:3.19 (EOL 2025-11-01 — no further security updates for
-# git/openssh/musl/openssl) to alpine:3.21 (supported through 2027-04). The
-# image runs sshd exposed to the internet on every stamp-server deploy, so
-# being on a supported package set matters. Pinned by digest for the same
-# reason as the builder.
+# alpine:3.24 (Alpine branches get about two years of security fixes; 3.24
+# runs to about 2028-05). The image runs sshd exposed to the internet on
+# every stamp-server deploy, so being on a supported package set matters.
+# Pinned by digest for the same reason as the builder.
 FROM alpine:3.24@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4
 
 # Restricted shell: git-shell prevents authenticated SSH users from getting
@@ -70,7 +75,7 @@ FROM alpine:3.24@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb2
 # root:git key directory). It shares exactly one thing with git: the
 # stamp-db group, which owns the membership DB directory
 # (/srv/git/.stamp-state, root:stamp-db 3770) and users.db (0660).
-RUN apk add --no-cache git openssh-server openssh-client bash nodejs netcat-openbsd tar sudo \
+RUN apk add --no-cache git openssh-server openssh-client bash 'nodejs~24' netcat-openbsd tar sudo \
  && adduser -D -s /usr/bin/git-shell -h /home/git git \
  && sed -i 's/^git:!/git:*/' /etc/shadow \
  && addgroup -S stamp-db \
@@ -433,9 +438,11 @@ EXPOSE 8080
 # running container from one whose sshd has crashed or hung while PID 1
 # (entrypoint.sh) is still alive. Without it, pushers see "connection
 # refused" while the platform reports the service as healthy. nc against
-# loopback:22 is the cheapest TCP-level probe; an actual ssh handshake
-# would require a key and pollute auth logs.
+# loopback is the cheapest TCP-level probe; an actual ssh handshake
+# would require a key and pollute auth logs. It probes the HTTP listener
+# too (AGT-2270): invite accept, the prompts webhook and the peer
+# endpoints live there, and entrypoint.sh restarts it if it exits.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD nc -z 127.0.0.1 22 || exit 1
+  CMD nc -z 127.0.0.1 22 && nc -z 127.0.0.1 "${STAMP_HTTP_PORT:-8080}" || exit 1
 
 CMD ["/entrypoint.sh"]
