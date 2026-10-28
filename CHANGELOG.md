@@ -24,6 +24,17 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   (`git@github.com:<org>/<name>.git`), the same remote layout
   `--migrate-existing` leaves.
 
+- **`data_flow.review_endpoints`** (optional): the hosts `stamp review` may
+  send this repo's diffs to. When present, a locally run reviewer whose
+  provider host is not listed (an openai-compatible OpenAI/DeepSeek endpoint,
+  an `ANTHROPIC_BASE_URL` gateway, cloud routing) refuses the review before
+  anything leaves the machine.
+- **`stamp provision` warns about other write-enabled deploy keys** on the
+  mirror, which GitHub's repo-scoped DeployKey bypass would also exempt.
+- **`stamp reviewers fetch` warns on trust-on-first-use from a tag or
+  branch** with no signed manifest or `--expect-prompt-sha`; docs recommend
+  a commit SHA as the ref.
+
 ### Security
 
 - **Brownfield `--from-tarball` imports no longer keep the tarball's git
@@ -133,7 +144,8 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   branches since AGT-2254. Operators delete such a tag on the server.
 - **Boot strips hook-redirecting config from every repo.** Each boot removes
   `core.hooksPath`, `include.path` and `includeIf.*.path` from every
-  `/srv/git/*.git/config` (as the git user) and logs each removal, so a
+  `/srv/git/*.git/config` and from the git user's global config (as the git
+  user) and logs each removal, so a
   value planted by a git foothold can no longer route pushes around the
   stamp pre-receive. A key that cannot be removed fails the boot.
 - **`pr-opened` broadcasts are bound to the SSH caller.** The payload's
@@ -144,7 +156,8 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `STAMP_PROMPTS_ALLOWED_SIGNERS` to an OpenSSH `allowed_signers` file and
   the server accepts a prompts-repo tip only if `git verify-commit` finds a
   signature by a listed key; a refused tip leaves the last verified prompts
-  in place. Boots without it warn that the prompts are trusted unverified.
+  in place (a cache that does not itself verify fails the boot). Boots
+  without it warn that the prompts are trusted unverified.
 - **Server-side retention for peer events and verdict prose.** An hourly
   sweep in `stamp-workers` drops PR title/body/paths from delivered peer
   events after an hour and deletes peer events/patches and cached
@@ -216,17 +229,6 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   repo, clone, mirror, deploy key or Ruleset. Previously it did all of that
   and then failed at bootstrap's merge. `--dry-run` still works without a TTY,
   and its plan now says how the bootstrap merge will be confirmed.
-
-- **`data_flow.review_endpoints`** (optional): the hosts `stamp review` may
-  send this repo's diffs to. When present, a locally run reviewer whose
-  provider host is not listed (an openai-compatible OpenAI/DeepSeek endpoint,
-  an `ANTHROPIC_BASE_URL` gateway, cloud routing) refuses the review before
-  anything leaves the machine.
-- **`stamp provision` warns about other write-enabled deploy keys** on the
-  mirror, which GitHub's repo-scoped DeployKey bypass would also exempt.
-- **`stamp reviewers fetch` warns on trust-on-first-use from a tag or
-  branch** with no signed manifest or `--expect-prompt-sha`; docs recommend
-  a commit SHA as the ref.
 
 ### Security
 

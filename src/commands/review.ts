@@ -1177,6 +1177,13 @@ export function maybeMintPrAttestation(args: {
   }
 }
 
+/** Where a locally run reviewer's diff goes (AGT-2249 review_endpoints). */
+function reviewEgressFor(reviewer: string, backend: ReviewerBackend): ReviewEgress {
+  if (backend.kind === "anthropic") return anthropicReviewEgress(reviewer);
+  const url = backend.endpoint ?? LOCAL_DEFAULT_BASE_URL;
+  return { reviewer, label: url, host: endpointHost(url) };
+}
+
 /**
  * Does running this reviewer put the diff on someone else's machine?
  *
@@ -1187,13 +1194,6 @@ export function maybeMintPrAttestation(args: {
  * resolved through the adapter default first, so an unset endpoint is
  * judged by the URL that will actually be hit.
  */
-/** Where a locally run reviewer's diff goes (AGT-2249 review_endpoints). */
-function reviewEgressFor(reviewer: string, backend: ReviewerBackend): ReviewEgress {
-  if (backend.kind === "anthropic") return anthropicReviewEgress(reviewer);
-  const url = backend.endpoint ?? LOCAL_DEFAULT_BASE_URL;
-  return { reviewer, label: url, host: endpointHost(url) };
-}
-
 function backendSendsOffHost(backend: ReviewerBackend): boolean {
   if (backend.kind === "anthropic") return true;
   return !isLoopbackEndpoint(backend.endpoint ?? LOCAL_DEFAULT_BASE_URL);

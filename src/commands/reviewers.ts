@@ -897,9 +897,10 @@ export function formatTofuWarning(source: string, ref: string, anchored: boolean
   if (anchored) return null;
   if (/^[0-9a-f]{40}$/.test(ref)) return null;
   return (
-    `warning: ${source}@${ref} is a movable tag or branch and this fetch has no trust anchor ` +
-      `(no verified signed manifest, no --expect-prompt-sha), so the lock pins whatever it points at now ` +
-      `(trust on first use). Prefer a full commit SHA as the ref, e.g. --from ${source}@<40-hex-sha>.`
+    `warning: ${source}@${ref} is a movable tag or branch and this fetch has no trust anchor\n` +
+      `         (no verified signed manifest, no --expect-prompt-sha), so the lock pins whatever it\n` +
+      `         points at now (trust on first use). Prefer a full commit SHA as the ref,\n` +
+      `         e.g. --from ${source}@<40-hex-sha>.`
   );
 }
 

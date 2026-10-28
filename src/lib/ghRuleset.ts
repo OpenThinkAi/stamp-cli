@@ -586,7 +586,7 @@ export function warnOnExtraWriteDeployKeys(
   if (keys === null) {
     console.log(
       `note: could not list deploy keys on ${owner}/${repo} to check for other write-enabled keys ` +
-        `(gh api /repos/${owner}/${repo}/keys failed).`,
+        `(gh api /repos/${owner}/${repo}/keys failed; check \`gh auth status\`).`,
     );
     return;
   }

@@ -84,6 +84,7 @@ function run(h: Harness): { status: number | null; stderr: string } {
       STAMP_HOOKS_DIR_OWNER: owner,
       // Edit repo config as the current (unprivileged) user, not via su.
       STAMP_REPO_CONFIG_USER: "",
+      STAMP_GIT_HOME: path.join(h.dir, "home-git"),
     },
     encoding: "utf8",
   });
@@ -313,7 +314,7 @@ describe("AGT-2261: refresh-repo-hooks.sh", () => {
       );
       const r = run(h);
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stderr, /removed 'core\.hookspath'/);
+      assert.match(r.stderr, /removed 'core\.hookspath' from .*redirected\.git\/config/);
       assert.match(r.stderr, /removed 'include\.path'/);
       assert.match(r.stderr, /removed 'includeif\.gitdir:\/srv\/\.path'/);
       assert.notEqual(gitCfg(repo, "--get", "core.hooksPath").status, 0);
@@ -354,5 +355,24 @@ describe("AGT-2261: refresh-repo-hooks.sh", () => {
       h.cleanup();
     }
   });
-});
 
+  it("removes core.hooksPath from the git user's global config", () => {
+    const h = setup();
+    try {
+      const home = path.join(h.dir, "home-git");
+      mkdirSync(path.join(home, ".config", "git"), { recursive: true });
+      writeFileSync(path.join(home, ".gitconfig"), "[core]\n\thooksPath = /tmp/evil\n[user]\n\tname = git\n");
+      writeFileSync(path.join(home, ".config", "git", "config"), "[core]\n\thooksPath = /tmp/evil2\n");
+      const r = run(h);
+      assert.equal(r.status, 0, r.stderr);
+      for (const f of [path.join(home, ".gitconfig"), path.join(home, ".config", "git", "config")]) {
+        const g = spawnSync("git", ["config", "--file", f, "--get", "core.hooksPath"], { encoding: "utf8" });
+        assert.notEqual(g.status, 0, `${f} still sets core.hooksPath`);
+      }
+      assert.match(readFileSync(path.join(home, ".gitconfig"), "utf8"), /name = git/);
+      assert.match(r.stderr, /removed 'core\.hookspath' from .*\.gitconfig/);
+    } finally {
+      h.cleanup();
+    }
+  });
+});

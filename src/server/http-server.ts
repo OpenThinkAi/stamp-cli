@@ -1309,13 +1309,11 @@ export function __getTrashSweepTickCountForTests(): number {
 
 export const SERVER_RETENTION_SWEEP_INTERVAL_SEC = 3600;
 
-const retentionSweepState: { handle: ReturnType<typeof setInterval> | null; tickCount: number } = {
+const retentionSweepState: { handle: ReturnType<typeof setInterval> | null } = {
   handle: null,
-  tickCount: 0,
 };
 
 function runServerRetentionSweepTick(): void {
-  retentionSweepState.tickCount += 1;
   try {
     const policy = resolveServerRetentionPolicy();
     const db = openServerDb({ skipChmod: true });
@@ -1339,8 +1337,6 @@ function runServerRetentionSweepTick(): void {
   }
 }
 
-export const __runServerRetentionSweepTickForTests = runServerRetentionSweepTick;
-
 /** Arm the hourly server retention sweep (and run one pass now). Idempotent. */
 export function startServerRetentionSweepWorker(): void {
   if (retentionSweepState.handle !== null) return;
@@ -1357,12 +1353,6 @@ export function startServerRetentionSweepWorker(): void {
     `retention-sweep: started (peer events ${p.peerEventRetentionDays ?? "kept"}d, ` +
       `verdict prose ${p.verdictRetentionDays ?? "kept"}d)`,
   );
-}
-
-export function stopServerRetentionSweepWorker(): void {
-  if (retentionSweepState.handle === null) return;
-  clearInterval(retentionSweepState.handle);
-  retentionSweepState.handle = null;
 }
 
 // ─── Seat-TTL sweep worker (AGT-454, G3) ─────────────────────────────

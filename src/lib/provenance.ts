@@ -231,7 +231,6 @@ export const HASH_PROVENANCE_ENDPOINT_ENV = "STAMP_HASH_PROVENANCE_ENDPOINT";
  */
 export function attestedEndpoint(endpoint: string): string {
   if (process.env[HASH_PROVENANCE_ENDPOINT_ENV] === "0") return endpoint;
-  if (/^sha256:[0-9a-f]{16}$/.test(endpoint)) return endpoint;
   return `sha256:${createHash("sha256").update(endpoint, "utf8").digest("hex").slice(0, 16)}`;
 }
 

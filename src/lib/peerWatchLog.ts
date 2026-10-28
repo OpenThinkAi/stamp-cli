@@ -57,6 +57,15 @@ function rotateIfNeeded(logPath: string, maxBytes: number): void {
   } catch {
     /* best-effort: leave the live log in place if the rename fails */
   }
+  // AGT-2249: archives rotated out of a pre-0600 log keep its old mode
+  // (and its full pre-summary payloads) — make them owner-only too.
+  for (let i = 1; i <= PEER_WATCH_LOG_KEEP; i++) {
+    try {
+      chmodSync(`${logPath}.${i}`, 0o600);
+    } catch {
+      /* missing archive is fine */
+    }
+  }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────

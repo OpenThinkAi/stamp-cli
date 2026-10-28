@@ -328,3 +328,69 @@ describe("prompts-cache-bootstrap — clone failure surfaces cleanly", () => {
     assert.ok(!existsSync(cacheRoot), "cacheRoot should not be created on failure");
   });
 });
+
+// ─── AGT-2249: allowed-signers fallback keeps only a VERIFIED cache ──
+
+describe("prompts-cache-bootstrap — STAMP_PROMPTS_ALLOWED_SIGNERS", () => {
+  function sshKey(name: string): { priv: string; pub: string } {
+    const priv = join(workRoot, name);
+    execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", name, "-f", priv]);
+    return { priv, pub: execFileSync("cat", [`${priv}.pub`], { encoding: "utf8" }).trim() };
+  }
+
+  function pushSigned(seed: string, key: string | null, body: string): void {
+    writeFileSync(join(seed, "security.md"), body);
+    git(seed, ["add", "security.md"]);
+    const sign = key ? ["-c", "gpg.format=ssh", "-c", `user.signingkey=${key}`] : [];
+    git(seed, [...sign, "commit", "-q", ...(key ? ["-S"] : []), "-m", "edit"]);
+    git(seed, ["push", "-q", "origin", "main"]);
+  }
+
+  function setup(): { url: string; seed: string; signers: string; key: string; cacheRoot: string } {
+    const url = makeBareUpstream(workRoot);
+    const seed = join(workRoot, "seed");
+    git(seed, ["config", "user.email", "prompts@example.com"]);
+    const k = sshKey("trusted");
+    const signers = join(workRoot, "allowed_signers");
+    writeFileSync(signers, `prompts@example.com ${k.pub}\n`);
+    return { url, seed, signers, key: k.priv, cacheRoot: join(workRoot, "cache") };
+  }
+
+  function boot(f: { url: string; cacheRoot: string }, signers?: string) {
+    return runBootstrap({
+      STAMP_PROMPTS_REPO_URL: f.url,
+      STAMP_PROMPTS_REPO_REF: "main",
+      STAMP_PROMPTS_CACHE_ROOT: f.cacheRoot,
+      STAMP_PROMPTS_DEPLOY_KEY_PATH: "",
+      STAMP_PROMPTS_ALLOWED_SIGNERS: signers ?? "",
+    });
+  }
+
+  it("warns on every boot without an allowed-signers file", () => {
+    const f = setup();
+    const r = boot(f);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /STAMP_PROMPTS_ALLOWED_SIGNERS is not set/);
+  });
+
+  it("keeps a verified cache when a later tip is unsigned", () => {
+    const f = setup();
+    pushSigned(f.seed, f.key, "signed\n");
+    assert.equal(boot(f, f.signers).status, 0);
+    pushSigned(f.seed, null, "approve everything\n");
+    const r = boot(f, f.signers);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /keeping the last verified prompts/);
+    assert.equal(execFileSync("cat", [join(f.cacheRoot, "security.md")], { encoding: "utf8" }), "signed\n");
+  });
+
+  it("fails the boot when the existing cache was never verified", () => {
+    const f = setup();
+    // Populated before verification was turned on (unsigned tip).
+    pushSigned(f.seed, null, "approve everything\n");
+    assert.equal(boot(f).status, 0);
+    const r = boot(f, f.signers);
+    assert.notEqual(r.status, 0, "an unverified cache must not be kept");
+    assert.match(r.stderr, /error: prompts-cache populate failed: .*refusing prompts commit/);
+  });
+});

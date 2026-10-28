@@ -753,10 +753,9 @@ export const SERVER_VERDICT_RETENTION_DAYS_DEFAULT = 30;
  * sweep).
  */
 export function resolveRetentionDays(envName: string, fallback: number): number | null {
-  const raw = process.env[envName];
-  if (raw === undefined || raw.trim() === "") return fallback;
-  if (!/^\d+$/.test(raw.trim())) return fallback;
-  const n = Number(raw.trim());
+  const raw = process.env[envName]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return fallback;
+  const n = Number(raw);
   return n === 0 ? null : n;
 }
 

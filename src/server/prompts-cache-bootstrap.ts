@@ -55,6 +55,7 @@ import { join } from "node:path";
 import {
   cloneOrFetchPromptsCache,
   PromptsSignatureError,
+  isPromptsCacheVerified,
   scrubGitUrlCredentials,
   type RefreshResult,
 } from "./prompts-cache.js";
@@ -124,8 +125,15 @@ async function main(): Promise<void> {
     });
   } catch (err) {
     // AGT-2249: an unsigned / wrongly signed tip must not brick the boot
-    // when a previously verified cache exists — keep serving that one.
-    if (err instanceof PromptsSignatureError && existsSync(`${cacheRoot}/.git`)) {
+    // when a previously VERIFIED cache exists — keep serving that one. A
+    // cache whose own HEAD does not verify (populated before verification
+    // was enabled, or by the very push being refused) is not kept.
+    if (
+      err instanceof PromptsSignatureError &&
+      allowedSignersPath !== undefined &&
+      existsSync(`${cacheRoot}/.git`) &&
+      isPromptsCacheVerified(cacheRoot, allowedSignersPath)
+    ) {
       process.stderr.write(
         `warning: ${err.message}\nwarning: prompts-cache: keeping the last verified prompts at ${cacheRoot}\n`,
       );

@@ -521,10 +521,12 @@ async function refreshInternal(
       // rejected tip leaves the last verified prompts in place.
       const fetched = runGit(cacheRoot, ["rev-parse", "FETCH_HEAD^{commit}"], env).trim();
       verifyPromptsCommit(cacheRoot, fetched, opts.allowedSignersPath, env);
-      runGit(cacheRoot, ["checkout", ref], env);
-      runGit(cacheRoot, ["reset", "--hard", `origin/${ref}`], env);
+      // Check out exactly the commit that was verified (by SHA, never by a
+      // ref name that could resolve elsewhere). Detached HEAD is fine: the
+      // cache is read as files only.
+      runGit(cacheRoot, ["checkout", "--quiet", "--force", "--detach", fetched], env);
       const commitSha = runGit(cacheRoot, ["rev-parse", "HEAD"], env).trim();
-      if (opts.allowedSignersPath !== undefined && commitSha !== fetched) {
+      if (commitSha !== fetched) {
         throw new Error(
           `prompts-cache: checked-out ${commitSha} is not the verified fetched tip ${fetched}`,
         );
@@ -589,18 +591,19 @@ async function refreshInternal(
   return { commitSha, refreshedAt: new Date().toISOString() };
 }
 
-/**
- * AGT-2249 (folds AGT-2262): when an allowed-signers file is configured,
- * require `sha` to carry a valid SSH signature by a key listed in it.
- * Throws on any failure (unsigned, unknown signer, bad signature). No-op
- * when verification isn't configured. gpg.format/allowedSignersFile are
- * passed with -c so the cache's own .git/config (git-writable) cannot
- * override them.
- */
+/** A prompts commit failed signature verification (AGT-2249). */
 export class PromptsSignatureError extends Error {
   override name = "PromptsSignatureError";
 }
 
+/**
+ * AGT-2249 (folds AGT-2262): when an allowed-signers file is configured,
+ * require `sha` to carry a valid SSH signature by a key listed in it.
+ * Throws on any failure (unsigned, unknown signer, bad signature). No-op
+ * when verification isn't configured. gpg.format, allowedSignersFile and
+ * the ssh program are passed with -c so the cache's own .git/config
+ * (git-writable) cannot override them.
+ */
 function verifyPromptsCommit(
   cwd: string,
   sha: string,
@@ -616,6 +619,9 @@ function verifyPromptsCommit(
         "gpg.format=ssh",
         "-c",
         `gpg.ssh.allowedSignersFile=${allowedSignersPath}`,
+        // The cache's .git/config is git-writable; pin the verifier too.
+        "-c",
+        "gpg.ssh.program=ssh-keygen",
         "verify-commit",
         "--",
         sha,
@@ -628,6 +634,23 @@ function verifyPromptsCommit(
         `${allowedSignersPath} (STAMP_PROMPTS_ALLOWED_SIGNERS). ` +
         `${err instanceof Error ? err.message : String(err)}`,
     );
+  }
+}
+
+/**
+ * True when `cacheRoot`'s checked-out HEAD carries a valid signature by a
+ * key in `allowedSignersPath` (AGT-2249). Used before keeping an existing
+ * cache after a refused refresh: a cache populated before verification was
+ * turned on (or by an unsigned push before then) is not "last verified".
+ */
+export function isPromptsCacheVerified(cacheRoot: string, allowedSignersPath: string): boolean {
+  try {
+    const env = { ...process.env };
+    const head = runGit(cacheRoot, ["rev-parse", "HEAD^{commit}"], env).trim();
+    verifyPromptsCommit(cacheRoot, head, allowedSignersPath, env);
+    return true;
+  } catch {
+    return false;
   }
 }
 

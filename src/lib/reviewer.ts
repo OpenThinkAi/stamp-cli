@@ -231,6 +231,14 @@ function denyIfReviewerInternal(
 }
 
 /**
+ * Total decoded query-value length allowed on a WebFetch URL when the entry
+ * configures neither `query_param_max_length` nor `query_param_allowlist`
+ * (AGT-2249). Ordinary API queries (`?state=open&per_page=5`) are far under
+ * it; base64'd diff content is far over.
+ */
+export const DEFAULT_WEBFETCH_QUERY_MAX_LENGTH = 64;
+
+/**
  * Per-host WebFetch policy carried into the runtime gate. Built by
  * `invokeReviewer` from the parsed reviewer config and consulted by
  * `checkReviewerTool` on every WebFetch invocation.
@@ -248,14 +256,6 @@ function denyIfReviewerInternal(
  * query-value lengths must not exceed it. With neither set, the sum is capped
  * at DEFAULT_WEBFETCH_QUERY_MAX_LENGTH (AGT-2249).
  */
-/**
- * Total decoded query-value length allowed on a WebFetch URL when the entry
- * configures neither `query_param_max_length` nor `query_param_allowlist`
- * (AGT-2249). Ordinary API queries (`?state=open&per_page=5`) are far under
- * it; base64'd diff content is far over.
- */
-export const DEFAULT_WEBFETCH_QUERY_MAX_LENGTH = 64;
-
 export interface WebFetchHostPolicy {
   path_prefix?: string;
   query_param_allowlist?: string[];

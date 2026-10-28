@@ -148,4 +148,3 @@ describe("skills/stamp-review.md — argument hygiene (AGT-2249)", () => {
     assert.match(text, /stamp review --plan --diff 'main\.\.feature' --only 'security'/);
   });
 });
-
