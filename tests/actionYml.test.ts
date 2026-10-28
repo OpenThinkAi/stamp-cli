@@ -14,7 +14,9 @@
  */
 
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { parse } from "yaml";
@@ -145,6 +147,65 @@ describe(".github/actions/verify-attestation/action.yml", () => {
     assert.equal(refs.env.BASE_SHA, "${{ github.event.pull_request.base.sha }}");
     assert.equal(refs.env.BASE_REF, "${{ github.event.pull_request.base.ref }}");
     assert.equal(refs.env.EVENT_NAME, "${{ github.event_name }}");
+  });
+
+  // AGT-2249: run the refs step's bash for real and check what reaches
+  // $GITHUB_OUTPUT. A newline in target-branch must not inject keys.
+  function runRefsStep(env: Record<string, string>): { status: number | null; output: string } {
+    const refs = steps.find((s) => s.id === "refs");
+    assert.ok(refs?.run);
+    const dir = mkdtempSync(path.join(os.tmpdir(), "stamp-action-refs-"));
+    const out = path.join(dir, "out");
+    writeFileSync(out, "");
+    try {
+      const r = spawnSync("bash", ["-c", refs.run], {
+        env: { PATH: process.env["PATH"] ?? "", GITHUB_OUTPUT: out, ...env },
+        encoding: "utf8",
+      });
+      return { status: r.status, output: readFileSync(out, "utf8") };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const PR_ENV = {
+    HEAD_SHA: "a".repeat(40),
+    BASE_SHA: "b".repeat(40),
+    BASE_REF: "main",
+    EVENT_NAME: "pull_request",
+  };
+
+  it("writes head/base/target outputs for a normal PR", () => {
+    const r = runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "release/1.x" });
+    assert.equal(r.status, 0);
+    assert.equal(r.output, `head=${"a".repeat(40)}\nbase=${"b".repeat(40)}\ntarget=release/1.x\n`);
+  });
+
+  it("refuses a target-branch carrying a newline (output-key injection)", () => {
+    const r = runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "main\nhead=deadbeef" });
+    assert.equal(r.status, 2);
+    assert.equal(r.output, "", "nothing may reach GITHUB_OUTPUT");
+  });
+
+  it("refuses a target-branch with '..' or a leading dash", () => {
+    assert.equal(runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "a..b" }).status, 2);
+    assert.equal(runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "-x" }).status, 2);
+  });
+
+  it("pins setup-node to the same commit as the workflows (AGT-2249)", () => {
+    const ci = readFileSync(path.resolve(import.meta.dirname, "..", ".github", "workflows", "ci.yml"), "utf8");
+    const wf = ci.match(/actions\/setup-node@([0-9a-f]{40})/)?.[1];
+    const act = body.match(/actions\/setup-node@([0-9a-f]{40})/)?.[1];
+    assert.ok(wf && act);
+    assert.equal(act, wf);
+  });
+
+  it("is covered by Dependabot's github-actions ecosystem (AGT-2249)", () => {
+    const dep = parse(
+      readFileSync(path.resolve(import.meta.dirname, "..", ".github", "dependabot.yml"), "utf8"),
+    ) as { updates: Array<{ "package-ecosystem": string; directories?: string[] }> };
+    const gha = dep.updates.find((u) => u["package-ecosystem"] === "github-actions");
+    assert.ok(gha?.directories?.includes("/.github/actions/verify-attestation"));
   });
 
   it("installs the verifier with --ignore-scripts on every path, never globally", () => {
