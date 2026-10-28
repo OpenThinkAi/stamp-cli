@@ -90,6 +90,17 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `data_flow: { peer_review_endpoints: [api.anthropic.com] }` (or your
   gateway's host) in `.stamp/config.yml` through stamp review. Older stamp
   versions ignore the new key.
+- **The stamp server's boot-time hook refresh no longer follows symlinks
+  in a repo.** Each boot, root re-copied the stamp hooks into every
+  `/srv/git/<repo>.git/hooks/` with `cp` + `chown` + `chmod`. Those repos are
+  owned by the git user, so a symlink planted at `hooks/pre-receive` (or a
+  symlinked `hooks/` directory) made root overwrite the link's target and
+  re-own it `root:root 0755`. The refresh now skips a symlinked repo path,
+  replaces a symlinked or non-directory `hooks/` with a real directory, and
+  renames each hook into place from a root-only staging directory, so a
+  planted link is replaced, never written through. It now runs before any
+  git-user process starts. The break-glass refresh in `server/README.md` runs
+  the same routine instead of the old `cp` loop.
 
 ### Changed
 

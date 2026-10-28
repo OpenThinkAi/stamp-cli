@@ -51,6 +51,27 @@ done
 # canonical fix (mirrors /tmp).
 chmod +t /srv/git
 
+# Refresh stamp hooks in every existing bare repo.
+#
+# When setup-repo.sh provisioned each repo, it COPIED /etc/stamp/*.cjs into
+# that repo's hooks/ directory. Git runs the per-repo copy at push time, not
+# /etc/stamp/ directly — so a container rebuild with new hook code doesn't
+# reach existing repos on its own. Walk /srv/git/ on every boot and replace
+# each repo's hooks with the fresh bundle from /etc/stamp/ (root:root 0755).
+# Idempotent; no-ops if the volume is empty (first boot, no repos yet).
+#
+# AGT-2261: hooks/ is git-writable, so the refresh never follows a symlink
+# there — a planted hooks/ or hooks/<name> link is replaced, never written
+# through, and each hook is staged root-only and rename(2)d into place. See
+# lib/refresh-repo-hooks.sh. It MUST run here, after the scoped chown and
+# before anything runs as git (the prompts-cache bootstrap, the HTTP
+# listener, sshd): its lstat-then-rename steps are only race-free while no
+# git-user process exists. A hook refreshed at boot is not permanent — git
+# owns the repo directory and can still swap hooks/ between boots; the next
+# boot replaces it again.
+. "$(dirname "$0")/lib/refresh-repo-hooks.sh"
+_refresh_repo_hooks || exit 1
+
 # SSH host-key persistence — the load-bearing fix for the recurring
 # "REMOTE HOST IDENTIFICATION HAS CHANGED" warning every operator hits
 # after a container redeploy. The keys live on the persistent volume,
@@ -576,33 +597,6 @@ for _ssh_env_var in $STAMP_SSH_PASS_ENV; do
   _inject_sshd_setenv "$_ssh_env_var" || exit 1
 done
 unset _ssh_env_var
-
-# Refresh stamp hooks in every existing bare repo before accepting connections.
-#
-# When setup-repo.sh provisioned each repo, it COPIED /etc/stamp/*.cjs into
-# that repo's hooks/ directory. Git runs the per-repo copy at push time, not
-# /etc/stamp/ directly — so a container rebuild with new hook code doesn't
-# reach existing repos on its own. Walk /srv/git/ on every boot and overwrite
-# each repo's hooks with the fresh bundle from /etc/stamp/. Idempotent;
-# no-ops if the volume is empty (first boot, no repos yet).
-for repo in /srv/git/*.git; do
-  [ -d "$repo" ] || continue
-  for hook in pre-receive post-receive; do
-    src="/etc/stamp/${hook}.cjs"
-    if [ -f "$src" ]; then
-      cp "$src" "$repo/hooks/$hook"
-      # Root-owned, mode 0755: git can EXECUTE the hook (which is what git-
-      # receive-pack does at push time) but cannot REPLACE it. Pre-cluster-B
-      # the per-repo hook was git:git, so even with git-shell a sufficiently
-      # creative pusher could overwrite the hook between container restarts.
-      # entrypoint refreshes hooks on every boot, so attacker windows close
-      # at the next restart — but routine redeploys don't happen on attacker
-      # timing. Root-owned hooks close the window entirely.
-      chown root:root "$repo/hooks/$hook"
-      chmod 0755 "$repo/hooks/$hook"
-    fi
-  done
-done
 
 # -e: log to stderr (goes to container logs); -D: don't daemonize.
 exec /usr/sbin/sshd -D -e
