@@ -75,6 +75,11 @@ import { maybePrintDeprecationNotice } from "../lib/deprecationNotice.js";
 import { acquireMergeLock } from "../lib/mergeLock.js";
 import { maybeWarnAgentsMdDrift } from "../lib/agentsMd.js";
 import { classifyRemote } from "../lib/remote.js";
+import {
+  checkApprovalRepoId,
+  repoIdRawFromConfigYaml,
+  resolveRepoBinding,
+} from "../lib/repoBinding.js";
 
 export interface MergeOptions {
   branch: string;
@@ -426,6 +431,7 @@ function runMergeLocked(
         headSha: resolved.head_sha,
         diff: resolved.diff,
         targetBranch: opts.into,
+        targetTipSha: preMergeSha,
         requiredReviewers: rule.required,
         checks: checkAttestations,
         operatorPrivateKeyPem: keypair.privateKeyPem,
@@ -728,6 +734,9 @@ function buildV4Trailers(input: {
   headSha: string;
   diff: string;
   targetBranch: string;
+  /** Target branch tip before the merge (AGT-2272: one of the two
+   *  configs the verifier reads `repo_id:` from). */
+  targetTipSha: string;
   requiredReviewers: string[];
   checks: CheckAttestation[];
   operatorPrivateKeyPem: string;
@@ -791,6 +800,24 @@ function buildV4Trailers(input: {
   const pubkeyByFingerprint = buildPubkeyMap(pubFilenames, (relPath) =>
     showAtRef(input.baseSha, relPath, input.repoRoot),
   );
+
+  // AGT-2272: the same repo-id binding the pre-receive hook will
+  // enforce (tip-before-merge + base_sha declarations). Checking it here
+  // turns a push-time rejection into a merge-time one, before a signed
+  // merge commit exists.
+  const readRepoIdAt = (ref: string): unknown => {
+    let yaml: string | null;
+    try {
+      yaml = showAtRef(ref, ".stamp/config.yml", input.repoRoot);
+    } catch {
+      yaml = null;
+    }
+    return repoIdRawFromConfigYaml(yaml);
+  };
+  const repoBinding = resolveRepoBinding([
+    { where: input.targetTipSha.slice(0, 8), raw: readRepoIdAt(input.targetTipSha) },
+    { where: input.baseSha.slice(0, 8), raw: readRepoIdAt(input.baseSha) },
+  ]);
 
   // Query server-signed approval rows for this (base, head) pair.
   const db = openDb(stampStateDbPath(input.repoRoot));
@@ -890,6 +917,10 @@ function buildV4Trailers(input: {
             `The diff content drifted between review and merge (rebased base, modified head). ` +
             `Re-run \`stamp review --diff ${input.revspec}\`.`,
         );
+      }
+      const binding = checkApprovalRepoId(approval.repo_id, repoBinding);
+      if (!binding.ok) {
+        throw new Error(`server approval for "${reviewerName}": ${binding.reason}`);
       }
       if (approval.verdict !== "approved") {
         throw new Error(

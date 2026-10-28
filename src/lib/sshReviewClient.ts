@@ -639,6 +639,19 @@ export async function requestServerReview(
         `but we sent diff_sha256 ${diffSha256} — refusing.`,
     );
   }
+  // AGT-2272: a server that binds approvals to a repo id must have bound
+  // this one to the org/repo we asked for. An approval with no repo_id
+  // comes from a pre-AGT-2272 server; it is accepted here and the
+  // verifier decides (it refuses it when the repo declares repo_id).
+  if (
+    parsed.approval.repo_id !== undefined &&
+    parsed.approval.repo_id !== `${input.org}/${input.repo}`
+  ) {
+    throw new Error(
+      `review_server returned a signed approval for repo ${JSON.stringify(parsed.approval.repo_id)} ` +
+        `but we asked for ${JSON.stringify(`${input.org}/${input.repo}`)} — refusing.`,
+    );
+  }
 
   // AGT-355: when the server surfaced the v3 PR-attestation payload
   // fields, defensively check that the canonical bytes ride agree with

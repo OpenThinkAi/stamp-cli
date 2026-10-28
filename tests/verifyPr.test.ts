@@ -761,3 +761,79 @@ describe("runVerifyPr — schema constants", () => {
     assert.equal(typeof canonicalSerializePayload, "function");
   });
 });
+
+// ─── AGT-2272: repo binding ─────────────────────────────────────────
+
+describe("runVerifyPr — repo binding (AGT-2272)", () => {
+  function verify(f: ReturnType<typeof setupV3Fixture>, base = f.baseSha) {
+    return trapExit(() =>
+      runFromRepo(f.repo, () => runVerifyPr({ head: f.headSha, base, into: "main" })),
+    );
+  }
+
+  it("accepts an approval signed for the repo's declared id", () => {
+    const f = setupV3Fixture({ repoId: "acme/prod" });
+    try {
+      writeFixtureEnvelope(f, buildV3Envelope({ fixture: f, approvalRepoId: "acme/prod" }));
+      const r = verify(f);
+      assert.equal(r.error, null, String(r.error));
+      assert.equal(r.exitCode, null, r.stderr);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("rejects an approval minted for another repo", () => {
+    const f = setupV3Fixture({ repoId: "acme/prod" });
+    try {
+      writeFixtureEnvelope(f, buildV3Envelope({ fixture: f, approvalRepoId: "acme/sandbox" }));
+      const r = verify(f);
+      assert.equal(r.exitCode, 1, "expected rejection");
+      assert.match(r.stderr, /server-signed for repo "acme\/sandbox"/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("rejects an unbound approval once the repo declares its id", () => {
+    const f = setupV3Fixture({ repoId: "acme/prod" });
+    try {
+      writeFixtureEnvelope(f, buildV3Envelope({ fixture: f }));
+      const r = verify(f);
+      assert.equal(r.exitCode, 1, "expected rejection");
+      assert.match(r.stderr, /carries no server-signed repo_id/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("enforces a declaration on the PR's base ref even when the merge base predates it", () => {
+    const f = setupV3Fixture();
+    try {
+      writeFixtureEnvelope(f, buildV3Envelope({ fixture: f, approvalRepoId: "acme/sandbox" }));
+      // main advances with a commit declaring repo_id; the PR still
+      // forks from the old base, so the patch-id (and envelope) is the same.
+      const cfgPath = path.join(f.repo, ".stamp", "config.yml");
+      const cfg = git(f.repo, ["show", `${f.baseSha}:.stamp/config.yml`]);
+      writeFileSync(cfgPath, `repo_id: acme/prod\n${cfg}`);
+      git(f.repo, ["commit", "-q", "-am", "declare repo_id"]);
+      const tip = shaOf(f.repo, "main");
+      const r = verify(f, tip);
+      assert.equal(r.exitCode, 1, "expected rejection");
+      assert.match(r.stderr, /server-signed for repo "acme\/sandbox"/);
+    } finally {
+      f.cleanup();
+    }
+  });
+
+  it("still verifies unbound approvals in a repo that declares no id", () => {
+    const f = setupV3Fixture();
+    try {
+      writeFixtureEnvelope(f, buildV3Envelope({ fixture: f }));
+      const r = verify(f);
+      assert.equal(r.exitCode, null, r.stderr);
+    } finally {
+      f.cleanup();
+    }
+  });
+});

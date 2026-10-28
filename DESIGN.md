@@ -112,6 +112,12 @@ reviewers:
 
 Names are user-chosen. The above is an example, not a fixed set. `required_checks` is optional; if omitted, only the reviewer gate applies.
 
+**`repo_id` (server-attested repos, AGT-2272):** optional top-level
+`repo_id: <org>/<repo>` — the id this repo's prompts live under on its
+review server. `stamp review` sends it as `--org` / `--repo`, the server
+signs it into each approval, and verifiers refuse approvals signed for
+any other id. See "Repo binding" under Security model.
+
 **Branch-key glob patterns:** entries under `branches:` accept the same `*` / `?` glob grammar as `mirror.yml`'s `tags:` and `branches:` (see `lib/refPatterns.ts`). A literal key like `main` still matches that one branch; a pattern like `release/*` matches any branch under that prefix. Resolution rule: an exact key wins over any glob; if no exact key matches, the rule looks for a glob that does. If two glob keys both match the pushed branch (e.g. `release/*` and `*/v3.2` against `release/v3.2`), the lookup throws — add an exact key for the overlapping name to disambiguate. Attestations always record `target_branch` as the literal pushed branch, so verifiers transparently re-resolve through the same glob path.
 
 **`required_checks` semantics (Phase 2.A):**
@@ -231,6 +237,50 @@ could approve its own merging). Admin gate replaces reviewer gate for
 trust-anchor paths. `minimum_signatures: 2+` in the rule turns admin
 key theft into a multi-compromise requirement.
 
+**Repo binding (`repo_id`, AGT-2272).** The server picks the reviewer
+prompt by the `--org` / `--repo` the client names (a per-repo override
+at `<cacheRoot>/<org>/<repo>/<reviewer>.md` when one exists), and since
+AGT-370 the verifier trusts the signed `prompt_sha256` without
+recomputing it. So the approval must say *which repo's prompts* it was
+reviewed under, or a member granted a lenient repo and a protected one
+could review a protected-repo diff under the lenient repo's override and
+present the result on the protected repo. The design:
+
+- *Canonical id.* A repo's id is the `<org>/<repo>` pair the server uses
+  to select its prompts, declared in `.stamp/config.yml` as top-level
+  `repo_id:`. It is never derived from a remote URL at verify time (a
+  stamp-server remote parses to org `git`, GitHub mirror names differ),
+  and it lives in a trust-anchor file, so changing it is an admin-signed
+  `.stamp/` change on any repo with the standard `path_rules`.
+- *Server signs it.* `stamp-review` adds `repo_id` (the requested pair,
+  after the AGT-2252 grant check) to every `ApprovalV4` it signs.
+  `stamp review` sends the declared id as `--org` / `--repo` and refuses
+  a response bound to any other id.
+- *Verifiers enforce it.* The pre-receive hook, `stamp verify-pr` and
+  `stamp merge` (as a preflight) read `repo_id` from the config at the
+  target branch's tip and at `base_sha`. If either declares one, every
+  approval must carry a server-signed `repo_id` equal to a declared value,
+  byte-for-byte (the server's override lookup is case-sensitive). An
+  approval without `repo_id` is refused, so presenting an unbound approval
+  is not a downgrade path. Reading the tip as well as the base stops a
+  branch forked before the declaration from escaping it. A malformed
+  `repo_id` fails closed: every approval is refused until it is fixed.
+- *Cutover marker = the declaration, not the schema version.* The outer
+  envelope's `schema_version` is operator-signed, so the operator could
+  always choose an older one; it cannot gate a check the operator must
+  not skip. The field is added inside the server-signed approval bytes
+  with no schema bump: `canonicalSerializeApproval` signs every field an
+  approval carries, so v5 envelopes and older verifiers keep verifying
+  (they check the signature over `repo_id` without comparing it). Repos
+  that declare no `repo_id` keep the pre-AGT-2272 behaviour, unbound; so
+  does all existing history, which pre-receive never re-verifies.
+
+What it does not cover: a repo that never declares `repo_id` is not
+protected, and `stamp review` prints a note saying so with the line to
+add. The legacy 1.x verifier line (v2/v3 envelopes, the
+`verify-attestation` action's default `stamp-version`) has no server
+signatures and so nothing to bind.
+
 **Lenient revocation (`trusted_keys_snapshot_sha256`).** Each approval
 embeds the hash of the manifest as it existed at the verdict's
 issue-time. When a compromised `server` key is rotated, future merges
@@ -250,6 +300,7 @@ walkthrough; pair both with the design plan for the full reasoning.
 | Operator passes fake prompt to local LLM, signs canonical prompt's hash | Server-attested verdicts — server fetches prompt itself; operator cannot influence what the LLM sees |
 | Operator signs a verdict for a sanitized diff, pushes a malicious one | `diff_sha256` binding — verifier hashes actual merge diff; mismatch rejected |
 | Operator embeds a permissive prompt's hash to justify approval | `prompt_sha256` cross-check against the committed `.stamp/` tree |
+| Member reviews a protected repo's diff under another repo's lenient prompt override (`--org`/`--repo` substitution) and presents the approval on the protected repo | Server-signed `repo_id` compared against the repo's declared `repo_id:` (AGT-2272); grant check on `--org`/`--repo` at request time (AGT-2252) |
 | Operator modifies `.stamp/reviewers/*.md` or `.stamp/config.yml` with permissive content, signed via the normal review flow | `path_rules` + `admin` capability + `bypass_review_cycle: true` — `.stamp/**` requires admin signatures, not reviewer verdicts |
 | Operator adds a new pubkey to `.stamp/trusted-keys/` to grant themselves more authority | Same as above — entire `.stamp/**` is gated |
 | Replay: reuse an old verdict's signature for a new diff | `diff_sha256` binding + `issued_at` in the signed payload — server's signature binds to a specific diff hash |

@@ -37,6 +37,7 @@
  * signature directly without going through `verifyV4SignerTrust`).
  */
 
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import {
@@ -220,6 +221,7 @@ function buildPhaseInput(args: {
     pubkeyByFingerprint,
     pathRules: [],
     changedFiles,
+    repoBinding: UNBOUND,
   };
 }
 

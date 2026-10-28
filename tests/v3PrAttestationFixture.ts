@@ -90,6 +90,8 @@ export interface FixtureOpts {
   /** Add a second admin key + entry so multi-sig scenarios can sign
    *  with two admins. */
   withSecondAdmin?: boolean;
+  /** AGT-2272: write `repo_id: <value>` into the base config. */
+  repoId?: string;
 }
 
 export interface Fixture {
@@ -134,6 +136,7 @@ export function setupV3Fixture(opts: FixtureOpts = {}): Fixture {
 
   // config.yml: single branch rule + optional path_rules.
   const cfgLines: string[] = [
+    ...(opts.repoId !== undefined ? [`repo_id: ${opts.repoId}`] : []),
     "branches:",
     "  main:",
     "    required: [security]",
@@ -264,6 +267,9 @@ export interface BuildEnvelopeOpts {
   payloadMutator?: (p: AttestationPayloadV4) => AttestationPayloadV4;
   /** Trust-anchor signatures to attach. Defaults to []. */
   trustAnchorSignatures?: TrustAnchorSignatureV4[];
+  /** AGT-2272: server-signed `repo_id` on the default approval. Omitted
+   *  → no `repo_id` (a pre-AGT-2272 server's approval). */
+  approvalRepoId?: string;
 }
 
 /**
@@ -303,6 +309,7 @@ export function buildV3Envelope(opts: BuildEnvelopeOpts): PrAttestationEnvelope 
       head_sha: fixture.headSha,
       issued_at: "2026-05-18T12:00:00Z",
       server_key_id: serverKey.fingerprint,
+      ...(opts.approvalRepoId !== undefined ? { repo_id: opts.approvalRepoId } : {}),
     };
     const serverSignature = signBytes(
       serverKey.privatePem,

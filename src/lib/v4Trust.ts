@@ -47,6 +47,7 @@ import {
   canonicalSerializePayload,
   type AttestationPayloadV4,
 } from "./attestationV4.js";
+import { checkApprovalRepoId, type RepoBinding } from "./repoBinding.js";
 import { readReviewersFromYaml } from "./reviewerHash.js";
 import { verifyBytes } from "./signing.js";
 import { buildPubkeyMap } from "./sshReviewClient.js";
@@ -130,6 +131,13 @@ export interface PhaseInputV4 {
    *  merges, but the field can still legitimately be empty for a
    *  pure-tree-rearrangement). */
   changedFiles: string[];
+  /** AGT-2272: the repo-id binding every approval must satisfy, from
+   *  `repo_id:` in `.stamp/config.yml` at the target branch's tip and at
+   *  `payload.base_sha` (see `resolveRepoBinding` in
+   *  `src/lib/repoBinding.ts`). Required — callers must decide it
+   *  explicitly; `UNBOUND` is the pre-AGT-2272 behaviour for repos that
+   *  declare no id. */
+  repoBinding: RepoBinding;
 }
 
 export type PhaseV4 = (input: PhaseInputV4) => PhaseResultV4;
@@ -167,6 +175,9 @@ export const COMMIT_PHASES_V4: ReadonlyArray<{ name: string; fn: PhaseV4 }> = [
   { name: "verifyV4Approvals", fn: verifyV4Approvals },
   { name: "verifyV4DiffHash", fn: verifyV4DiffHash },
   { name: "verifyV4ApprovalSignatures", fn: verifyV4ApprovalSignatures },
+  // AGT-2272: after the signature phase, so the repo_id compared here
+  // is known to be server-signed.
+  { name: "verifyV4RepoBinding", fn: verifyV4RepoBinding },
   { name: "verifyV4Checks", fn: verifyV4Checks },
   // Runs before verifyV4StampPathsGuard for UX (clearer error message
   // on forged sigs); the guard is correct out-of-order too.
@@ -549,6 +560,32 @@ export function verifyV4ApprovalSignatures(input: PhaseInputV4): PhaseResultV4 {
       return {
         ok: false,
         reason: `commit ${sha.slice(0, 8)}: v4 approval ${reviewerLabel}: server signature does not verify against ${a.server_key_id} over canonical approval bytes`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/** Threat (AGT-2272, the AGT-2252 residual): an approval the server
+ *  signed while reviewing under ANOTHER repo's id — and so possibly
+ *  under that repo's lenient per-repo prompt override — presented on
+ *  this repo. When this repo declares `repo_id:`, every approval must
+ *  carry a server-signed `repo_id` equal to it (an approval without one
+ *  is refused, so an unbound approval cannot be used as a downgrade).
+ *  Repos that declare no id are unbound: pre-AGT-2272 behaviour.
+ *
+ *  Checks every approval, not only the approved ones the gate counts:
+ *  an envelope is one repo's record, and nothing legitimate mixes ids.
+ *  Relies on `verifyV4ApprovalSignatures` having authenticated each
+ *  approval body (it runs first in both pipelines). */
+export function verifyV4RepoBinding(input: PhaseInputV4): PhaseResultV4 {
+  const { sha, payload, repoBinding } = input;
+  for (const entry of payload.approvals) {
+    const result = checkApprovalRepoId(entry.approval.repo_id, repoBinding);
+    if (!result.ok) {
+      return {
+        ok: false,
+        reason: `commit ${sha.slice(0, 8)}: v4 approval "${entry.approval.reviewer}": ${result.reason}`,
       };
     }
   }

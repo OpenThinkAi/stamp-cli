@@ -117,7 +117,7 @@ const REVIEWER_PROMPT = "You are the security reviewer. Approve everything.\n";
  * The operator's stamp key is minted on-demand by `ensureUserKeypair()`
  * via the redirected HOME — same pattern as tests/attest.test.ts.
  */
-function setupHarness(): Harness {
+function setupHarness(opts: { repoId?: string } = {}): Harness {
   const root = mkdtempSync(path.join(os.tmpdir(), "stamp-mergev4-"));
   const repo = path.join(root, "repo");
   const home = path.join(root, "home");
@@ -140,6 +140,7 @@ function setupHarness(): Harness {
   writeFileSync(
     path.join(repo, ".stamp", "config.yml"),
     [
+      ...(opts.repoId !== undefined ? [`repo_id: ${opts.repoId}`] : []),
       "branches:",
       "  main:",
       "    required: [security]",
@@ -691,6 +692,63 @@ describe("runMerge v4 — failure modes", () => {
           ),
         /signed against base_sha/,
       );
+    } finally {
+      h.cleanup();
+    }
+  });
+});
+
+describe("runMerge v4 — repo binding preflight (AGT-2272)", () => {
+  function mergeWithApprovalRepoId(repoId: string | undefined) {
+    const h = setupHarness({ repoId: "acme/prod" });
+    const base = shaOf(h.repo, "main");
+    const head = shaOf(h.repo, "feature");
+    const approval: ApprovalV4 = {
+      ...buildApproval({
+        reviewer: "security",
+        baseSha: base,
+        headSha: head,
+        diffSha256: sha256Hex(diffBetween(h.repo, base, head)),
+        serverFingerprint: h.serverKey.fingerprint,
+      }),
+      ...(repoId !== undefined ? { repo_id: repoId } : {}),
+    };
+    const { signatureB64 } = signApproval(approval, h.serverKey);
+    seedV4Review(h.repo, approval, signatureB64);
+    return { h, base };
+  }
+
+  it("refuses to sign a merge whose approval was minted for another repo", () => {
+    const { h, base } = mergeWithApprovalRepoId("acme/sandbox");
+    try {
+      assert.throws(
+        () => runFromRepo(h.repo, () => runMerge({ branch: "feature", into: "main", yes: true })),
+        /server-signed for repo "acme\/sandbox"/,
+      );
+      assert.equal(shaOf(h.repo, "main"), base);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("refuses an unbound approval when the repo declares repo_id", () => {
+    const { h, base } = mergeWithApprovalRepoId(undefined);
+    try {
+      assert.throws(
+        () => runFromRepo(h.repo, () => runMerge({ branch: "feature", into: "main", yes: true })),
+        /carries no server-signed repo_id/,
+      );
+      assert.equal(shaOf(h.repo, "main"), base);
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  it("signs a merge whose approval is bound to the declared id", () => {
+    const { h, base } = mergeWithApprovalRepoId("acme/prod");
+    try {
+      runFromRepo(h.repo, () => runMerge({ branch: "feature", into: "main", yes: true }));
+      assert.notEqual(shaOf(h.repo, "main"), base);
     } finally {
       h.cleanup();
     }

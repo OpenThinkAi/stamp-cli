@@ -255,6 +255,8 @@ function buildSignedFixture(opts: {
   diff: Buffer;
   verdict: ApprovalV4["verdict"];
   prose: string;
+  /** AGT-2272: server-signed repo_id; omitted = pre-binding server. */
+  repoId?: string;
 }): {
   responseJson: string;
   manifestYaml: string;
@@ -275,6 +277,7 @@ function buildSignedFixture(opts: {
     trusted_keys_snapshot_sha256: "sha256:" + "b".repeat(64),
     issued_at: "2026-05-17T18:42:13Z",
     server_key_id: fp,
+    ...(opts.repoId !== undefined ? { repo_id: opts.repoId } : {}),
   };
   const sig = sign(null, canonicalSerializeApproval(approval), privateKey);
   const responseJson = JSON.stringify({
@@ -759,5 +762,54 @@ describe("requestServerReview — cross-check signed approval vs request", () =>
       }),
       /head_sha/,
     );
+  });
+});
+
+describe("requestServerReview — repo binding (AGT-2272)", () => {
+  async function run(repoId: string | undefined) {
+    const fx = buildSignedFixture({
+      reviewer: "security",
+      org: "acme",
+      repo: "widget",
+      baseSha: BASE,
+      headSha: HEAD,
+      diff: DIFF,
+      verdict: "approved",
+      prose: "ok",
+      ...(repoId !== undefined ? { repoId } : {}),
+    });
+    const spawnFake: SshSpawnFn = async () => ({
+      stdout: fx.responseJson,
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+    });
+    return requestServerReview({
+      reviewServerUrl: "ssh://git@stamp.example.com:22",
+      reviewer: "security",
+      org: "acme",
+      repo: "widget",
+      baseSha: BASE,
+      headSha: HEAD,
+      diff: DIFF,
+      manifestYaml: fx.manifestYaml,
+      pubkeyByFingerprint: fx.pubkeyByFingerprint,
+      _sshSpawnForTest: spawnFake,
+    });
+  }
+
+  it("accepts an approval bound to the requested org/repo and keeps the field", async () => {
+    const r = await run("acme/widget");
+    assert.equal(r.approval.repo_id, "acme/widget");
+    assert.ok(r.approvalJson.includes(`"repo_id":"acme/widget"`));
+  });
+
+  it("refuses an approval the server bound to a different repo", async () => {
+    await assert.rejects(run("acme/sandbox"), /signed approval for repo "acme\/sandbox"/);
+  });
+
+  it("accepts an unbound approval from a pre-AGT-2272 server (the verifier decides)", async () => {
+    const r = await run(undefined);
+    assert.equal(r.approval.repo_id, undefined);
   });
 });

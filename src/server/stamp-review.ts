@@ -368,9 +368,12 @@ async function main(): Promise<void> {
   const { caller, db } = resolveAuth();
 
   // AGT-2252: bind the caller-chosen --org/--repo to the caller's
-  // authorization. `--org`/`--repo` select the per-repo prompt override
-  // and are NOT part of the signed approval, so an unchecked pair would
-  // let any member review under another repo's (lenient) override. A
+  // authorization. `--org`/`--repo` select the per-repo prompt override;
+  // since AGT-2272 the pair is also signed into the approval as
+  // `repo_id`, and verifiers of a repo that declares `repo_id:` refuse
+  // approvals signed for another pair. This check still matters: it
+  // stops a member obtaining an approval bound to a repo they aren't
+  // granted (or, unscoped, one with an override). A
   // member scoped by grants may only name a granted pair; a member with
   // no grants ("unscoped") may review under the default prompts only —
   // the pipeline refuses if the pair has an override.

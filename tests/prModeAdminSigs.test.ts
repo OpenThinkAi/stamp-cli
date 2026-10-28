@@ -22,6 +22,7 @@
  * anchor collection surface AGT-355 left as a TODO.
  */
 
+import { UNBOUND } from "../src/lib/repoBinding.ts";
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
@@ -495,6 +496,7 @@ function buildPhaseInputForEnvelope(args: {
     pubkeyByFingerprint,
     pathRules,
     changedFiles,
+    repoBinding: UNBOUND,
   };
 }
 

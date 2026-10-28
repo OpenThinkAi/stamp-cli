@@ -89,6 +89,7 @@ import {
   ReviewSigningKeyError,
   resolveReviewSigningKeyPath,
 } from "../lib/reviewSigningKey.js";
+import { formatRepoId } from "../lib/repoBinding.js";
 import { isValidModelId } from "../lib/userConfig.js";
 import {
   anthropicThinkingParam,
@@ -869,6 +870,13 @@ export async function runReviewPipeline(
     head_sha: input.params.headSha,
     issued_at,
     server_key_id: signingMaterial.fingerprint,
+    // AGT-2272: bind the approval to the org/repo the prompt was
+    // selected by. Always the REQUESTED pair (shape-checked by the verb
+    // and authorized by `resolveRepoAccess`), whether or not a per-repo
+    // override exists for it: the verifier compares it to the repo's
+    // declared `repo_id`, so an approval obtained under another repo's
+    // id — and that repo's prompts — is refused.
+    repo_id: formatRepoId(input.params.org, input.params.repo),
   };
 
   // Stage 7: sign canonical bytes. The canonical serializer is the
