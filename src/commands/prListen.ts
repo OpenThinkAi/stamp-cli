@@ -80,7 +80,7 @@ import { appendTriplet, type TripletRecord } from "../lib/peerWatchLog.js";
 import { firePeerNotification } from "../lib/peerNotify.js";
 import { draftsDir } from "../lib/paths.js";
 import { loadPeerReposConfig, resolveLocalRepoPath } from "../lib/peerReposConfig.js";
-import { verifyPeerAuthorLocal } from "../lib/peerOperatorVerify.js";
+import { FULL_SHA_RE, verifyPeerAuthorLocal } from "../lib/peerOperatorVerify.js";
 import { detectClaudeSession } from "../lib/claudeSession.js";
 import { checkPrUrlBinding, type ParsedPrUrl } from "../lib/prUrlBinding.js";
 
@@ -172,7 +172,7 @@ export interface PrListenOptions {
    * Test-only: override the client-side operator verification step (AGT-454).
    * When provided, `verifyPeerAuthorLocal` is NOT called. The function
    * receives (localRepoPath, baseSha, fingerprint) and returns the same shape
-   * as `verifyOperatorAtBaseLocal`. Use `() => ({ ok: true })` to bypass the
+   * as `verifyPeerAuthorLocal`. Use `() => ({ ok: true })` to bypass the
    * gate for tests that pre-date AGT-454 and don't need operator verification.
    */
   _operatorVerifyForTest?: (
@@ -869,7 +869,7 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
       typeof headShaRaw !== "string" || !FULL_SHA_RE.test(headShaRaw)
     ) {
       process.stderr.write(
-        `note: skipping event for PR #${prNumber} — base_sha/head_sha missing or not full 40-char hex SHAs\n`,
+        `note: skipping event for PR #${prNumber} — base_sha/head_sha missing or not full 40-char lowercase hex SHAs\n`,
       );
       continue;
     }
@@ -903,23 +903,21 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
     // check fails. Applies to re-review-requested too — the server only
     // checks that the pinger is the original author, which says nothing
     // about whether that author has since been revoked.
-    {
-      const localRepoPath = resolveLocalRepoPath(repo, peerReposMap);
-      if (localRepoPath === null) {
-        process.stderr.write(
-          `note: skipping event for PR #${prNumber} — repo "${repo}" is not mapped in ` +
-            `~/.stamp/peer-repos.yml; add it to enable operator verification for this repo\n`,
-        );
-        continue;
-      }
-      const verifyFn = opts._operatorVerifyForTest ?? verifyPeerAuthorLocal;
-      const opResult = verifyFn(localRepoPath, baseSha, requestedByFp);
-      if (!opResult.ok) {
-        process.stderr.write(
-          `note: skipping event for PR #${prNumber} — operator verification failed: ${opResult.reason}\n`,
-        );
-        continue;
-      }
+    const localRepoPath = resolveLocalRepoPath(repo, peerReposMap);
+    if (localRepoPath === null) {
+      process.stderr.write(
+        `note: skipping event for PR #${prNumber} — repo "${repo}" is not mapped in ` +
+          `~/.stamp/peer-repos.yml; add it to enable operator verification for this repo\n`,
+      );
+      continue;
+    }
+    const verifyFn = opts._operatorVerifyForTest ?? verifyPeerAuthorLocal;
+    const opResult = verifyFn(localRepoPath, baseSha, requestedByFp);
+    if (!opResult.ok) {
+      process.stderr.write(
+        `note: skipping event for PR #${prNumber} — operator verification failed: ${opResult.reason}\n`,
+      );
+      continue;
     }
 
     // ─── AGT-430: Haiku triage call ──────────────────────────────
@@ -1439,8 +1437,6 @@ export async function runPrListen(opts: PrListenOptions): Promise<void> {
 }
 
 // ─── AGT-2241: review post pinned to head_sha ─────────────────────────
-
-const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 
 /** REST `event` value for each verdict (POST /pulls/{n}/reviews). */
 const REVIEW_EVENT = {

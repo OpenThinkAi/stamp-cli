@@ -126,7 +126,8 @@ function checkOperator(
  */
 export const PROTECTED_TIP_REF = "refs/remotes/origin/HEAD";
 
-const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+/** Full 40-char lowercase hex commit SHA. */
+export const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 
 /**
  * Authorize a peer-review event's author against the listener's local clone,
@@ -186,7 +187,8 @@ export function verifyPeerAuthorLocal(
       ok: false,
       reason:
         `base_sha_not_on_protected_branch: ${base_sha} is not an ancestor of ${PROTECTED_TIP_REF} (${tip}) ` +
-        `in local clone at ${localRepoPath}`,
+        `in local clone at ${localRepoPath}; if the PR really branches off the default branch, ` +
+        `run 'git fetch origin' — otherwise the event cites a base off the protected branch`,
     };
   }
 

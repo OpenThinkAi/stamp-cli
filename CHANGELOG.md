@@ -78,7 +78,9 @@ Headless `stamp provision` can finish, and its clone knows about the mirror
   `operator` both at `base_sha` and at that tip. Events missing a full
   `base_sha` or `head_sha` are skipped, and `re-review-requested` events
   get the same check (the server now includes the patch's `base_sha` and
-  `head_sha` in them). Listeners need `origin/HEAD` set in each mapped
+  `head_sha` in them; upgrade the server first, or a new listener skips
+  re-review events from an old server as missing those fields). Listeners
+  need `origin/HEAD` set in each mapped
   clone (`git remote set-head origin --auto`) and should fetch regularly:
   a revocation takes effect once the listener has fetched it.
 - **Peer reviews are pinned to the event's `head_sha`.** The listener posts
