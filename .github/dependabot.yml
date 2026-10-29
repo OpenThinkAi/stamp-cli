@@ -5,7 +5,12 @@ version: 2
 # publish.yml / ci.yml would silently rot to known-vulnerable versions.
 updates:
   - package-ecosystem: github-actions
-    directory: /
+    # `directory: /` only scans .github/workflows/. The composite action
+    # pins its own actions and must be listed explicitly, or its pins rot
+    # unnoticed (AGT-2249).
+    directories:
+      - /
+      - /.github/actions/verify-attestation
     schedule:
       interval: weekly
     groups:

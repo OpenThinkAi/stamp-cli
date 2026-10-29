@@ -14,7 +14,9 @@
  */
 
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { parse } from "yaml";
@@ -43,11 +45,19 @@ const action = parse(body) as ActionYml;
 const steps = action.runs.steps;
 const VERIFIER_DIR = path.join(path.dirname(ACTION_PATH), "verifier");
 
-function installStep(): Step {
+/** The `Install stamp-cli` step's bash. */
+function installStep(): string {
   const step = steps.find((s) => s.name === "Install stamp-cli");
   assert.ok(step?.run, "action.yml has no `Install stamp-cli` run step");
-  return step;
+  return step.run;
 }
+
+interface VerifierLock {
+  packages: Record<string, Record<string, unknown> & { dependencies?: Record<string, string>; version?: string }>;
+}
+const verifierLock = JSON.parse(
+  readFileSync(path.join(VERIFIER_DIR, "package-lock.json"), "utf8"),
+) as VerifierLock;
 
 /** Shell lines only — comments describe the old global install by name. */
 function codeLines(run: string): string[] {
@@ -61,7 +71,7 @@ describe(".github/actions/verify-attestation/action.yml", () => {
   it("does NOT shallow-fetch base/head SHAs (1.6.0 regression)", () => {
     // `git fetch --depth=N` against an already-deep clone shallows it
     // for the named refs and severs ancestry. The action must rely on
-    // the caller workflow's actions/checkout@v4 + fetch-depth: 0 for
+    // the caller workflow's actions/checkout + fetch-depth: 0 for
     // base + head; any explicit refetch of those SHAs here must NOT
     // pass --depth.
     assert.ok(
@@ -147,8 +157,67 @@ describe(".github/actions/verify-attestation/action.yml", () => {
     assert.equal(refs.env.EVENT_NAME, "${{ github.event_name }}");
   });
 
+  // AGT-2249: run the refs step's bash for real and check what reaches
+  // $GITHUB_OUTPUT. A newline in target-branch must not inject keys.
+  function runRefsStep(env: Record<string, string>): { status: number | null; output: string } {
+    const refs = steps.find((s) => s.id === "refs");
+    assert.ok(refs?.run);
+    const dir = mkdtempSync(path.join(os.tmpdir(), "stamp-action-refs-"));
+    const out = path.join(dir, "out");
+    writeFileSync(out, "");
+    try {
+      const r = spawnSync("bash", ["-c", refs.run], {
+        env: { PATH: process.env["PATH"] ?? "", GITHUB_OUTPUT: out, ...env },
+        encoding: "utf8",
+      });
+      return { status: r.status, output: readFileSync(out, "utf8") };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const PR_ENV = {
+    HEAD_SHA: "a".repeat(40),
+    BASE_SHA: "b".repeat(40),
+    BASE_REF: "main",
+    EVENT_NAME: "pull_request",
+  };
+
+  it("writes head/base/target outputs for a normal PR", () => {
+    const r = runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "release/1.x" });
+    assert.equal(r.status, 0);
+    assert.equal(r.output, `head=${"a".repeat(40)}\nbase=${"b".repeat(40)}\ntarget=release/1.x\n`);
+  });
+
+  it("refuses a target-branch carrying a newline (output-key injection)", () => {
+    const r = runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "main\nhead=deadbeef" });
+    assert.equal(r.status, 2);
+    assert.equal(r.output, "", "nothing may reach GITHUB_OUTPUT");
+  });
+
+  it("refuses a target-branch with '..' or a leading dash", () => {
+    assert.equal(runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "a..b" }).status, 2);
+    assert.equal(runRefsStep({ ...PR_ENV, TARGET_BRANCH_OVERRIDE: "-x" }).status, 2);
+  });
+
+  it("pins setup-node to the same commit as the workflows (AGT-2249)", () => {
+    const ci = readFileSync(path.resolve(import.meta.dirname, "..", ".github", "workflows", "ci.yml"), "utf8");
+    const wf = ci.match(/actions\/setup-node@([0-9a-f]{40})/)?.[1];
+    const act = body.match(/actions\/setup-node@([0-9a-f]{40})/)?.[1];
+    assert.ok(wf && act);
+    assert.equal(act, wf);
+  });
+
+  it("is covered by Dependabot's github-actions ecosystem (AGT-2249)", () => {
+    const dep = parse(
+      readFileSync(path.resolve(import.meta.dirname, "..", ".github", "dependabot.yml"), "utf8"),
+    ) as { updates: Array<{ "package-ecosystem": string; directories?: string[] }> };
+    const gha = dep.updates.find((u) => u["package-ecosystem"] === "github-actions");
+    assert.ok(gha?.directories?.includes("/.github/actions/verify-attestation"));
+  });
+
   it("installs the verifier with --ignore-scripts on every path, never globally", () => {
-    const lines = codeLines(installStep().run!).filter((l) =>
+    const lines = codeLines(installStep()).filter((l) =>
       /^npm (ci|install|i)\b/.test(l),
     );
     assert.ok(lines.length >= 2, "expected a lockfile install and an override install");
@@ -159,7 +228,7 @@ describe(".github/actions/verify-attestation/action.yml", () => {
   });
 
   it("installs the default verifier with `npm ci` from the committed lockfile", () => {
-    const run = installStep().run!;
+    const run = installStep();
     assert.ok(
       codeLines(run).some((l) => /^npm ci\b.*--ignore-scripts/.test(l)),
       "default path must use `npm ci --ignore-scripts`",
@@ -176,16 +245,14 @@ describe(".github/actions/verify-attestation/action.yml", () => {
       def,
       "verifier/package.json must pin the exact stamp-version default",
     );
-    const lock = JSON.parse(readFileSync(path.join(VERIFIER_DIR, "package-lock.json"), "utf8"));
-    const root = lock.packages[""];
-    assert.equal(root.dependencies["@openthink/stamp"], def, "lockfile root out of date — re-run npm install");
-    const stamp = lock.packages["node_modules/@openthink/stamp"];
+    const root = verifierLock.packages[""];
+    assert.equal(root?.dependencies?.["@openthink/stamp"], def, "lockfile root out of date — re-run npm install");
+    const stamp = verifierLock.packages["node_modules/@openthink/stamp"];
     assert.equal(stamp?.version, def, "lockfile resolves a different stamp version");
   });
 
   it("pins every locked package to a registry tarball with an integrity hash", () => {
-    const lock = JSON.parse(readFileSync(path.join(VERIFIER_DIR, "package-lock.json"), "utf8"));
-    const entries = Object.entries(lock.packages as Record<string, Record<string, unknown>>).filter(
+    const entries = Object.entries(verifierLock.packages).filter(
       ([k]) => k !== "",
     );
     assert.ok(entries.length > 1, "lockfile has no transitive dependencies — regenerate it");
