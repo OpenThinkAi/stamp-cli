@@ -22,7 +22,7 @@
 # The builder tracks the runtime's Alpine branch (AGT-2270: it was on
 # alpine3.21, which leaves support around 2026-11, so digest bumps kept a
 # build toolchain with no security fixes). Move both together.
-FROM node:24-alpine3.24@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS builder
+FROM node:26-alpine3.24@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS builder
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json tsup.config.ts ./
 RUN npm ci
